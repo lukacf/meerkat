@@ -378,11 +378,44 @@ export interface StreamTruncatedEvent {
 }
 
 export type ToolConfigChangeOperation = "add" | "remove" | "reload";
+export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
+
+export interface BoundaryAppliedToolConfigChangeStatus {
+  readonly kind: "boundary_applied";
+  readonly base_changed: boolean;
+  readonly visible_changed: boolean;
+  readonly revision: number;
+}
+
+export interface DeferredCatalogDeltaToolConfigChangeStatus {
+  readonly kind: "deferred_catalog_delta";
+  readonly added_hidden_count: number;
+  readonly removed_hidden_count: number;
+  readonly pending_source_count: number;
+}
+
+export interface WarningFailedClosedToolConfigChangeStatus {
+  readonly kind: "warning_failed_closed";
+  readonly error: string;
+}
+
+export interface ExternalToolDeltaToolConfigChangeStatus {
+  readonly kind: "external_tool_delta";
+  readonly phase: ExternalToolDeltaPhase;
+  readonly detail?: string;
+}
+
+export type ToolConfigChangeStatus =
+  | BoundaryAppliedToolConfigChangeStatus
+  | DeferredCatalogDeltaToolConfigChangeStatus
+  | WarningFailedClosedToolConfigChangeStatus
+  | ExternalToolDeltaToolConfigChangeStatus;
 
 export interface ToolConfigChangedPayload {
   readonly operation?: ToolConfigChangeOperation;
   readonly target?: string;
   readonly status?: string;
+  readonly status_info?: ToolConfigChangeStatus;
   readonly persisted?: boolean;
   readonly applied_at_turn?: number;
 }
@@ -493,6 +526,44 @@ function parseUsage(raw: Record<string, unknown> | undefined): Usage {
 function parseContentInput(raw: unknown): ContentInput {
   if (Array.isArray(raw)) return raw as ContentInput;
   return String(raw ?? "");
+}
+
+function parseToolConfigChangeStatus(raw: unknown): ToolConfigChangeStatus | undefined {
+  if (raw == null || typeof raw !== "object") {
+    return undefined;
+  }
+
+  const value = raw as Record<string, unknown>;
+  const kind = String(value.kind ?? "");
+  switch (kind) {
+    case "boundary_applied":
+      return {
+        kind,
+        base_changed: typeof value.base_changed === "boolean" ? value.base_changed : false,
+        visible_changed: typeof value.visible_changed === "boolean" ? value.visible_changed : false,
+        revision: Number(value.revision ?? 0),
+      };
+    case "deferred_catalog_delta":
+      return {
+        kind,
+        added_hidden_count: Number(value.added_hidden_count ?? 0),
+        removed_hidden_count: Number(value.removed_hidden_count ?? 0),
+        pending_source_count: Number(value.pending_source_count ?? 0),
+      };
+    case "warning_failed_closed":
+      return {
+        kind,
+        error: String(value.error ?? ""),
+      };
+    case "external_tool_delta":
+      return {
+        kind,
+        phase: String(value.phase ?? "pending") as ExternalToolDeltaPhase,
+        ...(value.detail != null ? { detail: String(value.detail) } : {}),
+      };
+    default:
+      return undefined;
+  }
 }
 
 function parseSkillKey(raw: unknown): SkillKey | undefined {
@@ -792,6 +863,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
       const operation = parseToolConfigChangeOperation(payloadRaw?.operation);
       const target = parseWireString(payloadRaw?.target);
       const status = parseWireString(payloadRaw?.status);
+      const statusInfo = parseToolConfigChangeStatus(payloadRaw?.status_info);
       const persisted = parseWireBoolean(payloadRaw?.persisted);
       return {
         type,
@@ -799,6 +871,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
           ...(operation != null ? { operation } : {}),
           ...(target != null ? { target } : {}),
           ...(status != null ? { status } : {}),
+          ...(statusInfo != null ? { status_info: statusInfo } : {}),
           ...(persisted != null ? { persisted } : {}),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },

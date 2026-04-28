@@ -58,6 +58,7 @@ from meerkat.errors import (
     SkillNotFoundError,
 )
 from meerkat.events import (
+    BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionStarted,
     Event,
@@ -610,6 +611,12 @@ def test_parse_tool_config_changed():
             "operation": "remove",
             "target": "filesystem",
             "status": "staged",
+            "status_info": {
+                "kind": "boundary_applied",
+                "base_changed": True,
+                "visible_changed": False,
+                "revision": 9,
+            },
             "persisted": False,
             "applied_at_turn": 7,
         },
@@ -619,6 +626,10 @@ def test_parse_tool_config_changed():
     assert event.payload.operation == "remove"
     assert event.payload.target == "filesystem"
     assert event.payload.status == "staged"
+    assert isinstance(event.payload.status_info, BoundaryAppliedToolConfigChangeStatus)
+    assert event.payload.status_info.base_changed is True
+    assert event.payload.status_info.visible_changed is False
+    assert event.payload.status_info.revision == 9
     assert event.payload.persisted is False
     assert event.payload.applied_at_turn == 7
 
@@ -633,6 +644,7 @@ def test_parse_tool_config_changed_with_malformed_payload():
     assert event.payload.operation is None
     assert event.payload.target is None
     assert event.payload.status is None
+    assert event.payload.status_info is None
     assert event.payload.persisted is None
     assert event.payload.applied_at_turn is None
 

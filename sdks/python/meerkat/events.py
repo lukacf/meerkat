@@ -24,7 +24,7 @@ Example::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from .types import SkillKey
@@ -367,12 +367,58 @@ class StreamTruncated(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class BoundaryAppliedToolConfigChangeStatus:
+    """Structured status for a tool-scope boundary apply."""
+
+    kind: Literal["boundary_applied"] = "boundary_applied"
+    base_changed: bool = False
+    visible_changed: bool = False
+    revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredCatalogDeltaToolConfigChangeStatus:
+    """Structured status for a deferred-catalog boundary delta."""
+
+    kind: Literal["deferred_catalog_delta"] = "deferred_catalog_delta"
+    added_hidden_count: int = 0
+    removed_hidden_count: int = 0
+    pending_source_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class WarningFailedClosedToolConfigChangeStatus:
+    """Structured status for fail-closed tool-scope warnings."""
+
+    kind: Literal["warning_failed_closed"] = "warning_failed_closed"
+    error: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalToolDeltaToolConfigChangeStatus:
+    """Structured status for external-tool lifecycle deltas."""
+
+    kind: Literal["external_tool_delta"] = "external_tool_delta"
+    phase: Literal["pending", "applied", "draining", "forced", "failed"] = "pending"
+    detail: str | None = None
+
+
+ToolConfigChangeStatus = (
+    BoundaryAppliedToolConfigChangeStatus
+    | DeferredCatalogDeltaToolConfigChangeStatus
+    | WarningFailedClosedToolConfigChangeStatus
+    | ExternalToolDeltaToolConfigChangeStatus
+)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolConfigChangedPayload:
     """Payload for tool configuration change notifications."""
 
     operation: str | None = None
     target: str | None = None
     status: str | None = None
+    status_info: ToolConfigChangeStatus | None = None
     persisted: bool | None = None
     applied_at_turn: int | None = None
 
@@ -472,6 +518,42 @@ def _parse_usage(raw: dict[str, Any] | None) -> Usage:
         cache_creation_tokens=raw.get("cache_creation_tokens"),
         cache_read_tokens=raw.get("cache_read_tokens"),
     )
+
+
+def _parse_tool_config_change_status(raw: Any) -> ToolConfigChangeStatus | None:
+    if not isinstance(raw, dict):
+        return None
+
+    kind = str(raw.get("kind", ""))
+    if kind == "boundary_applied":
+        return BoundaryAppliedToolConfigChangeStatus(
+            base_changed=raw.get("base_changed") is True,
+            visible_changed=raw.get("visible_changed") is True,
+            revision=raw.get("revision", 0) if isinstance(raw.get("revision"), int) else 0,
+        )
+    if kind == "deferred_catalog_delta":
+        return DeferredCatalogDeltaToolConfigChangeStatus(
+            added_hidden_count=raw.get("added_hidden_count", 0)
+            if isinstance(raw.get("added_hidden_count"), int)
+            else 0,
+            removed_hidden_count=raw.get("removed_hidden_count", 0)
+            if isinstance(raw.get("removed_hidden_count"), int)
+            else 0,
+            pending_source_count=raw.get("pending_source_count", 0)
+            if isinstance(raw.get("pending_source_count"), int)
+            else 0,
+        )
+    if kind == "warning_failed_closed":
+        return WarningFailedClosedToolConfigChangeStatus(error=str(raw.get("error", "")))
+    if kind == "external_tool_delta":
+        phase = str(raw.get("phase", "pending"))
+        if phase not in {"pending", "applied", "draining", "forced", "failed"}:
+            phase = "pending"
+        return ExternalToolDeltaToolConfigChangeStatus(
+            phase=cast(Literal["pending", "applied", "draining", "forced", "failed"], phase),
+            detail=str(raw["detail"]) if raw.get("detail") is not None else None,
+        )
+    return None
 
 
 def _parse_skill_key(raw: Any) -> SkillKey | None:
@@ -603,6 +685,9 @@ def parse_event(raw: dict[str, Any]) -> Event:
                     operation=_parse_tool_config_operation(payload_raw.get("operation")),
                     target=_parse_optional_str(payload_raw.get("target")),
                     status=_parse_optional_str(payload_raw.get("status")),
+                    status_info=_parse_tool_config_change_status(
+                        payload_raw.get("status_info")
+                    ),
                     persisted=_parse_optional_bool(payload_raw.get("persisted")),
                     applied_at_turn=_parse_optional_int(payload_raw.get("applied_at_turn")),
                 )

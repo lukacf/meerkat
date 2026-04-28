@@ -392,6 +392,12 @@ describe("Typed Events", () => {
         operation: "remove",
         target: "filesystem",
         status: "staged",
+        status_info: {
+          kind: "boundary_applied",
+          base_changed: true,
+          visible_changed: false,
+          revision: 9,
+        },
         persisted: false,
         applied_at_turn: 7,
       },
@@ -401,6 +407,12 @@ describe("Typed Events", () => {
       assert.equal(event.payload.operation, "remove");
       assert.equal(event.payload.target, "filesystem");
       assert.equal(event.payload.status, "staged");
+      assert.deepEqual(event.payload.status_info, {
+        kind: "boundary_applied",
+        base_changed: true,
+        visible_changed: false,
+        revision: 9,
+      });
       assert.equal(event.payload.persisted, false);
       assert.equal(event.payload.applied_at_turn, 7);
     }
@@ -575,6 +587,7 @@ describe("Typed Events", () => {
       assert.equal(event.payload.operation, undefined);
       assert.equal(event.payload.target, undefined);
       assert.equal(event.payload.status, undefined);
+      assert.equal(event.payload.status_info, undefined);
       assert.equal(event.payload.persisted, undefined);
       assert.equal(event.payload.applied_at_turn, undefined);
     }

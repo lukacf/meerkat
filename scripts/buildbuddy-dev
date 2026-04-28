@@ -155,8 +155,7 @@ e2e_smoke_test_filter() {
     exit 2
   fi
   if [[ "${selection_count}" -eq 1 ]]; then
-    "${workspace_root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- \
-      smoke-test-filter "${selection_args[@]}"
+    "${workspace_root}/scripts/e2e-smoke-filter" "${selection_args[@]}"
   fi
 }
 

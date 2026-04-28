@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: e2e-smoke-filter [--test NAME | --scenario ID | --suite NAME | --lane smoke]
+
+Prints the Rust test filter for an e2e-smoke selection. Selector validation is
+derived from the single smoke lane entry macro in tests/integration/src/e2e_lanes.rs
+and intentionally does not invoke Cargo.
+EOF
+}
+
+root="$(git rev-parse --show-toplevel)"
+catalog="${root}/tests/integration/src/e2e_lanes.rs"
+
+selection_kind=""
+selection_value=""
+
+set_selection() {
+  if [[ -n "${selection_kind}" ]]; then
+    echo "error: provide only one of --test, --scenario, --suite, or --lane" >&2
+    exit 2
+  fi
+  selection_kind="$1"
+  selection_value="$2"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --test)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --test requires a value" >&2
+        exit 2
+      fi
+      set_selection test "$2"
+      shift 2
+      ;;
+    --scenario)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --scenario requires a value" >&2
+        exit 2
+      fi
+      set_selection scenario "$2"
+      shift 2
+      ;;
+    --suite)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --suite requires a value" >&2
+        exit 2
+      fi
+      set_selection suite "$2"
+      shift 2
+      ;;
+    --lane)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --lane requires a value" >&2
+        exit 2
+      fi
+      set_selection lane "$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "${selection_kind}" ]]; then
+  exit 0
+fi
+
+if [[ "${selection_kind}" == "lane" ]]; then
+  if [[ "${selection_value}" != "smoke" ]]; then
+    echo "error: smoke filters are only defined for --lane smoke" >&2
+    exit 2
+  fi
+  exit 0
+fi
+
+scenario_re='^[[:space:]]*scenario\(([A-Za-z0-9_]+),[[:space:]]*([0-9]+)\);[[:space:]]*$'
+suite_re='^[[:space:]]*suite\(([A-Za-z0-9_]+),[[:space:]]*"([^"]+)"\);[[:space:]]*$'
+
+find_scenario_filter() {
+  local wanted="$1"
+  local line
+  if [[ ! "${wanted}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: invalid e2e-smoke scenario id '${wanted}'" >&2
+    return 2
+  fi
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ${scenario_re} && "${BASH_REMATCH[2]}" == "${wanted}" ]]; then
+      printf 'e2e_smoke_s%s_\n' "${wanted}"
+      return 0
+    fi
+  done < "${catalog}"
+  echo "error: unknown e2e-smoke scenario id '${wanted}'" >&2
+  return 2
+}
+
+find_suite_filter() {
+  local wanted="$1"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ${suite_re} && "${BASH_REMATCH[2]}" == "${wanted}" ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < "${catalog}"
+  echo "error: unknown e2e-smoke suite '${wanted}'" >&2
+  return 2
+}
+
+find_test_filter() {
+  local wanted="$1"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ${scenario_re} && "${BASH_REMATCH[1]}" == "${wanted}" ]]; then
+      printf '%s\n' "${wanted}"
+      return 0
+    fi
+    if [[ "${line}" =~ ${suite_re} && "${BASH_REMATCH[1]}" == "${wanted}" ]]; then
+      printf '%s\n' "${wanted}"
+      return 0
+    fi
+  done < "${catalog}"
+  echo "error: unknown e2e-smoke test '${wanted}'" >&2
+  return 2
+}
+
+case "${selection_kind}" in
+  scenario)
+    find_scenario_filter "${selection_value}"
+    ;;
+  suite)
+    find_suite_filter "${selection_value}"
+    ;;
+  test)
+    find_test_filter "${selection_value}"
+    ;;
+esac

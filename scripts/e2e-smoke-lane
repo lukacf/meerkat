@@ -52,7 +52,7 @@ fi
 
 filter=""
 if [[ "${selection_count}" -eq 1 ]]; then
-  filter="$("${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- smoke-test-filter "${selection_args[@]}")"
+  filter="$("${root}/scripts/e2e-smoke-filter" "${selection_args[@]}")"
 fi
 
 mode="${MEERKAT_E2E_EXECUTION_MODE:-cargo}"

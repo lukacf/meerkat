@@ -99,8 +99,7 @@ case "${lane}" in
     ;;
   e2e-smoke)
     if meerkat_buildbuddy_enabled &&
-      [[ "${MEERKAT_E2E_EXECUTION_MODE:-cargo}" != "prebuilt" ]] &&
-      [[ -z "${TEST:-}" && -z "${SCENARIO:-}" && -z "${SUITE:-}" ]]; then
+      [[ "${MEERKAT_E2E_EXECUTION_MODE:-cargo}" != "prebuilt" ]]; then
       exec "${root}/scripts/buildbuddy-dev" e2e-smoke
     fi
     exec "${root}/scripts/e2e-smoke-lane"

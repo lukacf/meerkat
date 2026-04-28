@@ -162,32 +162,94 @@ const WEB_RUNTIME_BUILD_IF_MISSING: &[&str] = &[
 const MEERKAT_E2E_EXECUTION_MODE: &str = "MEERKAT_E2E_EXECUTION_MODE";
 const MEERKAT_E2E_ARTIFACT_MANIFEST: &str = "MEERKAT_E2E_ARTIFACT_MANIFEST";
 
-const SMOKE_SCENARIO_IDS: &[u16] = &[
-    16, 21, 22, 27, 28, 30, 40, 44, 47, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63,
-    64, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
-];
+#[macro_export]
+macro_rules! e2e_smoke_lane_entries {
+    ($receiver:ident) => {
+        $receiver! {
+            scenario(e2e_smoke_s16_rpc_kitchen_sink, 16);
+            scenario(e2e_smoke_s21_rpc_mob_callback_tools, 21);
+            scenario(e2e_smoke_s22_rpc_transport_backpressure, 22);
+            scenario(e2e_smoke_s27_cli_shell_and_structured_output, 27);
+            scenario(e2e_smoke_s28_cli_signed_mobpack_deploy, 28);
+            scenario(e2e_smoke_s30_cli_mob_flow_probe, 30);
+            scenario(e2e_smoke_s40_python_sdk_mixed_provider_swarm_probe, 40);
+            scenario(e2e_smoke_s44_typescript_sdk_mixed_provider_swarm_probe, 44);
+            scenario(e2e_smoke_s47_browser_mobpack_session_flow, 47);
+            scenario(e2e_smoke_s48_browser_raw_mob_lifecycle, 48);
+            scenario(e2e_smoke_s49_rpc_rest_shared_realm_roundtrip, 49);
+            scenario(e2e_smoke_s50_rest_cli_shared_realm_roundtrip, 50);
+            scenario(e2e_smoke_s51_rpc_mcp_shared_realm_parity, 51);
+            scenario(e2e_smoke_s52_cli_rpc_cli_continuity, 52);
+            scenario(e2e_smoke_s53_cli_rest_cli_continuity, 53);
+            scenario(e2e_smoke_s54_shared_realm_mob_visibility, 54);
+            scenario(e2e_smoke_s55_rpc_rest_callback_peer_storm_resume, 55);
+            scenario(e2e_smoke_s57_python_sdk_realtime_channel_session_exchange, 57);
+            scenario(e2e_smoke_s58_python_sdk_realtime_member_respawn_continuity, 58);
+            scenario(e2e_smoke_s59_typescript_sdk_realtime_channel_session_exchange, 59);
+            scenario(e2e_smoke_s60_rust_sdk_realtime_channel_session_exchange, 60);
+            scenario(e2e_smoke_s61_cli_realtime_bridge_session_roundtrip, 61);
+            scenario(e2e_smoke_s62_rest_bootstrap_to_rust_sdk_realtime_channel_exchange, 62);
+            scenario(e2e_smoke_s63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange, 63);
+            scenario(e2e_smoke_s64_python_sdk_realtime_member_model_switch_continuity, 64);
+            scenario(e2e_smoke_s71_rust_sdk_realtime_audio_mob_collaboration_roundtrip, 71);
+            scenario(e2e_smoke_s72_rust_sdk_realtime_audio_member_model_switch_continuity, 72);
+            scenario(e2e_smoke_s73_cli_generate_image_openai_default, 73);
+            scenario(e2e_smoke_s74_python_sdk_gemini_image_provider_params, 74);
+            scenario(e2e_smoke_s75_typescript_sdk_openai_image_provider_params, 75);
+            scenario(e2e_smoke_s76_typescript_sdk_cross_provider_image_model_switch_stress, 76);
+            scenario(e2e_smoke_s77_typescript_sdk_stacked_image_turn, 77);
+            scenario(e2e_smoke_s78_typescript_sdk_cross_provider_image_relay, 78);
+            scenario(e2e_smoke_s79_typescript_sdk_mob_image_critic, 79);
+            scenario(e2e_smoke_s80_typescript_sdk_persisted_generated_image_resume, 80);
+            scenario(e2e_smoke_s81_typescript_sdk_parallel_image_storm, 81);
+            scenario(e2e_smoke_s82_typescript_sdk_blob_image_roundtrip, 82);
+            suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
+            suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
+            suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
+            suite(e2e_smoke_cli_background_job_idle_keepalive, "cli-background-job-idle-keepalive");
+            suite(e2e_smoke_mob_live_smoke, "mob-live-smoke");
+            suite(e2e_smoke_mob_flow_runtime_suite, "mob-flow-runtime");
+            suite(e2e_smoke_mob_pictionary, "mob-pictionary");
+        }
+    };
+}
 
-const SMOKE_SUITE_TESTS: &[(&str, &str)] = &[
-    (
-        "e2e_smoke_rpc_dynamic_tool_pickup",
-        "rpc-dynamic-tool-pickup",
-    ),
-    (
-        "e2e_smoke_rpc_deferred_catalog_session",
-        "rpc-deferred-catalog-session",
-    ),
-    (
-        "e2e_smoke_cli_background_job_active_turn",
-        "cli-background-job-active-turn",
-    ),
-    (
-        "e2e_smoke_cli_background_job_idle_keepalive",
-        "cli-background-job-idle-keepalive",
-    ),
-    ("e2e_smoke_mob_live_smoke", "mob-live-smoke"),
-    ("e2e_smoke_mob_flow_runtime_suite", "mob-flow-runtime"),
-    ("e2e_smoke_mob_pictionary", "mob-pictionary"),
-];
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SmokeEntry {
+    Scenario {
+        test_name: &'static str,
+        id: u16,
+    },
+    Suite {
+        test_name: &'static str,
+        suite: &'static str,
+    },
+}
+
+macro_rules! smoke_entry {
+    (scenario, $test_name:ident, $id:literal) => {
+        SmokeEntry::Scenario {
+            test_name: stringify!($test_name),
+            id: $id,
+        }
+    };
+    (suite, $test_name:ident, $suite:literal) => {
+        SmokeEntry::Suite {
+            test_name: stringify!($test_name),
+            suite: $suite,
+        }
+    };
+}
+
+macro_rules! smoke_entries {
+    ($($kind:ident($test_name:ident, $value:tt);)*) => {
+        &[
+            $(smoke_entry!($kind, $test_name, $value),)*
+        ]
+    };
+}
+
+const SMOKE_ENTRIES: &[SmokeEntry] = crate::e2e_smoke_lane_entries!(smoke_entries);
 
 #[derive(Clone, Debug)]
 enum PreCommandState {
@@ -281,24 +343,16 @@ pub fn smoke_test_filter_for_selection(selection: &E2eSelection) -> Result<Optio
     match selection {
         E2eSelection::Lane(Lane::Smoke) => Ok(None),
         E2eSelection::Scenario(id) => {
-            let Some(spec) = scenario_spec(*id) else {
-                return Err(format!("unknown catalog scenario id {id}"));
-            };
-            if spec.lane != Lane::Smoke {
-                return Err(format!(
-                    "scenario {id} belongs to {:?}, not the e2e-smoke lane",
-                    spec.lane
-                ));
-            }
+            require_smoke_scenario_entry(*id)?;
             Ok(Some(format!("e2e_smoke_s{id}_")))
         }
-        E2eSelection::Suite(name) => SMOKE_SUITE_TESTS
-            .iter()
-            .find_map(|(test_name, suite)| (*suite == name).then(|| (*test_name).to_string()))
+        E2eSelection::Suite(name) => smoke_entry_for_suite(name)
+            .map(SmokeEntry::test_name)
+            .map(str::to_string)
             .map(Some)
             .ok_or_else(|| format!("unknown e2e-smoke suite '{name}'")),
         E2eSelection::SmokeTest(name) => {
-            spec_for_smoke_test_name(name)?;
+            require_smoke_test_name(name)?;
             Ok(Some(name.clone()))
         }
         E2eSelection::Lane(lane) => Err(format!(
@@ -323,23 +377,11 @@ pub async fn run_named_suite(name: &str) -> Result<(), String> {
 
 fn select_specs(selection: &E2eSelection) -> Result<Vec<SelectedSpec>, String> {
     match selection {
-        E2eSelection::Lane(Lane::Smoke) => {
-            let mut specs = Vec::new();
-            for id in SMOKE_SCENARIO_IDS {
-                let spec = scenario_spec(*id)
-                    .ok_or_else(|| format!("unknown e2e-smoke scenario id {id}"))?;
-                specs.push(SelectedSpec { spec, suite: None });
-            }
-            for (_, suite) in SMOKE_SUITE_TESTS {
-                let spec = suite_spec(suite)
-                    .ok_or_else(|| format!("unknown e2e-smoke suite '{suite}'"))?;
-                specs.push(SelectedSpec {
-                    spec,
-                    suite: Some((*suite).to_string()),
-                });
-            }
-            Ok(specs)
-        }
+        E2eSelection::Lane(Lane::Smoke) => SMOKE_ENTRIES
+            .iter()
+            .copied()
+            .map(selected_spec_for_smoke_entry)
+            .collect(),
         E2eSelection::Lane(lane) => Err(format!("planning is not implemented for {lane:?} lane")),
         E2eSelection::Scenario(id) => {
             let spec =
@@ -364,6 +406,77 @@ fn select_specs(selection: &E2eSelection) -> Result<Vec<SelectedSpec>, String> {
 struct SelectedSpec {
     spec: &'static Spec,
     suite: Option<String>,
+}
+
+impl SmokeEntry {
+    fn test_name(self) -> &'static str {
+        match self {
+            Self::Scenario { test_name, .. } | Self::Suite { test_name, .. } => test_name,
+        }
+    }
+}
+
+fn smoke_entry_for_scenario_id(id: u16) -> Option<SmokeEntry> {
+    SMOKE_ENTRIES
+        .iter()
+        .copied()
+        .find(|entry| matches!(*entry, SmokeEntry::Scenario { id: entry_id, .. } if entry_id == id))
+}
+
+fn smoke_entry_for_suite(name: &str) -> Option<SmokeEntry> {
+    SMOKE_ENTRIES
+        .iter()
+        .copied()
+        .find(|entry| matches!(*entry, SmokeEntry::Suite { suite, .. } if suite == name))
+}
+
+fn smoke_entry_for_test_name(name: &str) -> Option<SmokeEntry> {
+    SMOKE_ENTRIES
+        .iter()
+        .copied()
+        .find(|entry| entry.test_name() == name)
+}
+
+fn require_smoke_scenario_entry(id: u16) -> Result<SmokeEntry, String> {
+    if let Some(entry) = smoke_entry_for_scenario_id(id) {
+        return Ok(entry);
+    }
+
+    let Some(spec) = scenario_spec(id) else {
+        return Err(format!("unknown catalog scenario id {id}"));
+    };
+    Err(format!(
+        "scenario {id} belongs to {:?}, not the e2e-smoke lane",
+        spec.lane
+    ))
+}
+
+fn require_smoke_test_name(name: &str) -> Result<SmokeEntry, String> {
+    smoke_entry_for_test_name(name).ok_or_else(|| format!("unknown e2e-smoke test '{name}'"))
+}
+
+fn selected_spec_for_smoke_entry(entry: SmokeEntry) -> Result<SelectedSpec, String> {
+    match entry {
+        SmokeEntry::Scenario { id, .. } => {
+            let spec =
+                scenario_spec(id).ok_or_else(|| format!("unknown e2e-smoke scenario id {id}"))?;
+            if spec.lane != Lane::Smoke {
+                return Err(format!(
+                    "scenario {id} belongs to {:?}, not the e2e-smoke lane",
+                    spec.lane
+                ));
+            }
+            Ok(SelectedSpec { spec, suite: None })
+        }
+        SmokeEntry::Suite { suite, .. } => {
+            let spec =
+                suite_spec(suite).ok_or_else(|| format!("unknown e2e-smoke suite '{suite}'"))?;
+            Ok(SelectedSpec {
+                spec,
+                suite: Some(suite.to_string()),
+            })
+        }
+    }
 }
 
 fn plan_for_specs(selected: &[SelectedSpec]) -> E2ePlan {
@@ -412,39 +525,8 @@ fn plan_for_specs(selected: &[SelectedSpec]) -> E2ePlan {
 }
 
 fn spec_for_smoke_test_name(name: &str) -> Result<(&'static Spec, Option<String>), String> {
-    if let Some(id) = smoke_scenario_id_from_test_name(name) {
-        let spec =
-            scenario_spec(id).ok_or_else(|| format!("unknown e2e-smoke scenario id {id}"))?;
-        if spec.lane != Lane::Smoke {
-            return Err(format!(
-                "scenario {id} belongs to {:?}, not the e2e-smoke lane",
-                spec.lane
-            ));
-        }
-        return Ok((spec, None));
-    }
-
-    for (test_name, suite) in SMOKE_SUITE_TESTS {
-        if *test_name == name {
-            let spec =
-                suite_spec(suite).ok_or_else(|| format!("unknown e2e-smoke suite '{suite}'"))?;
-            return Ok((spec, Some((*suite).to_string())));
-        }
-    }
-
-    Err(format!("unknown e2e-smoke test '{name}'"))
-}
-
-fn smoke_scenario_id_from_test_name(name: &str) -> Option<u16> {
-    let rest = name.strip_prefix("e2e_smoke_s")?;
-    let digits = rest
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() || !rest[digits.len()..].starts_with('_') {
-        return None;
-    }
-    digits.parse().ok()
+    let selected = selected_spec_for_smoke_entry(require_smoke_test_name(name)?)?;
+    Ok((selected.spec, selected.suite))
 }
 
 fn collect_spec_requirements(
@@ -4747,10 +4829,11 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 mod tests {
     use super::{
         ArtifactManifest, ArtifactRequirement, CommandLockMode, E2eSelection, ExecutionMode, Lane,
-        build_commands_for_mode, normalize_command_with_env, plan_for_selection,
+        SMOKE_ENTRIES, build_commands_for_mode, normalize_command_with_env, plan_for_selection,
         pre_command_lock_mode, repo_cargo, sanitize_artifact_key, scenario_spec,
         smoke_test_filter_for_selection, source_revision_key,
     };
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     #[test]
@@ -4866,7 +4949,7 @@ mod tests {
     }
 
     #[test]
-    fn smoke_filter_rejects_invalid_scenario_ids() {
+    fn smoke_filter_rejects_invalid_selectors() {
         let non_smoke = smoke_test_filter_for_selection(&E2eSelection::Scenario(15)).unwrap_err();
         assert!(non_smoke.contains("not the e2e-smoke lane"), "{non_smoke}");
 
@@ -4875,22 +4958,49 @@ mod tests {
             unknown.contains("unknown catalog scenario id 9999"),
             "{unknown}"
         );
+
+        let typo = smoke_test_filter_for_selection(&E2eSelection::SmokeTest(
+            "e2e_smoke_s62_typo".to_string(),
+        ))
+        .unwrap_err();
+        assert!(typo.contains("unknown e2e-smoke test"), "{typo}");
     }
 
     #[test]
-    fn smoke_lane_plan_uses_existing_catalog_entries() {
+    fn smoke_lane_plan_uses_single_smoke_entry_catalog() {
         let plan = plan_for_selection(&E2eSelection::Lane(Lane::Smoke)).unwrap();
-        assert_eq!(plan.specs.len(), 44);
-        assert!(
-            plan.specs
-                .iter()
-                .any(|spec| spec.id == Some(62) && spec.suite.is_none())
-        );
-        assert!(
-            plan.specs
-                .iter()
-                .any(|spec| spec.suite.as_deref() == Some("mob-live-smoke"))
-        );
+        assert_eq!(plan.specs.len(), SMOKE_ENTRIES.len());
+
+        let planned_ids = plan
+            .specs
+            .iter()
+            .filter_map(|spec| spec.id)
+            .collect::<BTreeSet<_>>();
+        let planned_suites = plan
+            .specs
+            .iter()
+            .filter_map(|spec| spec.suite.as_deref())
+            .collect::<BTreeSet<_>>();
+        let mut test_names = BTreeSet::new();
+
+        for entry in SMOKE_ENTRIES {
+            assert!(
+                test_names.insert(entry.test_name()),
+                "duplicate smoke test name {}",
+                entry.test_name()
+            );
+            match entry {
+                super::SmokeEntry::Scenario { id, .. } => {
+                    assert!(planned_ids.contains(id), "missing smoke scenario {id}");
+                }
+                super::SmokeEntry::Suite { suite, .. } => {
+                    assert!(
+                        planned_suites.contains(suite),
+                        "missing smoke suite {suite}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

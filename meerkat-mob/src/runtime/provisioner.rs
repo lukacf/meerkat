@@ -1452,21 +1452,11 @@ impl MultiBackendProvisioner {
         })
     }
 
-    fn bridge_rejection_reason(
+    fn bridge_rejection_reply(
+        protocol_version: u32,
         value: &serde_json::Value,
-    ) -> Option<(super::bridge_protocol::BridgeRejectionCause, String)> {
-        if let Some(reason) = value.as_str() {
-            return Some((
-                super::bridge_protocol::BridgeRejectionCause::Internal,
-                reason.to_string(),
-            ));
-        }
-        match serde_json::from_value::<super::bridge_protocol::BridgeReply>(value.clone()).ok()? {
-            super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
-                Some((cause, reason))
-            }
-            _ => None,
-        }
+    ) -> Option<super::bridge_protocol::BridgeRejectionReply> {
+        super::bridge_protocol::decode_bridge_rejection_reply(protocol_version, value)
     }
 
     async fn ensure_supervisor_authorized(
@@ -1475,14 +1465,16 @@ impl MultiBackendProvisioner {
         binding: Option<(&str, &str, Option<&str>)>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let payload = self.bridge_supervisor_payload().await?;
+        let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         self.supervisor_bridge.trust_recipient(peer).await?;
         let value = self
             .supervisor_bridge
             .send_bridge_command(peer, &command, Duration::from_secs(30))
             .await?;
-        if let Some((cause, reason)) = Self::bridge_rejection_reason(&value) {
-            if super::bridge_fallback::should_fall_back_to_bind(cause)
+        if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
+            if let Some(cause) = rejection.typed_cause()
+                && super::bridge_fallback::should_fall_back_to_bind(cause)
                 && let Some((peer_id, address, bootstrap_token)) = binding
             {
                 let bind: super::bridge_protocol::BridgeBindResponse = self
@@ -1498,7 +1490,7 @@ impl MultiBackendProvisioner {
                 .await?;
                 return Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address);
             }
-            return Err(MobError::WiringError(reason));
+            return Err(MobError::WiringError(rejection.reason().to_string()));
         }
         Ok(peer.clone())
     }
@@ -1514,8 +1506,8 @@ impl MultiBackendProvisioner {
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
             .await?;
-        if let Some((_cause, reason)) = Self::bridge_rejection_reason(&value) {
-            return Err(MobError::WiringError(reason));
+        if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
+            return Err(MobError::WiringError(rejection.reason().to_string()));
         }
         serde_json::from_value(value).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
@@ -2061,5 +2053,53 @@ impl MobProvisioner for MultiBackendProvisioner {
 
     async fn rearm_all_checkpointers(&self) {
         self.session.rearm_all_checkpointers().await;
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod bridge_rejection_tests {
+    use super::MultiBackendProvisioner;
+    use crate::runtime::bridge_protocol::{
+        BridgeRejectionCause, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn provisioner_decodes_typed_protocol_v2_bridge_rejection() {
+        let value = json!({
+            "result": "rejected",
+            "cause": "not_bound",
+            "reason": "bind required",
+        });
+
+        let rejection = MultiBackendProvisioner::bridge_rejection_reply(
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            &value,
+        )
+        .expect("typed rejection should decode");
+
+        assert_eq!(
+            rejection.typed_cause(),
+            Some(BridgeRejectionCause::NotBound)
+        );
+        assert_eq!(rejection.reason(), "bind required");
+    }
+
+    #[test]
+    fn provisioner_does_not_promote_raw_string_as_protocol_v2_rejection() {
+        let value = json!("legacy rejection");
+
+        assert!(
+            MultiBackendProvisioner::bridge_rejection_reply(
+                SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                &value,
+            )
+            .is_none()
+        );
+        let legacy = MultiBackendProvisioner::bridge_rejection_reply(1, &value)
+            .expect("legacy raw string should decode only on protocol v1");
+        assert_eq!(legacy.typed_cause(), None);
+        assert!(legacy.is_legacy_v1_raw_string());
     }
 }

@@ -9,6 +9,7 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeCommand, BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse,
     BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
     BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload, BridgeRejectionCause,
-    BridgeRejectionClass, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
-    SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_INTENT, canonicalize_bridge_address,
+    BridgeRejectionClass, BridgeRejectionReply, BridgeReply, BridgeRetireResponse,
+    BridgeSupervisorPayload, SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_INTENT,
+    SUPERVISOR_BRIDGE_PROTOCOL_VERSION, canonicalize_bridge_address, decode_bridge_rejection_reply,
 };

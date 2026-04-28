@@ -65,6 +65,23 @@ pub enum BridgeCommand {
     UnwireMember(BridgePeerWiringPayload),
 }
 
+impl BridgeCommand {
+    /// Protocol version carried by this command's payload.
+    pub fn protocol_version(&self) -> u32 {
+        match self {
+            Self::BindMember(payload) => payload.protocol_version,
+            Self::AuthorizeSupervisor(payload)
+            | Self::RevokeSupervisor(payload)
+            | Self::ObserveMember(payload)
+            | Self::InterruptMember(payload)
+            | Self::RetireMember(payload)
+            | Self::DestroyMember(payload) => payload.protocol_version,
+            Self::DeliverMemberInput(payload) => payload.protocol_version,
+            Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Reply envelope
 // ---------------------------------------------------------------------------
@@ -84,6 +101,88 @@ pub enum BridgeReply {
         cause: BridgeRejectionCause,
         reason: String,
     },
+}
+
+/// Decoded bridge rejection reply.
+///
+/// Protocol v2 rejections carry a typed [`BridgeRejectionCause`]. Bare JSON
+/// string replies are only a protocol-v1 compatibility shape; callers must not
+/// treat them as authoritative typed v2 causes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BridgeRejectionReply {
+    Typed {
+        cause: BridgeRejectionCause,
+        reason: String,
+    },
+    LegacyV1RawString {
+        reason: String,
+    },
+}
+
+impl BridgeRejectionReply {
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Typed { reason, .. } | Self::LegacyV1RawString { reason } => reason,
+        }
+    }
+
+    pub fn typed_cause(&self) -> Option<BridgeRejectionCause> {
+        match self {
+            Self::Typed { cause, .. } => Some(*cause),
+            Self::LegacyV1RawString { .. } => None,
+        }
+    }
+
+    pub fn is_legacy_v1_raw_string(&self) -> bool {
+        matches!(self, Self::LegacyV1RawString { .. })
+    }
+}
+
+/// Decode a typed protocol-v2 bridge rejection.
+///
+/// Deliberately ignores bare JSON strings. Use
+/// [`decode_legacy_v1_raw_string_rejection`] only when the command was sent
+/// over the explicit protocol-v1 compatibility path.
+pub fn decode_protocol_v2_bridge_rejection(
+    value: &serde_json::Value,
+) -> Option<BridgeRejectionReply> {
+    match serde_json::from_value::<BridgeReply>(value.clone()).ok()? {
+        BridgeReply::Rejected { cause, reason } => {
+            Some(BridgeRejectionReply::Typed { cause, reason })
+        }
+        _ => None,
+    }
+}
+
+/// Decode the legacy protocol-v1 raw-string rejection compatibility shape.
+pub fn decode_legacy_v1_raw_string_rejection(
+    value: &serde_json::Value,
+) -> Option<BridgeRejectionReply> {
+    value
+        .as_str()
+        .map(|reason| BridgeRejectionReply::LegacyV1RawString {
+            reason: reason.to_string(),
+        })
+}
+
+/// Decode a bridge rejection according to the command protocol version.
+///
+/// Typed replies are accepted for every version so upgraded runtimes can reply
+/// precisely even while a persisted supervisor record still carries v1.
+/// Bare strings are accepted only for the explicit protocol-v1 compatibility
+/// path and never synthesize a typed cause.
+pub fn decode_bridge_rejection_reply(
+    protocol_version: u32,
+    value: &serde_json::Value,
+) -> Option<BridgeRejectionReply> {
+    decode_protocol_v2_bridge_rejection(value).or_else(|| {
+        if protocol_version == 1 {
+            decode_legacy_v1_raw_string_rejection(value)
+        } else {
+            None
+        }
+    })
 }
 
 /// Typed vocabulary for why a bridge command was rejected.
@@ -669,6 +768,56 @@ mod tests {
         }
         let reencoded = serde_json::to_value(&decoded).expect("reserialize reply");
         assert_eq!(value, reencoded);
+    }
+
+    #[test]
+    fn bridge_rejection_decoder_accepts_typed_protocol_v2_rejection() {
+        let value = json!({
+            "result": "rejected",
+            "cause": "sender_mismatch",
+            "reason": "wrong supervisor",
+        });
+
+        let decoded = decode_bridge_rejection_reply(SUPERVISOR_BRIDGE_PROTOCOL_VERSION, &value)
+            .expect("typed rejection should decode");
+
+        assert_eq!(
+            decoded.typed_cause(),
+            Some(BridgeRejectionCause::SenderMismatch)
+        );
+        assert_eq!(decoded.reason(), "wrong supervisor");
+        assert!(!decoded.is_legacy_v1_raw_string());
+    }
+
+    #[test]
+    fn bridge_rejection_decoder_rejects_raw_string_for_protocol_v2() {
+        let value = json!("legacy rejection");
+
+        assert!(
+            decode_bridge_rejection_reply(SUPERVISOR_BRIDGE_PROTOCOL_VERSION, &value).is_none(),
+            "protocol v2 must not promote raw strings into typed rejection causes"
+        );
+    }
+
+    #[test]
+    fn bridge_rejection_decoder_isolates_raw_string_to_legacy_v1() {
+        let value = json!("legacy rejection");
+
+        let decoded =
+            decode_bridge_rejection_reply(1, &value).expect("legacy raw string should decode");
+
+        assert_eq!(decoded.typed_cause(), None);
+        assert_eq!(decoded.reason(), "legacy rejection");
+        assert!(decoded.is_legacy_v1_raw_string());
+    }
+
+    #[test]
+    fn bridge_command_reports_payload_protocol_version() {
+        let mut payload = sample_supervisor_payload();
+        payload.protocol_version = 7;
+        let command = BridgeCommand::AuthorizeSupervisor(payload);
+
+        assert_eq!(command.protocol_version(), 7);
     }
 
     // -----------------------------------------------------------------------

@@ -578,7 +578,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Option<Session>, SessionError> {
         if let Some(runtime_store) = self.runtime_store.as_ref() {
             let runtime_id = Self::runtime_id_for_session(id);
-            let Some(runtime) = runtime_store
+            let runtime_snapshot = runtime_store
                 .load_session_snapshot(&runtime_id)
                 .await
                 .map_err(|err| {
@@ -595,27 +595,40 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         },
                     )
                 })
-                .transpose()?
-            else {
-                return Ok(None);
-            };
+                .transpose()?;
 
-            let store_snapshot = match self.store.load(id).await {
-                Ok(store_snapshot) => store_snapshot,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %id,
-                        error = %error,
-                        "failed to load non-authoritative session-store projection for metadata backfill"
-                    );
-                    None
-                }
-            };
+            if let Some(runtime) = runtime_snapshot {
+                let store_snapshot = match self.store.load(id).await {
+                    Ok(store_snapshot) => store_snapshot,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %id,
+                            error = %error,
+                            "failed to load non-authoritative session-store projection for metadata backfill"
+                        );
+                        None
+                    }
+                };
 
-            return Ok(match store_snapshot {
-                Some(store) => Some(Self::runtime_session_with_store_metadata(runtime, &store)),
-                None => Some(runtime),
-            });
+                Ok(match store_snapshot {
+                    Some(store) => Some(Self::runtime_session_with_store_metadata(runtime, &store)),
+                    None => Some(runtime),
+                })
+            } else {
+                let Some(store_only) = self
+                    .store
+                    .load(id)
+                    .await
+                    .map_err(|e| SessionError::Store(Box::new(e)))?
+                else {
+                    return Ok(None);
+                };
+                tracing::info!(
+                    session_id = %id,
+                    "migrating legacy session-store projection into runtime authority"
+                );
+                self.save_normalized_session(store_only).await.map(Some)
+            }
         } else {
             self.store
                 .load(id)
@@ -4366,14 +4379,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_authoritative_load_rejects_store_only_projection() {
+    async fn test_runtime_backed_authoritative_load_migrates_store_only_projection() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
             4,
             Arc::clone(&store),
-            Some(runtime_store),
+            Some(runtime_store.clone()),
             memory_blob_store(),
         );
 
@@ -4387,25 +4400,37 @@ mod tests {
             .await
             .expect("test should seed a raw store projection");
 
-        assert!(
-            service
-                .load_authoritative_session(&id)
-                .await
-                .expect("authoritative load should succeed")
-                .is_none(),
-            "runtime-backed reads must not promote store-only rows to authoritative sessions"
+        let authoritative = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("store-only projection should be migrated before exposure");
+        assert_eq!(
+            authoritative.messages().len(),
+            raw_projection.messages().len()
         );
+        let migrated_snapshot = runtime_store
+            .load_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("legacy store projection should be committed into runtime authority");
+        let migrated: Session = serde_json::from_slice(&migrated_snapshot)
+            .expect("migrated runtime snapshot should deserialize");
+        assert_eq!(migrated.messages().len(), raw_projection.messages().len());
+
         assert!(
-            matches!(service.read(&id).await, Err(SessionError::NotFound { .. })),
-            "read() must hide store-only compatibility rows when runtime authority is configured"
+            service.read(&id).await.is_ok(),
+            "read() may expose a legacy store-only row only after runtime migration"
         );
         let listed = service
             .list(SessionQuery::default())
             .await
             .expect("list should succeed");
         assert!(
-            listed.iter().all(|summary| summary.session_id != id),
-            "list() must not expose store-only compatibility rows when runtime authority is configured"
+            listed.iter().any(|summary| summary.session_id == id),
+            "list() may expose a legacy store-only row only after runtime migration"
         );
     }
 

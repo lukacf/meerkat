@@ -5,13 +5,15 @@
 
 use async_trait::async_trait;
 use meerkat_core::memory::{
-    MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+    MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryResult,
+    MemorySearchScope, MemoryStore, MemoryStoreError,
 };
 use tokio::sync::RwLock;
 
 /// Entry in the simple memory store.
 #[derive(Debug, Clone)]
 struct MemoryEntry {
+    scope: MemoryIndexScope,
     content: String,
     metadata: MemoryMetadata,
 }
@@ -42,13 +44,22 @@ impl Default for SimpleMemoryStore {
 
 #[async_trait]
 impl MemoryStore for SimpleMemoryStore {
-    async fn index(&self, content: &str, metadata: MemoryMetadata) -> Result<(), MemoryStoreError> {
+    async fn index_scoped(
+        &self,
+        request: MemoryIndexRequest,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        let (scope, content, metadata) = request.into_parts();
+        let receipt_scope = scope.clone();
         let mut entries = self.entries.write().await;
         entries.push(MemoryEntry {
-            content: content.to_string(),
+            scope,
+            content,
             metadata,
         });
-        Ok(())
+        Ok(MemoryIndexReceipt {
+            scope: receipt_scope,
+            indexed_entries: 1,
+        })
     }
 
     async fn search(
@@ -64,7 +75,7 @@ impl MemoryStore for SimpleMemoryStore {
 
         let mut results: Vec<MemoryResult> = entries
             .iter()
-            .filter(|entry| scope.includes(&entry.metadata))
+            .filter(|entry| entry.scope.owner == scope.owner && scope.includes(&entry.metadata))
             .filter_map(|entry| {
                 let content_lower = entry.content.to_lowercase();
                 let matching_words = query_words
@@ -112,24 +123,47 @@ mod tests {
         }
     }
 
+    fn request(content: impl Into<String>, session_id: &SessionId) -> MemoryIndexRequest {
+        MemoryIndexRequest::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            content.into(),
+            meta(session_id),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn test_index_and_search() {
         let store = SimpleMemoryStore::new();
         let session_id = SessionId::new();
         let scope = MemorySearchScope::for_session(session_id.clone());
+        let other_session_id = SessionId::new();
 
         store
-            .index("The user wants to implement a REST API", meta(&session_id))
+            .index_scoped(request(
+                "The user wants to implement a REST API",
+                &session_id,
+            ))
             .await
             .unwrap();
         store
-            .index("Configuration uses TOML format", meta(&session_id))
+            .index_scoped(request("Configuration uses TOML format", &session_id))
             .await
             .unwrap();
         store
-            .index("Authentication uses JWT tokens", meta(&SessionId::new()))
+            .index_scoped(request("Authentication uses JWT tokens", &other_session_id))
             .await
             .unwrap();
+
+        {
+            let entries = store.entries.read().await;
+            assert!(
+                entries
+                    .iter()
+                    .all(|entry| entry.scope.includes(&entry.metadata))
+            );
+            assert_eq!(entries[0].scope.session_id(), &session_id);
+        }
 
         let results = store.search(&scope, "REST API", 10).await.unwrap();
         assert!(!results.is_empty());
@@ -157,7 +191,7 @@ mod tests {
 
         for i in 0..10 {
             store
-                .index(&format!("Item {i} with keyword test"), meta(&session_id))
+                .index_scoped(request(format!("Item {i} with keyword test"), &session_id))
                 .await
                 .unwrap();
         }
@@ -171,9 +205,26 @@ mod tests {
         let store = SimpleMemoryStore::new();
         let session_id = SessionId::new();
         let scope = MemorySearchScope::for_session(session_id.clone());
-        store.index("Hello world", meta(&session_id)).await.unwrap();
+        store
+            .index_scoped(request("Hello world", &session_id))
+            .await
+            .unwrap();
 
         let results = store.search(&scope, "quantum computing", 10).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_index_request_rejects_metadata_outside_scope() {
+        let session_id = SessionId::new();
+        let other_session_id = SessionId::new();
+        let error = MemoryIndexRequest::new(
+            MemoryIndexScope::for_session(session_id),
+            "outside scope".to_string(),
+            meta(&other_session_id),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, MemoryStoreError::Scope(_)));
     }
 }

@@ -9,7 +9,8 @@
 use async_trait::async_trait;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use meerkat_core::memory::{
-    MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+    MemoryIndexReceipt, MemoryIndexRequest, MemoryResult, MemorySearchScope, MemoryStore,
+    MemoryStoreError,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -136,10 +137,14 @@ impl HnswMemoryStore {
 
 #[async_trait]
 impl MemoryStore for HnswMemoryStore {
-    async fn index(&self, content: &str, metadata: MemoryMetadata) -> Result<(), MemoryStoreError> {
+    async fn index_scoped(
+        &self,
+        request: MemoryIndexRequest,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        let (scope, content, metadata) = request.into_parts();
+        let receipt_scope = scope.clone();
         let meta_json = serde_json::to_vec(&metadata)
             .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
-        let content = content.to_owned();
         let db_path = self.db_path.clone();
         let index = Arc::clone(&self.index);
 
@@ -182,7 +187,10 @@ impl MemoryStore for HnswMemoryStore {
             .checked_add(1)
             .ok_or_else(|| MemoryStoreError::Index("point ID overflow".to_string()))?;
         self.next_id.store(next_id, Ordering::Release);
-        Ok(())
+        Ok(MemoryIndexReceipt {
+            scope: receipt_scope,
+            indexed_entries: 1,
+        })
     }
 
     async fn search(
@@ -299,6 +307,7 @@ fn text_to_embedding(text: &str) -> [f32; VOCAB_DIM] {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_core::memory::{MemoryIndexScope, MemoryMetadata};
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
     use tempfile::TempDir;
@@ -311,32 +320,42 @@ mod tests {
         }
     }
 
+    fn request(content: impl Into<String>, session_id: &SessionId) -> MemoryIndexRequest {
+        MemoryIndexRequest::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            content.into(),
+            meta(session_id),
+        )
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn test_hnsw_index_and_search() {
         let dir = TempDir::new().unwrap();
         let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
         let session_id = SessionId::new();
         let scope = MemorySearchScope::for_session(session_id.clone());
+        let other_session_id = SessionId::new();
 
         store
-            .index(
+            .index_scoped(request(
                 "The user wants to implement a REST API with authentication",
-                meta(&session_id),
-            )
+                &session_id,
+            ))
             .await
             .unwrap();
         store
-            .index(
+            .index_scoped(request(
                 "Configuration files use TOML format for settings",
-                meta(&session_id),
-            )
+                &session_id,
+            ))
             .await
             .unwrap();
         store
-            .index(
+            .index_scoped(request(
                 "JWT tokens handle authentication and authorization",
-                meta(&SessionId::new()),
-            )
+                &other_session_id,
+            ))
             .await
             .unwrap();
 
@@ -376,10 +395,10 @@ mod tests {
 
         for i in 0..10 {
             store
-                .index(
-                    &format!("Item {i} with keyword test data"),
-                    meta(&session_id),
-                )
+                .index_scoped(request(
+                    format!("Item {i} with keyword test data"),
+                    &session_id,
+                ))
                 .await
                 .unwrap();
         }
@@ -398,10 +417,10 @@ mod tests {
         {
             let store = HnswMemoryStore::open(&memory_dir).unwrap();
             store
-                .index(
+                .index_scoped(request(
                     "Persistent memory entry about Rust programming",
-                    meta(&session_id),
-                )
+                    &session_id,
+                ))
                 .await
                 .unwrap();
         }
@@ -422,7 +441,7 @@ mod tests {
         let scope = MemorySearchScope::for_session(session_id.clone());
 
         store
-            .index("Exact match query text here", meta(&session_id))
+            .index_scoped(request("Exact match query text here", &session_id))
             .await
             .unwrap();
 

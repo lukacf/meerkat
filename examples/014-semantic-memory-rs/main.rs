@@ -26,7 +26,9 @@
 use std::sync::Arc;
 
 use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder};
-use meerkat_core::memory::{MemoryMetadata, MemoryStore as _};
+use meerkat_core::memory::{
+    MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryStore as _,
+};
 use meerkat_memory::{MemorySearchDispatcher, SimpleMemoryStore};
 use meerkat_store::{JsonlStore, StoreAdapter};
 
@@ -62,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // In normal operation, memory is populated during context compaction:
     // when the agent loop compacts old messages to save context space,
     // the discarded text is indexed into the memory store. Here we simulate
-    // that by directly indexing some facts.
+    // that by scoped indexing of some facts.
 
     let now = std::time::SystemTime::now();
     let facts = [
@@ -80,7 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             turn: Some(i as u32 + 1),
             indexed_at: now,
         };
-        memory_store.index(fact, metadata).await?;
+        let request = MemoryIndexRequest::new(
+            MemoryIndexScope::for_session(memory_session_id.clone()),
+            (*fact).to_string(),
+            metadata,
+        )?;
+        memory_store.index_scoped(request).await?;
     }
 
     println!("Indexed {} facts into SimpleMemoryStore\n", facts.len());

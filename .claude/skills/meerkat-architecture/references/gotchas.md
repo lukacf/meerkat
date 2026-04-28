@@ -7,7 +7,7 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 1. **Never bypass `AgentFactory::build_agent()`** — all agent construction goes through this pipeline.
 2. **Never import implementations in business logic** — use traits from `meerkat-core`.
 3. **No sub-agent system** — all multi-agent work goes through mobs. No `SubAgentManager`, no `agent_spawn`/`agent_fork`.
-4. **Runtime conforms to machines** — runtime behavior matches verified machine schemas. No owner-crate `machines/mod.rs` re-exports; centralized `meerkat-machine-kernels` is the enforced design.
+4. **Runtime conforms to catalog-generated machines** — runtime behavior matches verified machine schemas. Production bridge modules import/invoke catalog-owned DSL bodies; centralized `meerkat-machine-kernels` is the enforced design.
 5. **Shell may execute mechanics; it may not invent seam semantics** — evidence capture is allowed, but feedback mapping, barrier membership, and terminal class must be protocol-constrained or machine-derived.
 6. **DSL is sole authority for absorbed domains** — every `*_authority.rs` file outside `meerkat-machine-kernels` is either a DSL adapter (`dsl_authority.rs`), a pure data projection (e.g., `roster`, `mob_member_lifecycle`), or a planning helper (e.g., `mob_wiring`, `mob_runtime_bridge`). None contain `fn apply(input) -> Result<Transition, Error>` match tables.
 7. **No shadow semantic truth** — if a helper, cache, queue, or surface carries authoritative meaning beside the machine/composition/protocol owner, the design is wrong.
@@ -24,6 +24,9 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 18. **One canonical step path** — `execute_step_with_all_guards()` is shared by flat and frame execution; parallel executors are a regression factory.
 19. **Operator authority is injected, not ambient** — mob support being enabled must not surface operator tools without runtime context.
 20. **Runtime owns detached wake** — background-op completion wakeups flow through `DetachedWakeState` + `ContinuationInput`, not surface code.
+21. **No production-only machine semantics** — new state fields, transitions, effects, helpers, and invariants land in catalog DSL first. Production bridge code may convert/realize, not decide.
+22. **Typed command parity only** — command classification uses typed manifests. String exception tables, wildcard "allowed" branches, and command-name folklore are dogma violations.
+23. **Mob flow helper reducers are not machines** — `flow_run`, `flow_frame`, and `loop_iteration` are MobMachine-owned fail-closed projection reducers. They must not become independent semantic owners.
 
 ## Gotchas to check on every non-trivial change
 
@@ -38,6 +41,7 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 - **`input_terminal_outcomes` / `input_attempt_counts`**: future DSL structural upgrades pending; until then, shell owns these two InputState fields explicitly (annotated with doc comments).
 - **Generated protocol files in `src/generated/`**: never hand-edit. Regenerate via `make machine-codegen` after any DSL change.
 - **Drift check before commit**: `make machine-check-drift` must be clean; if it reports stale artifacts, `make machine-codegen` was forgotten.
+- **Schema/alphabet parity before commit**: `runtime_schema_parity`, `runtime_alphabet_parity`, and render-contract audits must stay green; they are the ratchet for #38/#39.
 - **TLC at CI bounds**: `make machine-verify` passing at small bounds does not prove the runtime is bug-free at production scale; treat it as strong evidence, not a certificate.
 
 ## Review lens — ask these before accepting a change

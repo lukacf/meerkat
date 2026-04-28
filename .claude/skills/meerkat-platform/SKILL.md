@@ -297,7 +297,7 @@ Flow model highlights:
 - persisted run snapshots (`MobRun`) with `step_ledger` and `failure_ledger`,
 - frame-based execution via `FlowSpec.root: FrameSpec` (v2 flows),
 - `repeat_until` loop nodes with `until` condition, `max_iterations` guard, and nested `body: FrameSpec`,
-- `FlowFrameEngine` drives frame execution; `FlowFrameMachine` owns frame-local state; `LoopIterationMachine` owns loop body/evaluate lifecycle.
+- `FlowFrameEngine` drives frame execution as a shell executor. `MobMachine` owns frame-local state, loop iteration lifecycle, scheduler grants, frame-step projection, and flow terminalization. The `flow_run`, `flow_frame`, and `loop_iteration` modules are MobMachine-owned fail-closed projection reducers for `MobRun` persistence shape, not standalone machines.
 
 Operational notes:
 

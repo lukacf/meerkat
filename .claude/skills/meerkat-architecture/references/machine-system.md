@@ -1,6 +1,6 @@
 # Machine System — DSL, Schemas, Kernels, TLA+, Runtime
 
-Load this reference when working on DSL definitions, schema catalog, generated kernels, TLC verification, or authority cutover.
+Load this reference when working on DSL definitions, schema catalog, generated kernels, TLC verification, production bridge modules, command classification, schema/alphabet parity, or authority cutover.
 
 ## The 5-machine target
 
@@ -14,9 +14,9 @@ The final system has exactly five canonical machines:
 
 Plus four composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`.
 
-Catalog authoritative file: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these five machine DSLs.
+Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these five machine DSLs.
 
-Previously-standalone machines absorbed into MeerkatMachine/MobMachine state become fields, inputs, and transitions inside the host machine. Post-absorption, no `*_authority.rs` files should remain for absorbed domains — shell code routes through the host machine's DSL via handle traits (see "Cross-crate DSL access" below).
+Previously-standalone machines absorbed into MeerkatMachine/MobMachine state become fields, inputs, and transitions inside the host machine. Post-absorption, remaining helper modules are projection/reducer support or shell mechanics; shell code routes semantic decisions through the host machine's DSL via handle traits or in-crate MobMachine authority access (see "Cross-crate DSL access" below).
 
 ## The two-compilation model
 
@@ -83,15 +83,36 @@ The DSL is a single source that produces two artifacts:
 
 Trust axiom: the codegen (macro expansion + schema extraction) is correct. The drift-check + machine-verify together prove that the on-disk generated artifacts match the current DSL AND that the abstract model satisfies invariants. No separate equivalence proof between "runtime Rust" and "TLA+ model" — both come from the same DSL source.
 
-## The three verification passes
+## Production bridge and parity ratchets
+
+Phase 1 of the foundational machine-authority convergence is closed. There is one catalog DSL body per canonical machine; production crates expose bridge modules that bind crate-local types and import/invoke the catalog-owned body. Production bridge code may do domain conversions, imports, and effect realization, but it may not participate in transition decisions.
+
+Ratchets that must stay green:
+
+- `meerkat-machine-codegen/tests/render_contracts.rs`
+  - generated kernel modules must be schema-fed from the catalog, not rendered from production source files;
+  - production bridges must import catalog-owned helper semantics such as `OptionValueExt`;
+  - `flow_run`, `flow_frame`, and `loop_iteration` are audited as MobMachine-owned fail-closed projection reducers, not canonical machines.
+- `meerkat-machine-codegen/tests/runtime_schema_parity.rs`
+  - catalog/production schemas must match shape for all canonical machines;
+  - drift inventory and count tests must remain empty after convergence.
+- `meerkat-machine-codegen/tests/runtime_alphabet_parity.rs`
+  - command classification is typed via `MeerkatMachineCommandClassificationRecord` and `MobMachineCommandClassificationRecord`;
+  - every semantic command maps to catalog inputs or a typed shell-mechanic reason;
+  - string whitelists, wildcard bypasses, and command-name folklore are forbidden.
+
+Do not add `machine! { ... }` or equivalent handwritten production machine bodies outside `meerkat-machine-schema/src/catalog/dsl/`. If production needs a new semantic field, transition, effect, or invariant, lift it into the catalog first, regenerate artifacts, run drift/parity checks, and then adapt bridge code.
+
+## Verification and parity passes
 
 Run these in order after any DSL edit:
 
 1. `make machine-codegen` — re-emit TLA+ specs + generated protocol adapters from the current DSL. Must run after any DSL change.
 2. `make machine-check-drift` — compare freshly generated artifacts against committed on-disk versions. Fails if DSL was edited without re-running codegen.
 3. `make machine-verify` — run TLC model-checker on the TLA+ specs. Proves invariants across the bounded state space (CI uses 2-3 concurrent entities per domain; can be expanded).
+4. Parity tests — `runtime_schema_parity`, `runtime_alphabet_parity`, and render-contract audits guard catalog/production equality, typed command coverage, and generated-source provenance.
 
-All three pass = DSL + runtime are provably in sync, and the machine cannot enter an invalid state given typed inputs.
+All required passes green = DSL + runtime are in sync, generated artifacts match the catalog, and the machine cannot enter an invalid state given typed inputs within the verified bounds.
 
 ## DSL is field-driven, not phase-driven
 
@@ -182,16 +203,18 @@ Per `docs/architecture/meerkat-runtime-dogma.md`:
 
 1. **One semantic fact, one owner.** If something can mutate machine state, the machine owns it. Shell copies of DSL-owned fields are shadow truth and must be eliminated (see Phase 5G).
 2. **Machines own semantics, shell owns mechanics.** Transition tables belong in the DSL. Handwritten match tables on `(phase, input)` tuples in shell code are authority-reimplementation in disguise.
-3. **Derived projections are rebuildable, never authoritative.** If a cache or projection affects a semantic decision, it's shadow truth.
+3. **Catalog wins over production.** Production-only invariants, fields, transitions, or effects must be lifted into the catalog and verified before bridge code can depend on them.
+4. **Derived projections are rebuildable, never authoritative.** If a cache or projection affects a semantic decision, it's shadow truth.
 
 ## What the workspace looks like in the target state
 
-- Exactly 4 `*.rs` files in `meerkat-machine-schema/src/catalog/dsl/` — one per machine. No other machine DSL sources.
+- Exactly 5 canonical machine DSL files in `meerkat-machine-schema/src/catalog/dsl/` — one per machine. Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
 - Exactly 4 compositions in `meerkat-machine-schema/src/catalog/compositions.rs`.
-- Zero `*_authority.rs` files containing handwritten match-table state machines. The only file named `dsl_authority.rs` is `meerkat-runtime/src/meerkat_machine/dsl_authority.rs`, which is the runtime adapter plumbing (not a state machine).
+- Zero `*_authority.rs` files containing handwritten match-table state machines. Files named `dsl_authority.rs` are runtime adapter plumbing (not state machines); other authority-named helpers must be projections, planners, or sealed mutators with no semantic transition table.
 - Runtime shell holds only: per-session `Arc<Mutex<MeerkatMachineAuthority>>` + `Arc<Mutex<MobMachineAuthority>>`, handle trait impls that route through the shared authorities, IO mechanics (channels, handles, wall-clock timestamps), and observability projections (history logs, diagnostic snapshots).
 - Handle traits in `meerkat-core/src/handles.rs` (`TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`) give cross-crate access to MeerkatMachine transitions. Mob-internal callers use `MobActor.dsl_authority` directly.
 - `InputState` and equivalent per-instance shell structs carry only non-DSL data: caller-provided metadata (policy, durability, idempotency keys), wall-clock timestamps, and observability history. Semantic state (phase, terminal outcome, attempt count, run association, boundary sequence) is read from the DSL through handle accessors.
+- `flow_run`, `flow_frame`, and `loop_iteration` are projection/reducer support modules for `MobRun` persistence shape. Their semantic inputs are covered by MobMachine; they must fail closed if used outside a MobMachine-authorized transition path.
 
 ## Key files to read when touching the machine system
 

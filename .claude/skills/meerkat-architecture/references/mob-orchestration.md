@@ -89,6 +89,7 @@ Definition has `WiringRules` with `role_wiring: [{a, b}]`. At spawn time, `MobAc
 
 - Flat DAG steps still exist, but `FlowSpec.root: FrameSpec` and `RepeatUntilSpec` enable frame-based execution.
 - Frame execution is owned by MobMachine DSL: frame-local state, loop iteration lifecycle, scheduler grants (`GrantNodeSlot`, `GrantBodyFrameStart`), frame-step projection, and terminalization all live in the MobMachine DSL as transitions. `FlowEngine` is the thin execution shell.
+- `flow_run`, `flow_frame`, and `loop_iteration` under `meerkat-mob/src/run/` are MobMachine-owned fail-closed projection reducers. They define the persisted `MobRun` shape and reducer vocabulary, but every semantic reducer command must be authorized by a MobMachine input/effect path.
 - `FlowEngine::execute_step_with_all_guards()` is the single canonical step path used by both flat-step execution and the frame adapter. `FlowTurnExecutorAdapter` is intentionally thin.
 - Recovery lives in `meerkat-mob/src/runtime/recovery.rs`: repairs ready-frame / pending-body-frame drift when possible and returns typed incompatibility for pre-v2 active runs when not.
 - Gotcha: never append step/failure/event projections from a parallel executor path if the DSL already owns that projection.

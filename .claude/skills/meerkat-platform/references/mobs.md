@@ -394,10 +394,11 @@ Key types:
 
 Execution model:
 
-- `FlowFrameMachine` owns per-frame state (node readiness, completion tracking)
-- `LoopIterationMachine` owns loop body/evaluate lifecycle
-- `FlowRunMachine` owns scheduler grants (`GrantNodeSlot`, `GrantBodyFrameStart`), frame-step projection, and terminalization
-- Frame-step outcomes route back through `FlowRunMachine`; direct mutation from executor code is prohibited
+- `MobMachine` owns per-frame state (node readiness, completion tracking)
+- `MobMachine` owns loop body/evaluate lifecycle
+- `MobMachine` owns scheduler grants (`GrantNodeSlot`, `GrantBodyFrameStart`), frame-step projection, and terminalization
+- `flow_run`, `flow_frame`, and `loop_iteration` are MobMachine-owned fail-closed projection reducers used to materialize `MobRun` snapshots. They are not standalone machines.
+- Frame-step outcomes route back through MobMachine-owned transitions; direct mutation from executor code is prohibited
 - Recovery handles ready-frame / pending-body-frame drift and returns typed incompatibility for pre-v2 active runs
 
 Definition example:

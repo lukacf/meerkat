@@ -15,10 +15,11 @@ This file is a lean navigator. Load the specific reference under `references/` w
 2. **Trait contracts own the architecture** — `meerkat-core` defines contracts; implementations live in satellite crates.
 3. **Surfaces are skins, not authorities** — CLI, REST, RPC, MCP, WASM route through shared substrate and factory seams, but runtime-backed surfaces own runtime semantics.
 4. **Composition over configuration** — optional components are `Option<Arc<dyn Trait>>`, not feature-flagged defaults.
-5. **Runtime conforms to machines** — the runtime follows the verified DSL model, not the other way around.
+5. **Runtime conforms to catalog-generated machines** — the runtime follows the verified DSL model, not the other way around. Production bridge modules import/invoke catalog-owned DSL bodies; they do not author competing machine semantics.
 6. **Mob is the only multi-agent runtime path** — no separate sub-agent substrate. User-facing "delegate"/"sub-agent" flows compile to mob members, often inside session-owned implicit mobs.
 7. **Override-first resource injection** — `AgentBuildConfig` overrides take precedence over factory/config/filesystem resolution.
 8. **Seams are formal** — async owner handoffs, wait barriers, and surfaced terminal classes are modeled in the DSL or composition protocols, not left to shell convention.
+9. **Parity gates are dogmatic** — production/catalog schema drift, command alphabet drift, string whitelists, and handwritten production machine bodies are CI failures, not review notes.
 
 ## Build And Test Architecture
 
@@ -108,7 +109,14 @@ Exactly five canonical machines, each with a DSL source in `meerkat-machine-sche
 
 Plus four composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`.
 
-**Primary semantic authority should live in the catalog-generated machines.** Handwritten `*_authority.rs` helpers that still exist should be treated as transitional or adapter-level mechanics, not competing semantic owners.
+**Primary semantic authority lives in the catalog-generated machines.** Production modules are bridge shells around catalog-owned DSL bodies and crate-local bridging types. Handwritten `*_authority.rs` helpers that still exist are adapter mechanics, projections, planners, or sealed mutators, not competing semantic owners.
+
+Phase 1 of the machine-authority convergence is closed:
+
+- Catalog DSL is the source for production machine bodies and generated kernels.
+- `runtime_schema_parity` asserts catalog/production schema equality for all canonical machines.
+- `runtime_alphabet_parity` uses typed command classification manifests; string whitelists are forbidden.
+- `flow_run`, `flow_frame`, and `loop_iteration` are MobMachine-owned fail-closed projection reducers. They are support modules for `MobRun` projection shape, not canonical machines.
 
 Detailed architecture, DSL ↔ schema ↔ kernel ↔ TLA+ flow, the field-driven design principle, signals vs inputs, and the cross-crate handle trait pattern: **load `references/machine-system.md`**.
 
@@ -164,7 +172,7 @@ For detailed crate-by-crate reference: load `references/crate_map.md`.
 
 Load these as needed. SKILL.md alone is intentionally minimal — everything else lives in `references/` for progressive disclosure.
 
-- **`references/machine-system.md`** — load when touching DSL sources, catalog schemas, generated kernels, TLC verification, authority cutover, handle trait design, or any "where does this semantic state live" question. Covers the DSL → MachineSchema → kernel → TLA+ → runtime flow, the field-driven design principle, signals vs inputs, and the `HandleDslAuthority` cross-crate pattern.
+- **`references/machine-system.md`** — load when touching DSL sources, catalog schemas, generated kernels, TLC verification, production bridge modules, parity gates, command classification, authority cutover, handle trait design, or any "where does this semantic state live" question. Covers the DSL → MachineSchema → kernel → TLA+ → runtime flow, the catalog/production parity ratchets, the field-driven design principle, signals vs inputs, and the `HandleDslAuthority` cross-crate pattern.
 - **`references/runtime-control-plane.md`** — load when working on `MeerkatMachine`, runtime drivers, session registration, policy resolution, `RuntimeBuildMode` / `SessionRuntimeBindings`, `OpsLifecycleRegistry`, session service lifecycle, persistence pairing, detached-op wake, or test harness ownership.
 - **`references/realtime-attachment.md`** — load when working on realtime attachment state, the capability-driven transport policy (`ModelCapabilities.realtime`), the live-topology reconfigure flow, provider callback authority epochs, or the peer-response-terminal context append path. Covers the DSL state fields, the `RealtimeAttachmentSignalAuthority` token, and the five CoreExecutor entry points that route context-only staged primitives.
 - **`references/agent-construction.md`** — load when touching `AgentFactory::build_agent()`, agent builder, multimodal content types, or runtime tool scoping.

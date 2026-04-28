@@ -98,13 +98,16 @@ pub enum SurfaceMetadataError {
 /// Check whether a metadata key is reserved for Meerkat-owned facts.
 #[must_use]
 pub fn is_reserved_meerkat_metadata_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
     key == "meerkat" || key.starts_with(MEERKAT_METADATA_PREFIX)
 }
 
 /// Check whether a label key is reserved for Meerkat-owned facts.
 #[must_use]
 pub fn is_reserved_meerkat_label_key(key: &str) -> bool {
-    RESERVED_MOB_LABEL_KEYS.contains(&key) || is_reserved_meerkat_metadata_key(key)
+    let normalized = key.to_ascii_lowercase();
+    RESERVED_MOB_LABEL_KEYS.contains(&normalized.as_str())
+        || is_reserved_meerkat_metadata_key(&normalized)
 }
 
 /// Validate caller-supplied labels.
@@ -179,7 +182,14 @@ mod tests {
 
     #[test]
     fn public_validation_rejects_meerkat_owned_label_keys() {
-        for key in ["mob_id", "role", "meerkat_id", "meerkat.runtime_id"] {
+        for key in [
+            "mob_id",
+            "role",
+            "meerkat_id",
+            "meerkat.runtime_id",
+            "Meerkat.Runtime_Id",
+            "ROLE",
+        ] {
             let metadata = SurfaceMetadata::from_optional_parts(
                 Some(BTreeMap::from([(key.to_string(), "spoof".to_string())])),
                 None,
@@ -196,7 +206,7 @@ mod tests {
         let metadata = SurfaceMetadata::from_optional_parts(
             None,
             Some(json!({
-                "meerkat.runtime_id": "spoof",
+                "Meerkat.Runtime_Id": "spoof",
                 "client_ref": "ok"
             })),
         );

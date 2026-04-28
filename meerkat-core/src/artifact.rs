@@ -100,14 +100,15 @@ pub enum ArtifactType {
 
 impl ArtifactType {
     fn accepts_media_type(&self, media_type: &str) -> bool {
+        let essence = media_type_essence(media_type).to_ascii_lowercase();
         match self {
-            Self::Text | Self::Log | Self::CommandOutput => media_type.starts_with("text/"),
+            Self::Text | Self::Log | Self::CommandOutput => essence.starts_with("text/"),
             Self::Diff | Self::Patch => {
-                media_type.starts_with("text/") || media_type == "application/patch"
+                essence.starts_with("text/") || essence == "application/patch"
             }
             Self::GeneratedFile | Self::TestReport | Self::Binary | Self::Other(_) => true,
-            Self::Screenshot | Self::Image => media_type.starts_with("image/"),
-            Self::Json => media_type == "application/json" || media_type.ends_with("+json"),
+            Self::Screenshot | Self::Image => essence.starts_with("image/"),
+            Self::Json => essence == "application/json" || essence.ends_with("+json"),
         }
     }
 }
@@ -320,13 +321,18 @@ fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ArtifactEr
 }
 
 fn validate_media_type(media_type: &str) -> Result<(), ArtifactError> {
-    let parts: Vec<&str> = media_type.split('/').collect();
+    let essence = media_type_essence(media_type);
+    let parts: Vec<&str> = essence.split('/').collect();
     if parts.len() != 2 || parts.iter().any(|part| part.trim().is_empty()) {
         return Err(ArtifactError::InvalidMediaType {
             media_type: media_type.to_string(),
         });
     }
     Ok(())
+}
+
+fn media_type_essence(media_type: &str) -> &str {
+    media_type.split(';').next().unwrap_or(media_type).trim()
 }
 
 #[cfg(test)]
@@ -394,6 +400,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn artifact_type_matching_accepts_standard_media_type_parameters_and_case() {
+        let record = ArtifactRecord::new(
+            ArtifactId::new("artifact-json").unwrap(),
+            ArtifactType::Json,
+            "JSON".to_string(),
+            "Application/LD+JSON; charset=utf-8".to_string(),
+            12,
+            None,
+            ArtifactContentHandle::Opaque {
+                handle: "json-object-1".to_string(),
+                media_type: "Application/LD+JSON; charset=utf-8".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(record.artifact_type, ArtifactType::Json);
     }
 
     #[test]

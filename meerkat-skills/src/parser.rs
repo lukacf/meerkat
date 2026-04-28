@@ -132,20 +132,36 @@ fn validate_frontmatter(
 
 /// Split content into frontmatter and body, separated by `---` delimiters.
 fn split_frontmatter(content: &str) -> Result<(String, &str), SkillError> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
+    let Some(first_line_end) = trimmed.find('\n') else {
+        return Err(SkillError::Parse(
+            "missing closing frontmatter delimiter".into(),
+        ));
+    };
+    let first_line = trimmed[..first_line_end].trim_end_matches('\r').trim();
+    if first_line != "---" {
         return Err(SkillError::Parse("missing frontmatter delimiter".into()));
     }
 
-    let after_first = &trimmed[3..].trim_start_matches('\n');
-    let end_pos = after_first
-        .find("\n---")
-        .ok_or_else(|| SkillError::Parse("missing closing frontmatter delimiter".into()))?;
+    let after_first = &trimmed[first_line_end + 1..];
+    let mut offset = 0;
+    for line in after_first.split_inclusive('\n') {
+        let delimiter_candidate = line.trim_end_matches(['\r', '\n']).trim_end();
+        if delimiter_candidate == "---" {
+            let frontmatter = &after_first[..offset];
+            let body = &after_first[offset + line.len()..];
+            return Ok((
+                frontmatter.trim_end_matches(['\r', '\n']).to_string(),
+                body.trim_start_matches(['\r', '\n']),
+            ));
+        }
+        offset += line.len();
+    }
 
-    let frontmatter = &after_first[..end_pos];
-    let body = &after_first[end_pos + 4..];
-
-    Ok((frontmatter.to_string(), body.trim_start_matches('\n')))
+    Err(SkillError::Parse(
+        "missing closing frontmatter delimiter".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -207,6 +223,35 @@ When running background jobs...";
         let content = "---\nname: test\ndescription: \"Use: this tool carefully\"\n---\n\nBody";
         let doc = parse_skill_md(test_key("test"), SkillScope::Builtin, content, None).unwrap();
         assert_eq!(doc.descriptor.description, "Use: this tool carefully");
+    }
+
+    #[test]
+    fn test_parse_accepts_bom_and_consumes_full_closing_delimiter_line() {
+        let content = "\u{feff}---\r\nname: test-skill\r\ndescription: d\r\n---   \r\nBody";
+        let doc =
+            parse_skill_md(test_key("test-skill"), SkillScope::Builtin, content, None).unwrap();
+        assert_eq!(doc.body, "Body");
+    }
+
+    #[test]
+    fn test_parse_keeps_indented_delimiter_in_yaml_block_scalar() {
+        let content = r"---
+name: test-skill
+description: |
+  first line
+  ---
+  still description
+---
+Body";
+
+        let doc =
+            parse_skill_md(test_key("test-skill"), SkillScope::Builtin, content, None).unwrap();
+
+        assert_eq!(
+            doc.descriptor.description,
+            "first line\n---\nstill description"
+        );
+        assert_eq!(doc.body, "Body");
     }
 
     #[test]

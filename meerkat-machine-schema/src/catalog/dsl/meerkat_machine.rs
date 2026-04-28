@@ -1250,9 +1250,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             reload_staged_surfaces: Set<String>,
             surface_staged_intent_sequence: Map<String, u64>,
             next_staged_intent_sequence: u64,
-            surface_pending_task_sequence: Map<String, u64>,
-            next_pending_task_sequence: u64,
-            surface_pending_lineage_sequence: Map<String, u64>,
+            surface_pending_completion_sequence: Map<String, u64>,
             surface_inflight_calls: Map<String, u64>,
             surface_last_delta_operation: Map<String, Enum<ExternalToolSurfaceDeltaOperation>>,
             surface_last_delta_phase: Map<String, Enum<ExternalToolSurfaceDeltaPhase>>,
@@ -1562,9 +1560,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             reload_staged_surfaces = EmptySet,
             surface_staged_intent_sequence = EmptyMap,
             next_staged_intent_sequence = 0,
-            surface_pending_task_sequence = EmptyMap,
-            next_pending_task_sequence = 0,
-            surface_pending_lineage_sequence = EmptyMap,
+            surface_pending_completion_sequence = EmptyMap,
             surface_inflight_calls = EmptyMap,
             surface_last_delta_operation = EmptyMap,
             surface_last_delta_phase = EmptyMap,
@@ -4625,10 +4621,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.next_pending_task_sequence = self.next_pending_task_sequence + 1;
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::Add);
-                self.surface_pending_task_sequence.insert(surface_id, self.next_pending_task_sequence);
-                self.surface_pending_lineage_sequence.insert(surface_id, staged_intent_sequence);
+                self.surface_pending_completion_sequence.insert(surface_id, staged_intent_sequence);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4640,7 +4634,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ScheduleSurfaceCompletion {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Add,
-                pending_task_sequence: self.next_pending_task_sequence,
+                pending_task_sequence: staged_intent_sequence,
                 staged_intent_sequence: staged_intent_sequence,
                 applied_at_turn: applied_at_turn,
             }
@@ -4668,10 +4662,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.next_pending_task_sequence = self.next_pending_task_sequence + 1;
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::Add);
-                self.surface_pending_task_sequence.insert(surface_id, self.next_pending_task_sequence);
-                self.surface_pending_lineage_sequence.insert(surface_id, staged_intent_sequence);
+                self.surface_pending_completion_sequence.insert(surface_id, staged_intent_sequence);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4683,7 +4675,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ScheduleSurfaceCompletion {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Add,
-                pending_task_sequence: self.next_pending_task_sequence,
+                pending_task_sequence: staged_intent_sequence,
                 staged_intent_sequence: staged_intent_sequence,
                 applied_at_turn: applied_at_turn,
             }
@@ -4707,10 +4699,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.next_pending_task_sequence = self.next_pending_task_sequence + 1;
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::Reload);
-                self.surface_pending_task_sequence.insert(surface_id, self.next_pending_task_sequence);
-                self.surface_pending_lineage_sequence.insert(surface_id, staged_intent_sequence);
+                self.surface_pending_completion_sequence.insert(surface_id, staged_intent_sequence);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4722,7 +4712,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ScheduleSurfaceCompletion {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Reload,
-                pending_task_sequence: self.next_pending_task_sequence,
+                pending_task_sequence: staged_intent_sequence,
                 staged_intent_sequence: staged_intent_sequence,
                 applied_at_turn: applied_at_turn,
             }
@@ -4746,10 +4736,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {
                 self.known_surfaces.insert(surface_id);
-                self.next_pending_task_sequence = self.next_pending_task_sequence + 1;
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::Reload);
-                self.surface_pending_task_sequence.insert(surface_id, self.next_pending_task_sequence);
-                self.surface_pending_lineage_sequence.insert(surface_id, staged_intent_sequence);
+                self.surface_pending_completion_sequence.insert(surface_id, staged_intent_sequence);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4761,7 +4749,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ScheduleSurfaceCompletion {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Reload,
-                pending_task_sequence: self.next_pending_task_sequence,
+                pending_task_sequence: staged_intent_sequence,
                 staged_intent_sequence: staged_intent_sequence,
                 applied_at_turn: applied_at_turn,
             }
@@ -4785,8 +4773,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4820,8 +4807,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4858,8 +4844,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4883,8 +4868,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_staged_op.remove(surface_id);
                 self.surface_staged_intent_sequence.remove(surface_id);
                 self.reload_staged_surfaces.remove(surface_id);
@@ -4896,13 +4880,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "pending_add" { self.surface_pending_op.contains_key(surface_id) && self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::Add }
-            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
-            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "pending_sequence_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == staged_intent_sequence }
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Add);
@@ -4921,13 +4904,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Running }
             guard "pending_add" { self.surface_pending_op.contains_key(surface_id) && self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::Add }
-            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
-            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "pending_sequence_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == staged_intent_sequence }
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Add);
@@ -4946,13 +4928,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "pending_reload" { self.surface_pending_op.contains_key(surface_id) && self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::Reload }
-            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
-            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "pending_sequence_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == staged_intent_sequence }
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Reload);
@@ -4971,13 +4952,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input SurfaceMarkPendingSucceeded { surface_id, pending_task_sequence, staged_intent_sequence }
             guard { self.lifecycle_phase == Phase::Running }
             guard "pending_reload" { self.surface_pending_op.contains_key(surface_id) && self.surface_pending_op.get(surface_id).get("value") == SurfacePendingOp::Reload }
-            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
-            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "pending_sequence_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == staged_intent_sequence }
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Reload);
@@ -4996,12 +4976,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition SurfaceMarkPendingFailedAttached {
             on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, reason }
             guard { self.lifecycle_phase == Phase::Attached }
-            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
-            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "pending_sequence_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == staged_intent_sequence }
             update {
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Failed);
             }
             to Attached
@@ -5014,12 +4993,11 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition SurfaceMarkPendingFailedRunning {
             on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, reason }
             guard { self.lifecycle_phase == Phase::Running }
-            guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
-            guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
+            guard "pending_sequence_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == pending_task_sequence }
+            guard "pending_lineage_matches" { self.surface_pending_completion_sequence.contains_key(surface_id) && self.surface_pending_completion_sequence.get(surface_id).get("value") == staged_intent_sequence }
             update {
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Failed);
             }
             to Running
@@ -5138,8 +5116,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_draining_since_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
@@ -5167,8 +5144,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_draining_since_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
@@ -5193,8 +5169,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_inflight_calls.insert(surface_id, 0);
                 self.surface_draining_since_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);
@@ -5219,8 +5194,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
-                self.surface_pending_task_sequence.insert(surface_id, 0);
-                self.surface_pending_lineage_sequence.insert(surface_id, 0);
+                self.surface_pending_completion_sequence.remove(surface_id);
                 self.surface_inflight_calls.insert(surface_id, 0);
                 self.surface_draining_since_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);

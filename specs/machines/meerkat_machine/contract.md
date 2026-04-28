@@ -102,9 +102,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `reload_staged_surfaces`: `Set<String>`
 - `surface_staged_intent_sequence`: `Map<String, u64>`
 - `next_staged_intent_sequence`: `u64`
-- `surface_pending_task_sequence`: `Map<String, u64>`
-- `next_pending_task_sequence`: `u64`
-- `surface_pending_lineage_sequence`: `Map<String, u64>`
+- `surface_pending_completion_sequence`: `Map<String, u64>`
 - `surface_inflight_calls`: `Map<String, u64>`
 - `surface_last_delta_operation`: `Map<String, ExternalToolSurfaceDeltaOperation>`
 - `surface_last_delta_phase`: `Map<String, ExternalToolSurfaceDeltaPhase>`

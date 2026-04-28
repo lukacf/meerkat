@@ -74,8 +74,8 @@ impl RuntimeExternalToolSurfaceHandle {
                 .map(map_staged_op)
                 .unwrap_or(ExternalToolSurfaceStagedOp::None),
             staged_intent_sequence: state.surface_staged_intent_sequence.get(&key).copied(),
-            pending_task_sequence: state.surface_pending_task_sequence.get(&key).copied(),
-            pending_lineage_sequence: state.surface_pending_lineage_sequence.get(&key).copied(),
+            pending_task_sequence: state.surface_pending_completion_sequence.get(&key).copied(),
+            pending_lineage_sequence: state.surface_pending_completion_sequence.get(&key).copied(),
             inflight_calls: state.surface_inflight_calls.get(&key).copied().unwrap_or(0),
             last_delta_operation: state
                 .surface_last_delta_operation
@@ -636,6 +636,64 @@ mod tests {
             removing.removal_timeout_at_ms, None,
             "runtime surfaces should derive timeout_at from router configuration, not a fixed DSL mirror"
         );
+    }
+
+    #[test]
+    fn surface_completion_token_is_the_staged_intent_sequence() {
+        let handle = handle_in_phase(mm_dsl::MeerkatPhase::Attached);
+
+        handle
+            .stage_add("alpha".to_owned(), 10)
+            .expect("stage alpha");
+        handle.stage_add("beta".to_owned(), 11).expect("stage beta");
+        handle
+            .stage_add("gamma".to_owned(), 12)
+            .expect("stage gamma");
+        let gamma_sequence = handle
+            .surface_snapshot("gamma")
+            .and_then(|entry| entry.staged_intent_sequence)
+            .expect("gamma staged sequence");
+        assert_eq!(gamma_sequence, 3);
+
+        let transition = handle
+            .apply_surface_input(ExternalToolSurfaceInput::ApplyBoundary {
+                surface_id: "gamma".to_owned(),
+                now_ms: 20,
+                staged_intent_sequence: gamma_sequence,
+                applied_at_turn: 99,
+            })
+            .expect("apply gamma boundary");
+
+        let pending_token = transition
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                ExternalToolSurfaceEffect::ScheduleSurfaceCompletion {
+                    surface_id,
+                    pending_task_sequence,
+                    staged_intent_sequence,
+                    ..
+                } if surface_id == "gamma" => {
+                    assert_eq!(*staged_intent_sequence, gamma_sequence);
+                    Some(*pending_task_sequence)
+                }
+                _ => None,
+            })
+            .expect("surface completion obligation");
+        assert_eq!(
+            pending_token, gamma_sequence,
+            "the completion token should be the staged intent sequence, not a separate pending-task counter"
+        );
+
+        assert!(
+            handle
+                .mark_pending_succeeded("gamma".to_owned(), 1, gamma_sequence)
+                .is_err(),
+            "legacy pending-task counter must not satisfy the completion guard"
+        );
+        handle
+            .mark_pending_succeeded("gamma".to_owned(), gamma_sequence, gamma_sequence)
+            .expect("completion token should satisfy pending guard");
     }
 
     #[test]

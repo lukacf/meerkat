@@ -256,7 +256,6 @@ if [[ -x scripts/run-build-backend-lane ]] &&
   grep -Fq 'e2e-live-rbe' scripts/buildbuddy-dev &&
   grep -Fq 'e2e-smoke-rbe' scripts/buildbuddy-dev &&
   grep -Fq 'BUILDBUDDY_DRY_RUN' scripts/buildbuddy-dev &&
-  grep -Fq 'BUILDBUDDY_DRY_RUN=1' README.md &&
   grep -Fq 'BUILDBUDDY_DRY_RUN=1' docs/architecture/buildbuddy-bazel-poc.md; then
   pass "Developer build, check, lint, and test lanes use BuildBuddy when MEERKAT_BUILDBUDDY is enabled"
 else
@@ -313,7 +312,6 @@ if grep -Fq 'vars.MEERKAT_BUILDBUDDY == '"'"'true'"'"'' .github/workflows/ci.yml
   grep -Fq 'vars.MEERKAT_BUILDBUDDY == '"'"'true'"'"'' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY' .github/workflows/ci.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'MEERKAT_BUILDBUDDY=1' README.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' CLAUDE.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' AGENTS.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' docs/architecture/buildbuddy-bazel-poc.md &&

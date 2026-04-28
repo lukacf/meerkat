@@ -3907,7 +3907,7 @@ impl SessionRuntime {
                             None => break,
                         }
                     }
-                    _ = pending_streams.receiver_dropped.notified() => {
+                    () = pending_streams.receiver_dropped.notified() => {
                         if pending_streams.events.receiver_count() == 0 {
                             break;
                         }

@@ -1095,6 +1095,39 @@ impl AgentFactory {
         ))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_image_binding_for_provider(
+        config: &Config,
+        provider: Provider,
+        selected_realm: Option<&str>,
+    ) -> Result<(RealmConnectionSet, String, ConnectionRef), String> {
+        let Some(selected_realm) = selected_realm else {
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+        };
+        let Some(section) = config.realm.get(selected_realm) else {
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+        };
+        if section.binding.is_empty() && section.backend.is_empty() && section.auth.is_empty() {
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+        }
+        let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
+        let target = meerkat_core::resolve_realm_binding_target_for_provider(
+            config,
+            provider,
+            Some(&selected_realm),
+            None,
+            None,
+            None,
+            false,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok((
+            target.realm,
+            target.connection_ref.binding.to_string(),
+            target.connection_ref,
+        ))
+    }
+
     #[cfg(all(
         feature = "openai",
         feature = "openai-realtime",
@@ -2243,15 +2276,11 @@ impl AgentFactory {
                     continue;
                 }
                 let Ok((realm, _binding_id, connection_ref)) =
-                    Self::resolve_realm_binding_for_provider(
+                    Self::resolve_image_binding_for_provider(
                         config,
                         image_provider,
-                        None,
                         build_config.realm_id.as_deref(),
                     )
-                    .or_else(|_| {
-                        Self::resolve_realm_binding_for_provider(config, image_provider, None, None)
-                    })
                 else {
                     continue;
                 };
@@ -3440,6 +3469,128 @@ mod tests {
         assert_eq!(binding_id, "default_anthropic");
         assert_eq!(connection_ref.realm.as_str(), "dev");
         assert_eq!(connection_ref.binding.as_str(), "default_anthropic");
+    }
+
+    #[test]
+    fn selected_realm_image_binding_does_not_cross_to_default_realm() {
+        let mut config = Config::default();
+        let mut session_section = RealmConfigSection {
+            default_binding: Some("default_anthropic".to_string()),
+            ..Default::default()
+        };
+        session_section.backend.insert(
+            "anthropic_backend".to_string(),
+            BackendProfileConfig {
+                provider: "anthropic".to_string(),
+                backend_kind: "anthropic_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        session_section.auth.insert(
+            "anthropic_env".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "anthropic".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::Env {
+                    env: "ANTHROPIC_API_KEY".to_string(),
+                    fallback: Vec::new(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        session_section.binding.insert(
+            "default_anthropic".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "anthropic_backend".to_string(),
+                auth_profile: "anthropic_env".to_string(),
+                default_model: None,
+                policy: Default::default(),
+            },
+        );
+        config
+            .realm
+            .insert("session_a".to_string(), session_section);
+
+        let mut default_section = RealmConfigSection {
+            default_binding: Some("default_openai".to_string()),
+            ..Default::default()
+        };
+        default_section.backend.insert(
+            "openai_backend".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_responses".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        default_section.auth.insert(
+            "openai_env".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::Env {
+                    env: "OPENAI_API_KEY".to_string(),
+                    fallback: Vec::new(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        default_section.binding.insert(
+            "default_openai".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_backend".to_string(),
+                auth_profile: "openai_env".to_string(),
+                default_model: None,
+                policy: Default::default(),
+            },
+        );
+        config.realm.insert("default".to_string(), default_section);
+
+        let err = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some("session_a"),
+        )
+        .expect_err("image lookup must stay inside the selected realm");
+
+        assert!(
+            err.contains("binding 'session_a:default_anthropic'")
+                && err.contains("expected provider OpenAI"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unscoped_image_binding_can_still_synthesize_env_default() {
+        let config = Config::default();
+        let (realm, binding_id, connection_ref) =
+            AgentFactory::resolve_image_binding_for_provider(&config, Provider::Gemini, None)
+                .expect("unscoped image lookup may use env_default");
+
+        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(binding_id, "default");
+        assert_eq!(connection_ref.realm.as_str(), "env_default");
+        assert_eq!(connection_ref.binding.as_str(), "default");
+    }
+
+    #[test]
+    fn runtime_realm_without_provider_config_can_use_env_default_image_binding() {
+        let config = Config::default();
+        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some("default"),
+        )
+        .expect("runtime-only realm should not disable env_default image credentials");
+
+        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(binding_id, "default");
+        assert_eq!(connection_ref.realm.as_str(), "env_default");
+        assert_eq!(connection_ref.binding.as_str(), "default");
     }
 
     #[cfg(feature = "skills")]

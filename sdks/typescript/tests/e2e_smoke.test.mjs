@@ -659,8 +659,8 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const scenario = "Scenario 75";
       const client = await withStepTimeout(
         scenario,
-        "connect isolated client",
-        connectClient({ isolated: true }),
+        "connect client",
+        connectClient(),
       );
 
       const session = await withStepTimeout(
@@ -707,8 +707,8 @@ After the tool returns, reply with TS-OPENAI-75-DONE and no extra prose.`,
       const scenario = "Scenario 76";
       const client = await withStepTimeout(
         scenario,
-        "connect isolated client",
-        connectClient({ isolated: true }),
+        "connect client",
+        connectClient(),
       );
 
       const initial = await withStepTimeout(
@@ -801,6 +801,390 @@ Reply with CROSS-IMAGE-76-DESCRIBE and a short phrase containing the text you ca
         descriptionText.includes("hello") || descriptionText.includes("meerkat"),
         `expected OpenAI to read some text from the final image, got: ${description.text}`,
       );
+      },
+    );
+  }
+
+  if (includeScenario(77)) {
+    it(
+      "Scenario 77: stacked generate and edit calls in one assistant turn",
+      { skip: !(hasAnthropicKey() && hasGeminiKey()) },
+      async () => {
+      const scenario = "Scenario 77";
+      const client = await withStepTimeout(
+        scenario,
+        "connect client",
+        connectClient(),
+      );
+
+      const session = await withStepTimeout(
+        scenario,
+        "run stacked image tool turn",
+        client.createSession(
+          `Complete this as a single assistant turn. Before your final answer, call generate_image twice in sequence.
+First call: request.provider="gemini", request.model="${geminiImageModel()}", request.intent="generate",
+request.prompt="A neat museum placard portrait of Johann Sebastian Bach beside a pipe organ, with the text BACH-77 visible",
+request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
+and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
+Second call: request.provider="gemini", request.model="${geminiImageModel()}", request.intent="edit",
+use the assistant image returned by the first call as request.source_images, and transform it into a bright yellow
+animated sitcom-style composer portrait with BACH-77 still visible.
+After both tool calls finish, describe the second image in detail and rate it on a 1-10 Simpson-like scale.
+Your final reply must include STACKED-IMAGE-77-DONE.`,
+          {
+            model: anthropicModel(),
+            provider: "anthropic",
+            enableBuiltins: true,
+          },
+        ),
+        420000,
+      );
+      assert.match(session.text.toLowerCase(), /stacked-image-77-done/);
+
+      const history = await withStepTimeout(
+        scenario,
+        "read stacked image history",
+        client.readSessionHistory(session.id),
+      );
+      const images = assistantImageBlocks(history);
+      assert.ok(images.length >= 2, "stacked turn should commit two assistant image blocks");
+      const firstImage = images.at(-2);
+      const secondImage = images.at(-1);
+      assert.notEqual(secondImage.imageId, firstImage.imageId);
+      await withStepTimeout(scenario, "fetch first stacked image", assertFetchableImageBlob(client, firstImage));
+      await withStepTimeout(scenario, "fetch second stacked image", assertFetchableImageBlob(client, secondImage));
+      },
+    );
+  }
+
+  if (includeScenario(78)) {
+    it(
+      "Scenario 78: cross-provider image relay with later visual readback",
+      { skip: !(hasOpenAIKey() && hasGeminiKey()) },
+      async () => {
+      const scenario = "Scenario 78";
+      const client = await withStepTimeout(
+        scenario,
+        "connect client",
+        connectClient(),
+      );
+
+      const generated = await withStepTimeout(
+        scenario,
+        "OpenAI session routes image generation to Gemini",
+        client.createSession(
+          `Use generate_image exactly once with request.provider="gemini", request.model="${geminiImageModel()}",
+request.intent="generate", request.prompt="A clean product sketch of a tiny glass terrarium containing a lighthouse, with RELAY-78 printed on the base",
+request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
+and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
+After the image is generated, reply with CROSS-RELAY-78-GENERATED and no extra prose.`,
+          {
+            model: openaiStressModel(),
+            provider: "openai",
+            enableBuiltins: true,
+          },
+        ),
+        300000,
+      );
+      assert.match(generated.text.toLowerCase(), /cross-relay-78-generated/);
+
+      const history = await withStepTimeout(
+        scenario,
+        "read relay image history",
+        client.readSessionHistory(generated.id),
+      );
+      const images = assistantImageBlocks(history);
+      assert.ok(images.length >= 1, "cross-provider relay should commit an image");
+      await withStepTimeout(scenario, "fetch relay image", assertFetchableImageBlob(client, images.at(-1)));
+
+      const readback = await withStepTimeout(
+        scenario,
+        "Gemini model reads prior generated image",
+        generated.turn(
+          "Switch to Gemini. Inspect the previous assistant image and reply with CROSS-RELAY-78-READBACK plus the main object you see.",
+          {
+            model: geminiModel(),
+            provider: "gemini",
+            enableBuiltins: true,
+          },
+        ),
+        240000,
+      );
+      assert.match(readback.text.toLowerCase(), /cross-relay-78-readback/);
+      assert.match(readback.text.toLowerCase(), /terrarium|lighthouse|glass/);
+      },
+    );
+  }
+
+  if (includeScenario(79)) {
+    it(
+      "Scenario 79: mob member image generation with critic handoff",
+      { skip: !(hasAnthropicKey() && hasOpenAIKey()) },
+      async () => {
+      const scenario = "Scenario 79";
+      const client = await withStepTimeout(
+        scenario,
+        "connect client",
+        connectClient(),
+      );
+      const mobId = `ts-image-critic-${Date.now()}`;
+      const mob = await withStepTimeout(scenario, "create image critic mob", client.createMob({
+        definition: {
+          id: mobId,
+          orchestrator: { profile: "maker" },
+          profiles: {
+            maker: {
+              model: anthropicModel(),
+              tools: { builtins: true, comms: true },
+              peer_description: "Image maker that can create and summarize generated images",
+              external_addressable: true,
+            },
+            critic: {
+              model: openaiModel(),
+              tools: { comms: true },
+              peer_description: "Art critic that reviews image descriptions",
+              external_addressable: true,
+            },
+          },
+        },
+      }));
+
+      await withStepTimeout(scenario, "spawn critic", mob.spawn({
+        profile: "critic",
+        agentIdentity: "critic-1",
+        runtimeMode: "turn_driven",
+        initialMessage: "Stand by as an art critic. Reply CRITIC-79-READY.",
+      }));
+      await withStepTimeout(scenario, "spawn maker", mob.spawn({
+        profile: "maker",
+        agentIdentity: "maker-1",
+        runtimeMode: "turn_driven",
+      }));
+      await withStepTimeout(scenario, "wire maker to critic", mob.wire("maker-1", "critic-1"));
+
+      await withStepTimeout(
+        scenario,
+        "send maker image task",
+        mob.member("maker-1").send(
+          `Use generate_image exactly once with request.provider="openai", request.model="${openaiImageModel()}",
+request.intent="generate", request.prompt="A gallery postcard showing a blue teapot orbiting a small moon, with ART-CRITIC-79 on the border",
+request.size="1024x1024", request.quality="low", request.format="webp", request.count=1,
+and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
+After it returns, summarize the image in one sentence and include ART-CRITIC-79-MAKER.`,
+        ),
+        180000,
+      );
+      const makerState = await waitFor(
+        async () => withStepTimeout(scenario, "poll maker image status", mob.memberStatus("maker-1")),
+        (state) => (state.outputPreview || "").toLowerCase().includes("art-critic-79-maker"),
+        { timeoutMs: 300000, intervalMs: 1000 },
+      );
+      assert.match((makerState.outputPreview || "").toLowerCase(), /art-critic-79-maker/);
+
+      await withStepTimeout(
+        scenario,
+        "send critic handoff",
+        mob.member("critic-1").send(
+          `Review this maker summary as an art critic and reply with ART-CRITIC-79-CRITIQUE: ${makerState.outputPreview}`,
+        ),
+        120000,
+      );
+      const criticState = await waitFor(
+        async () => withStepTimeout(scenario, "poll critic critique status", mob.memberStatus("critic-1")),
+        (state) => (state.outputPreview || "").toLowerCase().includes("art-critic-79-critique"),
+        { timeoutMs: 180000, intervalMs: 1000 },
+      );
+      assert.match((criticState.outputPreview || "").toLowerCase(), /art-critic-79-critique/);
+      },
+    );
+  }
+
+  if (includeScenario(80)) {
+    it(
+      "Scenario 80: persisted generated image survives reconnect and resume",
+      { skip: !(hasAnthropicKey() && hasGeminiKey()) },
+      async () => {
+      const scenario = "Scenario 80";
+      const stateRoot = mkdtempSync(path.join(os.tmpdir(), "ts-image-resume-"));
+      const realmId = `ts-image-resume-${Date.now()}`;
+
+      const clientA = await connectClient({
+        realmId,
+        stateRoot,
+        realmBackend: "sqlite",
+      });
+      const session = await withStepTimeout(
+        scenario,
+        "create persisted image session",
+        clientA.createSession(
+          `Use generate_image exactly once with request.provider="gemini", request.model="${geminiImageModel()}",
+request.intent="generate", request.prompt="A durable archive card with RESUME-80 printed in green ink beside a small brass key",
+request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
+and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
+After the image is generated, reply with RESUME-80-GENERATED.`,
+          {
+            model: anthropicModel(),
+            provider: "anthropic",
+            enableBuiltins: true,
+          },
+        ),
+        300000,
+      );
+      const sessionId = session.id;
+      const firstHistory = await withStepTimeout(
+        scenario,
+        "read persisted image history before reconnect",
+        clientA.readSessionHistory(sessionId),
+      );
+      const firstImages = assistantImageBlocks(firstHistory);
+      assert.ok(firstImages.length >= 1, "persisted session should have an image before reconnect");
+      const persistedImage = firstImages.at(-1);
+      await withStepTimeout(scenario, "fetch persisted image before reconnect", assertFetchableImageBlob(clientA, persistedImage));
+      await clientA.close();
+
+      const clientB = await connectClient({
+        realmId,
+        stateRoot,
+        realmBackend: "sqlite",
+      });
+      const secondHistory = await withStepTimeout(
+        scenario,
+        "read persisted image history after reconnect",
+        clientB.readSessionHistory(sessionId),
+      );
+      const secondImages = assistantImageBlocks(secondHistory);
+      assert.ok(secondImages.some((block) => block.imageId === persistedImage.imageId));
+      await withStepTimeout(scenario, "fetch persisted image after reconnect", assertFetchableImageBlob(clientB, persistedImage));
+
+      const resumed = await withStepTimeout(
+        scenario,
+        "resume session and inspect persisted image",
+        clientB._startTurn(
+          sessionId,
+          "Inspect the previous assistant image and reply with RESUME-80-READBACK plus the object printed or shown on it.",
+        ),
+        240000,
+      );
+      assert.match(resumed.text.toLowerCase(), /resume-80-readback/);
+      assert.match(resumed.text.toLowerCase(), /key|archive|card|resume/);
+      },
+    );
+  }
+
+  if (includeScenario(81)) {
+    it(
+      "Scenario 81: parallel image storm across independent sessions",
+      { skip: !(hasAnthropicKey() && hasOpenAIKey()) },
+      async () => {
+      const scenario = "Scenario 81";
+      const client = await withStepTimeout(
+        scenario,
+        "connect client",
+        connectClient(),
+      );
+      const markers = ["STORM-81-A", "STORM-81-B", "STORM-81-C"];
+
+      const sessions = await withStepTimeout(
+        scenario,
+        "run parallel image sessions",
+        Promise.all(markers.map((marker) =>
+          client.createSession(
+            `Use generate_image exactly once with request.provider="openai", request.model="${openaiImageModel()}",
+request.intent="generate", request.prompt="A minimal square badge with ${marker} written in crisp black letters",
+request.size="1024x1024", request.quality="low", request.format="webp", request.count=1,
+and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
+After the image is generated, reply with ${marker}-DONE and no extra prose.`,
+            {
+              model: anthropicModel(),
+              provider: "anthropic",
+              enableBuiltins: true,
+            },
+          )
+        )),
+        420000,
+      );
+
+      for (let index = 0; index < sessions.length; index += 1) {
+        const marker = markers[index].toLowerCase();
+        assert.match(sessions[index].text.toLowerCase(), new RegExp(`${marker}-done`));
+        const history = await withStepTimeout(
+          scenario,
+          `read storm history ${markers[index]}`,
+          client.readSessionHistory(sessions[index].id),
+        );
+        const images = assistantImageBlocks(history);
+        assert.ok(images.length >= 1, `${markers[index]} should commit an image`);
+        await withStepTimeout(
+          scenario,
+          `fetch storm image ${markers[index]}`,
+          assertFetchableImageBlob(client, images.at(-1)),
+        );
+      }
+      },
+    );
+  }
+
+  if (includeScenario(82)) {
+    it(
+      "Scenario 82: SDK blob image roundtrip as fresh user input",
+      { skip: !(hasAnthropicKey() && hasOpenAIKey()) },
+      async () => {
+      const scenario = "Scenario 82";
+      const client = await withStepTimeout(
+        scenario,
+        "connect client",
+        connectClient(),
+      );
+
+      const generated = await withStepTimeout(
+        scenario,
+        "generate SDK roundtrip image",
+        client.createSession(
+          `Use generate_image exactly once with request.provider="openai", request.model="${openaiImageModel()}",
+request.intent="generate", request.prompt="A simple postcard with SDK-ROUNDTRIP-82 printed above a red compass",
+request.size="1024x1024", request.quality="low", request.format="webp", request.count=1,
+and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
+After the image is generated, reply with SDK-ROUNDTRIP-82-GENERATED.`,
+          {
+            model: anthropicModel(),
+            provider: "anthropic",
+            enableBuiltins: true,
+          },
+        ),
+        300000,
+      );
+      const history = await withStepTimeout(
+        scenario,
+        "read SDK roundtrip image history",
+        client.readSessionHistory(generated.id),
+      );
+      const images = assistantImageBlocks(history);
+      assert.ok(images.length >= 1, "SDK roundtrip source image should exist");
+      const image = images.at(-1);
+      await withStepTimeout(scenario, "fetch SDK roundtrip blob", assertFetchableImageBlob(client, image));
+
+      const described = await withStepTimeout(
+        scenario,
+        "send blob-backed image as new SDK input",
+        client.createSession(
+          [
+            { type: "text", text: "Inspect this blob-backed image and reply with SDK-ROUNDTRIP-82-READ plus the main object." },
+            {
+              type: "image",
+              source: "blob",
+              media_type: image.mediaType,
+              blob_id: image.blobId,
+            },
+          ],
+          {
+            model: openaiStressModel(),
+            provider: "openai",
+          },
+        ),
+        240000,
+      );
+      assert.match(described.text.toLowerCase(), /sdk-roundtrip-82-read/);
+      assert.match(described.text.toLowerCase(), /compass|postcard|sdk/);
       },
     );
   }

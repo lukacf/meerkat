@@ -147,44 +147,23 @@ e2e wrappers. `scripts/repo-cargo` uses `RUST_LANE_ID` first, then
 lane from the current worktree path.
 
 For local multi-agent edits, use `make agent-gate` or `scripts/agent-gate`.
-Cargo is the default backend, so the command works without BuildBuddy access.
 It derives build-relevant changed files and runs a package-scoped Cargo clippy
 + nextest gate, escalating only global Rust lane changes to a workspace Cargo
-gate. Set `MEERKAT_BUILDBUDDY=1` or pass `--buildbuddy` to opt into the
-BuildBuddy changed-path gate. That same `MEERKAT_BUILDBUDDY=1` switch makes
-the standard pre-push Rust hooks choose BuildBuddy automatically.
+gate.
 
-For normal local development, keep using the Make targets. They run Cargo by
-default and switch to BuildBuddy only when explicitly opted in:
+For normal local development, keep using the Make targets:
 
 ```bash
 make build
 make check
 make lint
 make test
-
-MEERKAT_BUILDBUDDY=1 make build
-MEERKAT_BUILDBUDDY=1 make check
-MEERKAT_BUILDBUDDY=1 make lint
-MEERKAT_BUILDBUDDY=1 make test
 ```
 
-The explicit BuildBuddy forms are also available for one-off use:
-`make buildbuddy-build`, `make buildbuddy-check`, `make buildbuddy-clippy`,
-`make buildbuddy-test`, `make buildbuddy-test-unit`, `make buildbuddy-test-int`,
-`make buildbuddy-e2e-fast`, `make buildbuddy-e2e-system`,
-`make buildbuddy-e2e-live`, and `make buildbuddy-e2e-smoke`. Pass extra Bazel
-arguments with `BUILDBUDDY_ARGS='...'`; run `make buildbuddy-doctor` if setup
-looks suspicious. Use `BUILDBUDDY_DRY_RUN=1` with explicit BuildBuddy targets
-to inspect the selected command. Live and smoke e2e lanes require provider keys.
 Use `--dry-run` to inspect the selected packages or paths before paying the
-build cost. The Cargo and BuildBuddy gates accept `--staged`, `--committed`,
-and `--working-tree` for hook and CI routing. When using Make, pass gate flags
-with `AGENT_GATE_ARGS='--dry-run --working-tree'`.
-The optional BuildBuddy workflow remains opt-in and mirrors the standard Cargo
-CI lanes. It can be run manually, or from normal CI by setting the repository
-variable `MEERKAT_BUILDBUDDY=true` (or `1`) and adding the `BUILDBUDDY_API_KEY`
-repository secret. Without that variable, GitHub CI stays on the Cargo path.
+build cost. The Cargo gates accept `--staged`, `--committed`, and
+`--working-tree` for hook and CI routing. When using Make, pass gate flags with
+`AGENT_GATE_ARGS='--dry-run --working-tree'`.
 
 Default CI requires `unit`, `int`, `e2e-fast`, and `e2e-system`. Live-provider lanes stay opt-in.
 
@@ -197,9 +176,8 @@ make install-build-deps
 ```
 
 The installer reads `rust-toolchain.toml`, installs the pinned Rust toolchain
-with `rustfmt` and `clippy` through `rustup`, and leaves optional BuildBuddy
-setup to `make buildbuddy-doctor`. If your shell does not already include
-Cargo's bin directory, run:
+with `rustfmt` and `clippy` through `rustup`. If your shell does not already
+include Cargo's bin directory, run:
 
 ```bash
 source "$HOME/.cargo/env"
@@ -432,7 +410,6 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 make build                          # Cargo build by default
 make test                           # Fast tests (unit + integration-fast)
 make lint                           # Clippy
-MEERKAT_BUILDBUDDY=1 make build     # Same local lane through BuildBuddy
 make ci                             # Full Cargo CI pipeline
 ```
 

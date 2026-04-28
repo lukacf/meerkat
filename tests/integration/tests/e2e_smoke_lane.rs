@@ -85,6 +85,15 @@ smoke_scenario!(
     e2e_smoke_s76_typescript_sdk_cross_provider_image_model_switch_stress,
     76
 );
+smoke_scenario!(e2e_smoke_s77_typescript_sdk_stacked_image_turn, 77);
+smoke_scenario!(e2e_smoke_s78_typescript_sdk_cross_provider_image_relay, 78);
+smoke_scenario!(e2e_smoke_s79_typescript_sdk_mob_image_critic, 79);
+smoke_scenario!(
+    e2e_smoke_s80_typescript_sdk_persisted_generated_image_resume,
+    80
+);
+smoke_scenario!(e2e_smoke_s81_typescript_sdk_parallel_image_storm, 81);
+smoke_scenario!(e2e_smoke_s82_typescript_sdk_blob_image_roundtrip, 82);
 smoke_suite!(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
 smoke_suite!(
     e2e_smoke_rpc_deferred_catalog_session,

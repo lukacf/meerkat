@@ -40,7 +40,7 @@ impl AuthStatusPhase {
     pub const fn from_lease_phase(phase: Option<AuthLeasePhase>) -> Self {
         match phase {
             Some(AuthLeasePhase::Valid) => Self::Valid,
-            Some(AuthLeasePhase::Expiring) | Some(AuthLeasePhase::Refreshing) => Self::Expiring,
+            Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => Self::Expiring,
             Some(AuthLeasePhase::ReauthRequired) => Self::ReauthRequired,
             Some(AuthLeasePhase::Released) | None => Self::Unknown,
         }

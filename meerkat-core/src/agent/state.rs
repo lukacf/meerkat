@@ -2476,7 +2476,8 @@ mod tests {
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
     use crate::memory::{
-        MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+        MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryResult,
+        MemorySearchScope, MemoryStore, MemoryStoreError,
     };
     use crate::retry::select_retry_delay;
     use crate::skills::{
@@ -3028,7 +3029,7 @@ mod tests {
     }
 
     struct RecordingMemoryStore {
-        entries: Mutex<Vec<(String, MemoryMetadata)>>,
+        entries: Mutex<Vec<(MemoryIndexScope, String, MemoryMetadata)>>,
         fail_indexing: bool,
     }
 
@@ -3052,26 +3053,39 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(content, _)| content.clone())
+                .map(|(_, content, _)| content.clone())
+                .collect()
+        }
+
+        fn scopes(&self) -> Vec<MemoryIndexScope> {
+            self.entries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(scope, _, _)| scope.clone())
                 .collect()
         }
     }
 
     #[async_trait]
     impl MemoryStore for RecordingMemoryStore {
-        async fn index(
+        async fn index_scoped(
             &self,
-            content: &str,
-            metadata: MemoryMetadata,
-        ) -> Result<(), MemoryStoreError> {
+            request: MemoryIndexRequest,
+        ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
             if self.fail_indexing {
                 return Err(MemoryStoreError::Index("injected failure".to_string()));
             }
+            let (scope, content, metadata) = request.into_parts();
+            let receipt_scope = scope.clone();
             self.entries
                 .lock()
                 .unwrap()
-                .push((content.to_string(), metadata));
-            Ok(())
+                .push((scope, content, metadata));
+            Ok(MemoryIndexReceipt {
+                scope: receipt_scope,
+                indexed_entries: 1,
+            })
         }
 
         async fn search(
@@ -3821,6 +3835,13 @@ mod tests {
         assert!(
             indexed.iter().any(|content| content.contains("first")),
             "discarded first turn should be indexed before compaction commits"
+        );
+        assert!(
+            memory_store
+                .scopes()
+                .iter()
+                .all(|scope| scope.session_id() == agent.session().id()),
+            "compaction must index discarded memory into the owning session scope"
         );
         assert!(
             !agent

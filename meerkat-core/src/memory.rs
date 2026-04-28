@@ -105,9 +105,9 @@ impl MemoryIndexScope {
 /// One scoped semantic-memory indexing request.
 #[derive(Debug, Clone)]
 pub struct MemoryIndexRequest {
-    pub scope: MemoryIndexScope,
-    pub content: String,
-    pub metadata: MemoryMetadata,
+    scope: MemoryIndexScope,
+    content: String,
+    metadata: MemoryMetadata,
 }
 
 impl MemoryIndexRequest {
@@ -128,6 +128,22 @@ impl MemoryIndexRequest {
             content,
             metadata,
         })
+    }
+
+    pub fn scope(&self) -> &MemoryIndexScope {
+        &self.scope
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    pub fn metadata(&self) -> &MemoryMetadata {
+        &self.metadata
+    }
+
+    pub fn into_parts(self) -> (MemoryIndexScope, String, MemoryMetadata) {
+        (self.scope, self.content, self.metadata)
     }
 }
 
@@ -156,26 +172,11 @@ pub enum MemoryIndexDelivery {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MemoryStore: Send + Sync {
-    /// Index text content with associated metadata.
-    async fn index(&self, content: &str, metadata: MemoryMetadata) -> Result<(), MemoryStoreError>;
-
     /// Index a typed, owner-scoped memory request.
     async fn index_scoped(
         &self,
         request: MemoryIndexRequest,
-    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
-        let MemoryIndexRequest {
-            scope,
-            content,
-            metadata,
-        } = request;
-        let receipt_scope = scope.clone();
-        self.index(&content, metadata).await?;
-        Ok(MemoryIndexReceipt {
-            scope: receipt_scope,
-            indexed_entries: 1,
-        })
-    }
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError>;
 
     /// Semantic search: return up to `limit` results ordered by relevance.
     async fn search(

@@ -112,7 +112,10 @@ pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,
     SESSION_COMPACTION_CADENCE_KEY, SessionCompactionCadence,
 };
-pub use memory::{MemoryMetadata, MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError};
+pub use memory::{
+    MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryOwner,
+    MemoryResult, MemorySearchScope, MemoryStore, MemoryStoreError,
+};
 pub use model_registry::{ModelRegistry, ModelRegistryEntry, SelfHostedServerRef};
 pub use peer_correlation::{
     InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState, PeerCorrelationId,

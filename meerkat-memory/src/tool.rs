@@ -152,7 +152,7 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::{MemoryMetadata, MemoryStore};
+    use meerkat_core::memory::{MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryStore};
     use meerkat_core::types::SessionId;
     use serde_json::value::RawValue;
     use std::time::SystemTime;
@@ -179,6 +179,15 @@ mod tests {
             turn: Some(1),
             indexed_at: SystemTime::now(),
         }
+    }
+
+    fn request(content: impl Into<String>, session_id: &SessionId) -> MemoryIndexRequest {
+        MemoryIndexRequest::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            content.into(),
+            meta(session_id),
+        )
+        .unwrap()
     }
 
     fn dispatcher(store: Arc<dyn MemoryStore>, session_id: &SessionId) -> MemorySearchDispatcher {
@@ -236,19 +245,20 @@ mod tests {
     async fn test_search_returns_results() {
         let store: Arc<dyn MemoryStore> = Arc::new(crate::SimpleMemoryStore::new());
         let session_id = SessionId::new();
+        let other_session_id = SessionId::new();
         store
-            .index("The project codename is AURORA-7", meta(&session_id))
+            .index_scoped(request("The project codename is AURORA-7", &session_id))
             .await
             .unwrap();
         store
-            .index("The budget was set at $42,000", meta(&session_id))
+            .index_scoped(request("The budget was set at $42,000", &session_id))
             .await
             .unwrap();
         store
-            .index(
+            .index_scoped(request(
                 "Meeting scheduled for next Tuesday",
-                meta(&SessionId::new()),
-            )
+                &other_session_id,
+            ))
             .await
             .unwrap();
 
@@ -291,10 +301,10 @@ mod tests {
         let session_id = SessionId::new();
         for i in 0..10 {
             store
-                .index(
-                    &format!("Memory entry {i} about testing"),
-                    meta(&session_id),
-                )
+                .index_scoped(request(
+                    format!("Memory entry {i} about testing"),
+                    &session_id,
+                ))
                 .await
                 .unwrap();
         }
@@ -314,10 +324,10 @@ mod tests {
         let session_id = SessionId::new();
         for i in 0..10 {
             store
-                .index(
-                    &format!("Entry {i} about Rust programming"),
-                    meta(&session_id),
-                )
+                .index_scoped(request(
+                    format!("Entry {i} about Rust programming"),
+                    &session_id,
+                ))
                 .await
                 .unwrap();
         }
@@ -336,7 +346,7 @@ mod tests {
         let store: Arc<dyn MemoryStore> = Arc::new(crate::SimpleMemoryStore::new());
         let session_id = SessionId::new();
         store
-            .index("The weather is sunny today", meta(&session_id))
+            .index_scoped(request("The weather is sunny today", &session_id))
             .await
             .unwrap();
 
@@ -387,7 +397,10 @@ mod tests {
         let session_id = SessionId::new();
         for i in 0..30 {
             store
-                .index(&format!("Data point {i} about science"), meta(&session_id))
+                .index_scoped(request(
+                    format!("Data point {i} about science"),
+                    &session_id,
+                ))
                 .await
                 .unwrap();
         }

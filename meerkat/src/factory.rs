@@ -1104,12 +1104,6 @@ impl AgentFactory {
         let Some(selected_realm) = selected_realm else {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
-        let Some(section) = config.realm.get(selected_realm) else {
-            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
-        };
-        if section.binding.is_empty() && section.backend.is_empty() && section.auth.is_empty() {
-            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
-        }
         let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
         let target = meerkat_core::resolve_realm_binding_target_for_provider(
             config,
@@ -1120,7 +1114,13 @@ impl AgentFactory {
             None,
             false,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            format!(
+                "image credential binding for provider '{}' is unavailable in selected realm '{}': {e}",
+                provider.as_str(),
+                selected_realm.as_str(),
+            )
+        })?;
         Ok((
             target.realm,
             target.connection_ref.binding.to_string(),
@@ -3723,19 +3723,43 @@ mod tests {
     }
 
     #[test]
-    fn runtime_realm_without_provider_config_can_use_env_default_image_binding() {
+    fn selected_realm_without_provider_config_rejects_env_default_image_binding() {
         let config = Config::default();
-        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+        let err = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some("default"),
         )
-        .expect("runtime-only realm should not disable env_default image credentials");
+        .expect_err("selected image lookup must not synthesize env_default");
 
-        assert_eq!(realm.realm_id, "env_default");
-        assert_eq!(binding_id, "default");
-        assert_eq!(connection_ref.realm.as_str(), "env_default");
-        assert_eq!(connection_ref.binding.as_str(), "default");
+        assert!(
+            err.contains("provider 'openai'")
+                && err.contains("selected realm 'default'")
+                && err.contains("not found in config.realm"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn selected_empty_realm_image_binding_rejects_env_default_image_binding() {
+        let mut config = Config::default();
+        config
+            .realm
+            .insert("default".to_string(), RealmConfigSection::default());
+
+        let err = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::Gemini,
+            Some("default"),
+        )
+        .expect_err("empty selected image realm must not synthesize env_default");
+
+        assert!(
+            err.contains("provider 'gemini'")
+                && err.contains("selected realm 'default'")
+                && err.contains("has no default binding"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(feature = "skills")]

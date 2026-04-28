@@ -2189,9 +2189,24 @@ impl AgentFactory {
                     provider = connection.provider;
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        auto_image_generation_executor = provider_registry
-                            .build_image_generation_executor(connection.clone())
-                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                        let selected_realm = build_config.realm_id.as_deref();
+                        let connection_is_in_selected_realm = selected_realm
+                            .map(|realm| resolved_connection_ref.realm.as_str() == realm)
+                            .unwrap_or(true);
+                        if connection_is_in_selected_realm {
+                            auto_image_generation_executor = provider_registry
+                                .build_image_generation_executor(connection.clone())
+                                .map_err(|e| {
+                                    BuildAgentError::ConnectionResolution(e.to_string())
+                                })?;
+                        } else {
+                            tracing::debug!(
+                                provider = provider.as_str(),
+                                ?selected_realm,
+                                resolved_realm = resolved_connection_ref.realm.as_str(),
+                                "skipping image executor reuse for LLM connection outside selected realm"
+                            );
+                        }
                     }
 
                     // Phase 1.5-rev loop closure — refresh-loop middle:
@@ -3759,6 +3774,127 @@ mod tests {
                 && err.contains("selected realm 'default'")
                 && err.contains("has no default binding"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn selected_realm_skips_env_default_same_provider_image_executor() {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+        use meerkat_llm_core::{
+            ImageGenerationExecutor, LlmError, ProviderImageGenerationOutput,
+            ProviderImageGenerationRequest,
+        };
+
+        struct RecordingOpenAiRuntime {
+            image_executor_builds: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        struct UnusedImageExecutor;
+
+        #[async_trait::async_trait]
+        impl ImageGenerationExecutor for UnusedImageExecutor {
+            async fn execute_image_generation(
+                &self,
+                _request: ProviderImageGenerationRequest,
+            ) -> Result<ProviderImageGenerationOutput, LlmError> {
+                Err(LlmError::InvalidRequest {
+                    message: "unused test executor".to_string(),
+                })
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for RecordingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                Ok(ValidatedBinding {
+                    connection_ref: connection_ref.clone(),
+                    provider: Provider::OpenAI,
+                    backend: NormalizedBackendKind::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                    ),
+                    auth: NormalizedAuthMethod::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                    ),
+                    backend_profile: Arc::new(backend.clone()),
+                    auth_profile: Arc::new(auth.clone()),
+                    policy: policy.clone(),
+                })
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                assert_eq!(binding.connection_ref.realm.as_str(), "env_default");
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend,
+                    backend_profile: Arc::clone(&binding.backend_profile),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        "test-openai-key".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+
+            fn build_image_generation_executor(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Option<Arc<dyn ImageGenerationExecutor>>, ProviderClientError> {
+                self.image_executor_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Some(Arc::new(UnusedImageExecutor)))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let image_executor_builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(RecordingOpenAiRuntime {
+                image_executor_builds: Arc::clone(&image_executor_builds),
+            }));
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.provider = Some(Provider::OpenAI);
+        build.realm_id = Some("default".to_string());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        factory
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            image_executor_builds.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "selected-realm image setup must not reuse the env_default LLM connection"
         );
     }
 

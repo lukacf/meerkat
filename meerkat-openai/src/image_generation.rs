@@ -196,6 +196,40 @@ pub enum OpenAiImagesApiEndpoint {
     Edits,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiImagesApiRequestShape {
+    GptImage,
+    DallE,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiImageModelRoute {
+    HostedResponsesTool,
+    ImagesApi {
+        request_shape: OpenAiImagesApiRequestShape,
+    },
+}
+
+fn openai_image_model_route(model: &str) -> Option<OpenAiImageModelRoute> {
+    match model {
+        OPENAI_RESPONSES_IMAGE_TOOL_MODEL => Some(OpenAiImageModelRoute::HostedResponsesTool),
+        "gpt-image-1" => Some(OpenAiImageModelRoute::ImagesApi {
+            request_shape: OpenAiImagesApiRequestShape::GptImage,
+        }),
+        "dall-e-2" | "dall-e-3" => Some(OpenAiImageModelRoute::ImagesApi {
+            request_shape: OpenAiImagesApiRequestShape::DallE,
+        }),
+        _ => None,
+    }
+}
+
+pub fn openai_images_api_request_shape(model: &str) -> Option<OpenAiImagesApiRequestShape> {
+    match openai_image_model_route(model) {
+        Some(OpenAiImageModelRoute::ImagesApi { request_shape }) => Some(request_shape),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 pub struct OpenAiImageGenerationProfile;
 
@@ -214,14 +248,13 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
 
     fn owns_model(&self, model: &str) -> bool {
         matches!(Provider::infer_from_model(model), Some(Provider::OpenAI))
-            || model.starts_with("gpt-image")
-            || model.starts_with("dall-e")
+            || openai_image_model_route(model).is_some()
     }
 
     fn image_generation_documentation(&self) -> Option<&'static str> {
         Some(
             r#"OpenAI:
-- Models: provider:"openai" uses the OpenAI image default; model:"gpt-image-2" uses the hosted Responses image tool; other gpt-image*/dall-e* models use the Images API when owned by this provider.
+- Models: provider:"openai" uses the OpenAI image default; catalog OpenAI models use the hosted Responses image tool; model:"gpt-image-2" uses the hosted Responses image tool; model:"gpt-image-1", model:"dall-e-2", and model:"dall-e-3" use the Images API.
 - provider_params: {"background":"auto"|"transparent"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}.
 - action applies only to the hosted Responses image tool. Images API requests reject action.
 - background:"transparent" is model-dependent; unsupported model/background combinations are rejected by OpenAI."#,
@@ -236,14 +269,15 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
         capabilities: ImageGenerationTargetCapabilities,
         max_count: NonZeroU32,
     ) -> Result<ImageGenerationProviderResolution, ImageOperationDenialReason> {
+        if !self.owns_model(requested_model.as_str()) {
+            return Err(ImageOperationDenialReason::UnsupportedTarget);
+        }
+
         let output = openai_image_output_options(request);
         let provider_params = openai_image_provider_params(request)?;
-        let is_gpt_image_2 = requested_model.as_str() == OPENAI_RESPONSES_IMAGE_TOOL_MODEL;
-        let is_images_api = !is_gpt_image_2
-            && (requested_model.as_str().starts_with("gpt-image")
-                || requested_model.as_str().starts_with("dall-e"));
+        let image_model_route = openai_image_model_route(requested_model.as_str());
 
-        if is_images_api {
+        if let Some(OpenAiImageModelRoute::ImagesApi { request_shape }) = image_model_route {
             if matches!(request.intent, ImageGenerationIntent::Edit { .. })
                 || matches!(
                     &request.intent,
@@ -258,7 +292,9 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
             if provider_params.action.is_some() {
                 return Err(ImageOperationDenialReason::ProjectionUnsupported);
             }
-            if requested_model.as_str().starts_with("dall-e") && !provider_params.is_empty() {
+            if matches!(request_shape, OpenAiImagesApiRequestShape::DallE)
+                && !provider_params.is_empty()
+            {
                 return Err(ImageOperationDenialReason::ProjectionUnsupported);
             }
             let provider_plan = serde_json::to_value(OpenAiImagesApiPlan {
@@ -280,10 +316,11 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
             });
         }
 
-        let provider_call_model = if is_gpt_image_2 {
-            ModelId::new(OPENAI_RESPONSES_IMAGE_HOST_MODEL)
-        } else {
-            requested_model.clone()
+        let provider_call_model = match image_model_route {
+            Some(OpenAiImageModelRoute::HostedResponsesTool) => {
+                ModelId::new(OPENAI_RESPONSES_IMAGE_HOST_MODEL)
+            }
+            _ => requested_model.clone(),
         };
         let provider_plan = serde_json::to_value(OpenAiResponsesImagePlan {
             tool_name: "image_generation".to_string(),
@@ -450,6 +487,80 @@ mod tests {
         assert!(matches!(
             result,
             Err(ImageOperationDenialReason::ProjectionUnsupported)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn profile_routes_known_images_api_model_from_explicit_mapping()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = generate_request(json!({}))?;
+
+        let resolution = OpenAiImageGenerationProfile
+            .resolve_execution_plan(
+                operation_id()?,
+                &ModelId::new("gpt-image-1"),
+                &request,
+                capabilities(),
+                NonZeroU32::MIN,
+            )
+            .map_err(|err| std::io::Error::other(format!("resolve plan: {err:?}")))?;
+
+        assert_eq!(resolution.provider_call_model, ModelId::new("gpt-image-1"));
+        assert_eq!(
+            resolution.execution_plan.backend,
+            ImageGenerationBackendKind::ProviderApi
+        );
+        let plan: OpenAiImagesApiPlan =
+            serde_json::from_value(resolution.execution_plan.provider_plan)?;
+        assert_eq!(plan.endpoint, OpenAiImagesApiEndpoint::Generations);
+        assert_eq!(
+            openai_images_api_request_shape("gpt-image-1"),
+            Some(OpenAiImagesApiRequestShape::GptImage)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn profile_routes_catalog_openai_text_model_to_hosted_tool()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = generate_request(json!({}))?;
+
+        let resolution = OpenAiImageGenerationProfile
+            .resolve_execution_plan(
+                operation_id()?,
+                &ModelId::new("gpt-5.4"),
+                &request,
+                capabilities(),
+                NonZeroU32::MIN,
+            )
+            .map_err(|err| std::io::Error::other(format!("resolve plan: {err:?}")))?;
+
+        assert_eq!(resolution.provider_call_model, ModelId::new("gpt-5.4"));
+        assert_eq!(
+            resolution.execution_plan.backend,
+            ImageGenerationBackendKind::HostedTool
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn profile_rejects_uncatalogued_image_like_model_name() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let request = generate_request(json!({}))?;
+
+        assert!(!OpenAiImageGenerationProfile.owns_model("gpt-image-text-only"));
+        let result = OpenAiImageGenerationProfile.resolve_execution_plan(
+            operation_id()?,
+            &ModelId::new("gpt-image-text-only"),
+            &request,
+            capabilities(),
+            NonZeroU32::MIN,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ImageOperationDenialReason::UnsupportedTarget)
         ));
         Ok(())
     }

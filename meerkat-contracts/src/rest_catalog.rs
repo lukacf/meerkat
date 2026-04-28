@@ -317,9 +317,10 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
         ),
         RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/status",
-            vec![RestOperationDescriptor::new(
+            vec![RestOperationDescriptor::with_description(
                 "get",
-                "Get realtime attachment status for a mob member",
+                "Get a mob member execution status snapshot",
+                "Returns the current execution/status snapshot for the named mob member.",
             )],
         ),
         RestPathDescriptor::new(
@@ -478,6 +479,34 @@ mod tests {
         assert_eq!(
             post.description,
             Some("Requires mcp_live capability. Check GET /capabilities.")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn catalog_labels_mob_member_status_as_execution_snapshot() {
+        let catalog = rest_path_catalog();
+        let member_status = catalog
+            .iter()
+            .find(|entry| entry.path == "/mob/{id}/members/{agent_identity}/status")
+            .expect("mob member status path should remain documented");
+        let get = member_status
+            .operations
+            .iter()
+            .find(|operation| operation.method == "get")
+            .expect("mob member status GET should remain documented");
+
+        assert_eq!(get.summary, "Get a mob member execution status snapshot");
+        assert_eq!(
+            get.description,
+            Some("Returns the current execution/status snapshot for the named mob member.")
+        );
+        assert!(
+            !get.summary.contains("realtime attachment")
+                && get
+                    .description
+                    .is_none_or(|description| !description.contains("realtime attachment")),
+            "mob member status route must not be labelled as realtime attachment status"
         );
     }
 }

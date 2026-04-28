@@ -109,7 +109,8 @@
     },
     "/mob/{id}/members/{agent_identity}/status": {
       "get": {
-        "summary": "Get realtime attachment status for a mob member"
+        "description": "Returns the current execution/status snapshot for the named mob member.",
+        "summary": "Get a mob member execution status snapshot"
       }
     },
     "/mob/{id}/spawn-helper": {

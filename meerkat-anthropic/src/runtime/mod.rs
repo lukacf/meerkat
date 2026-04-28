@@ -186,7 +186,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
             AnthropicAuthMethod::BedrockAwsSigv4 => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
                 {
-                    let region = bedrock_region(binding);
+                    let region = bedrock_region(binding)?;
                     let lookup = env.env_lookup.clone();
                     let authorizer: Arc<dyn HttpAuthorizer> =
                         Arc::new(meerkat_auth_core::authorizers::AwsStsAuthorizer::new(
@@ -582,23 +582,45 @@ fn backend_option_string(binding: &ValidatedBinding, key: &str) -> Option<String
 }
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
-fn bedrock_region(binding: &ValidatedBinding) -> String {
-    backend_option_string(binding, "aws_region")
-        .or_else(|| backend_option_string(binding, "region"))
-        .or_else(|| {
-            binding.backend_profile.base_url.as_deref().and_then(|url| {
-                let after_prefix = url.split("bedrock-runtime.").nth(1)?;
-                let region = after_prefix.split('.').next()?;
-                (!region.is_empty()).then(|| region.to_string())
-            })
+fn bedrock_region(binding: &ValidatedBinding) -> Result<String, ProviderAuthError> {
+    explicit_anthropic_aws_region(binding)
+        .or_else(|| backend_option_string(binding, "aws_region").and_then(non_empty_region))
+        .or_else(|| backend_option_string(binding, "region").and_then(non_empty_region))
+        .ok_or_else(|| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "bedrock_aws_sigv4 requires an explicit AWS signing region for binding {}/{}; \
+                 set auth_profile.metadata_defaults.provider_metadata.aws_region or \
+                 backend_profile.options.aws_region/region. Region is not inferred from \
+                 BackendProfile.base_url.",
+                binding.connection_ref.realm.as_str(),
+                binding.connection_ref.binding.as_str()
+            ))
         })
-        .unwrap_or_else(|| "us-east-1".to_string())
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+fn explicit_anthropic_aws_region(binding: &ValidatedBinding) -> Option<String> {
+    match &binding.auth_profile.metadata_defaults.provider_metadata {
+        Some(meerkat_core::ProviderAuthMetadata::Anthropic(metadata)) => metadata
+            .aws_region
+            .as_deref()
+            .and_then(|region| non_empty_region(region.to_string())),
+        _ => None,
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+fn non_empty_region(region: String) -> Option<String> {
+    let region = region.trim();
+    (!region.is_empty()).then(|| region.to_string())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 
     #[test]
     fn allowed_bindings_cover_api_key_and_oauth_variants() {
@@ -615,5 +637,112 @@ mod tests {
     #[test]
     fn provider_id_is_anthropic() {
         assert_eq!(AnthropicProviderRuntime.provider_id(), Provider::Anthropic);
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    fn bedrock_sigv4_binding(
+        options: serde_json::Value,
+        base_url: Option<&str>,
+        metadata_region: Option<&str>,
+    ) -> ValidatedBinding {
+        ValidatedBinding {
+            connection_ref: meerkat_core::ConnectionRef {
+                realm: meerkat_core::RealmId::parse("dev").unwrap(),
+                binding: meerkat_core::BindingId::parse("bedrock").unwrap(),
+                profile: None,
+            },
+            provider: Provider::Anthropic,
+            backend: NormalizedBackendKind::Anthropic(AnthropicBackendKind::Bedrock),
+            auth: NormalizedAuthMethod::Anthropic(AnthropicAuthMethod::BedrockAwsSigv4),
+            backend_profile: Arc::new(BackendProfile {
+                id: "bedrock-backend".into(),
+                provider: Provider::Anthropic,
+                backend_kind: AnthropicBackendKind::Bedrock.as_str().into(),
+                base_url: base_url.map(str::to_string),
+                options,
+            }),
+            auth_profile: Arc::new(AuthProfile {
+                id: "bedrock-auth".into(),
+                provider: Provider::Anthropic,
+                auth_method: AnthropicAuthMethod::BedrockAwsSigv4.as_str().into(),
+                source: meerkat_core::CredentialSourceSpec::PlatformDefault,
+                constraints: Default::default(),
+                metadata_defaults: meerkat_core::AuthMetadataDefaults {
+                    provider_metadata: metadata_region.map(|region| {
+                        meerkat_core::ProviderAuthMetadata::Anthropic(
+                            meerkat_core::AnthropicAuthMetadata {
+                                aws_region: Some(region.into()),
+                                ..Default::default()
+                            },
+                        )
+                    }),
+                    ..Default::default()
+                },
+            }),
+            policy: BindingPolicy::default(),
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    #[test]
+    fn bedrock_region_prefers_typed_auth_metadata_region() {
+        let binding = bedrock_sigv4_binding(
+            serde_json::json!({ "aws_region": "eu-central-1" }),
+            Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            Some("us-west-2"),
+        );
+
+        assert_eq!(bedrock_region(&binding).unwrap(), "us-west-2");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    #[test]
+    fn bedrock_region_retains_explicit_backend_option_compatibility() {
+        let binding = bedrock_sigv4_binding(
+            serde_json::json!({ "region": "eu-central-1" }),
+            Some("https://bedrock-runtime.us-east-1.amazonaws.com"),
+            None,
+        );
+
+        assert_eq!(bedrock_region(&binding).unwrap(), "eu-central-1");
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    #[tokio::test]
+    async fn bedrock_sigv4_resolve_records_explicit_region_metadata() {
+        let binding = bedrock_sigv4_binding(serde_json::Value::Null, None, Some("ap-southeast-2"));
+        let resolved = AnthropicProviderRuntime
+            .resolve_binding(&binding, &ResolverEnvironment::testing())
+            .await
+            .unwrap();
+
+        match &resolved.auth_lease.metadata().provider_metadata {
+            Some(meerkat_core::ProviderAuthMetadata::Anthropic(metadata)) => {
+                assert_eq!(metadata.aws_region.as_deref(), Some("ap-southeast-2"));
+            }
+            other => panic!("unexpected provider metadata: {other:?}"),
+        }
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]
+    #[tokio::test]
+    async fn bedrock_sigv4_missing_region_fails_instead_of_inferring_from_endpoint() {
+        let binding = bedrock_sigv4_binding(
+            serde_json::Value::Null,
+            Some("https://bedrock-runtime.eu-west-1.amazonaws.com"),
+            None,
+        );
+        let err = AnthropicProviderRuntime
+            .resolve_binding(&binding, &ResolverEnvironment::testing())
+            .await
+            .unwrap_err();
+
+        match err {
+            ProviderAuthError::SourceResolutionFailed(message) => {
+                assert!(message.contains("requires an explicit AWS signing region"));
+                assert!(message.contains("not inferred"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

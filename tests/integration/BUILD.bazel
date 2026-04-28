@@ -130,6 +130,51 @@ rust_test(
     ),
 )
 
+rust_binary(
+    name = "e2e_artifacts_bin",
+    aliases = aliases(package_name = "tests/integration"),
+    crate_name = "e2e_artifacts",
+    crate_root = "src/bin/e2e_artifacts.rs",
+    crate_features = [
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "e2e_artifacts",
+        "CARGO_MANIFEST_DIR": "tests/integration",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "tests/integration",
+        proc_macro = True,
+    ),
+    deps = [
+        "//meerkat-client:meerkat_client",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob-mcp:meerkat_mob_mcp",
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-rpc:meerkat_rpc",
+        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+        "//tests/integration:meerkat_integration_tests",
+    ] + all_crate_deps(
+        package_name = "tests/integration",
+        normal = True,
+    ),
+)
+
 rust_test(
     name = "e2e_auth_lane_test",
     aliases = aliases(

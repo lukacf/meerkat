@@ -53,6 +53,31 @@ settings match CI:
 ./scripts/repo-cargo e2e-smoke
 ```
 
+The Make target also supports smoke-lane selection without duplicating the
+catalog:
+
+```bash
+make e2e-smoke
+make e2e-smoke TEST=e2e_smoke_mob_live_smoke
+make e2e-smoke SCENARIO=62
+make e2e-smoke SUITE=mob-live-smoke
+```
+
+Prebuilt mode first materializes the selected Rust binaries/test executables
+through `./scripts/repo-cargo`, writes an artifact manifest, and then runs the
+same harness with nested cargo builds disabled:
+
+```bash
+MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke
+MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke TEST=e2e_smoke_mob_live_smoke
+MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke SCENARIO=62
+MEERKAT_E2E_EXECUTION_MODE=prebuilt make e2e-smoke SUITE=mob-live-smoke
+```
+
+Use `MEERKAT_E2E_ARTIFACT_MANIFEST=/path/to/manifest.json` to choose or inspect
+the manifest path. In prebuilt mode, `CommandSpec::CargoTest` entries execute
+the manifest's test executable directly instead of invoking `cargo test`.
+
 Run one scenario by cargo test filter:
 
 ```bash

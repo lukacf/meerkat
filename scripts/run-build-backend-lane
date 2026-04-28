@@ -98,10 +98,12 @@ case "${lane}" in
     exec "${cargo_bin}" e2e-live
     ;;
   e2e-smoke)
-    if meerkat_buildbuddy_enabled; then
+    if meerkat_buildbuddy_enabled &&
+      [[ "${MEERKAT_E2E_EXECUTION_MODE:-cargo}" != "prebuilt" ]] &&
+      [[ -z "${TEST:-}" && -z "${SCENARIO:-}" && -z "${SUITE:-}" ]]; then
       exec "${root}/scripts/buildbuddy-dev" e2e-smoke
     fi
-    exec "${cargo_bin}" e2e-smoke
+    exec "${root}/scripts/e2e-smoke-lane"
     ;;
   *)
     echo "unknown build backend lane: ${lane}" >&2

@@ -135,6 +135,31 @@ workspace_build_targets() {
   ./scripts/bazel-affected-fast-tests.mjs --all --build
 }
 
+e2e_smoke_test_filter() {
+  local selection_count=0
+  local filter=""
+  if [[ -n "${TEST:-}" ]]; then
+    selection_count=$((selection_count + 1))
+    filter="${TEST}"
+  fi
+  if [[ -n "${SCENARIO:-}" ]]; then
+    selection_count=$((selection_count + 1))
+    filter="e2e_smoke_s${SCENARIO}_"
+  fi
+  if [[ -n "${SUITE:-}" ]]; then
+    selection_count=$((selection_count + 1))
+    filter="e2e_smoke_${SUITE//-/_}"
+    if [[ "${SUITE}" == "mob-flow-runtime" ]]; then
+      filter="${filter}_suite"
+    fi
+  fi
+  if [[ "${selection_count}" -gt 1 ]]; then
+    echo "error: provide only one of TEST, SCENARIO, or SUITE" >&2
+    exit 2
+  fi
+  [[ -n "${filter}" ]] && printf '%s\n' "${filter}"
+}
+
 case "${lane}" in
   build|check)
     if [[ "${#extra_args[@]}" -gt 0 && "${extra_args[0]}" != -* ]]; then
@@ -168,6 +193,10 @@ case "${lane}" in
     run_bazel_with_extra e2e-live-rbe
     ;;
   e2e-smoke)
+    smoke_filter="$(e2e_smoke_test_filter)"
+    if [[ -n "${smoke_filter}" ]]; then
+      extra_args=(--test_arg="${smoke_filter}" "${extra_args[@]}")
+    fi
     run_bazel_with_extra e2e-smoke-rbe
     ;;
   workspace-fast|fast)

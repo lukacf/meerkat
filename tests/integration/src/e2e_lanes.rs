@@ -1,16 +1,18 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum Lane {
     Build,
     System,
@@ -20,6 +22,67 @@ pub enum Lane {
     /// ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY env, and
     /// optional CLAUDE_CODE_OAUTH_TOKEN for interactive flow tests.
     Auth,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionMode {
+    Cargo,
+    Prebuilt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum E2eSelection {
+    Lane(Lane),
+    Scenario(u16),
+    Suite(String),
+    SmokeTest(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArtifactRequirement {
+    RustBin(RustBinRequirement),
+    RustTest(RustTestRequirement),
+    NodeBuild { cwd: String },
+    PythonEnv { cwd: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct RustBinRequirement {
+    pub package: String,
+    pub bin: String,
+    pub features: BTreeSet<String>,
+    pub all_features: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
+pub struct RustTestRequirement {
+    pub package: String,
+    pub test_target: String,
+    pub features: BTreeSet<String>,
+    pub all_features: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlannedSpec {
+    pub label: String,
+    pub lane: Lane,
+    pub id: Option<u16>,
+    pub suite: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct E2ePlan {
+    pub specs: Vec<PlannedSpec>,
+    pub requirements: Vec<ArtifactRequirement>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ArtifactManifest {
+    #[serde(default)]
+    pub rust_bins: BTreeMap<String, PathBuf>,
+    #[serde(default)]
+    pub rust_tests: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -59,10 +122,15 @@ enum CommandLockMode {
     Shared,
 }
 
-#[derive(Clone, Copy)]
 struct CommandEntry {
     spec: &'static Spec,
-    command: &'static [&'static str],
+    command: Vec<String>,
+}
+
+struct BuiltCommands {
+    pre_commands: Vec<Vec<String>>,
+    command: Vec<String>,
+    output_policy: OutputPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -91,11 +159,152 @@ const WEB_RUNTIME_BUILD_IF_MISSING: &[&str] = &[
     "if test -f ../../../sdks/web/wasm/meerkat_web_runtime.js && test -f ../../../sdks/web/wasm/meerkat_web_runtime_bg.wasm; then :; else npm --prefix ../../../sdks/web run build; fi",
 ];
 
+const MEERKAT_E2E_EXECUTION_MODE: &str = "MEERKAT_E2E_EXECUTION_MODE";
+const MEERKAT_E2E_ARTIFACT_MANIFEST: &str = "MEERKAT_E2E_ARTIFACT_MANIFEST";
+
+const SMOKE_SCENARIO_IDS: &[u16] = &[
+    16, 21, 22, 27, 28, 30, 40, 44, 47, 48, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 62, 63,
+    64, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
+];
+
+const SMOKE_SUITE_TESTS: &[(&str, &str)] = &[
+    (
+        "e2e_smoke_rpc_dynamic_tool_pickup",
+        "rpc-dynamic-tool-pickup",
+    ),
+    (
+        "e2e_smoke_rpc_deferred_catalog_session",
+        "rpc-deferred-catalog-session",
+    ),
+    (
+        "e2e_smoke_cli_background_job_active_turn",
+        "cli-background-job-active-turn",
+    ),
+    (
+        "e2e_smoke_cli_background_job_idle_keepalive",
+        "cli-background-job-idle-keepalive",
+    ),
+    ("e2e_smoke_mob_live_smoke", "mob-live-smoke"),
+    ("e2e_smoke_mob_flow_runtime_suite", "mob-flow-runtime"),
+    ("e2e_smoke_mob_pictionary", "mob-pictionary"),
+];
+
 #[derive(Clone, Debug)]
 enum PreCommandState {
     Running,
     Done,
     Failed(String),
+}
+
+impl ExecutionMode {
+    fn from_env() -> Result<Self, String> {
+        match std::env::var(MEERKAT_E2E_EXECUTION_MODE) {
+            Ok(value)
+                if matches!(
+                    value.as_str(),
+                    "prebuilt" | "PREBUILT" | "Prebuilt" | "1" | "true" | "TRUE"
+                ) =>
+            {
+                Ok(Self::Prebuilt)
+            }
+            Ok(value)
+                if matches!(
+                    value.as_str(),
+                    "cargo" | "CARGO" | "Cargo" | "0" | "false" | "FALSE"
+                ) =>
+            {
+                Ok(Self::Cargo)
+            }
+            Ok(value) => Err(format!(
+                "unknown {MEERKAT_E2E_EXECUTION_MODE} value '{value}' (expected cargo or prebuilt)"
+            )),
+            Err(_) => Ok(Self::Cargo),
+        }
+    }
+}
+
+impl ArtifactManifest {
+    pub fn from_json_str(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json)
+            .map_err(|error| format!("invalid e2e artifact manifest: {error}"))
+    }
+
+    pub fn from_path(path: &Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            format!(
+                "failed to read e2e artifact manifest {}: {error}",
+                path.display()
+            )
+        })?;
+        Self::from_json_str(&content)
+    }
+
+    fn from_env() -> Result<Self, String> {
+        let path = std::env::var(MEERKAT_E2E_ARTIFACT_MANIFEST).map_err(|_| {
+            format!(
+                "{MEERKAT_E2E_EXECUTION_MODE}=prebuilt requires {MEERKAT_E2E_ARTIFACT_MANIFEST}"
+            )
+        })?;
+        Self::from_path(Path::new(&path))
+    }
+
+    fn rust_bin(&self, bin: &str) -> Result<&Path, String> {
+        self.rust_bins
+            .get(bin)
+            .map(PathBuf::as_path)
+            .ok_or_else(|| {
+                format!(
+                    "e2e artifact manifest is missing rust_bins.{bin}; materialize the selected lane before running prebuilt mode"
+                )
+            })
+    }
+
+    fn rust_test(&self, package: &str, test_target: &str) -> Result<&Path, String> {
+        let key = rust_test_manifest_key(package, test_target);
+        self.rust_tests
+            .get(&key)
+            .map(PathBuf::as_path)
+            .ok_or_else(|| {
+                format!(
+                    "e2e artifact manifest is missing rust_tests.{key}; materialize the selected lane before running prebuilt mode"
+                )
+            })
+    }
+}
+
+pub fn plan_for_selection(selection: &E2eSelection) -> Result<E2ePlan, String> {
+    let selected = select_specs(selection)?;
+    Ok(plan_for_specs(&selected))
+}
+
+pub fn smoke_test_filter_for_selection(selection: &E2eSelection) -> Result<Option<String>, String> {
+    match selection {
+        E2eSelection::Lane(Lane::Smoke) => Ok(None),
+        E2eSelection::Scenario(id) => {
+            let Some(spec) = scenario_spec(*id) else {
+                return Err(format!("unknown catalog scenario id {id}"));
+            };
+            if spec.lane != Lane::Smoke {
+                return Err(format!(
+                    "scenario {id} belongs to {:?}, not the e2e-smoke lane",
+                    spec.lane
+                ));
+            }
+            Ok(Some(format!("e2e_smoke_s{id}_")))
+        }
+        E2eSelection::Suite(name) => SMOKE_SUITE_TESTS
+            .iter()
+            .find_map(|(test_name, suite)| (*suite == name).then(|| (*test_name).to_string()))
+            .map(Some)
+            .ok_or_else(|| format!("unknown e2e-smoke suite '{name}'")),
+        E2eSelection::SmokeTest(name) => {
+            spec_for_smoke_test_name(name)?;
+            Ok(Some(name.clone()))
+        }
+        E2eSelection::Lane(lane) => Err(format!(
+            "smoke test filters are only defined for the e2e-smoke lane, got {lane:?}"
+        )),
+    }
 }
 
 pub async fn run_catalog_scenario(id: u16) -> Result<(), String> {
@@ -112,6 +321,417 @@ pub async fn run_named_suite(name: &str) -> Result<(), String> {
     run_spec(spec).await
 }
 
+fn select_specs(selection: &E2eSelection) -> Result<Vec<SelectedSpec>, String> {
+    match selection {
+        E2eSelection::Lane(Lane::Smoke) => {
+            let mut specs = Vec::new();
+            for id in SMOKE_SCENARIO_IDS {
+                let spec = scenario_spec(*id)
+                    .ok_or_else(|| format!("unknown e2e-smoke scenario id {id}"))?;
+                specs.push(SelectedSpec { spec, suite: None });
+            }
+            for (_, suite) in SMOKE_SUITE_TESTS {
+                let spec = suite_spec(suite)
+                    .ok_or_else(|| format!("unknown e2e-smoke suite '{suite}'"))?;
+                specs.push(SelectedSpec {
+                    spec,
+                    suite: Some((*suite).to_string()),
+                });
+            }
+            Ok(specs)
+        }
+        E2eSelection::Lane(lane) => Err(format!("planning is not implemented for {lane:?} lane")),
+        E2eSelection::Scenario(id) => {
+            let spec =
+                scenario_spec(*id).ok_or_else(|| format!("unknown catalog scenario id {id}"))?;
+            Ok(vec![SelectedSpec { spec, suite: None }])
+        }
+        E2eSelection::Suite(name) => {
+            let spec = suite_spec(name).ok_or_else(|| format!("unknown lane suite '{name}'"))?;
+            Ok(vec![SelectedSpec {
+                spec,
+                suite: Some(name.clone()),
+            }])
+        }
+        E2eSelection::SmokeTest(name) => {
+            let (spec, suite) = spec_for_smoke_test_name(name)?;
+            Ok(vec![SelectedSpec { spec, suite }])
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SelectedSpec {
+    spec: &'static Spec,
+    suite: Option<String>,
+}
+
+fn plan_for_specs(selected: &[SelectedSpec]) -> E2ePlan {
+    let mut rust_bins = BTreeMap::<String, RustBinRequirement>::new();
+    let mut rust_tests = BTreeMap::<String, RustTestRequirement>::new();
+    let mut node_builds = BTreeSet::<String>::new();
+    let mut python_envs = BTreeSet::<String>::new();
+
+    for selected_spec in selected {
+        collect_spec_requirements(
+            selected_spec.spec,
+            &mut rust_bins,
+            &mut rust_tests,
+            &mut node_builds,
+            &mut python_envs,
+        );
+    }
+
+    let mut requirements = Vec::new();
+    requirements.extend(rust_bins.into_values().map(ArtifactRequirement::RustBin));
+    requirements.extend(rust_tests.into_values().map(ArtifactRequirement::RustTest));
+    requirements.extend(
+        node_builds
+            .into_iter()
+            .map(|cwd| ArtifactRequirement::NodeBuild { cwd }),
+    );
+    requirements.extend(
+        python_envs
+            .into_iter()
+            .map(|cwd| ArtifactRequirement::PythonEnv { cwd }),
+    );
+    requirements.sort();
+
+    E2ePlan {
+        specs: selected
+            .iter()
+            .map(|selected_spec| PlannedSpec {
+                label: run_label(selected_spec.spec),
+                lane: selected_spec.spec.lane,
+                id: selected_spec.spec.id,
+                suite: selected_spec.suite.clone(),
+            })
+            .collect(),
+        requirements,
+    }
+}
+
+fn spec_for_smoke_test_name(name: &str) -> Result<(&'static Spec, Option<String>), String> {
+    if let Some(id) = smoke_scenario_id_from_test_name(name) {
+        let spec =
+            scenario_spec(id).ok_or_else(|| format!("unknown e2e-smoke scenario id {id}"))?;
+        if spec.lane != Lane::Smoke {
+            return Err(format!(
+                "scenario {id} belongs to {:?}, not the e2e-smoke lane",
+                spec.lane
+            ));
+        }
+        return Ok((spec, None));
+    }
+
+    for (test_name, suite) in SMOKE_SUITE_TESTS {
+        if *test_name == name {
+            let spec =
+                suite_spec(suite).ok_or_else(|| format!("unknown e2e-smoke suite '{suite}'"))?;
+            return Ok((spec, Some((*suite).to_string())));
+        }
+    }
+
+    Err(format!("unknown e2e-smoke test '{name}'"))
+}
+
+fn smoke_scenario_id_from_test_name(name: &str) -> Option<u16> {
+    let rest = name.strip_prefix("e2e_smoke_s")?;
+    let digits = rest
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() || !rest[digits.len()..].starts_with('_') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn collect_spec_requirements(
+    spec: &Spec,
+    rust_bins: &mut BTreeMap<String, RustBinRequirement>,
+    rust_tests: &mut BTreeMap<String, RustTestRequirement>,
+    node_builds: &mut BTreeSet<String>,
+    python_envs: &mut BTreeSet<String>,
+) {
+    match spec.command {
+        CommandSpec::CargoTest {
+            package,
+            test_target,
+            features,
+            all_features,
+            ..
+        } => {
+            merge_rust_test(
+                rust_tests,
+                RustTestRequirement::new(package, test_target, features, all_features),
+            );
+            if let Some(bin) = default_bin_for_package(package) {
+                merge_rust_bin(
+                    rust_bins,
+                    RustBinRequirement::new(package, bin, features, all_features),
+                );
+            }
+        }
+        CommandSpec::Pytest { .. } => {
+            python_envs.insert(spec.cwd.to_string());
+        }
+        CommandSpec::NodeTest { .. } => {
+            node_builds.insert(spec.cwd.to_string());
+        }
+        CommandSpec::Raw { argv, .. } => {
+            if let Some(requirement) = parse_cargo_test_requirement(argv) {
+                if let Some(bin) = default_bin_for_package(&requirement.package) {
+                    merge_rust_bin(
+                        rust_bins,
+                        RustBinRequirement {
+                            package: requirement.package.clone(),
+                            bin: bin.to_string(),
+                            features: requirement.features.clone(),
+                            all_features: requirement.all_features,
+                        },
+                    );
+                }
+                merge_rust_test(rust_tests, requirement);
+            }
+            if command_mentions_node_setup(argv) {
+                node_builds.insert(spec.cwd.to_string());
+            }
+            if command_mentions_python_setup(argv) {
+                python_envs.insert(spec.cwd.to_string());
+            }
+        }
+    }
+
+    for command in spec.pre_commands {
+        if let Some(requirement) = parse_cargo_build_requirement(command) {
+            merge_rust_bin(rust_bins, requirement);
+        }
+        if command_mentions_node_setup(command) {
+            node_builds.insert(spec.cwd.to_string());
+        }
+        if command_mentions_python_setup(command) {
+            python_envs.insert(spec.cwd.to_string());
+        }
+    }
+
+    for binary in spec.cargo_bin_env {
+        if let Some(package) = package_for_bin(binary) {
+            merge_rust_bin(
+                rust_bins,
+                RustBinRequirement::new(package, *binary, &[], false),
+            );
+        }
+    }
+
+    for (key, value) in spec.env {
+        if key.starts_with("RKAT_TEST_BIN_") {
+            if let Some(binary) = bin_from_rkat_test_bin_env(key)
+                && let Some(package) = package_for_bin(&binary)
+            {
+                merge_rust_bin(
+                    rust_bins,
+                    RustBinRequirement::new(package, &binary, &[], false),
+                );
+            }
+        } else if *key == "MEERKAT_BIN_PATH"
+            && let Some(binary) = binary_from_artifact_path_template(value)
+            && let Some(package) = package_for_bin(&binary)
+        {
+            merge_rust_bin(
+                rust_bins,
+                RustBinRequirement::new(package, &binary, &[], false),
+            );
+        }
+    }
+}
+
+impl RustBinRequirement {
+    fn new(
+        package: impl Into<String>,
+        bin: impl Into<String>,
+        features: &[&str],
+        all_features: bool,
+    ) -> Self {
+        Self {
+            package: package.into(),
+            bin: bin.into(),
+            features: features
+                .iter()
+                .map(|feature| (*feature).to_string())
+                .collect(),
+            all_features,
+        }
+    }
+
+    fn key(&self) -> String {
+        format!("{}:{}", self.package, self.bin)
+    }
+}
+
+impl RustTestRequirement {
+    fn new(
+        package: impl Into<String>,
+        test_target: impl Into<String>,
+        features: &[&str],
+        all_features: bool,
+    ) -> Self {
+        Self {
+            package: package.into(),
+            test_target: test_target.into(),
+            features: features
+                .iter()
+                .map(|feature| (*feature).to_string())
+                .collect(),
+            all_features,
+        }
+    }
+
+    fn key(&self) -> String {
+        rust_test_manifest_key(&self.package, &self.test_target)
+    }
+}
+
+fn merge_rust_bin(
+    requirements: &mut BTreeMap<String, RustBinRequirement>,
+    requirement: RustBinRequirement,
+) {
+    let key = requirement.key();
+    requirements
+        .entry(key)
+        .and_modify(|existing| {
+            existing.features.extend(requirement.features.clone());
+            existing.all_features |= requirement.all_features;
+        })
+        .or_insert(requirement);
+}
+
+fn merge_rust_test(
+    requirements: &mut BTreeMap<String, RustTestRequirement>,
+    requirement: RustTestRequirement,
+) {
+    let key = requirement.key();
+    requirements
+        .entry(key)
+        .and_modify(|existing| {
+            existing.features.extend(requirement.features.clone());
+            existing.all_features |= requirement.all_features;
+        })
+        .or_insert(requirement);
+}
+
+fn parse_cargo_build_requirement(command: &[&str]) -> Option<RustBinRequirement> {
+    if !is_cargo_command(command.first().copied()?) || command.get(1) != Some(&"build") {
+        return None;
+    }
+    let package = command_value(command, "-p", "--package")?;
+    let bin = command_value(command, "--bin", "--bin")
+        .map(str::to_string)
+        .or_else(|| default_bin_for_package(package).map(str::to_string))?;
+    Some(RustBinRequirement {
+        package: package.to_string(),
+        bin,
+        features: command_features(command),
+        all_features: command.contains(&"--all-features"),
+    })
+}
+
+fn parse_cargo_test_requirement(command: &[&str]) -> Option<RustTestRequirement> {
+    if !is_cargo_command(command.first().copied()?) || command.get(1) != Some(&"test") {
+        return None;
+    }
+    let package = command_value(command, "-p", "--package")?;
+    let test_target = command_value(command, "--test", "--test")?;
+    Some(RustTestRequirement {
+        package: package.to_string(),
+        test_target: test_target.to_string(),
+        features: command_features(command),
+        all_features: command.contains(&"--all-features"),
+    })
+}
+
+fn is_cargo_command(command: &str) -> bool {
+    command == "cargo"
+        || command.ends_with("/repo-cargo")
+        || command == "{repo_root}/scripts/repo-cargo"
+}
+
+fn command_value<'a>(command: &'a [&str], short: &str, long: &str) -> Option<&'a str> {
+    command.windows(2).find_map(|window| {
+        let key = window[0];
+        (key == short || key == long).then_some(window[1])
+    })
+}
+
+fn command_features(command: &[&str]) -> BTreeSet<String> {
+    command_value(command, "--features", "--features")
+        .map(split_features)
+        .unwrap_or_default()
+}
+
+fn split_features(features: &str) -> BTreeSet<String> {
+    features
+        .split(',')
+        .map(str::trim)
+        .filter(|feature| !feature.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn command_mentions_node_setup(command: &[&str]) -> bool {
+    let command_text = command.join(" ");
+    command_text.contains("npm")
+        || command_text.contains("playwright")
+        || command_text.contains("sdks/web")
+}
+
+fn command_mentions_python_setup(command: &[&str]) -> bool {
+    command.join(" ").contains("pip install")
+}
+
+fn default_bin_for_package(package: &str) -> Option<&'static str> {
+    match package {
+        "rkat" => Some("rkat"),
+        "meerkat-rpc" => Some("rkat-rpc"),
+        "meerkat-rest" => Some("rkat-rest"),
+        "meerkat-mcp-server" => Some("rkat-mcp"),
+        _ => None,
+    }
+}
+
+fn package_for_bin(bin: &str) -> Option<&'static str> {
+    match bin {
+        "rkat" => Some("rkat"),
+        "rkat-rpc" => Some("meerkat-rpc"),
+        "rkat-rest" => Some("meerkat-rest"),
+        "rkat-mcp" => Some("meerkat-mcp-server"),
+        _ => None,
+    }
+}
+
+fn rkat_test_bin_env_name(bin: &str) -> String {
+    format!(
+        "RKAT_TEST_BIN_{}",
+        bin.replace('-', "_").to_ascii_uppercase()
+    )
+}
+
+fn bin_from_rkat_test_bin_env(key: &str) -> Option<String> {
+    key.strip_prefix("RKAT_TEST_BIN_")
+        .map(|name| name.to_ascii_lowercase().replace('_', "-"))
+}
+
+fn binary_from_artifact_path_template(value: &str) -> Option<String> {
+    ["rkat-rpc", "rkat-rest", "rkat-mcp", "rkat"]
+        .iter()
+        .find(|binary| value.contains(*binary))
+        .map(|binary| (*binary).to_string())
+}
+
+fn rust_test_manifest_key(package: &str, test_target: &str) -> String {
+    format!("{package}:{test_target}")
+}
+
 fn run_label(spec: &Spec) -> String {
     match spec.id {
         Some(id) => format!("{id:02} {}", spec.title),
@@ -122,7 +742,12 @@ fn run_label(spec: &Spec) -> String {
 async fn run_spec(spec: &'static Spec) -> Result<(), String> {
     let spec_started = Instant::now();
     eprintln!("e2e lane start: {}", run_label(spec));
-    if let Some(message) = prereq_failure(spec) {
+    let execution_mode = ExecutionMode::from_env()?;
+    let manifest = match execution_mode {
+        ExecutionMode::Cargo => None,
+        ExecutionMode::Prebuilt => Some(ArtifactManifest::from_env()?),
+    };
+    if let Some(message) = prereq_failure(spec, execution_mode) {
         if strict_prereqs_enabled() {
             return Err(format!("{}: {message}", run_label(spec)));
         }
@@ -132,17 +757,28 @@ async fn run_spec(spec: &'static Spec) -> Result<(), String> {
 
     let cwd = workspace_root().join(spec.cwd);
     let scenario_target_dir = scenario_cargo_target_dir(spec)?;
-    let env_overrides = match scenario_env(spec, &scenario_target_dir) {
+    let env_overrides = match scenario_env(
+        spec,
+        &scenario_target_dir,
+        execution_mode,
+        manifest.as_ref(),
+    ) {
         Ok(env_overrides) => env_overrides,
         Err(error) => {
             clean_scenario_target_dir_if_requested(spec, &scenario_target_dir);
             return Err(error);
         }
     };
-    let (pre_commands, command, output_policy) = build_commands(spec);
+    let commands = match build_commands_for_mode(spec, execution_mode, manifest.as_ref()) {
+        Ok(commands) => commands,
+        Err(error) => {
+            clean_scenario_target_dir_if_requested(spec, &scenario_target_dir);
+            return Err(error);
+        }
+    };
 
     let result = async {
-        for pre_command in pre_commands {
+        for pre_command in commands.pre_commands {
             run_pre_command(
                 CommandEntry {
                     spec,
@@ -161,12 +797,13 @@ async fn run_spec(spec: &'static Spec) -> Result<(), String> {
         // so the scenario can `exec` them cleanly. No-op on non-macOS.
         ensure_binary_signatures_fresh(spec, &env_overrides).await;
 
-        let completed = run_command(command, &cwd, &env_overrides, spec.timeout_secs).await?;
-        if let Some(problem) = analyze_success_output(output_policy, &completed.output) {
+        let completed =
+            run_command(&commands.command, &cwd, &env_overrides, spec.timeout_secs).await?;
+        if let Some(problem) = analyze_success_output(commands.output_policy, &completed.output) {
             return Err(format!(
                 "{}: {} ({problem})",
                 run_label(spec),
-                command_display(command)
+                command_display(&commands.command)
             ));
         }
 
@@ -188,9 +825,11 @@ async fn run_pre_command(
     cwd: &Path,
     env_overrides: &[(String, String)],
 ) -> Result<(), String> {
-    let _shared_lock = match pre_command_lock_mode(entry.command) {
+    let _shared_lock = match pre_command_lock_mode_parts(&entry.command) {
         CommandLockMode::ScenarioLocal => None,
-        CommandLockMode::Shared => Some(acquire_shared_pre_command_lock(entry.command, cwd).await?),
+        CommandLockMode::Shared => {
+            Some(acquire_shared_pre_command_lock(&entry.command, cwd).await?)
+        }
     };
     let env_signature = env_overrides
         .iter()
@@ -200,7 +839,7 @@ async fn run_pre_command(
     let key = format!(
         "{}::{}::{}",
         cwd.display(),
-        command_display_with_env(entry.command, env_overrides),
+        command_display_with_env(&entry.command, env_overrides),
         env_signature
     );
     loop {
@@ -219,7 +858,7 @@ async fn run_pre_command(
         }
     }
 
-    let result = run_command(entry.command, cwd, env_overrides, entry.spec.timeout_secs)
+    let result = run_command(&entry.command, cwd, env_overrides, entry.spec.timeout_secs)
         .await
         .map(|_| ());
     let mut completed = completed_pre_commands().lock().unwrap();
@@ -249,11 +888,21 @@ impl Drop for SharedPreCommandLock {
     }
 }
 
+#[cfg(test)]
 fn pre_command_lock_mode(command: &[&str]) -> CommandLockMode {
+    pre_command_lock_mode_parts(
+        &command
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn pre_command_lock_mode_parts(command: &[String]) -> CommandLockMode {
     if command
         .iter()
         .any(|part| part.contains("{cargo_target_dir}"))
-        || command.first() == Some(&"cargo")
+        || command.first().map(String::as_str) == Some("cargo")
     {
         return CommandLockMode::ScenarioLocal;
     }
@@ -270,7 +919,7 @@ fn pre_command_lock_mode(command: &[&str]) -> CommandLockMode {
 }
 
 async fn acquire_shared_pre_command_lock(
-    command: &[&str],
+    command: &[String],
     cwd: &Path,
 ) -> Result<SharedPreCommandLock, String> {
     let base = cargo_target_dir()
@@ -325,7 +974,7 @@ async fn acquire_shared_pre_command_lock(
     }
 }
 
-fn shared_pre_command_lock_name(command: &[&str], cwd: &Path) -> String {
+fn shared_pre_command_lock_name(command: &[String], cwd: &Path) -> String {
     let key = format!("{} {}", cwd.display(), command.join(" "));
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
@@ -360,12 +1009,12 @@ fn remove_stale_shared_pre_command_lock(lock_path: &Path, stale_secs: u64) {
 }
 
 async fn run_command(
-    command: &[&str],
+    command: &[String],
     cwd: &Path,
     env_overrides: &[(String, String)],
     timeout_secs: u64,
 ) -> Result<CompletedCommand, String> {
-    let argv = normalize_command_with_env(command, env_overrides);
+    let argv = normalize_command_with_env_parts(command, env_overrides);
     let display = argv.join(" ");
     let started = Instant::now();
     eprintln!("e2e command start: {display}");
@@ -409,13 +1058,11 @@ async fn run_command(
     Ok(CompletedCommand { output: combined })
 }
 
-fn build_commands(
+fn build_commands_for_mode(
     spec: &'static Spec,
-) -> (
-    Vec<&'static [&'static str]>,
-    &'static [&'static str],
-    OutputPolicy,
-) {
+    execution_mode: ExecutionMode,
+    manifest: Option<&ArtifactManifest>,
+) -> Result<BuiltCommands, String> {
     let output_policy = match spec.command {
         CommandSpec::CargoTest { .. } => OutputPolicy::CargoTest,
         CommandSpec::Pytest { .. } => OutputPolicy::Pytest,
@@ -423,14 +1070,54 @@ fn build_commands(
         CommandSpec::Raw { output_policy, .. } => output_policy,
     };
 
-    let command = match spec.command {
-        CommandSpec::CargoTest {
-            package,
-            test_target,
-            test_name,
-            features,
-            all_features,
-        } => {
+    let command = match (execution_mode, spec.command) {
+        (
+            ExecutionMode::Prebuilt,
+            CommandSpec::CargoTest {
+                package,
+                test_target,
+                test_name,
+                ..
+            },
+        ) => {
+            let manifest = manifest.ok_or_else(|| {
+                "prebuilt command generation requires an artifact manifest".to_string()
+            })?;
+            vec![
+                manifest
+                    .rust_test(package, test_target)?
+                    .display()
+                    .to_string(),
+                test_name.to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ]
+        }
+        (ExecutionMode::Prebuilt, CommandSpec::Raw { argv, .. })
+            if parse_cargo_test_requirement(argv).is_some() =>
+        {
+            let manifest = manifest.ok_or_else(|| {
+                "prebuilt command generation requires an artifact manifest".to_string()
+            })?;
+            prebuilt_raw_cargo_test_command(argv, manifest)?
+        }
+        (ExecutionMode::Prebuilt, CommandSpec::Raw { argv, .. }) if is_raw_cargo_command(argv) => {
+            return Err(format!(
+                "prebuilt execution does not support raw cargo command for {}: {}",
+                run_label(spec),
+                argv.join(" ")
+            ));
+        }
+        (
+            _,
+            CommandSpec::CargoTest {
+                package,
+                test_target,
+                test_name,
+                features,
+                all_features,
+            },
+        ) => {
             let mut command = vec!["cargo", "test", "-p", package];
             if all_features {
                 command.push("--all-features");
@@ -447,54 +1134,150 @@ fn build_commands(
                 "--ignored",
                 "--nocapture",
             ]);
-            Box::leak(command.into_boxed_slice())
+            command.into_iter().map(str::to_string).collect()
         }
-        CommandSpec::Pytest {
-            test_file,
-            test_name,
-        } => Box::leak(
-            vec![
-                compatible_python_bin().unwrap_or("python3"),
-                "-m",
-                "pytest",
-                "-v",
-                Box::leak(format!("{test_file}::{test_name}").into_boxed_str()),
-            ]
-            .into_boxed_slice(),
-        ),
-        CommandSpec::NodeTest {
-            test_file,
-            test_name,
-        } => Box::leak(
-            vec![
-                "node",
-                "--test",
-                "--test-name-pattern",
-                test_name,
+        (
+            _,
+            CommandSpec::Pytest {
                 test_file,
-            ]
-            .into_boxed_slice(),
-        ),
-        CommandSpec::Raw { argv, .. } => argv,
+                test_name,
+            },
+        ) => vec![
+            compatible_python_bin().unwrap_or("python3"),
+            "-m",
+            "pytest",
+            "-v",
+            Box::leak(format!("{test_file}::{test_name}").into_boxed_str()),
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        (
+            _,
+            CommandSpec::NodeTest {
+                test_file,
+                test_name,
+            },
+        ) => vec![
+            "node".to_string(),
+            "--test".to_string(),
+            "--test-name-pattern".to_string(),
+            test_name.to_string(),
+            test_file.to_string(),
+        ],
+        (_, CommandSpec::Raw { argv, .. }) => argv.iter().map(|part| (*part).to_string()).collect(),
     };
 
-    (spec.pre_commands.to_vec(), command, output_policy)
+    let pre_commands = spec
+        .pre_commands
+        .iter()
+        .filter(|command| {
+            !matches!(execution_mode, ExecutionMode::Prebuilt)
+                || !pre_command_replaced_by_manifest_artifact(command)
+        })
+        .map(|command| command.iter().map(|part| (*part).to_string()).collect())
+        .collect();
+
+    Ok(BuiltCommands {
+        pre_commands,
+        command,
+        output_policy,
+    })
 }
 
-fn normalize_command(command: &[&str]) -> Vec<String> {
+fn prebuilt_raw_cargo_test_command(
+    argv: &[&str],
+    manifest: &ArtifactManifest,
+) -> Result<Vec<String>, String> {
+    let requirement = parse_cargo_test_requirement(argv)
+        .ok_or_else(|| format!("cannot derive prebuilt rust test from {}", argv.join(" ")))?;
+    let mut command = vec![
+        manifest
+            .rust_test(&requirement.package, &requirement.test_target)?
+            .display()
+            .to_string(),
+    ];
+    let mut after_test_target = false;
+    let mut after_harness_separator = false;
+    let mut skip_next = false;
+    for (index, part) in argv.iter().enumerate().skip(2) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if *part == "--" {
+            after_harness_separator = true;
+            continue;
+        }
+        if after_harness_separator {
+            command.push((*part).to_string());
+            continue;
+        }
+        if after_test_target {
+            if !part.starts_with('-') {
+                command.push((*part).to_string());
+            }
+            continue;
+        }
+        if matches!(*part, "-p" | "--package" | "--features" | "--test") {
+            skip_next = true;
+            if *part == "--test" {
+                after_test_target = true;
+            }
+            continue;
+        }
+        if *part == "--all-features" {
+            continue;
+        }
+        if index + 1 == argv.len() && !part.starts_with('-') {
+            command.push((*part).to_string());
+        }
+    }
+    Ok(command)
+}
+
+fn pre_command_replaced_by_manifest_artifact(command: &[&str]) -> bool {
+    if parse_cargo_build_requirement(command).is_some() {
+        return true;
+    }
+    let text = command.join(" ");
+    text.contains("{cargo_target_dir}/e2e-bins")
+        || (command.first() == Some(&"cp") && text.contains("{cargo_target_dir}/debug/"))
+}
+
+fn is_raw_cargo_command(argv: &[&str]) -> bool {
+    argv.first().copied().is_some_and(is_cargo_command)
+}
+
+fn normalize_command(command: &[String]) -> Vec<String> {
     let cargo_target_dir = cargo_target_dir().unwrap_or_else(|_| workspace_root().join("target"));
-    normalize_command_with_target_dir(command, &cargo_target_dir)
+    normalize_command_parts_with_target_dir(command, &cargo_target_dir)
 }
 
+#[cfg(test)]
 fn normalize_command_with_env(command: &[&str], env_overrides: &[(String, String)]) -> Vec<String> {
+    let command = command
+        .iter()
+        .map(|part| (*part).to_string())
+        .collect::<Vec<_>>();
+    normalize_command_with_env_parts(&command, env_overrides)
+}
+
+fn normalize_command_with_env_parts(
+    command: &[String],
+    env_overrides: &[(String, String)],
+) -> Vec<String> {
     let cargo_target_dir = env_value(env_overrides, "CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .or_else(|| cargo_target_dir().ok())
         .unwrap_or_else(|| workspace_root().join("target"));
-    normalize_command_with_target_dir(command, &cargo_target_dir)
+    normalize_command_parts_with_target_dir(command, &cargo_target_dir)
 }
 
-fn normalize_command_with_target_dir(command: &[&str], cargo_target_dir: &Path) -> Vec<String> {
+fn normalize_command_parts_with_target_dir(
+    command: &[String],
+    cargo_target_dir: &Path,
+) -> Vec<String> {
     let repo_root = workspace_root().display().to_string();
     let cargo_target_dir = cargo_target_dir.display().to_string();
     let mut argv = command
@@ -578,7 +1361,7 @@ fn analyze_success_output(output_policy: OutputPolicy, output: &str) -> Option<&
     }
 }
 
-fn prereq_failure(spec: &Spec) -> Option<String> {
+fn prereq_failure(spec: &Spec, execution_mode: ExecutionMode) -> Option<String> {
     let mut failures = Vec::new();
     for group in spec.required_env {
         if group
@@ -594,6 +1377,9 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
         }
     }
     for binary in spec.required_bins {
+        if matches!(execution_mode, ExecutionMode::Prebuilt) && *binary == "cargo" {
+            continue;
+        }
         if *binary == "python3" {
             if compatible_python_bin().is_none() {
                 failures.push("missing compatible python >=3.10".to_string());
@@ -627,7 +1413,12 @@ fn prereq_failure(spec: &Spec) -> Option<String> {
     }
 }
 
-fn scenario_env(spec: &Spec, cargo_target_dir: &Path) -> Result<Vec<(String, String)>, String> {
+fn scenario_env(
+    spec: &Spec,
+    cargo_target_dir: &Path,
+    execution_mode: ExecutionMode,
+    manifest: Option<&ArtifactManifest>,
+) -> Result<Vec<(String, String)>, String> {
     let mut env = BTreeMap::new();
     std::fs::create_dir_all(cargo_target_dir).map_err(|error| {
         format!(
@@ -675,12 +1466,56 @@ fn scenario_env(spec: &Spec, cargo_target_dir: &Path) -> Result<Vec<(String, Str
                 .to_string(),
         );
     }
+    if matches!(execution_mode, ExecutionMode::Prebuilt) {
+        let manifest = manifest.ok_or_else(|| {
+            "prebuilt scenario environment requires an artifact manifest".to_string()
+        })?;
+        apply_prebuilt_manifest_env(spec, &mut env, manifest)?;
+    }
     if matches!(spec.command, CommandSpec::Pytest { .. })
         && let Some(python) = compatible_python_bin()
     {
         env.insert("MEERKAT_PYTHON_BIN".to_string(), python.to_string());
     }
     Ok(env.into_iter().collect())
+}
+
+fn apply_prebuilt_manifest_env(
+    spec: &Spec,
+    env: &mut BTreeMap<String, String>,
+    manifest: &ArtifactManifest,
+) -> Result<(), String> {
+    for (binary, path) in &manifest.rust_bins {
+        let path = path.display().to_string();
+        env.insert(format!("CARGO_BIN_EXE_{binary}"), path.clone());
+        env.insert(rkat_test_bin_env_name(binary), path);
+    }
+
+    for binary in spec.cargo_bin_env {
+        let path = manifest.rust_bin(binary)?.display().to_string();
+        env.insert(format!("CARGO_BIN_EXE_{binary}"), path.clone());
+        env.insert(rkat_test_bin_env_name(binary), path);
+    }
+
+    for (key, value) in spec.env {
+        if key.starts_with("RKAT_TEST_BIN_") {
+            if let Some(binary) = bin_from_rkat_test_bin_env(key) {
+                env.insert(
+                    (*key).to_string(),
+                    manifest.rust_bin(&binary)?.display().to_string(),
+                );
+            }
+        } else if *key == "MEERKAT_BIN_PATH"
+            && let Some(binary) = binary_from_artifact_path_template(value)
+        {
+            env.insert(
+                (*key).to_string(),
+                manifest.rust_bin(&binary)?.display().to_string(),
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn clean_scenario_target_dir_if_requested(spec: &Spec, cargo_target_dir: &Path) {
@@ -932,6 +1767,157 @@ fn cargo_target_dir() -> Result<PathBuf, String> {
         .clone()
 }
 
+pub fn materialize_local_cargo_plan(
+    selection: &E2eSelection,
+    manifest_path: &Path,
+) -> Result<E2ePlan, String> {
+    let plan = plan_for_selection(selection)?;
+    let mut manifest = ArtifactManifest::default();
+
+    for requirement in &plan.requirements {
+        match requirement {
+            ArtifactRequirement::RustBin(requirement) => {
+                let path = materialize_rust_bin(requirement)?;
+                manifest.rust_bins.insert(requirement.bin.clone(), path);
+            }
+            ArtifactRequirement::RustTest(requirement) => {
+                let path = materialize_rust_test(requirement)?;
+                manifest.rust_tests.insert(requirement.key(), path);
+            }
+            ArtifactRequirement::NodeBuild { .. } | ArtifactRequirement::PythonEnv { .. } => {}
+        }
+    }
+
+    if let Some(parent) = manifest_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create e2e artifact manifest directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed to serialize e2e artifact manifest: {error}"))?;
+    std::fs::write(manifest_path, format!("{json}\n")).map_err(|error| {
+        format!(
+            "failed to write e2e artifact manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+
+    Ok(plan)
+}
+
+fn materialize_rust_bin(requirement: &RustBinRequirement) -> Result<PathBuf, String> {
+    let mut args = vec![
+        "build".to_string(),
+        "-p".to_string(),
+        requirement.package.clone(),
+        "--bin".to_string(),
+        requirement.bin.clone(),
+    ];
+    push_feature_args(&mut args, &requirement.features, requirement.all_features);
+    args.push("--message-format=json".to_string());
+    let messages = run_repo_cargo_json(&args)?;
+    executable_from_cargo_messages(&messages, &requirement.bin, "bin")?.ok_or_else(|| {
+        format!(
+            "cargo did not report executable path for bin {} ({})",
+            requirement.bin,
+            requirement.key()
+        )
+    })
+}
+
+fn materialize_rust_test(requirement: &RustTestRequirement) -> Result<PathBuf, String> {
+    let mut args = vec![
+        "test".to_string(),
+        "-p".to_string(),
+        requirement.package.clone(),
+        "--test".to_string(),
+        requirement.test_target.clone(),
+        "--no-run".to_string(),
+    ];
+    push_feature_args(&mut args, &requirement.features, requirement.all_features);
+    args.push("--message-format=json".to_string());
+    let messages = run_repo_cargo_json(&args)?;
+    executable_from_cargo_messages(&messages, &requirement.test_target, "test")?.ok_or_else(|| {
+        format!(
+            "cargo did not report executable path for test {} ({})",
+            requirement.test_target,
+            requirement.key()
+        )
+    })
+}
+
+fn push_feature_args(args: &mut Vec<String>, features: &BTreeSet<String>, all_features: bool) {
+    if all_features {
+        args.push("--all-features".to_string());
+    }
+    if !features.is_empty() {
+        args.push("--features".to_string());
+        args.push(features.iter().cloned().collect::<Vec<_>>().join(","));
+    }
+}
+
+fn run_repo_cargo_json(args: &[String]) -> Result<Vec<serde_json::Value>, String> {
+    eprintln!("e2e materialize cargo: {}", args.join(" "));
+    let output = StdCommand::new(repo_cargo())
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run repo-cargo {}: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "repo-cargo {} failed (exit {:?}):\n{}",
+            args.join(" "),
+            output.status.code(),
+            combine_output(&output.stdout, &output.stderr)
+        ));
+    }
+
+    let mut messages = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str(line)
+            .map_err(|error| format!("failed to parse cargo JSON message '{line}': {error}"))?;
+        messages.push(value);
+    }
+    Ok(messages)
+}
+
+fn executable_from_cargo_messages(
+    messages: &[serde_json::Value],
+    target_name: &str,
+    target_kind: &str,
+) -> Result<Option<PathBuf>, String> {
+    for message in messages {
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        let Some(target) = message.get("target") else {
+            continue;
+        };
+        if target.get("name").and_then(serde_json::Value::as_str) != Some(target_name) {
+            continue;
+        }
+        let has_kind = target
+            .get("kind")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some(target_kind)));
+        if !has_kind {
+            continue;
+        }
+        if let Some(executable) = message
+            .get("executable")
+            .and_then(serde_json::Value::as_str)
+        {
+            return Ok(Some(PathBuf::from(executable)));
+        }
+    }
+    Ok(None)
+}
+
 fn strict_prereqs_enabled() -> bool {
     matches!(
         std::env::var("MEERKAT_STRICT_E2E_PREREQS").as_deref(),
@@ -951,12 +1937,12 @@ fn completed_pre_commands() -> &'static Mutex<HashMap<String, PreCommandState>> 
     PRE_COMMANDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn command_display(command: &[&str]) -> String {
+fn command_display(command: &[String]) -> String {
     normalize_command(command).join(" ")
 }
 
-fn command_display_with_env(command: &[&str], env_overrides: &[(String, String)]) -> String {
-    normalize_command_with_env(command, env_overrides).join(" ")
+fn command_display_with_env(command: &[String], env_overrides: &[(String, String)]) -> String {
+    normalize_command_with_env_parts(command, env_overrides).join(" ")
 }
 
 fn scenario_spec(id: u16) -> Option<&'static Spec> {
@@ -3760,9 +4746,12 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandLockMode, Lane, normalize_command_with_env, pre_command_lock_mode, repo_cargo,
-        sanitize_artifact_key, scenario_spec, source_revision_key,
+        ArtifactManifest, ArtifactRequirement, CommandLockMode, E2eSelection, ExecutionMode, Lane,
+        build_commands_for_mode, normalize_command_with_env, plan_for_selection,
+        pre_command_lock_mode, repo_cargo, sanitize_artifact_key, scenario_spec,
+        smoke_test_filter_for_selection, source_revision_key,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn artifact_keys_are_stable_for_scenario_targets() {
@@ -3853,6 +4842,124 @@ mod tests {
         assert_eq!(
             pre_command_lock_mode(&["/bin/sh", "-c", "echo {cargo_target_dir}"]),
             CommandLockMode::ScenarioLocal
+        );
+    }
+
+    #[test]
+    fn smoke_selection_supports_scenario_suite_and_test_name() {
+        assert_eq!(
+            smoke_test_filter_for_selection(&E2eSelection::Scenario(62)).unwrap(),
+            Some("e2e_smoke_s62_".to_string())
+        );
+        assert_eq!(
+            smoke_test_filter_for_selection(&E2eSelection::Suite("mob-live-smoke".to_string()))
+                .unwrap(),
+            Some("e2e_smoke_mob_live_smoke".to_string())
+        );
+
+        let plan = plan_for_selection(&E2eSelection::SmokeTest(
+            "e2e_smoke_mob_live_smoke".to_string(),
+        ))
+        .unwrap();
+        assert_eq!(plan.specs.len(), 1);
+        assert_eq!(plan.specs[0].suite.as_deref(), Some("mob-live-smoke"));
+    }
+
+    #[test]
+    fn smoke_lane_plan_uses_existing_catalog_entries() {
+        let plan = plan_for_selection(&E2eSelection::Lane(Lane::Smoke)).unwrap();
+        assert_eq!(plan.specs.len(), 44);
+        assert!(
+            plan.specs
+                .iter()
+                .any(|spec| spec.id == Some(62) && spec.suite.is_none())
+        );
+        assert!(
+            plan.specs
+                .iter()
+                .any(|spec| spec.suite.as_deref() == Some("mob-live-smoke"))
+        );
+    }
+
+    #[test]
+    fn single_scenario_plan_avoids_unrelated_service_bins() {
+        let plan = plan_for_selection(&E2eSelection::Scenario(62)).unwrap();
+        let rust_bins = plan
+            .requirements
+            .iter()
+            .filter_map(|requirement| match requirement {
+                ArtifactRequirement::RustBin(requirement) => Some(requirement.bin.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rust_bins, vec!["rkat-rest", "rkat-rpc"]);
+        assert!(plan.requirements.iter().any(|requirement| matches!(
+            requirement,
+            ArtifactRequirement::RustTest(requirement)
+                if requirement.package == "meerkat-integration-tests"
+                    && requirement.test_target == "smoke_shared_realm"
+        )));
+    }
+
+    #[test]
+    fn manifest_parses_stable_rust_artifact_keys() {
+        let manifest = ArtifactManifest::from_json_str(
+            r#"{
+              "rust_bins": {
+                "rkat-rpc": "/tmp/rkat-rpc"
+              },
+              "rust_tests": {
+                "meerkat-integration-tests:smoke_shared_realm": "/tmp/smoke_shared_realm"
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.rust_bins["rkat-rpc"],
+            PathBuf::from("/tmp/rkat-rpc")
+        );
+        assert_eq!(
+            manifest.rust_tests["meerkat-integration-tests:smoke_shared_realm"],
+            PathBuf::from("/tmp/smoke_shared_realm")
+        );
+    }
+
+    #[test]
+    fn command_generation_switches_cargo_test_to_prebuilt_executable() {
+        let spec = scenario_spec(62).unwrap();
+        let manifest = ArtifactManifest::from_json_str(
+            r#"{
+              "rust_bins": {
+                "rkat-rpc": "/tmp/rkat-rpc",
+                "rkat-rest": "/tmp/rkat-rest"
+              },
+              "rust_tests": {
+                "meerkat-integration-tests:smoke_shared_realm": "/tmp/smoke_shared_realm"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let cargo = build_commands_for_mode(spec, ExecutionMode::Cargo, None).unwrap();
+        assert_eq!(cargo.command[0], "cargo");
+        assert!(cargo.command.contains(&"test".to_string()));
+
+        let prebuilt =
+            build_commands_for_mode(spec, ExecutionMode::Prebuilt, Some(&manifest)).unwrap();
+        assert_eq!(
+            prebuilt.command,
+            vec![
+                "/tmp/smoke_shared_realm",
+                "e2e_scenario_62_rest_bootstrap_to_rust_sdk_realtime_channel_exchange",
+                "--ignored",
+                "--nocapture"
+            ]
+        );
+        assert!(
+            prebuilt
+                .pre_commands
+                .iter()
+                .all(|command| command.first().map(String::as_str) != Some("cargo"))
         );
     }
 }

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: e2e-smoke-lane
+
+Environment selection:
+  TEST=e2e_smoke_mob_live_smoke
+  SCENARIO=62
+  SUITE=mob-live-smoke
+
+Execution modes:
+  MEERKAT_E2E_EXECUTION_MODE=cargo     Run the current nested-cargo harness.
+  MEERKAT_E2E_EXECUTION_MODE=prebuilt  Materialize selected artifacts first,
+                                       then run the harness from the manifest.
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+cd "${root}"
+
+selection_count=0
+selection_args=()
+filter=""
+
+if [[ -n "${TEST:-}" ]]; then
+  selection_count=$((selection_count + 1))
+  selection_args=(--test "${TEST}")
+  filter="${TEST}"
+fi
+if [[ -n "${SCENARIO:-}" ]]; then
+  selection_count=$((selection_count + 1))
+  selection_args=(--scenario "${SCENARIO}")
+  filter="e2e_smoke_s${SCENARIO}_"
+fi
+if [[ -n "${SUITE:-}" ]]; then
+  selection_count=$((selection_count + 1))
+  selection_args=(--suite "${SUITE}")
+fi
+
+if [[ "${selection_count}" -gt 1 ]]; then
+  echo "error: provide only one of TEST, SCENARIO, or SUITE" >&2
+  exit 2
+fi
+
+if [[ "${selection_count}" -eq 0 ]]; then
+  selection_args=(--lane smoke)
+fi
+
+mode="${MEERKAT_E2E_EXECUTION_MODE:-cargo}"
+case "${mode}" in
+  prebuilt|PREBUILT|Prebuilt|1|true|TRUE)
+    mode="prebuilt"
+    ;;
+  cargo|CARGO|Cargo|0|false|FALSE|"")
+    mode="cargo"
+    ;;
+  *)
+    echo "error: unknown MEERKAT_E2E_EXECUTION_MODE='${mode}'" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "${filter}" && "${selection_count}" -eq 1 ]]; then
+  filter="$("${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- smoke-test-filter "${selection_args[@]}")"
+fi
+
+test_args=(
+  test
+  -p
+  meerkat-integration-tests
+  --test
+  e2e_smoke_lane
+)
+if [[ -n "${filter}" ]]; then
+  test_args+=("${filter}")
+fi
+test_args+=(
+  --
+  --ignored
+  --nocapture
+)
+
+if [[ "${mode}" == "cargo" ]]; then
+  if [[ "${selection_count}" -eq 0 ]]; then
+    exec "${root}/scripts/repo-cargo" e2e-smoke
+  fi
+  exec "${root}/scripts/repo-cargo" "${test_args[@]}"
+fi
+
+if [[ -z "${MEERKAT_E2E_ARTIFACT_MANIFEST:-}" ]]; then
+  target_dir="$("${root}/scripts/repo-cargo" --print-env | awk -F= '$1 == "CARGO_TARGET_DIR" { print $2 }')"
+  selection_key="$(printf '%s-' "${selection_args[@]}" | tr -c 'A-Za-z0-9_.-' '-' | sed 's/-$//')"
+  export MEERKAT_E2E_ARTIFACT_MANIFEST="${target_dir}/e2e-lanes/prebuilt/${selection_key}/artifact-manifest.json"
+fi
+
+"${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- \
+  materialize \
+  --manifest "${MEERKAT_E2E_ARTIFACT_MANIFEST}" \
+  "${selection_args[@]}"
+
+export MEERKAT_E2E_EXECUTION_MODE=prebuilt
+exec "${root}/scripts/repo-cargo" "${test_args[@]}"

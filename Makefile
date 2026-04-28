@@ -72,7 +72,7 @@ e2e-live:
 # Compound live-provider smoke scenarios
 e2e-smoke:
 	@echo "$(YELLOW)Running e2e-smoke lane (ignored by default)...$(NC)"
-	@scripts/run-build-backend-lane e2e-smoke
+	@TEST="$(TEST)" SCENARIO="$(SCENARIO)" SUITE="$(SUITE)" scripts/run-build-backend-lane e2e-smoke
 
 # Live per-model catalog validation (ignored by default; on-demand / pre-release)
 e2e-models:
@@ -276,7 +276,7 @@ buildbuddy-e2e-live:
 
 buildbuddy-e2e-smoke:
 	@echo "$(YELLOW)Running BuildBuddy e2e-smoke lane (requires provider keys)...$(NC)"
-	@scripts/buildbuddy-dev e2e-smoke $(BUILDBUDDY_ARGS)
+	@TEST="$(TEST)" SCENARIO="$(SCENARIO)" SUITE="$(SUITE)" scripts/buildbuddy-dev e2e-smoke $(BUILDBUDDY_ARGS)
 
 buildbuddy-agent-gate: buildbuddy-doctor
 	@echo "$(GREEN)Running BuildBuddy agent changed-path gate...$(NC)"
@@ -631,6 +631,7 @@ help:
 	@echo "  $(GREEN)e2e-system$(NC)    - Run real-binary / real-local-resource lane"
 	@echo "  $(GREEN)e2e-live$(NC)      - Run targeted live-provider lane (ignored)"
 	@echo "  $(GREEN)e2e-smoke$(NC)     - Run kitchen-sink live smoke lane (ignored)"
+	@echo "                  Select with TEST=..., SCENARIO=..., or SUITE=...; set MEERKAT_E2E_EXECUTION_MODE=prebuilt for materialized artifacts"
 	@echo "  $(GREEN)test-int-real$(NC) - Legacy alias for e2e-system"
 	@echo "  $(GREEN)test-e2e$(NC)      - Legacy alias for e2e-live + e2e-smoke"
 	@echo "  $(GREEN)test-all$(NC)      - Run all-feature fast suite"

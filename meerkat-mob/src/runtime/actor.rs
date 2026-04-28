@@ -1388,6 +1388,7 @@ impl MobActor {
                     role: entry.role,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
+                    transport_public_key: entry.transport_public_key,
                     state: entry.state,
                     wired_to: entry.wired_to,
                     external_peer_specs: entry.external_peer_specs,
@@ -4789,17 +4790,18 @@ impl MobActor {
         // and fails with `"autonomous member '{id}' missing roster entry for
         // startup readiness"` (#30 D-spawn-readiness-lookup).
         //
-        // `peer_id` is resolved from the session's comms runtime public key;
-        // callers like `list_members` project it directly from the roster
-        // entry (see `test_member_roster_surfaces_peer_id`).
-        let peer_id = if let Some(session_id) = member_ref.bridge_session_id() {
-            self.session_service
-                .comms_runtime(session_id)
-                .await
-                .and_then(|runtime| runtime.public_key())
-        } else {
-            None
-        };
+        // `peer_id` is the canonical comms routing UUID. Keep the Ed25519
+        // public key in its own transport/auth slot so roster projections do
+        // not bind peer-directory lookups to key material.
+        let (peer_id, transport_public_key) =
+            if let Some(session_id) = member_ref.bridge_session_id() {
+                match self.session_service.comms_runtime(session_id).await {
+                    Some(runtime) => (runtime.peer_id(), runtime.public_key()),
+                    None => (None, None),
+                }
+            } else {
+                (None, None)
+            };
         {
             let mut roster = self.roster.write().await;
             roster.add_member(crate::roster::RosterAddEntry {
@@ -4811,6 +4813,7 @@ impl MobActor {
                 runtime_mode,
                 member_ref: Self::sanitized_member_ref(&member_ref),
                 peer_id,
+                transport_public_key,
                 labels: labels.clone(),
                 effective_profile_override: effective_profile_override.clone(),
             });
@@ -9373,7 +9376,8 @@ impl MobActor {
                     role: profile_name.clone(),
                     member_ref: member_ref.clone(),
                     runtime_mode: crate::MobRuntimeMode::TurnDriven,
-                    peer_id: spawned_comms.as_ref().and_then(|c| c.public_key()),
+                    peer_id: spawned_comms.as_ref().and_then(|c| c.peer_id()),
+                    transport_public_key: spawned_comms.as_ref().and_then(|c| c.public_key()),
                     state: crate::roster::MemberState::Active,
                     wired_to: std::collections::BTreeSet::new(),
                     external_peer_specs: std::collections::BTreeMap::new(),

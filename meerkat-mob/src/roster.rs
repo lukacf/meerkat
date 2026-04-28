@@ -14,11 +14,19 @@
 use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
 use crate::runtime_mode::MobRuntimeMode;
-use meerkat_core::comms::TrustedPeerDescriptor;
+use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+fn deserialize_optional_peer_id<'de, D>(deserializer: D) -> Result<Option<PeerId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| PeerId::parse(&value).ok()))
+}
 
 /// Lifecycle state for a roster member.
 ///
@@ -94,9 +102,16 @@ pub struct RosterEntry {
     // --- Internal bridge fields (pub(crate)) ---
     /// Backend-neutral bridge identity.
     pub(crate) member_ref: MemberRef,
-    /// Public comms peer identifier when this member exposes a comms runtime.
+    /// Canonical comms peer identifier when this member exposes a comms runtime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_peer_id"
+    )]
+    pub(crate) peer_id: Option<PeerId>,
+    /// Transport/auth signing public key for this member's comms runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) peer_id: Option<String>,
+    pub(crate) transport_public_key: Option<String>,
     /// Trusted specs for external peers keyed by their projected peer name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) external_peer_specs: BTreeMap<AgentIdentity, TrustedPeerDescriptor>,
@@ -121,7 +136,8 @@ pub(crate) struct RosterAddEntry {
     pub(crate) role: ProfileName,
     pub(crate) runtime_mode: MobRuntimeMode,
     pub(crate) member_ref: MemberRef,
-    pub(crate) peer_id: Option<String>,
+    pub(crate) peer_id: Option<PeerId>,
+    pub(crate) transport_public_key: Option<String>,
     pub(crate) labels: BTreeMap<String, String>,
     pub(crate) effective_profile_override: Option<crate::profile::Profile>,
 }
@@ -168,6 +184,7 @@ impl Roster {
                     runtime_mode: member_spawned.runtime_mode,
                     member_ref,
                     peer_id: None,
+                    transport_public_key: None,
                     labels: member_spawned.labels.clone(),
                     effective_profile_override: None,
                 });
@@ -255,6 +272,7 @@ impl Roster {
                     member_ref: entry.member_ref,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
+                    transport_public_key: entry.transport_public_key,
                     state: MemberState::default(),
                     wired_to: BTreeSet::new(),
                     external_peer_specs: BTreeMap::new(),
@@ -401,14 +419,16 @@ impl Roster {
         false
     }
 
-    /// Update the resolved comms peer id for an existing meerkat.
-    pub(crate) fn set_peer_id(
+    /// Update the resolved comms identity for an existing meerkat.
+    pub(crate) fn set_comms_identity(
         &mut self,
         agent_identity: &AgentIdentity,
-        peer_id: Option<String>,
+        peer_id: Option<PeerId>,
+        transport_public_key: Option<String>,
     ) -> bool {
         if let Some(entry) = self.get_mut(agent_identity) {
             entry.peer_id = peer_id;
+            entry.transport_public_key = transport_public_key;
             return true;
         }
         false
@@ -560,9 +580,14 @@ impl RosterEntry {
         self.member_ref.bridge_session_id()
     }
 
-    /// Bridge-internal peer ID for comms wiring.
-    pub fn peer_id(&self) -> Option<&str> {
-        self.peer_id.as_deref()
+    /// Canonical comms peer ID for this roster entry.
+    pub fn peer_id(&self) -> Option<PeerId> {
+        self.peer_id
+    }
+
+    /// Transport/auth public key for comms wiring, if known.
+    pub fn transport_public_key(&self) -> Option<&str> {
+        self.transport_public_key.as_deref()
     }
 }
 
@@ -594,6 +619,7 @@ mod tests {
             runtime_mode,
             member_ref,
             peer_id: None,
+            transport_public_key: None,
             labels,
             effective_profile_override: None,
         }
@@ -828,6 +854,7 @@ mod tests {
             member_ref: MemberRef::from_bridge_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             peer_id: None,
+            transport_public_key: None,
             state: MemberState::default(),
             wired_to: {
                 let mut s = BTreeSet::new();
@@ -856,6 +883,7 @@ mod tests {
             member_ref: MemberRef::from_bridge_session_id(session_id()),
             runtime_mode: MobRuntimeMode::AutonomousHost,
             peer_id: None,
+            transport_public_key: None,
             state: MemberState::Active,
             wired_to: BTreeSet::new(),
             external_peer_specs: BTreeMap::new(),

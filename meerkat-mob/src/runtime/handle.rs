@@ -16,7 +16,7 @@ use crate::runtime::reconcile::{
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
-    PeerDirectoryEntry, PeerReachability, PeerReachabilityReason, TrustedPeerDescriptor,
+    PeerDirectoryEntry, PeerId, PeerReachability, PeerReachabilityReason, TrustedPeerDescriptor,
 };
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
@@ -201,8 +201,12 @@ pub struct MobMemberListEntry {
     pub(crate) agent_runtime_id: AgentRuntimeId,
     #[serde(skip)]
     pub(crate) fence_token: FenceToken,
+    /// Canonical comms routing ID for bridge-internal peer lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) peer_id: Option<String>,
+    pub(crate) peer_id: Option<PeerId>,
+    /// Transport/auth public key material, separate from canonical `peer_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transport_public_key: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) external_peer_specs: BTreeMap<AgentIdentity, TrustedPeerDescriptor>,
     #[serde(skip)]
@@ -1563,10 +1567,8 @@ impl MobHandle {
             .comms_runtime(bridge_session_id)
             .await?;
         let peers = comms.peers().await;
-        let peers_by_id: HashMap<String, &PeerDirectoryEntry> = peers
-            .iter()
-            .map(|peer| (peer.peer_id.as_str(), peer))
-            .collect();
+        let peers_by_id: HashMap<PeerId, &PeerDirectoryEntry> =
+            peers.iter().map(|peer| (peer.peer_id, peer)).collect();
         let peers_by_name: HashMap<&str, &PeerDirectoryEntry> = peers
             .iter()
             .map(|peer| (peer.name.as_str(), peer))
@@ -1580,7 +1582,7 @@ impl MobHandle {
             let wired_peer_meerkat = MeerkatId::from(wired_peer);
             let matched = if let Some(spec) = entry.external_peer_specs.get(&wired_peer_meerkat) {
                 peers_by_id
-                    .get(&spec.peer_id.as_str())
+                    .get(&spec.peer_id)
                     .copied()
                     .or_else(|| peers_by_name.get(spec.name.as_str()).copied())
             } else {
@@ -1592,15 +1594,14 @@ impl MobHandle {
                         .session_service
                         .comms_runtime(target_session_id)
                         .await
-                        .and_then(|runtime| runtime.public_key()),
+                        .and_then(|runtime| runtime.peer_id()),
                     None => None,
                 };
                 live_peer_id
-                    .as_deref()
-                    .and_then(|peer_id| peers_by_id.get(peer_id).copied())
+                    .and_then(|peer_id| peers_by_id.get(&peer_id).copied())
                     .or_else(|| {
                         local_entry
-                            .and_then(|peer_entry| peer_entry.peer_id.as_deref())
+                            .and_then(|peer_entry| peer_entry.peer_id.as_ref())
                             .and_then(|peer_id| peers_by_id.get(peer_id).copied())
                     })
                     .or_else(|| {
@@ -1674,7 +1675,8 @@ impl MobHandle {
                     fence_token: entry.fence_token,
                     role: entry.role.clone(),
                     runtime_mode: entry.runtime_mode,
-                    peer_id: entry.peer_id.clone(),
+                    peer_id: entry.peer_id,
+                    transport_public_key: entry.transport_public_key.clone(),
                     state: entry.state,
                     wired_to: entry.wired_to.clone(),
                     external_peer_specs: entry.external_peer_specs.clone(),

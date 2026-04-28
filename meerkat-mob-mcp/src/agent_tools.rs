@@ -537,7 +537,7 @@ impl AgentMobToolSurface {
         }
         // Same reasoning as `parent_spec` above: inproc transport, zero
         // pubkey by design.
-        let Ok(helper_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+        let Ok(helper_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned_typed(
             &helper_comms_name,
             helper_peer_id,
             format!("inproc://{helper_comms_name}"),

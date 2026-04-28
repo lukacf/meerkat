@@ -1072,18 +1072,28 @@ impl MobBuilder {
             .collect::<HashSet<_>>();
         for entry in &entries {
             if broken_members.contains(&entry.agent_identity) {
-                let _ = roster.set_peer_id(&entry.agent_identity, None);
+                let _ = roster.set_comms_identity(&entry.agent_identity, None, None);
                 continue;
             }
             let local_comms = provisioner.comms_runtime(&entry.member_ref).await;
             if let Some(comms_a) = &local_comms {
+                let peer_id_a = comms_a.peer_id().ok_or_else(|| {
+                    MobError::WiringError(format!(
+                        "resume requires peer id for wired member '{}'",
+                        entry.agent_identity
+                    ))
+                })?;
                 let key_a = comms_a.public_key().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume requires public key for wired member '{}'",
                         entry.agent_identity
                     ))
                 })?;
-                let _ = roster.set_peer_id(&entry.agent_identity, Some(key_a.clone()));
+                let _ = roster.set_comms_identity(
+                    &entry.agent_identity,
+                    Some(peer_id_a),
+                    Some(key_a.clone()),
+                );
             } else if entry.wired_to.is_empty() {
                 continue;
             }

@@ -14,8 +14,8 @@ mod state;
 pub mod test_turn_state_handle;
 use crate::budget::Budget;
 use crate::comms::{
-    CommsCommand, EventStream, PeerDirectoryEntry, SendAndStreamError, SendError, SendReceipt,
-    StreamError, StreamScope, TrustedPeerDescriptor,
+    CommsCommand, EventStream, PeerDirectoryEntry, PeerId, SendAndStreamError, SendError,
+    SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use crate::compact::SessionCompactionCadence;
 use crate::completion_feed::CompletionSeq;
@@ -609,9 +609,24 @@ pub enum CommsCapabilityError {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait CommsRuntime: Send + Sync {
-    /// Runtime-local public key identifier, if available.
+    /// Canonical runtime routing identity for this peer, if available.
+    ///
+    /// `PeerId` is the UUID-shaped routing key used by peer directories and
+    /// trust stores. Implementations that only have the legacy string carrier
+    /// may return a parsed UUID-shaped `public_key()` value; implementations
+    /// with Ed25519 public keys should override this and return the pubkey-
+    /// derived canonical [`PeerId`].
+    fn peer_id(&self) -> Option<PeerId> {
+        self.public_key()
+            .as_deref()
+            .and_then(|public_key| PeerId::parse(public_key).ok())
+    }
+
+    /// Runtime-local transport/auth public key, if available.
     ///
     /// Returns an Ed25519 public key string in `ed25519:<base64>` format.
+    /// This is not the canonical routing [`PeerId`]; use [`Self::peer_id`]
+    /// for roster/projection identity and peer-directory lookups.
     fn public_key(&self) -> Option<String> {
         None
     }

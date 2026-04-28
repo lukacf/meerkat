@@ -177,13 +177,12 @@ impl SessionBackend {
         //
         // Pre-#24 `PeerId::parse` accepted arbitrary strings (including
         // the `"ed25519:…"` form); post-#24 it only accepts hyphenated
-        // UUIDs. Tests with `MockCommsRuntime` pass a UUID-shaped peer_id
-        // directly (the mock synthesizes one off the name bytes, not a
-        // real keypair), so we fall back to the legacy
-        // `test_only_unsigned` zero-pubkey descriptor when the caller
-        // supplies a non-ed25519 peer_id string. Those paths remain
-        // inproc-only — signature verification is bypassed there, so a
-        // zero-pubkey descriptor is admission-safe.
+        // UUIDs. Some legacy test/runtime shims still pass a UUID-shaped
+        // peer_id directly instead of an Ed25519 public-key carrier, so we
+        // fall back to the legacy `test_only_unsigned` zero-pubkey descriptor
+        // for non-ed25519 strings. Those paths remain inproc-only —
+        // signature verification is bypassed there, so a zero-pubkey
+        // descriptor is admission-safe.
         if let Some(pubkey_b64) = fallback_peer_id.strip_prefix("ed25519:") {
             let _ = pubkey_b64; // pattern anchor; full parse delegates below.
             let pubkey =

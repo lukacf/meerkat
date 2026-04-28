@@ -21,7 +21,7 @@ use indexmap::IndexMap;
 use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerName, PeerReachability,
+    CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerReachability,
     PeerReachabilityReason, PeerRoute, SendError, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
@@ -78,6 +78,7 @@ struct MockCommsBehavior {
 }
 
 struct MockCommsRuntime {
+    default_peer_id: PeerId,
     default_public_key: String,
     behavior: std::sync::RwLock<MockCommsBehavior>,
     remove_failures_remaining: std::sync::Mutex<usize>,
@@ -96,10 +97,10 @@ impl MockCommsRuntime {
                 .wrapping_add(byte)
                 .rotate_left((index % 8) as u32);
         }
+        let public_key = meerkat_comms::PubKey::new(key_bytes);
         Self {
-            default_public_key: meerkat_comms::PubKey::new(key_bytes)
-                .to_peer_id()
-                .to_string(),
+            default_peer_id: public_key.to_peer_id(),
+            default_public_key: public_key.to_pubkey_string(),
             behavior: std::sync::RwLock::new(behavior),
             remove_failures_remaining: std::sync::Mutex::new(usize::from(
                 behavior.fail_remove_trust_once,
@@ -178,6 +179,18 @@ impl MockCommsRuntime {
 
 #[async_trait]
 impl CoreCommsRuntime for MockCommsRuntime {
+    fn peer_id(&self) -> Option<PeerId> {
+        let behavior = self
+            .behavior
+            .read()
+            .expect("poisoned behavior lock in mock runtime");
+        if behavior.missing_public_key {
+            None
+        } else {
+            Some(self.default_peer_id)
+        }
+    }
+
     fn public_key(&self) -> Option<String> {
         let behavior = self
             .behavior
@@ -817,9 +830,9 @@ impl MockSessionService {
             )
         };
         if let (Some(from_runtime), Some(to_runtime)) = (from_runtime, to_runtime)
-            && let Some(to_key) = to_runtime.public_key()
+            && let Some(to_key) = to_runtime.peer_id()
         {
-            let _ = from_runtime.remove_trusted_peer(&to_key).await;
+            let _ = from_runtime.remove_trusted_peer(&to_key.to_string()).await;
         }
     }
 
@@ -9919,14 +9932,29 @@ async fn test_member_roster_surfaces_peer_id() {
         .comms_runtime(&lead_sid)
         .await
         .expect("lead comms runtime")
-        .public_key()
+        .peer_id()
         .expect("lead peer id");
+    let transport_public_key = service
+        .comms_runtime(&lead_sid)
+        .await
+        .expect("lead comms runtime")
+        .public_key()
+        .expect("lead transport public key");
 
     let entry = handle
         .get_member(&AgentIdentity::from("l-1"))
         .await
         .expect("member should exist");
-    assert_eq!(entry.peer_id.as_deref(), Some(expected_peer_id.as_str()));
+    assert_eq!(entry.peer_id, Some(expected_peer_id));
+    assert_eq!(
+        entry.transport_public_key.as_deref(),
+        Some(transport_public_key.as_str())
+    );
+    assert_ne!(
+        expected_peer_id.to_string(),
+        transport_public_key,
+        "roster peer_id must be the canonical UUID, not the Ed25519 public key"
+    );
 }
 
 #[tokio::test]
@@ -9980,6 +10008,80 @@ async fn test_member_status_projects_unreachable_peer_connectivity() {
     assert_eq!(connectivity.unknown_peer_count, 0);
     assert_eq!(connectivity.unreachable_peers.len(), 1);
     assert_eq!(connectivity.unreachable_peers[0].peer, right_name);
+    assert_eq!(
+        connectivity.unreachable_peers[0].reason,
+        Some(PeerReachabilityReason::OfflineOrNoAck)
+    );
+}
+
+#[tokio::test]
+async fn test_member_status_matches_connectivity_by_canonical_peer_id_when_public_key_differs() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let left_id = MeerkatId::from("l-1");
+    let right_id = MeerkatId::from("w-1");
+    let left_session_id = handle
+        .spawn(ProfileName::from("lead"), left_id.clone(), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let right_session_id = handle
+        .spawn(ProfileName::from("worker"), right_id.clone(), None)
+        .await
+        .expect("spawn worker")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .wire(AgentIdentity::from(left_id.as_str()), right_id.clone())
+        .await
+        .expect("wire local peers");
+
+    let right_runtime = service
+        .comms_runtime(&right_session_id)
+        .await
+        .expect("right comms runtime");
+    let right_peer_id = right_runtime.peer_id().expect("right canonical peer id");
+    let right_public_key = right_runtime
+        .public_key()
+        .expect("right transport public key");
+    assert_ne!(
+        right_peer_id.to_string(),
+        right_public_key,
+        "test fixture must exercise distinct canonical peer id and public key carriers"
+    );
+
+    let alias_name = format!("{}/worker/right-alias", handle.mob_id());
+    let alias_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+        alias_name.clone(),
+        right_peer_id,
+        format!("inproc://{alias_name}"),
+    )
+    .expect("valid alias peer spec");
+    service
+        .force_add_trust_from_spec(&left_session_id, alias_spec)
+        .await;
+    service
+        .set_peer_status(
+            &left_session_id,
+            &alias_name,
+            PeerReachability::Unreachable,
+            Some(PeerReachabilityReason::OfflineOrNoAck),
+        )
+        .await;
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from(left_id.as_str()))
+        .await
+        .expect("member status should succeed");
+    let connectivity = snapshot
+        .peer_connectivity
+        .expect("live comms runtime should project peer connectivity");
+    assert_eq!(connectivity.reachable_peer_count, 0);
+    assert_eq!(connectivity.unknown_peer_count, 0);
+    assert_eq!(connectivity.unreachable_peers.len(), 1);
+    assert_eq!(connectivity.unreachable_peers[0].peer, alias_name);
     assert_eq!(
         connectivity.unreachable_peers[0].reason,
         Some(PeerReachabilityReason::OfflineOrNoAck)

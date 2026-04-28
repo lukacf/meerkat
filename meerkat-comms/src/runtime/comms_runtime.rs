@@ -19,7 +19,7 @@ use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, PeerReachabilityReason, PeerRoute, SendAndStreamError,
+    PeerDirectorySource, PeerId, PeerName, PeerReachabilityReason, PeerRoute, SendAndStreamError,
     SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
@@ -281,6 +281,11 @@ impl CoreCommsRuntime for CommsRuntime {
     fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
         self.inbox_notify.clone()
     }
+
+    fn peer_id(&self) -> Option<PeerId> {
+        Some(self.public_key.to_peer_id())
+    }
+
     fn public_key(&self) -> Option<String> {
         Some(self.public_key.to_pubkey_string())
     }

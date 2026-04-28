@@ -201,6 +201,7 @@ mod tests {
                 member_ref: MemberRef::from_bridge_session_id(SessionId::new()),
                 runtime_mode: crate::MobRuntimeMode::TurnDriven,
                 peer_id: None,
+                transport_public_key: None,
                 state: MemberState::Retiring,
                 wired_to: BTreeSet::new(),
                 external_peer_specs: std::collections::BTreeMap::new(),

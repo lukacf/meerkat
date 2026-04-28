@@ -113,6 +113,14 @@ export {
   SkillNotFoundError,
 } from "./generated/errors.js";
 
+export type {
+  WireAssistantImageRef,
+  WireGenerateImageExecutionPlan,
+  WireGenerateImageRequest,
+  WireImageGenerationToolResult,
+  WireImageOperationPhase,
+} from "./generated/types.js";
+
 export { CONTRACT_VERSION } from "./generated/types.js";
 export type {
   CatalogModelEntry,

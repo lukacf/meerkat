@@ -1,7 +1,7 @@
-error[E0609]: no field `fields` on type `State`
+error[E0609]: no field `fields` on type `meerkat_machine_kernels::generated::meerkat::State`
  --> tests/compile_fail/typed_state_has_no_fields_map.rs:5:19
   |
 5 |     let _ = state.fields.get("session_id");
   |                   ^^^^^^ unknown field
   |
-  = note: available fields are: `phase`, `session_id`, `active_runtime_id`
+  = note: available fields are: `phase`, `session_id`, `active_runtime_id`, `active_fence_token`, `current_run_id` ... and 95 others

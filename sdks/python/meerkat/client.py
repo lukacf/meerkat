@@ -63,7 +63,12 @@ from .mob import (
     WorkOrigin,
 )
 from .session import DeferredSession, Session, _normalize_skill_ref
-from .streaming import EventStream, EventSubscription, _StdoutDispatcher
+from .streaming import (
+    RPC_STDOUT_LIMIT_BYTES,
+    EventStream,
+    EventSubscription,
+    _StdoutDispatcher,
+)
 from .tools import ToolRegistry
 from .types import (
     AttributedEvent,
@@ -265,6 +270,7 @@ class MeerkatClient:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=RPC_STDOUT_LIMIT_BYTES,
         )
         assert self._process.stdout is not None
         self._dispatcher = _StdoutDispatcher(self._process.stdout)
@@ -2572,6 +2578,7 @@ class MeerkatClient:
         role = data.get("role", "")
         return SessionMessage(
             role=role,
+            created_at=str(data.get("created_at", "")),
             content=MeerkatClient._parse_content_input(data["content"]) if "content" in data else None,
             tool_calls=[
                 SessionToolCall(
@@ -2639,12 +2646,22 @@ class MeerkatClient:
     @staticmethod
     def _parse_session_assistant_block(data: dict[str, Any]) -> SessionAssistantBlock:
         block_data = data.get("data", {})
+        if not isinstance(block_data, dict):
+            block_data = {}
+        blob_ref = block_data.get("blob_ref")
+        blob_id = blob_ref.get("blob_id") if isinstance(blob_ref, dict) else None
         return SessionAssistantBlock(
             block_type=data.get("block_type", ""),
             text=block_data.get("text"),
             id=block_data.get("id"),
             name=block_data.get("name"),
             args=block_data.get("args"),
+            image_id=block_data.get("image_id"),
+            blob_id=str(blob_id) if blob_id is not None else None,
+            media_type=block_data.get("media_type"),
+            width=MeerkatClient._parse_int(block_data.get("width")) if "width" in block_data else None,
+            height=MeerkatClient._parse_int(block_data.get("height")) if "height" in block_data else None,
+            revised_prompt=block_data.get("revised_prompt") if isinstance(block_data.get("revised_prompt"), dict) else None,
             meta=block_data.get("meta"),
         )
 

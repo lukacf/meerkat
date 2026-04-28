@@ -14,7 +14,9 @@ from meerkat import RealtimeChannel
 from meerkat.errors import MeerkatError
 
 from .live_smoke_support import (
+    gemini_image_model,
     has_anthropic_api_key,
+    has_gemini_api_key,
     has_openai_api_key,
     live_client,
     make_prompt_input,
@@ -38,6 +40,11 @@ requires_live_llm = pytest.mark.skipif(
 requires_mixed_llms = pytest.mark.skipif(
     not (has_anthropic_api_key() and has_openai_api_key()),
     reason="need both ANTHROPIC_API_KEY and OPENAI_API_KEY",
+)
+
+requires_anthropic_and_gemini = pytest.mark.skipif(
+    not (has_anthropic_api_key() and has_gemini_api_key()),
+    reason="need both ANTHROPIC_API_KEY and GEMINI_API_KEY",
 )
 
 
@@ -116,6 +123,26 @@ def realtime_frames_show_turn_activity(frames: list[dict[str, object]]) -> bool:
 
 def realtime_frames_show_turn_completed(frames: list[dict[str, object]]) -> bool:
     return any(realtime_frame_event_type(frame) == "turn_completed" for frame in frames)
+
+
+def assistant_image_blocks(history):
+    return [
+        block
+        for message in history.messages
+        if message.role in {"assistant", "block_assistant"}
+        for block in message.blocks
+        if block.block_type == "image"
+    ]
+
+
+async def assert_fetchable_image_blob(client, block):
+    assert block.image_id, "assistant image block should expose image_id"
+    assert block.blob_id, "assistant image block should expose blob_id"
+    assert block.media_type and block.media_type.startswith("image/")
+    payload = await client.get_blob(block.blob_id)
+    assert payload.blob_id == block.blob_id
+    assert payload.media_type.startswith("image/")
+    assert len(payload.data_base64) > 1024
 
 
 async def read_realtime_until_ready_or_idle(
@@ -862,3 +889,36 @@ if include_scenario(64):
                 lambda frame, _frames: frame.get("type") == "channel.closed",
             )
             assert closed_frames[-1]["type"] == "channel.closed"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 74: Python SDK Gemini image generation with provider params
+# ---------------------------------------------------------------------------
+
+
+if include_scenario(74):
+    @pytest.mark.asyncio
+    @requires_anthropic_and_gemini
+    async def test_smoke_scenario_74_python_sdk_gemini_image_provider_params():
+        async with live_client() as client:
+            prompt = f"""
+Use the generate_image tool exactly once. You are an Anthropic chat model, but the image target must be Gemini.
+Pass request.provider="gemini",
+request.model="{gemini_image_model()}", request.intent="generate",
+request.prompt="A crisp poster with the text PY-GEMINI-74 clearly written in large black letters",
+request.size="1536x1024", request.quality="auto", request.format="png",
+request.count=1, and request.provider_params={{"aspect_ratio":"16:9","image_size":"1K"}}.
+After the tool returns, reply with PY-GEMINI-74-DONE and no extra prose.
+"""
+            session = await client.create_session(
+                prompt,
+                model=smoke_model(),
+                provider="anthropic",
+                enable_builtins=True,
+            )
+            assert "py-gemini-74" in session.text.lower()
+
+            history = await client.read_session_history(session.id)
+            images = assistant_image_blocks(history)
+            assert images, "Gemini image generation should append an assistant image block"
+            await assert_fetchable_image_blob(client, images[-1])

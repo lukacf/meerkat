@@ -2249,6 +2249,9 @@ impl AgentFactory {
                         None,
                         build_config.realm_id.as_deref(),
                     )
+                    .or_else(|_| {
+                        Self::resolve_realm_binding_for_provider(config, image_provider, None, None)
+                    })
                 else {
                     continue;
                 };

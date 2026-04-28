@@ -68,9 +68,14 @@ fn strip_media_from_messages(messages: &[Message]) -> Vec<Message> {
         .map(|msg| match msg {
             Message::User(user) => {
                 let content = strip_media_for_compaction(&user.content);
-                Message::User(meerkat_core::types::UserMessage::with_blocks(content))
+                let mut user = user.clone();
+                user.content = content;
+                Message::User(user)
             }
-            Message::ToolResults { results } => {
+            Message::ToolResults {
+                results,
+                created_at,
+            } => {
                 let results = results
                     .iter()
                     .map(|r| {
@@ -82,7 +87,10 @@ fn strip_media_from_messages(messages: &[Message]) -> Vec<Message> {
                         )
                     })
                     .collect();
-                Message::ToolResults { results }
+                Message::ToolResults {
+                    results,
+                    created_at: *created_at,
+                }
             }
             other => other.clone(),
         })
@@ -324,9 +332,7 @@ mod tests {
     fn test_rebuild_preserves_system_prompt() {
         let c = DefaultCompactor::new(make_config());
         let messages = vec![
-            Message::System(SystemMessage {
-                content: "system".to_string(),
-            }),
+            Message::System(SystemMessage::new("system")),
             Message::User(UserMessage::text("turn1")),
             Message::User(UserMessage::text("turn2")),
             Message::User(UserMessage::text("turn3")),
@@ -443,43 +449,39 @@ mod tests {
         // Turn 1: User -> BlockAssistant(tool call) -> ToolResults -> BlockAssistant(text)
         // Turn 2: User -> BlockAssistant(text)
         let messages = vec![
-            Message::System(SystemMessage {
-                content: "You are helpful.".to_string(),
-            }),
+            Message::System(SystemMessage::new("You are helpful.")),
             // Turn 1
             Message::User(UserMessage::text("What is the weather?")),
-            Message::BlockAssistant(BlockAssistantMessage {
-                blocks: vec![AssistantBlock::ToolUse {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
                     id: "tc_1".to_string(),
                     name: "get_weather".to_string(),
                     args: args_raw,
                     meta: None,
                 }],
-                stop_reason: StopReason::ToolUse,
-            }),
-            Message::ToolResults {
-                results: vec![ToolResult::new(
-                    "tc_1".to_string(),
-                    "Sunny, 25C".to_string(),
-                    false,
-                )],
-            },
-            Message::BlockAssistant(BlockAssistantMessage {
-                blocks: vec![AssistantBlock::Text {
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "tc_1".to_string(),
+                "Sunny, 25C".to_string(),
+                false,
+            )]),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
                     text: "It's sunny in Tokyo!".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
-            }),
+                StopReason::EndTurn,
+            )),
             // Turn 2
             Message::User(UserMessage::text("Thanks!")),
-            Message::BlockAssistant(BlockAssistantMessage {
-                blocks: vec![AssistantBlock::Text {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
                     text: "You're welcome!".to_string(),
                     meta: None,
                 }],
-                stop_reason: StopReason::EndTurn,
-            }),
+                StopReason::EndTurn,
+            )),
         ];
 
         let result = c.rebuild_history(&messages, "Summary of weather conversation");
@@ -580,28 +582,26 @@ mod tests {
                     },
                 },
             ])),
-            Message::ToolResults {
-                results: vec![ToolResult::with_blocks(
-                    "tc_1".to_string(),
-                    vec![
-                        ContentBlock::Text {
-                            text: "screenshot captured".to_string(),
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "tc_1".to_string(),
+                vec![
+                    ContentBlock::Text {
+                        text: "screenshot captured".to_string(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "screenshotdata".into(),
+                    },
+                    ContentBlock::Video {
+                        media_type: "video/webm".to_string(),
+                        duration_ms: 7_000,
+                        data: meerkat_core::VideoData::Inline {
+                            data: "toolvideo".to_string(),
                         },
-                        ContentBlock::Image {
-                            media_type: "image/png".to_string(),
-                            data: "screenshotdata".into(),
-                        },
-                        ContentBlock::Video {
-                            media_type: "video/webm".to_string(),
-                            duration_ms: 7_000,
-                            data: meerkat_core::VideoData::Inline {
-                                data: "toolvideo".to_string(),
-                            },
-                        },
-                    ],
-                    false,
-                )],
-            },
+                    },
+                ],
+                false,
+            )]),
         ];
 
         let prepared = c.prepare_for_summarization(&messages);
@@ -622,7 +622,7 @@ mod tests {
         }
 
         // Tool result: text preserved, media replaced
-        if let Message::ToolResults { results } = &prepared[1] {
+        if let Message::ToolResults { results, .. } = &prepared[1] {
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].content.len(), 3);
             assert!(
@@ -736,21 +736,19 @@ mod tests {
         let messages = vec![
             Message::User(UserMessage::text("old turn")),
             Message::User(UserMessage::text("latest turn")),
-            Message::ToolResults {
-                results: vec![ToolResult::with_blocks(
-                    "tool_1".to_string(),
-                    vec![
-                        ContentBlock::Text {
-                            text: "saw this".to_string(),
-                        },
-                        ContentBlock::Image {
-                            media_type: "image/jpeg".to_string(),
-                            data: "abc".into(),
-                        },
-                    ],
-                    false,
-                )],
-            },
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "tool_1".to_string(),
+                vec![
+                    ContentBlock::Text {
+                        text: "saw this".to_string(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/jpeg".to_string(),
+                        data: "abc".into(),
+                    },
+                ],
+                false,
+            )]),
         ];
 
         let result = c.rebuild_history(&messages, "summary");
@@ -761,7 +759,7 @@ mod tests {
             "summary + retained user + tool results"
         );
         match &result.messages[2] {
-            Message::ToolResults { results } => {
+            Message::ToolResults { results, .. } => {
                 assert_eq!(results.len(), 1);
                 assert!(matches!(
                     &results[0].content[1],

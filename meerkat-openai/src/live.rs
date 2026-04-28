@@ -246,7 +246,7 @@ fn openai_realtime_history_context(seed_messages: &[Message]) -> Option<String> 
 
     let mut tool_lines = Vec::new();
     for message in seed_messages {
-        if let Message::ToolResults { results } = message {
+        if let Message::ToolResults { results, .. } = message {
             for result in results {
                 let output = result.text_content();
                 if !output.trim().is_empty() {
@@ -2129,14 +2129,12 @@ mod tests {
                 provenance: None,
             }],
             vec![
-                Message::System(meerkat_core::SystemMessage {
-                    content: "You are the realtime operator.".to_string(),
-                }),
-                Message::System(meerkat_core::SystemMessage {
-                    content:
-                        "[Runtime System Context]\nsource: peer_response_terminal:analyst:req-123\n\nAuthoritative peer token is birch seventeen."
-                            .to_string(),
-                }),
+                Message::System(meerkat_core::SystemMessage::new(
+                    "You are the realtime operator.".to_string(),
+                )),
+                Message::System(meerkat_core::SystemMessage::new(
+                    "[Runtime System Context]\nsource: peer_response_terminal:analyst:req-123\n\nAuthoritative peer token is birch seventeen.",
+                )),
                 Message::User(meerkat_core::UserMessage::text(
                     "Earlier turn context should survive reconnect.",
                 )),
@@ -2145,6 +2143,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     stop_reason: meerkat_core::StopReason::EndTurn,
                     usage: meerkat_core::Usage::default(),
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         )
@@ -2274,9 +2273,9 @@ mod tests {
 
     #[test]
     fn openai_realtime_instructions_prepend_language_pin_when_seed_has_system_only() {
-        let seed_messages = vec![Message::System(meerkat_core::SystemMessage {
-            content: "You are a helpful realtime operator.".to_string(),
-        })];
+        let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(
+            "You are a helpful realtime operator.".to_string(),
+        ))];
 
         let instructions = openai_realtime_instructions(&seed_messages)
             .expect("system seed must yield instructions");
@@ -2301,12 +2300,10 @@ mod tests {
 
     #[test]
     fn instructions_extract_authoritative_runtime_blocks_embedded_in_root_system_prompt() {
-        let seed_messages = vec![Message::System(meerkat_core::SystemMessage {
-            content: format!(
-                "You are the realtime operator.{}\n[Runtime System Context]\nsource: peer_response_terminal:analyst:req-123\n\n[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst. Request ID: req-123. Status: completed. Result: {{\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}}.",
-                meerkat_core::SYSTEM_CONTEXT_SEPARATOR
-            ),
-        })];
+        let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(format!(
+            "You are the realtime operator.{}\n[Runtime System Context]\nsource: peer_response_terminal:analyst:req-123\n\n[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst. Request ID: req-123. Status: completed. Result: {{\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}}.",
+            meerkat_core::SYSTEM_CONTEXT_SEPARATOR
+        )))];
 
         let instructions = openai_realtime_instructions(&seed_messages)
             .expect("embedded runtime context should produce instructions");
@@ -2336,9 +2333,9 @@ mod tests {
     #[test]
     fn instructions_include_dialogue_recap_for_text_first_reconstruction() {
         let seed_messages = vec![
-            Message::System(meerkat_core::SystemMessage {
-                content: "You are the realtime operator.".to_string(),
-            }),
+            Message::System(meerkat_core::SystemMessage::new(
+                "You are the realtime operator.".to_string(),
+            )),
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
@@ -2347,6 +2344,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: meerkat_core::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
 
@@ -2391,18 +2389,19 @@ mod tests {
     #[test]
     fn realtime_reconstruction_replays_authoritative_runtime_context_and_recent_dialogue() {
         let events = openai_realtime_history_events(&[
-            Message::System(meerkat_core::SystemMessage {
-                content: "You are the realtime operator.".to_string(),
-            }),
-            Message::System(meerkat_core::SystemMessage {
-                content: "[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\n[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}.".to_string(),
-            }),
+            Message::System(meerkat_core::SystemMessage::new(
+                "You are the realtime operator.".to_string(),
+            )),
+            Message::System(meerkat_core::SystemMessage::new(
+                "[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\n[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}.",
+            )),
             Message::User(meerkat_core::UserMessage::text("hello")),
             Message::Assistant(meerkat_core::AssistantMessage {
                 content: "world".to_string(),
                 tool_calls: Vec::new(),
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: meerkat_core::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::BlockAssistant(meerkat_core::BlockAssistantMessage {
                 blocks: vec![meerkat_core::AssistantBlock::Text {
@@ -2410,6 +2409,7 @@ mod tests {
                     meta: None,
                 }],
                 stop_reason: meerkat_core::StopReason::EndTurn,
+                created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::ToolResults {
                 results: vec![meerkat_core::ToolResult {
@@ -2419,6 +2419,7 @@ mod tests {
                     ),
                     is_error: false,
                 }],
+                created_at: meerkat_core::types::message_timestamp_now(),
             },
         ]);
 
@@ -2490,15 +2491,16 @@ mod tests {
     #[test]
     fn realtime_history_context_includes_rebuildable_dialogue_recap_and_tool_results() {
         let history = openai_realtime_history_context(&[
-            Message::System(meerkat_core::SystemMessage {
-                content: "You are the realtime operator.".to_string(),
-            }),
+            Message::System(meerkat_core::SystemMessage::new(
+                "You are the realtime operator.".to_string(),
+            )),
             Message::User(meerkat_core::UserMessage::text("old setup line")),
             Message::Assistant(meerkat_core::AssistantMessage {
                 content: "old setup ack".to_string(),
                 tool_calls: Vec::new(),
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: meerkat_core::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
@@ -2508,6 +2510,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: meerkat_core::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }),
             Message::ToolResults {
                 results: vec![meerkat_core::ToolResult {
@@ -2518,6 +2521,7 @@ mod tests {
                     ),
                     is_error: false,
                 }],
+                created_at: meerkat_core::types::message_timestamp_now(),
             },
         ])
         .expect("history context should be present");
@@ -2543,12 +2547,8 @@ mod tests {
     #[test]
     fn realtime_reconstruction_replays_full_canonical_dialogue_without_adapter_side_trimming() {
         let mut seed_messages = vec![
-            Message::System(meerkat_core::SystemMessage {
-                content: "You are the realtime operator.".to_string(),
-            }),
-            Message::System(meerkat_core::SystemMessage {
-                content: "[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\nAuthoritative peer token is birch seventeen.".to_string(),
-            }),
+            Message::System(meerkat_core::SystemMessage::new("You are the realtime operator.".to_string())),
+            Message::System(meerkat_core::SystemMessage::new("[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\nAuthoritative peer token is birch seventeen.".to_string())),
             Message::User(meerkat_core::UserMessage::text(
                 "Remember the codeword amber lantern.",
             )),
@@ -2557,6 +2557,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: meerkat_core::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }),
         ];
         for index in 0..14 {
@@ -2568,6 +2569,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 stop_reason: meerkat_core::StopReason::EndTurn,
                 usage: meerkat_core::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }));
         }
 

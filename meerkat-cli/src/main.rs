@@ -7130,7 +7130,7 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                         );
                     }
                 }
-                Message::ToolResults { results } => {
+                Message::ToolResults { results, .. } => {
                     println!("\n[{}] TOOL RESULTS:", i + 1);
                     for result in results {
                         let status = if result.is_error { "ERROR" } else { "OK" };

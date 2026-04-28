@@ -1,4 +1,7 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -48,6 +51,12 @@ enum CommandSpec {
         argv: &'static [&'static str],
         output_policy: OutputPolicy,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandLockMode {
+    ScenarioLocal,
+    Shared,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +188,10 @@ async fn run_pre_command(
     cwd: &Path,
     env_overrides: &[(String, String)],
 ) -> Result<(), String> {
+    let _shared_lock = match pre_command_lock_mode(entry.command) {
+        CommandLockMode::ScenarioLocal => None,
+        CommandLockMode::Shared => Some(acquire_shared_pre_command_lock(entry.command, cwd).await?),
+    };
     let env_signature = env_overrides
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
@@ -219,6 +232,131 @@ async fn run_pre_command(
         }
     }
     result
+}
+
+struct SharedPreCommandLock {
+    path: PathBuf,
+}
+
+impl Drop for SharedPreCommandLock {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            eprintln!(
+                "warning: failed to release e2e shared pre-command lock {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+fn pre_command_lock_mode(command: &[&str]) -> CommandLockMode {
+    if command
+        .iter()
+        .any(|part| part.contains("{cargo_target_dir}"))
+        || command.first() == Some(&"cargo")
+    {
+        return CommandLockMode::ScenarioLocal;
+    }
+
+    let command_text = command.join(" ");
+    if command_text.contains("npm")
+        || command_text.contains("pip install")
+        || command_text.contains("playwright install")
+    {
+        return CommandLockMode::Shared;
+    }
+
+    CommandLockMode::ScenarioLocal
+}
+
+async fn acquire_shared_pre_command_lock(
+    command: &[&str],
+    cwd: &Path,
+) -> Result<SharedPreCommandLock, String> {
+    let base = cargo_target_dir()
+        .unwrap_or_else(|_| workspace_root().join("target"))
+        .join("e2e-lanes")
+        .join("locks")
+        .join("shared-precommands");
+    std::fs::create_dir_all(&base)
+        .map_err(|error| format!("failed to create e2e pre-command lock root: {error}"))?;
+    let lock_name = shared_pre_command_lock_name(command, cwd);
+    let lock_path = base.join(format!("{lock_name}.lock"));
+    let timeout_secs = std::env::var("MEERKAT_E2E_PRECOMMAND_LOCK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1800);
+    let stale_secs = std::env::var("MEERKAT_E2E_PRECOMMAND_LOCK_STALE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(3600);
+    let started = Instant::now();
+
+    loop {
+        match std::fs::create_dir(&lock_path) {
+            Ok(()) => {
+                let owner = format!(
+                    "pid={}\ncommand={}\ncwd={}\n",
+                    std::process::id(),
+                    command.join(" "),
+                    cwd.display()
+                );
+                let _ = std::fs::write(lock_path.join("owner.txt"), owner);
+                return Ok(SharedPreCommandLock { path: lock_path });
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                remove_stale_shared_pre_command_lock(&lock_path, stale_secs);
+                if started.elapsed().as_secs() > timeout_secs {
+                    return Err(format!(
+                        "timed out after {timeout_secs}s waiting for e2e shared pre-command lock {} ({})",
+                        lock_path.display(),
+                        command.join(" ")
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to acquire e2e shared pre-command lock {}: {error}",
+                    lock_path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn shared_pre_command_lock_name(command: &[&str], cwd: &Path) -> String {
+    let key = format!("{} {}", cwd.display(), command.join(" "));
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    let prefix = sanitize_artifact_key(&key)
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    format!("{prefix}-{:016x}", hasher.finish())
+}
+
+fn remove_stale_shared_pre_command_lock(lock_path: &Path, stale_secs: u64) {
+    let Ok(metadata) = std::fs::metadata(lock_path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let Ok(age) = modified.elapsed() else {
+        return;
+    };
+    if age.as_secs() <= stale_secs {
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(lock_path) {
+        eprintln!(
+            "warning: failed to remove stale e2e shared pre-command lock {}: {error}",
+            lock_path.display()
+        );
+    }
 }
 
 async fn run_command(
@@ -2435,6 +2573,105 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        74 => Some(&Spec {
+            id: Some(74),
+            lane: Lane::Smoke,
+            title: "Python SDK generate_image Gemini provider params",
+            timeout_secs: 1800,
+            required_env: &[
+                &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+                &["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            ],
+            required_bins: &["python3", "cargo"],
+            cwd: "sdks/python",
+            env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
+                ],
+                &[
+                    "cargo",
+                    "build",
+                    "-p",
+                    "meerkat-rpc",
+                    "--bin",
+                    "rkat-rpc",
+                    "--features",
+                    "mob",
+                ],
+            ],
+            command: CommandSpec::Pytest {
+                test_file: "tests/test_e2e_smoke.py",
+                test_name: "test_smoke_scenario_74_python_sdk_gemini_image_provider_params",
+            },
+        }),
+        75 => Some(&Spec {
+            id: Some(75),
+            lane: Lane::Smoke,
+            title: "TypeScript SDK generate_image OpenAI provider params",
+            timeout_secs: 1800,
+            required_env: &[
+                &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+                &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"],
+            ],
+            required_bins: &["node", "npm", "cargo"],
+            cwd: "sdks/typescript",
+            env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["npm", "install", "--no-audit", "--no-fund"],
+                &[
+                    "cargo",
+                    "build",
+                    "-p",
+                    "meerkat-rpc",
+                    "--bin",
+                    "rkat-rpc",
+                    "--features",
+                    "mob",
+                ],
+                &["npm", "run", "build"],
+            ],
+            command: CommandSpec::NodeTest {
+                test_file: "tests/e2e_smoke.test.mjs",
+                test_name: "Scenario 75",
+            },
+        }),
+        76 => Some(&Spec {
+            id: Some(76),
+            lane: Lane::Smoke,
+            title: "TypeScript SDK cross-provider image model-switch stress",
+            timeout_secs: 2400,
+            required_env: &[
+                &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"],
+                &["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            ],
+            required_bins: &["node", "npm", "cargo"],
+            cwd: "sdks/typescript",
+            env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["npm", "install", "--no-audit", "--no-fund"],
+                &[
+                    "cargo",
+                    "build",
+                    "-p",
+                    "meerkat-rpc",
+                    "--bin",
+                    "rkat-rpc",
+                    "--features",
+                    "mob",
+                ],
+                &["npm", "run", "build"],
+            ],
+            command: CommandSpec::NodeTest {
+                test_file: "tests/e2e_smoke.test.mjs",
+                test_name: "Scenario 76",
+            },
+        }),
         _ => None,
     }
 }
@@ -3296,7 +3533,6 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                     "smoke_mob_flow_runtime",
                     "--",
                     "--ignored",
-                    "--test-threads=1",
                     "--nocapture",
                 ],
                 output_policy: OutputPolicy::CargoTest,
@@ -3332,8 +3568,8 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Lane, normalize_command_with_env, repo_cargo, sanitize_artifact_key, scenario_spec,
-        source_revision_key,
+        CommandLockMode, Lane, normalize_command_with_env, pre_command_lock_mode, repo_cargo,
+        sanitize_artifact_key, scenario_spec, source_revision_key,
     };
 
     #[test]
@@ -3390,5 +3626,41 @@ mod tests {
         assert_eq!(live, 24);
         assert_eq!(smoke, 17);
         assert_eq!(system, 1);
+    }
+
+    #[test]
+    fn shared_setup_pre_commands_use_cross_process_locks() {
+        assert_eq!(
+            pre_command_lock_mode(&["/bin/sh", "-c", "test -d node_modules || npm ci"]),
+            CommandLockMode::Shared
+        );
+        assert_eq!(
+            pre_command_lock_mode(&["npm", "install", "--no-audit", "--no-fund"]),
+            CommandLockMode::Shared
+        );
+        assert_eq!(
+            pre_command_lock_mode(&["npm", "run", "build"]),
+            CommandLockMode::Shared
+        );
+        assert_eq!(
+            pre_command_lock_mode(&[
+                "/bin/sh",
+                "-c",
+                "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
+            ]),
+            CommandLockMode::Shared
+        );
+    }
+
+    #[test]
+    fn scenario_local_cargo_builds_remain_parallelizable() {
+        assert_eq!(
+            pre_command_lock_mode(&["cargo", "build", "-p", "meerkat-rpc"]),
+            CommandLockMode::ScenarioLocal
+        );
+        assert_eq!(
+            pre_command_lock_mode(&["/bin/sh", "-c", "echo {cargo_target_dir}"]),
+            CommandLockMode::ScenarioLocal
+        );
     }
 }

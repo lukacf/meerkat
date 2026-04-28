@@ -11698,22 +11698,19 @@
   },
   "WireGenerateImageExecutionPlan": {
     "$defs": {
-      "GeminiImageTurnPlan": {
-        "properties": {
-          "projection_snapshot_id": {
-            "$ref": "#/$defs/ProjectionSnapshotId"
-          }
-        },
-        "required": [
-          "projection_snapshot_id"
-        ],
-        "type": "object"
-      },
       "ImageContinuityTokenSupport": {
         "enum": [
           "unsupported",
           "same_provider_only",
           "cross_provider"
+        ],
+        "type": "string"
+      },
+      "ImageGenerationBackendKind": {
+        "enum": [
+          "hosted_tool",
+          "provider_api",
+          "native_model"
         ],
         "type": "string"
       },
@@ -11743,130 +11740,40 @@
           "image_continuity_tokens"
         ],
         "type": "object"
-      },
-      "OpenAiImagesApiEndpoint": {
-        "enum": [
-          "generations",
-          "edits"
-        ],
-        "type": "string"
-      },
-      "OpenAiImagesApiPlan": {
-        "properties": {
-          "endpoint": {
-            "$ref": "#/$defs/OpenAiImagesApiEndpoint"
-          }
-        },
-        "required": [
-          "endpoint"
-        ],
-        "type": "object"
-      },
-      "OpenAiResponsesImagePlan": {
-        "properties": {
-          "tool_name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "tool_name"
-        ],
-        "type": "object"
-      },
-      "ProjectionSnapshotId": {
-        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "oneOf": [
-      {
-        "properties": {
-          "capabilities": {
-            "$ref": "#/$defs/ImageGenerationTargetCapabilities"
-          },
-          "max_count": {
-            "format": "uint32",
-            "minimum": 1,
-            "type": "integer"
-          },
-          "plan": {
-            "$ref": "#/$defs/OpenAiResponsesImagePlan"
-          },
-          "plan_type": {
-            "const": "open_ai_hosted_responses_image_tool",
-            "type": "string"
-          }
-        },
-        "required": [
-          "plan_type",
-          "max_count",
-          "capabilities",
-          "plan"
-        ],
-        "type": "object"
+    "properties": {
+      "backend": {
+        "$ref": "#/$defs/ImageGenerationBackendKind"
       },
-      {
-        "properties": {
-          "capabilities": {
-            "$ref": "#/$defs/ImageGenerationTargetCapabilities"
-          },
-          "max_count": {
-            "format": "uint32",
-            "minimum": 1,
-            "type": "integer"
-          },
-          "model": {
-            "type": "string"
-          },
-          "plan": {
-            "$ref": "#/$defs/OpenAiImagesApiPlan"
-          },
-          "plan_type": {
-            "const": "open_ai_images_api",
-            "type": "string"
-          }
-        },
-        "required": [
-          "plan_type",
-          "model",
-          "max_count",
-          "capabilities",
-          "plan"
-        ],
-        "type": "object"
+      "capabilities": {
+        "$ref": "#/$defs/ImageGenerationTargetCapabilities"
       },
-      {
-        "properties": {
-          "capabilities": {
-            "$ref": "#/$defs/ImageGenerationTargetCapabilities"
-          },
-          "max_count": {
-            "format": "uint32",
-            "minimum": 1,
-            "type": "integer"
-          },
-          "model": {
-            "type": "string"
-          },
-          "plan": {
-            "$ref": "#/$defs/GeminiImageTurnPlan"
-          },
-          "plan_type": {
-            "const": "gemini_native_image_model",
-            "type": "string"
-          }
-        },
-        "required": [
-          "plan_type",
-          "model",
-          "max_count",
-          "capabilities",
-          "plan"
-        ],
-        "type": "object"
+      "max_count": {
+        "format": "uint32",
+        "minimum": 1,
+        "type": "integer"
+      },
+      "provider": {
+        "type": "string"
+      },
+      "provider_plan": {
+        "default": null
+      },
+      "requires_scoped_override": {
+        "type": "boolean"
       }
+    },
+    "required": [
+      "provider",
+      "backend",
+      "max_count",
+      "capabilities",
+      "requires_scoped_override"
     ],
-    "title": "GenerateImageExecutionPlan"
+    "title": "GenerateImageExecutionPlan",
+    "type": "object"
   },
   "WireGenerateImageRequest": {
     "$defs": {
@@ -12314,6 +12221,7 @@
       "intent": {
         "$ref": "#/$defs/ImageGenerationIntent"
       },
+      "provider_params": true,
       "quality": {
         "$ref": "#/$defs/ImageQualityPreference"
       },
@@ -15501,6 +15409,9 @@
               "content": {
                 "type": "string"
               },
+              "created_at": {
+                "type": "string"
+              },
               "role": {
                 "const": "system",
                 "type": "string"
@@ -15508,13 +15419,17 @@
             },
             "required": [
               "role",
-              "content"
+              "content",
+              "created_at"
             ],
             "type": "object"
           },
           {
             "properties": {
               "body": {
+                "type": "string"
+              },
+              "created_at": {
                 "type": "string"
               },
               "kind": {
@@ -15528,7 +15443,8 @@
             "required": [
               "role",
               "kind",
-              "body"
+              "body",
+              "created_at"
             ],
             "type": "object"
           },
@@ -15537,6 +15453,9 @@
               "content": {
                 "$ref": "#/$defs/WireContentInput"
               },
+              "created_at": {
+                "type": "string"
+              },
               "role": {
                 "const": "user",
                 "type": "string"
@@ -15544,13 +15463,17 @@
             },
             "required": [
               "role",
-              "content"
+              "content",
+              "created_at"
             ],
             "type": "object"
           },
           {
             "properties": {
               "content": {
+                "type": "string"
+              },
+              "created_at": {
                 "type": "string"
               },
               "role": {
@@ -15570,7 +15493,8 @@
             "required": [
               "role",
               "content",
-              "stop_reason"
+              "stop_reason",
+              "created_at"
             ],
             "type": "object"
           },
@@ -15581,6 +15505,9 @@
                   "$ref": "#/$defs/WireAssistantBlock"
                 },
                 "type": "array"
+              },
+              "created_at": {
+                "type": "string"
               },
               "role": {
                 "const": "block_assistant",
@@ -15593,12 +15520,16 @@
             "required": [
               "role",
               "blocks",
-              "stop_reason"
+              "stop_reason",
+              "created_at"
             ],
             "type": "object"
           },
           {
             "properties": {
+              "created_at": {
+                "type": "string"
+              },
               "results": {
                 "items": {
                   "$ref": "#/$defs/WireToolResult"
@@ -15612,7 +15543,8 @@
             },
             "required": [
               "role",
-              "results"
+              "results",
+              "created_at"
             ],
             "type": "object"
           }
@@ -16497,6 +16429,9 @@
           "content": {
             "type": "string"
           },
+          "created_at": {
+            "type": "string"
+          },
           "role": {
             "const": "system",
             "type": "string"
@@ -16504,13 +16439,17 @@
         },
         "required": [
           "role",
-          "content"
+          "content",
+          "created_at"
         ],
         "type": "object"
       },
       {
         "properties": {
           "body": {
+            "type": "string"
+          },
+          "created_at": {
             "type": "string"
           },
           "kind": {
@@ -16524,7 +16463,8 @@
         "required": [
           "role",
           "kind",
-          "body"
+          "body",
+          "created_at"
         ],
         "type": "object"
       },
@@ -16533,6 +16473,9 @@
           "content": {
             "$ref": "#/$defs/WireContentInput"
           },
+          "created_at": {
+            "type": "string"
+          },
           "role": {
             "const": "user",
             "type": "string"
@@ -16540,13 +16483,17 @@
         },
         "required": [
           "role",
-          "content"
+          "content",
+          "created_at"
         ],
         "type": "object"
       },
       {
         "properties": {
           "content": {
+            "type": "string"
+          },
+          "created_at": {
             "type": "string"
           },
           "role": {
@@ -16566,7 +16513,8 @@
         "required": [
           "role",
           "content",
-          "stop_reason"
+          "stop_reason",
+          "created_at"
         ],
         "type": "object"
       },
@@ -16577,6 +16525,9 @@
               "$ref": "#/$defs/WireAssistantBlock"
             },
             "type": "array"
+          },
+          "created_at": {
+            "type": "string"
           },
           "role": {
             "const": "block_assistant",
@@ -16589,12 +16540,16 @@
         "required": [
           "role",
           "blocks",
-          "stop_reason"
+          "stop_reason",
+          "created_at"
         ],
         "type": "object"
       },
       {
         "properties": {
+          "created_at": {
+            "type": "string"
+          },
           "results": {
             "items": {
               "$ref": "#/$defs/WireToolResult"
@@ -16608,7 +16563,8 @@
         },
         "required": [
           "role",
-          "results"
+          "results",
+          "created_at"
         ],
         "type": "object"
       }

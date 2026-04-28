@@ -20,7 +20,7 @@
 //! ```bash
 //! ANTHROPIC_API_KEY=... GEMINI_API_KEY=... OPENAI_API_KEY=... \
 //!   cargo test -p meerkat-mob --test smoke_mob_pictionary \
-//!     --features integration-real-tests -- --ignored --test-threads=1 --nocapture
+//!     --features integration-real-tests -- --ignored --nocapture
 //! ```
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
@@ -400,7 +400,7 @@ async fn wait_for_member_histories_to_settle(
                             .collect::<Vec<_>>()
                             .join("")
                     ),
-                    meerkat_core::types::Message::ToolResults { results } => format!(
+                    meerkat_core::types::Message::ToolResults { results, .. } => format!(
                         "tool_results:{}",
                         results
                             .iter()
@@ -633,23 +633,27 @@ fn current_round_artist_received_guess(page: &meerkat_core::SessionHistoryPage) 
         })
 }
 
-fn current_round_discussion_completed(page: &meerkat_core::SessionHistoryPage) -> bool {
-    let latest_image_idx = page.messages.iter().rposition(|msg| match msg {
+fn current_round_discussion_completed(
+    page: &meerkat_core::SessionHistoryPage,
+    label: &str,
+) -> bool {
+    let first_image_idx = page.messages.iter().position(|msg| match msg {
         meerkat_core::types::Message::User(u) => {
             let text = meerkat_core::types::text_content(&u.content);
             text.contains("[COMMS MESSAGE from pictionary/artist/artist]")
                 && text.contains("I drew this for Pictionary")
+                && text.contains(label)
         }
         _ => false,
     });
 
-    let Some(latest_image_idx) = latest_image_idx else {
+    let Some(first_image_idx) = first_image_idx else {
         return false;
     };
 
     let mut heard_from_b = false;
     let mut heard_from_c = false;
-    for msg in page.messages.iter().skip(latest_image_idx + 1) {
+    for msg in page.messages.iter().skip(first_image_idx + 1) {
         let text = match msg {
             meerkat_core::types::Message::User(u) => meerkat_core::types::text_content(&u.content),
             _ => continue,
@@ -663,11 +667,57 @@ fn current_round_discussion_completed(page: &meerkat_core::SessionHistoryPage) -
     false
 }
 
+#[test]
+fn current_round_discussion_survives_artist_image_retry_after_first_peer_reply() {
+    let label = "Round 1 — easy: concrete object";
+    let page = pictionary_history_page(vec![
+        "[COMMS MESSAGE from pictionary/artist/artist]\nI drew this for Pictionary (Round 1 — easy: concrete object).",
+        "[COMMS MESSAGE from pictionary/guesser-b/guesser-b]\nA protective beacon.",
+        "[COMMS MESSAGE from pictionary/artist/artist]\nI drew this for Pictionary (Round 1 — easy: concrete object).",
+        "[COMMS MESSAGE from pictionary/guesser-c/guesser-c]\nThis feels like a lighthouse.",
+    ]);
+
+    assert!(current_round_discussion_completed(&page, label));
+}
+
+#[test]
+fn current_round_discussion_ignores_previous_round_replies() {
+    let page = pictionary_history_page(vec![
+        "[COMMS MESSAGE from pictionary/artist/artist]\nI drew this for Pictionary (Round 1 — easy: concrete object).",
+        "[COMMS MESSAGE from pictionary/guesser-b/guesser-b]\nA protective beacon.",
+        "[COMMS MESSAGE from pictionary/guesser-c/guesser-c]\nThis feels like a lighthouse.",
+        "[COMMS MESSAGE from pictionary/artist/artist]\nI drew this for Pictionary (Round 2 — medium: abstract concept).",
+    ]);
+
+    assert!(!current_round_discussion_completed(
+        &page,
+        "Round 2 — medium: abstract concept"
+    ));
+}
+
+fn pictionary_history_page(texts: Vec<&str>) -> meerkat_core::SessionHistoryPage {
+    let messages = texts
+        .into_iter()
+        .map(|text| {
+            meerkat_core::types::Message::User(meerkat_core::types::UserMessage::text(text))
+        })
+        .collect::<Vec<_>>();
+    meerkat_core::SessionHistoryPage {
+        session_id: meerkat_core::types::SessionId::new(),
+        message_count: messages.len(),
+        offset: 0,
+        limit: None,
+        has_more: false,
+        messages,
+    }
+}
+
 /// Wait for a full round-trip: guesser-a discusses with both peers, then a guess
 /// is sent to the artist for the current round.
 async fn wait_for_artist_guess_after_discussion(
     handle: &MobHandle,
     service: &dyn MobSessionService,
+    label: &str,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
@@ -703,7 +753,7 @@ async fn wait_for_artist_guess_after_discussion(
                 )
                 .await
         {
-            current_round_discussion_completed(&page)
+            current_round_discussion_completed(&page, label)
         } else {
             false
         };
@@ -821,7 +871,7 @@ async fn print_conversation(
                     }
                     ("said", parts.join(" "))
                 }
-                meerkat_core::types::Message::ToolResults { results } => {
+                meerkat_core::types::Message::ToolResults { results, .. } => {
                     let rendered = results
                         .iter()
                         .map(|result| {
@@ -1135,7 +1185,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                                 ),
                             )
                         }
-                        meerkat_core::types::Message::ToolResults { results } => {
+                        meerkat_core::types::Message::ToolResults { results, .. } => {
                             ("tool_results", format!("count={}", results.len()))
                         }
                     };
@@ -1149,6 +1199,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
         let guess_reached_artist = wait_for_artist_guess_after_discussion(
             &handle,
             service.as_ref(),
+            label,
             Duration::from_secs(300),
         )
         .await;

@@ -262,7 +262,6 @@ case "${command}" in
     extra_args+=(
       "${e2e_test_env[@]}"
       --test_arg=--ignored
-      --test_arg=--test-threads=1
       --test_output=errors
       --test_summary=terse
       --color=no

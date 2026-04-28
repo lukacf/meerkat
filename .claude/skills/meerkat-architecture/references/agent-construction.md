@@ -29,6 +29,13 @@ The factory validates `bindings.session_id == session.id()` for `SessionOwned` b
 - `ContentBlock` (meerkat-core): `Text { text }`, `Image { media_type, ... }`, or `Video { media_type, duration_ms, ... }`
 - `ContentInput` (meerkat-core): `Text(String)` or `Blocks(Vec<ContentBlock>)`
 - `ToolOutput` (meerkat-tools): `Json(Value)` or `Blocks(Vec<ContentBlock>)`
+- `AssistantBlock::Image` (meerkat-core): canonical generated assistant image output; stores `image_id`, `blob_ref`, dimensions, revised prompt disposition, and provider metadata.
+
+## Assistant Image Generation
+
+`generate_image` is a privileged built-in dispatch path, not an ordinary external tool. `AgentFactory` wires it only when the build has an image-generation machine, planner, executor, and blob store. The machine owns lifecycle semantics; provider crates own image target profiles and provider-specific parameters; the tool layer only normalizes the model-facing request, calls the planner/executor, commits blobs, and appends assistant image blocks after tool results to preserve provider tool-call adjacency.
+
+Generated images must be surfaced through transcript history plus blob retrieval. SDKs should parse `AssistantBlock::Image` into typed image fields and fetch bytes through `blob/get`; do not inline generated image bytes into history.
 
 ## Tool Scoping
 

@@ -15,6 +15,13 @@ use crate::image_generation::{
 };
 use crate::schema::{MeerkatSchema, SchemaCompat, SchemaError, SchemaFormat, SchemaWarning};
 
+/// Wall-clock timestamp for canonical transcript messages.
+pub type MessageTimestamp = chrono::DateTime<chrono::Utc>;
+
+pub fn message_timestamp_now() -> MessageTimestamp {
+    chrono::Utc::now()
+}
+
 // ===========================================================================
 // Multimodal content blocks
 // ===========================================================================
@@ -816,10 +823,21 @@ pub enum Message {
     /// Assistant response with ordered blocks - new format (spec v2)
     BlockAssistant(BlockAssistantMessage),
     /// Results from tool execution
-    ToolResults { results: Vec<ToolResult> },
+    ToolResults {
+        results: Vec<ToolResult>,
+        #[allow(missing_docs)]
+        created_at: MessageTimestamp,
+    },
 }
 
 impl Message {
+    pub fn tool_results(results: Vec<ToolResult>) -> Self {
+        Self::ToolResults {
+            results,
+            created_at: message_timestamp_now(),
+        }
+    }
+
     /// Extract text content suitable for semantic indexing.
     ///
     /// Returns user and assistant text content. System messages and
@@ -857,6 +875,8 @@ enum MessageWire {
     #[serde(rename = "tool_results")]
     ToolResults {
         results: Vec<ToolResult>,
+        #[serde(default = "message_timestamp_now")]
+        created_at: MessageTimestamp,
     },
 }
 
@@ -871,8 +891,12 @@ impl Serialize for Message {
             Self::User(message) => MessageWire::User(message.clone()),
             Self::Assistant(message) => MessageWire::Assistant(message.clone()),
             Self::BlockAssistant(message) => MessageWire::BlockAssistant(message.clone()),
-            Self::ToolResults { results } => MessageWire::ToolResults {
+            Self::ToolResults {
+                results,
+                created_at,
+            } => MessageWire::ToolResults {
                 results: results.clone(),
+                created_at: *created_at,
             },
         };
         wire.serialize(serializer)
@@ -893,7 +917,13 @@ impl<'de> Deserialize<'de> for Message {
                 .unwrap_or(Self::User(message)),
             MessageWire::Assistant(message) => Self::Assistant(message),
             MessageWire::BlockAssistant(message) => Self::BlockAssistant(message),
-            MessageWire::ToolResults { results } => Self::ToolResults { results },
+            MessageWire::ToolResults {
+                results,
+                created_at,
+            } => Self::ToolResults {
+                results,
+                created_at,
+            },
         })
     }
 }
@@ -903,6 +933,17 @@ impl<'de> Deserialize<'de> for Message {
 #[serde(rename_all = "snake_case")]
 pub struct SystemMessage {
     pub content: String,
+    #[serde(default = "message_timestamp_now")]
+    pub created_at: MessageTimestamp,
+}
+
+impl SystemMessage {
+    pub fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            created_at: message_timestamp_now(),
+        }
+    }
 }
 
 /// Typed system notice content carried in the transcript.
@@ -975,6 +1016,9 @@ impl SystemNoticeKind {
 pub struct SystemNoticeMessage {
     pub kind: SystemNoticeKind,
     pub body: String,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    #[serde(default = "message_timestamp_now")]
+    pub created_at: MessageTimestamp,
 }
 
 impl SystemNoticeMessage {
@@ -982,6 +1026,7 @@ impl SystemNoticeMessage {
         Self {
             kind,
             body: body.into(),
+            created_at: message_timestamp_now(),
         }
     }
 
@@ -1008,6 +1053,8 @@ pub struct UserMessage {
     pub content: Vec<ContentBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
+    #[serde(default = "message_timestamp_now")]
+    pub created_at: MessageTimestamp,
 }
 
 impl UserMessage {
@@ -1024,6 +1071,7 @@ impl UserMessage {
         Self {
             content: ContentBlock::text_vec(content.into()),
             render_metadata,
+            created_at: message_timestamp_now(),
         }
     }
 
@@ -1040,6 +1088,7 @@ impl UserMessage {
         Self {
             content,
             render_metadata,
+            created_at: message_timestamp_now(),
         }
     }
 
@@ -1075,6 +1124,9 @@ pub struct BlockAssistantMessage {
     pub blocks: Vec<AssistantBlock>,
     /// How the turn ended
     pub stop_reason: StopReason,
+    /// When this assistant message was committed to the transcript.
+    #[serde(default = "message_timestamp_now")]
+    pub created_at: MessageTimestamp,
 }
 
 // Usage is NOT part of BlockAssistantMessage.
@@ -1082,6 +1134,14 @@ pub struct BlockAssistantMessage {
 // See LlmResponse in meerkat-client.
 
 impl BlockAssistantMessage {
+    pub fn new(blocks: Vec<AssistantBlock>, stop_reason: StopReason) -> Self {
+        Self {
+            blocks,
+            stop_reason,
+            created_at: message_timestamp_now(),
+        }
+    }
+
     /// Iterate over tool calls without allocation.
     pub fn tool_calls(&self) -> ToolCallIter<'_> {
         ToolCallIter {
@@ -1135,6 +1195,9 @@ pub struct AssistantMessage {
     pub stop_reason: StopReason,
     /// Token usage for this turn
     pub usage: Usage,
+    /// When this assistant message was committed to the transcript.
+    #[serde(default = "message_timestamp_now")]
+    pub created_at: MessageTimestamp,
 }
 
 /// A tool call requested by the model

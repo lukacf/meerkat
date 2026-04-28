@@ -591,6 +591,8 @@ Prompts and tool results support multimodal content (text, images, and video). T
 
 **view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Path sandboxed to project root. 5 MB limit. Hidden on non-vision-capable models via `ToolScope` based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
 
+**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store and committed as `AssistantBlock::Image`; surfaces read `image_id`/`blob_ref` from history and fetch bytes via `blob/get` or SDK `get_blob` / `getBlob`.
+
 **Provider capabilities:**
 | Provider | `vision` | `image_tool_results` | `inline_video` |
 |----------|----------|---------------------|----------------|

@@ -645,10 +645,10 @@ impl Session {
         usage: Usage,
     ) {
         if !blocks.is_empty() {
-            self.push(Message::BlockAssistant(BlockAssistantMessage {
+            self.push(Message::BlockAssistant(BlockAssistantMessage::new(
                 blocks,
                 stop_reason,
-            }));
+            )));
         }
         if usage != Usage::default() {
             self.record_usage(usage);
@@ -662,9 +662,9 @@ impl Session {
         let inner = Arc::make_mut(&mut self.messages);
         // Check if first message is system
         if let Some(Message::System(_)) = inner.first() {
-            inner[0] = Message::System(SystemMessage { content: prompt });
+            inner[0] = Message::System(SystemMessage::new(prompt));
         } else {
-            inner.insert(0, Message::System(SystemMessage { content: prompt }));
+            inner.insert(0, Message::System(SystemMessage::new(prompt)));
         }
         self.updated_at = SystemTime::now();
     }
@@ -1303,15 +1303,14 @@ mod tests {
     #[test]
     fn test_session_fork() {
         let mut session = Session::new();
-        session.push(Message::System(SystemMessage {
-            content: "System prompt".to_string(),
-        }));
+        session.push(Message::System(SystemMessage::new("System prompt")));
         session.push(Message::User(UserMessage::text("Hello".to_string())));
         session.push(Message::Assistant(AssistantMessage {
             content: "Hi!".to_string(),
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
+            created_at: crate::types::message_timestamp_now(),
         }));
 
         // Fork at index 2 (system + user)
@@ -1406,6 +1405,7 @@ mod tests {
                 cache_creation_tokens: None,
                 cache_read_tokens: None,
             },
+            created_at: crate::types::message_timestamp_now(),
         }));
         session.record_usage(Usage {
             input_tokens: 10,
@@ -1437,10 +1437,10 @@ mod tests {
     fn has_pending_boundary_after_assistant_message() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("hello")));
-        session.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![],
-            stop_reason: StopReason::EndTurn,
-        }));
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![],
+            StopReason::EndTurn,
+        )));
         assert!(!session.has_pending_boundary());
     }
 
@@ -1448,16 +1448,14 @@ mod tests {
     fn has_pending_boundary_after_tool_results() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("hello")));
-        session.push(Message::ToolResults { results: vec![] });
+        session.push(Message::tool_results(vec![]));
         assert!(session.has_pending_boundary());
     }
 
     #[test]
     fn has_pending_boundary_after_system() {
         let mut session = Session::new();
-        session.push(Message::System(SystemMessage {
-            content: "system".into(),
-        }));
+        session.push(Message::System(SystemMessage::new("system")));
         assert!(!session.has_pending_boundary());
     }
 }

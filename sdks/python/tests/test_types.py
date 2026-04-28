@@ -267,6 +267,49 @@ def test_parse_session_history():
     assert history.messages[2].results[0].tool_use_id == "tc_1"
 
 
+def test_parse_session_history_preserves_assistant_image_blocks():
+    history = MeerkatClient._parse_session_history(
+        {
+            "session_id": "s1",
+            "message_count": 1,
+            "offset": 0,
+            "has_more": False,
+            "messages": [
+                {
+                    "role": "block_assistant",
+                    "blocks": [
+                        {
+                            "block_type": "image",
+                            "data": {
+                                "image_id": "img_1",
+                                "blob_ref": {
+                                    "blob_id": "blob_1",
+                                    "media_type": "image/png",
+                                },
+                                "media_type": "image/png",
+                                "width": 1024,
+                                "height": 1536,
+                                "revised_prompt": {"disposition": "not_requested"},
+                                "meta": {"provider": "open_ai", "target_model": "gpt-image-1"},
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    block = history.messages[0].blocks[0]
+    assert block.block_type == "image"
+    assert block.image_id == "img_1"
+    assert block.blob_id == "blob_1"
+    assert block.media_type == "image/png"
+    assert block.width == 1024
+    assert block.height == 1536
+    assert block.revised_prompt == {"disposition": "not_requested"}
+    assert block.meta == {"provider": "open_ai", "target_model": "gpt-image-1"}
+
+
 def test_skill_key_export():
     key = SkillKey(source_uuid="abc-123", skill_name="my-skill")
     assert key.source_uuid == "abc-123"

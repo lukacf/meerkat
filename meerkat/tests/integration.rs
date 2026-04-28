@@ -292,6 +292,7 @@ mod session_persistence {
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("How are you?".to_string())));
 
@@ -328,6 +329,7 @@ mod session_persistence {
                 tool_calls: vec![],
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }));
             let id = session.id().clone();
             store.save(&session).await.expect("Save should succeed");
@@ -355,24 +357,21 @@ mod session_persistence {
 
         // Create complex session
         let mut session = Session::new();
-        session.push(Message::System(SystemMessage {
-            content: "You are helpful".to_string(),
-        }));
+        session.push(Message::System(SystemMessage::new("You are helpful")));
         session.push(Message::User(UserMessage::text("Hello".to_string())));
         session.push(Message::Assistant(AssistantMessage {
             content: "Hi!".to_string(),
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.push(Message::User(UserMessage::text("Call a tool".to_string())));
-        session.push(Message::ToolResults {
-            results: vec![ToolResult::new(
-                "call_123".to_string(),
-                "Tool output".to_string(),
-                false,
-            )],
-        });
+        session.push(Message::tool_results(vec![ToolResult::new(
+            "call_123".to_string(),
+            "Tool output".to_string(),
+            false,
+        )]));
 
         let original_id = session.id().clone();
         let original_len = session.messages().len();
@@ -1008,16 +1007,15 @@ mod combined {
             )],
             stop_reason: StopReason::ToolUse,
             usage: first_usage.clone(),
+            created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.record_usage(first_usage);
 
-        session.push(Message::ToolResults {
-            results: vec![ToolResult::new(
-                "tc_1".to_string(),
-                "Tool result".to_string(),
-                false,
-            )],
-        });
+        session.push(Message::tool_results(vec![ToolResult::new(
+            "tc_1".to_string(),
+            "Tool result".to_string(),
+            false,
+        )]));
 
         let second_usage = Usage {
             input_tokens: 150,
@@ -1030,6 +1028,7 @@ mod combined {
             tool_calls: vec![],
             stop_reason: StopReason::EndTurn,
             usage: second_usage.clone(),
+            created_at: meerkat_core::types::message_timestamp_now(),
         }));
         session.record_usage(second_usage);
 

@@ -347,7 +347,7 @@ impl AnthropicClient {
                         "content": content
                     }));
                 }
-                Message::ToolResults { results } => {
+                Message::ToolResults { results, .. } => {
                     let mut content = Vec::new();
 
                     for r in results {
@@ -1172,6 +1172,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            created_at: meerkat_core::types::message_timestamp_now(),
         });
 
         let request = LlmRequest::new(
@@ -1252,6 +1253,7 @@ mod tests {
                     }],
                     false,
                 )],
+                created_at: meerkat_core::types::message_timestamp_now(),
             }],
         );
 
@@ -1284,6 +1286,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            created_at: meerkat_core::types::message_timestamp_now(),
         });
 
         let request = LlmRequest::new(
@@ -1326,6 +1329,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            created_at: meerkat_core::types::message_timestamp_now(),
         });
 
         let request = LlmRequest::new(
@@ -1960,6 +1964,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            created_at: meerkat_core::types::message_timestamp_now(),
         });
 
         let request = LlmRequest::new(
@@ -2003,6 +2008,7 @@ mod tests {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            created_at: meerkat_core::types::message_timestamp_now(),
         });
 
         let request = LlmRequest::new(
@@ -2201,6 +2207,7 @@ mod tests {
                         "file contents here".to_string(),
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );
@@ -2241,6 +2248,7 @@ mod tests {
                         ],
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );

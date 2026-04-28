@@ -169,7 +169,7 @@ fn render_fork_context(
                     lines.push(format!("[assistant]: {text}"));
                 }
             }
-            Message::ToolResults { results } => {
+            Message::ToolResults { results, .. } => {
                 for tr in results {
                     let text: String = tr
                         .content

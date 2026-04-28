@@ -127,6 +127,23 @@ The Python client also exposes:
 - comms helpers: `session.send(...)`, `session.peers()`
 - typed ingress helpers: `send_peer_response_terminal(...)`
 
+### Generated assistant images
+
+When a session model calls the built-in `generate_image` tool, generated images appear in committed history as `SessionAssistantBlock` entries with `block_type == "image"`. The SDK preserves `image_id`, `blob_id`, `media_type`, `width`, `height`, `revised_prompt`, and provider metadata.
+
+```python
+history = await session.history()
+image = next(
+    block
+    for message in history.messages
+    for block in message.blocks
+    if block.block_type == "image"
+)
+payload = await client.get_blob(image.blob_id)
+```
+
+Image-generation wire contracts are also exported for integrations that inspect tool results directly: `WireGenerateImageRequest`, `WireGenerateImageExecutionPlan`, `WireImageGenerationToolResult`, `WireImageOperationPhase`, and `WireAssistantImageRef`.
+
 ## Typed session metadata
 
 - `SessionSummary` (from `session/list`) includes `total_tokens`

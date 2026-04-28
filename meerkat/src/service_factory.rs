@@ -141,7 +141,7 @@ impl SessionAgent for FactoryAgent {
         }
         self.agent
             .session_mut()
-            .push(Message::ToolResults { results });
+            .push(Message::tool_results(results));
         Ok(())
     }
 

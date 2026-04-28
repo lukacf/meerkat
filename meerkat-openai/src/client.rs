@@ -358,7 +358,7 @@ impl OpenAiClient {
                         }
                     }
                 }
-                Message::ToolResults { results } => {
+                Message::ToolResults { results, .. } => {
                     // OpenAI function_call_output only accepts strings; images
                     // degrade to text projection via text_content().
                     for r in results {
@@ -1610,9 +1610,9 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.4",
             vec![
-                Message::System(meerkat_core::SystemMessage {
-                    content: "You are helpful".to_string(),
-                }),
+                Message::System(meerkat_core::SystemMessage::new(
+                    "You are helpful".to_string(),
+                )),
                 Message::User(UserMessage::text("Hello".to_string())),
             ],
         );
@@ -1671,6 +1671,7 @@ mod tests {
                 }],
                 false,
             )],
+            created_at: meerkat_core::types::message_timestamp_now(),
         }])
         .expect_err("video tool results should be rejected");
 
@@ -1699,6 +1700,7 @@ mod tests {
                     )],
                     stop_reason: StopReason::ToolUse,
                     usage: Usage::default(),
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -1731,6 +1733,7 @@ mod tests {
                         "Sunny, 25C".to_string(),
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );
@@ -1884,6 +1887,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -1920,6 +1924,7 @@ mod tests {
                         },
                     ],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -1951,6 +1956,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::ToolUse,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -2091,6 +2097,7 @@ mod tests {
                     )],
                     stop_reason: StopReason::ToolUse,
                     usage: Usage::default(),
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -2656,6 +2663,7 @@ mod tests {
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -2688,6 +2696,7 @@ mod tests {
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
                 Message::User(UserMessage::text("Second question".to_string())),
             ],
@@ -2723,6 +2732,7 @@ mod tests {
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
                 // Next message is tool results — not a valid follower for reasoning
                 Message::ToolResults {
@@ -2731,6 +2741,7 @@ mod tests {
                         "result".to_string(),
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );
@@ -2771,6 +2782,7 @@ mod tests {
                         },
                     ],
                     stop_reason: StopReason::ToolUse,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -2806,6 +2818,7 @@ mod tests {
                         },
                     ],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -2840,6 +2853,7 @@ mod tests {
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Reasoning {
@@ -2850,6 +2864,7 @@ mod tests {
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
                 Message::User(UserMessage::text("Still here".to_string())),
             ],
@@ -2924,6 +2939,7 @@ mod tests {
                         },
                     ],
                     stop_reason: StopReason::ToolUse,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -2961,6 +2977,7 @@ mod tests {
                         },
                     ],
                     stop_reason: StopReason::EndTurn,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         );
@@ -3185,6 +3202,7 @@ mod tests {
                         ],
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );

@@ -129,6 +129,8 @@ Tools can return rich content beyond plain text. The injected runtime shape is `
 
 The built-in `view_image` tool reads an image file from disk and returns a result containing image content blocks. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via capability-aware tool visibility.
 
+The built-in `generate_image` tool is session-owned runtime dispatch. It lets a model request generated or edited images through universal fields plus provider-owned `provider_params`. Generated image bytes are stored as blobs and committed as `AssistantBlock::Image` transcript blocks, so every surface reads the same `image_id`/`blob_ref` history and fetches bytes through `blob/get`.
+
 Custom tools can return multimodal content by returning `ToolResult::with_blocks(...)` with the appropriate content blocks.
 
 ## Image generation

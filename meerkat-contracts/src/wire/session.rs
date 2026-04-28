@@ -499,28 +499,34 @@ pub struct WireToolResult {
 pub enum WireSessionMessage {
     System {
         content: String,
+        created_at: String,
     },
     SystemNotice {
         kind: SystemNoticeKind,
         body: String,
+        created_at: String,
     },
     User {
         content: WireContentInput,
+        created_at: String,
     },
     Assistant {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<WireToolCall>,
         stop_reason: WireStopReason,
+        created_at: String,
     },
     #[serde(rename = "block_assistant")]
     BlockAssistant {
         blocks: Vec<WireAssistantBlock>,
         stop_reason: WireStopReason,
+        created_at: String,
     },
     #[serde(rename = "tool_results")]
     ToolResults {
         results: Vec<WireToolResult>,
+        created_at: String,
     },
 }
 
@@ -530,12 +536,15 @@ impl From<Message> for WireSessionMessage {
         match value {
             Message::System(message) => Self::System {
                 content: message.content,
+                created_at: message.created_at.to_rfc3339(),
             },
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
                 body: message.body,
+                created_at: message.created_at.to_rfc3339(),
             },
             Message::User(message) => {
+                let created_at = message.created_at.to_rfc3339();
                 let content = if message.content.len() == 1
                     && matches!(&message.content[0], ContentBlock::Text { .. })
                 {
@@ -543,7 +552,10 @@ impl From<Message> for WireSessionMessage {
                 } else {
                     WireContentInput::Blocks(message.content.into_iter().map(Into::into).collect())
                 };
-                Self::User { content }
+                Self::User {
+                    content,
+                    created_at,
+                }
             }
             Message::Assistant(message) => Self::Assistant {
                 content: message.content,
@@ -563,12 +575,17 @@ impl From<Message> for WireSessionMessage {
                     })
                     .collect(),
                 stop_reason: message.stop_reason.into(),
+                created_at: message.created_at.to_rfc3339(),
             },
             Message::BlockAssistant(message) => Self::BlockAssistant {
                 blocks: message.blocks.into_iter().map(Into::into).collect(),
                 stop_reason: message.stop_reason.into(),
+                created_at: message.created_at.to_rfc3339(),
             },
-            Message::ToolResults { results } => Self::ToolResults {
+            Message::ToolResults {
+                results,
+                created_at,
+            } => Self::ToolResults {
                 results: results
                     .into_iter()
                     .map(|result| {
@@ -588,6 +605,7 @@ impl From<Message> for WireSessionMessage {
                         }
                     })
                     .collect(),
+                created_at: created_at.to_rfc3339(),
             },
         }
     }
@@ -777,9 +795,11 @@ mod tests {
             messages: vec![
                 WireSessionMessage::System {
                     content: "You are helpful".to_string(),
+                    created_at: "2026-04-27T00:00:00Z".to_string(),
                 },
                 WireSessionMessage::User {
                     content: WireContentInput::Text("hello".to_string()),
+                    created_at: "2026-04-27T00:00:01Z".to_string(),
                 },
                 WireSessionMessage::Assistant {
                     content: "hi".to_string(),
@@ -792,6 +812,7 @@ mod tests {
                         .expect("fixture args literal is valid JSON"),
                     }],
                     stop_reason: WireStopReason::ToolUse,
+                    created_at: "2026-04-27T00:00:02Z".to_string(),
                 },
                 WireSessionMessage::BlockAssistant {
                     blocks: vec![
@@ -805,6 +826,7 @@ mod tests {
                         },
                     ],
                     stop_reason: WireStopReason::EndTurn,
+                    created_at: "2026-04-27T00:00:03Z".to_string(),
                 },
                 WireSessionMessage::ToolResults {
                     results: vec![WireToolResult {
@@ -812,6 +834,7 @@ mod tests {
                         content: WireToolResultContent::Text("ok".to_string()),
                         is_error: false,
                     }],
+                    created_at: "2026-04-27T00:00:04Z".to_string(),
                 },
             ],
         };
@@ -833,9 +856,7 @@ mod tests {
             limit: None,
             has_more: false,
             messages: vec![
-                Message::System(SystemMessage {
-                    content: "sys".to_string(),
-                }),
+                Message::System(SystemMessage::new("sys")),
                 Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
                     meerkat_core::SystemNoticeKind::BackgroundJob,
                     "still running",
@@ -849,6 +870,7 @@ mod tests {
                     )],
                     stop_reason: StopReason::ToolUse,
                     usage: meerkat_core::Usage::default(),
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
             ],
         };
@@ -877,20 +899,18 @@ mod tests {
             limit: Some(2),
             has_more: false,
             messages: vec![
-                Message::BlockAssistant(BlockAssistantMessage {
-                    blocks: vec![AssistantBlock::Text {
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![AssistantBlock::Text {
                         text: "hi".to_string(),
                         meta: None,
                     }],
-                    stop_reason: StopReason::EndTurn,
-                }),
-                Message::ToolResults {
-                    results: vec![meerkat_core::ToolResult::new(
-                        "tool-2".to_string(),
-                        "done".to_string(),
-                        false,
-                    )],
-                },
+                    StopReason::EndTurn,
+                )),
+                Message::tool_results(vec![meerkat_core::ToolResult::new(
+                    "tool-2".to_string(),
+                    "done".to_string(),
+                    false,
+                )]),
             ],
         };
         let wire: WireSessionHistory = page.into();
@@ -1044,10 +1064,10 @@ mod tests {
 
     #[test]
     fn test_wire_user_message_text_backward_compat() {
-        let json = r#"{"role":"user","content":"hello"}"#;
+        let json = r#"{"role":"user","content":"hello","created_at":"2026-04-27T00:00:00Z"}"#;
         let parsed: WireSessionMessage = serde_json::from_str(json).unwrap();
         match parsed {
-            WireSessionMessage::User { content } => {
+            WireSessionMessage::User { content, .. } => {
                 assert_eq!(content, WireContentInput::Text("hello".to_string()));
             }
             _ => panic!("expected User message"),
@@ -1056,10 +1076,10 @@ mod tests {
 
     #[test]
     fn test_wire_user_message_blocks() {
-        let json = r#"{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","media_type":"image/png","source":"inline","data":"abc"}]}"#;
+        let json = r#"{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","media_type":"image/png","source":"inline","data":"abc"}],"created_at":"2026-04-27T00:00:00Z"}"#;
         let parsed: WireSessionMessage = serde_json::from_str(json).unwrap();
         match parsed {
-            WireSessionMessage::User { content } => {
+            WireSessionMessage::User { content, .. } => {
                 assert_eq!(
                     content,
                     WireContentInput::Blocks(vec![
@@ -1097,7 +1117,7 @@ mod tests {
         };
         let wire: WireSessionHistory = page.into();
         match &wire.messages[0] {
-            WireSessionMessage::User { content } => {
+            WireSessionMessage::User { content, .. } => {
                 assert_eq!(
                     *content,
                     WireContentInput::Blocks(vec![
@@ -1123,8 +1143,8 @@ mod tests {
             offset: 0,
             limit: None,
             has_more: false,
-            messages: vec![Message::ToolResults {
-                results: vec![meerkat_core::ToolResult::with_blocks(
+            messages: vec![Message::tool_results(vec![
+                meerkat_core::ToolResult::with_blocks(
                     "tool-1".to_string(),
                     vec![
                         ContentBlock::Text {
@@ -1136,12 +1156,12 @@ mod tests {
                         },
                     ],
                     false,
-                )],
-            }],
+                ),
+            ])],
         };
         let wire: WireSessionHistory = page.into();
         match &wire.messages[0] {
-            WireSessionMessage::ToolResults { results } => {
+            WireSessionMessage::ToolResults { results, .. } => {
                 assert_eq!(
                     results[0].content,
                     WireToolResultContent::Blocks(vec![

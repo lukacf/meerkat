@@ -72,7 +72,7 @@ pub async fn externalize_messages_from(
             Message::User(user) => {
                 externalize_content_blocks(blob_store, &mut user.content).await?;
             }
-            Message::ToolResults { results } => {
+            Message::ToolResults { results, .. } => {
                 for result in results.iter_mut() {
                     externalize_content_blocks(blob_store, &mut result.content).await?;
                 }
@@ -93,7 +93,7 @@ pub async fn hydrate_messages_for_execution(
             Message::User(user) => {
                 hydrate_content_blocks(blob_store, &mut user.content, missing_behavior).await?;
             }
-            Message::ToolResults { results } => {
+            Message::ToolResults { results, .. } => {
                 for result in results.iter_mut() {
                     hydrate_content_blocks(blob_store, &mut result.content, missing_behavior)
                         .await?;
@@ -175,7 +175,7 @@ pub fn collect_blob_ids_from_messages(messages: &[Message]) -> BTreeSet<BlobId> 
     for message in messages {
         match message {
             Message::User(user) => ids.extend(collect_blob_ids_from_blocks(&user.content)),
-            Message::ToolResults { results } => {
+            Message::ToolResults { results, .. } => {
                 for result in results {
                     ids.extend(collect_blob_ids_from_blocks(&result.content));
                 }

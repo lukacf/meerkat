@@ -337,7 +337,7 @@ async fn post_tool_rewrite_mutates_result() {
         .messages()
         .iter()
         .find_map(|message| match message {
-            Message::ToolResults { results } => Some(results.clone()),
+            Message::ToolResults { results, .. } => Some(results.clone()),
             _ => None,
         })
         .expect("tool results message should exist");

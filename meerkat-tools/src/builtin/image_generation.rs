@@ -1416,6 +1416,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_image_survives_ops_lifecycle_rebind() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let machine = Arc::new(FakeMachine::default());
+        let runtime = ImageGenerationToolRuntime {
+            session_id: SessionId::new(),
+            machine,
+            planner: fake_planner(),
+            blob_store: Arc::new(FakeBlobStore {
+                writes: Mutex::new(Vec::new()),
+            }),
+            executor: Arc::new(FakeExecutor),
+        };
+        let mut dispatcher = crate::builtin::CompositeDispatcher::new(
+            Arc::new(crate::builtin::MemoryTaskStore::new()),
+            &crate::builtin::BuiltinToolConfig::default(),
+            None,
+            Some(crate::builtin::shell::ShellConfig::with_project_root(
+                temp_dir.path().to_path_buf(),
+            )),
+            None,
+            Some(SessionId::new().to_string()),
+            true,
+        )
+        .unwrap();
+        dispatcher.register_image_generation_tool(runtime);
+
+        let registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .unwrap()
+            .into_dispatcher();
+
+        assert!(
+            rebound
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "generate_image"),
+            "ops lifecycle rebinding must preserve late-registered image generation tool"
+        );
+    }
+
+    #[tokio::test]
     async fn generate_image_gemini_plan_uses_scoped_override_call_sequence() {
         let machine = Arc::new(FakeMachine::default());
         let tool = GenerateImageTool::new(ImageGenerationToolRuntime {

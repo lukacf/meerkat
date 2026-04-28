@@ -27,11 +27,6 @@ export interface WireProviderMeta {
   [key: string]: unknown;
 }
 
-export interface WireAssistantBlock {
-  block_type: string;
-  data: Record<string, unknown>;
-}
-
 export interface WireToolCall {
   id: string;
   name: string;
@@ -46,6 +41,7 @@ export interface WireToolResult {
 
 export interface WireSessionMessage {
   role: string;
+  created_at: string;
   content?: WireContentInput;
   tool_calls?: WireToolCall[];
   stop_reason?: WireStopReason;
@@ -812,6 +808,43 @@ export interface WireModelProfile {
   supports_web_search?: boolean;
 }
 
+export interface WireAssistantImageRef {
+  blob_ref: Record<string, unknown>;
+  height: number;
+  image_id: string;
+  media_type: string;
+  width: number;
+}
+
+export interface WireGenerateImageRequest {
+  count: number;
+  format: "auto" | "png" | "jpeg" | "webp";
+  intent: Record<string, unknown>;
+  provider_params?: unknown;
+  quality: "auto" | "low" | "medium" | "high";
+  size: Record<string, unknown>;
+  target: Record<string, unknown>;
+}
+
+export interface WireGenerateImageExecutionPlan {
+  backend: "hosted_tool" | "provider_api" | "native_model";
+  capabilities: Record<string, unknown>;
+  max_count: number;
+  provider: string;
+  provider_plan?: unknown;
+  requires_scoped_override: boolean;
+}
+
+export interface WireImageGenerationToolResult {
+  images?: Record<string, unknown>[];
+  native_metadata: Record<string, unknown>;
+  operation_id: string;
+  provider_text: Record<string, unknown>;
+  revised_prompt: Record<string, unknown>;
+  terminal: Record<string, unknown>;
+  warnings?: Record<string, unknown>[];
+}
+
 export interface WireConnectionRef {
   binding: string;
   profile?: string;
@@ -909,3 +942,81 @@ export interface WireAuthErrorOther {
 }
 
 export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;
+
+export interface WireAssistantBlockText {
+  block_type: "text";
+  data: Record<string, unknown>;
+}
+
+export interface WireAssistantBlockReasoning {
+  block_type: "reasoning";
+  data: Record<string, unknown>;
+}
+
+export interface WireAssistantBlockToolUse {
+  block_type: "tool_use";
+  data: Record<string, unknown>;
+}
+
+export interface WireAssistantBlockImage {
+  block_type: "image";
+  data: Record<string, unknown>;
+}
+
+export interface WireAssistantBlockUnknown {
+  block_type: "unknown";
+}
+
+export type WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockImage | WireAssistantBlockUnknown;
+
+export interface WireImageOperationPhaseRequested {
+  phase: "requested";
+}
+
+export interface WireImageOperationPhaseValidating {
+  phase: "validating";
+}
+
+export interface WireImageOperationPhaseAwaitingApproval {
+  approval_id: string;
+  phase: "awaiting_approval";
+}
+
+export interface WireImageOperationPhasePlanResolved {
+  phase: "plan_resolved";
+}
+
+export interface WireImageOperationPhaseProjectionSnapshotted {
+  phase: "projection_snapshotted";
+}
+
+export interface WireImageOperationPhaseScopedOverrideActive {
+  phase: "scoped_override_active";
+}
+
+export interface WireImageOperationPhaseProviderCallInFlight {
+  phase: "provider_call_in_flight";
+}
+
+export interface WireImageOperationPhaseProviderResultCaptured {
+  phase: "provider_result_captured";
+}
+
+export interface WireImageOperationPhaseBlobCommitPending {
+  phase: "blob_commit_pending";
+}
+
+export interface WireImageOperationPhaseResultCommitted {
+  phase: "result_committed";
+}
+
+export interface WireImageOperationPhaseRestoringScopedOverride {
+  phase: "restoring_scoped_override";
+}
+
+export interface WireImageOperationPhaseTerminal {
+  phase: "terminal";
+  terminal: Record<string, unknown>;
+}
+
+export type WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationPhaseValidating | WireImageOperationPhaseAwaitingApproval | WireImageOperationPhasePlanResolved | WireImageOperationPhaseProjectionSnapshotted | WireImageOperationPhaseScopedOverrideActive | WireImageOperationPhaseProviderCallInFlight | WireImageOperationPhaseProviderResultCaptured | WireImageOperationPhaseBlobCommitPending | WireImageOperationPhaseResultCommitted | WireImageOperationPhaseRestoringScopedOverride | WireImageOperationPhaseTerminal;

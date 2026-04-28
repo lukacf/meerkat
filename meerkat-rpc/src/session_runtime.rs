@@ -105,7 +105,7 @@ fn render_runtime_system_context_message(append: &PendingSystemContextAppend) ->
     }
     content.push_str("\n\n");
     content.push_str(&append.text);
-    Message::System(SystemMessage { content })
+    Message::System(SystemMessage::new(content))
 }
 
 fn realtime_projection_root_system_message(session: &Session) -> Option<Message> {
@@ -144,7 +144,7 @@ fn realtime_projection_root_system_message(session: &Session) -> Option<Message>
     if content.trim().is_empty() {
         None
     } else {
-        Some(Message::System(SystemMessage { content }))
+        Some(Message::System(SystemMessage::new(content)))
     }
 }
 

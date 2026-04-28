@@ -118,6 +118,10 @@ rkat-rpc [--realm <id>] [--isolated] [--instance <id>] [--realm-backend <sqlite|
 | `mob/member_send` | Mob | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
 | `mob/append_system_context` | Mob | Stage system context for a member session (mob feature) |
 | `mob/flows` | Mob | List mob flows (mob feature) |
+
+<Note>
+Generated assistant images use the same surface-neutral history and blob APIs as other blob-backed artifacts. Read `session/history`, find assistant blocks with `block_type: "image"`, then call `blob/get` with `data.blob_ref.blob_id` to retrieve the base64 payload.
+</Note>
 | `mob/flow_run` | Mob | Start a mob flow run (mob feature) |
 | `mob/flow_status` | Mob | Get flow run status (mob feature) |
 | `mob/flow_cancel` | Mob | Cancel a flow run (mob feature) |

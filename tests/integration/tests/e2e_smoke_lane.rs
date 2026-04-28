@@ -76,6 +76,15 @@ smoke_scenario!(
     72
 );
 smoke_scenario!(e2e_smoke_s73_cli_generate_image_openai_default, 73);
+smoke_scenario!(e2e_smoke_s74_python_sdk_gemini_image_provider_params, 74);
+smoke_scenario!(
+    e2e_smoke_s75_typescript_sdk_openai_image_provider_params,
+    75
+);
+smoke_scenario!(
+    e2e_smoke_s76_typescript_sdk_cross_provider_image_model_switch_stress,
+    76
+);
 smoke_suite!(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
 smoke_suite!(
     e2e_smoke_rpc_deferred_catalog_session,

@@ -59,8 +59,14 @@ fn insert_frame_to_ready_queue(flow_state: &mut flow_run::State, frame_id: &str)
         .insert(FrameId::from(frame_id));
 }
 
-fn get_ready_frames_from_run_state(flow_state: &flow_run::State) -> Vec<meerkat_mob::FrameId> {
-    flow_state.ready_frames.clone()
+fn assert_projection_mismatch(result: Result<(), RestoreIncompatible>, field: &'static str) {
+    assert!(
+        matches!(
+            result,
+            Err(RestoreIncompatible::ProjectionMismatch { field: actual }) if actual == field
+        ),
+        "expected ProjectionMismatch({field}), got: {result:?}"
+    );
 }
 
 // ─── REQ-10 / CHOKE-04: FlowContext path resolution ─────────────────────────
@@ -157,13 +163,7 @@ fn test_recovery_drops_stale_ready_frames() {
     // Manually add frame-1 to ready_frames as a stale entry.
     insert_frame_to_ready_queue(&mut run.flow_state, "frame-1");
 
-    reconcile_run_state(&mut run).expect("reconcile");
-
-    let ready_frames = get_ready_frames_from_run_state(&run.flow_state);
-    assert!(
-        !ready_frames.contains(&FrameId::from("frame-1")),
-        "Stale frame-1 should be removed from ready_frames; got: {ready_frames:?}"
-    );
+    assert_projection_mismatch(reconcile_run_state(&mut run), "ready_frames");
 }
 
 // ─── REQ-11 / CHOKE-05: Recovery adds missing ready_frames entries ───────────
@@ -179,13 +179,7 @@ fn test_recovery_adds_missing_ready_frames() {
 
     // Do NOT insert frame-2 into ready_frames (simulating missing entry).
 
-    reconcile_run_state(&mut run).expect("reconcile");
-
-    let ready_frames = get_ready_frames_from_run_state(&run.flow_state);
-    assert!(
-        ready_frames.contains(&FrameId::from("frame-2")),
-        "Missing frame-2 should be added to ready_frames; got: {ready_frames:?}"
-    );
+    assert_projection_mismatch(reconcile_run_state(&mut run), "ready_frames");
 }
 
 // ─── REQ-12: Recovery detects frame invariant violation ─────────────────────
@@ -250,12 +244,6 @@ fn test_pre_v3_pending_run_is_accepted() {
 
 // ─── Recovery: pending_body_frame_loops reconciliation ─────────────────────
 
-fn get_pending_body_frame_loops_from_run_state(
-    flow_state: &flow_run::State,
-) -> Vec<meerkat_mob::LoopInstanceId> {
-    flow_state.pending_body_frame_loops.clone()
-}
-
 /// Recovery adds missing pending_body_frame_loops entries for loops in Running
 /// phase with active_body_frame_id = None.
 #[test]
@@ -276,13 +264,7 @@ fn test_recovery_adds_missing_pending_body_frame_loops() {
 
     // Do NOT insert into pending_body_frame_loops (simulating missing entry).
 
-    reconcile_run_state(&mut run).expect("reconcile");
-
-    let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
-    assert!(
-        pending.contains(&LoopInstanceId::from("loop-inst-1")),
-        "Missing loop-inst-1 should be added to pending_body_frame_loops; got: {pending:?}"
-    );
+    assert_projection_mismatch(reconcile_run_state(&mut run), "pending_body_frame_loops");
 }
 
 /// Recovery drops stale pending_body_frame_loops entries for loops whose
@@ -308,11 +290,5 @@ fn test_recovery_drops_stale_pending_body_frame_loops() {
     run.flow_state.pending_body_frame_loop_membership =
         [LoopInstanceId::from("loop-inst-2")].into_iter().collect();
 
-    reconcile_run_state(&mut run).expect("reconcile");
-
-    let pending = get_pending_body_frame_loops_from_run_state(&run.flow_state);
-    assert!(
-        !pending.contains(&LoopInstanceId::from("loop-inst-2")),
-        "Stale loop-inst-2 should be removed from pending_body_frame_loops; got: {pending:?}"
-    );
+    assert_projection_mismatch(reconcile_run_state(&mut run), "pending_body_frame_loops");
 }

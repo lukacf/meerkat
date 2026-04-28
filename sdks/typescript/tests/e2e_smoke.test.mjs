@@ -55,6 +55,14 @@ function hasOpenAIKey() {
   );
 }
 
+function hasGeminiKey() {
+  return Boolean(
+    process.env.RKAT_GEMINI_API_KEY ||
+      process.env.GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY,
+  );
+}
+
 function anthropicModel() {
   return (
     process.env.SMOKE_MODEL_ANTHROPIC ||
@@ -66,6 +74,22 @@ function anthropicModel() {
 function openaiModel() {
   // Default to the current approved OpenAI smoke model per CLAUDE.md.
   return process.env.SMOKE_MODEL_OPENAI || "gpt-5.4-mini";
+}
+
+function openaiStressModel() {
+  return process.env.SMOKE_MODEL_OPENAI_STRESS || "gpt-5.5";
+}
+
+function openaiImageModel() {
+  return process.env.SMOKE_IMAGE_MODEL_OPENAI || "gpt-image-2";
+}
+
+function geminiModel() {
+  return process.env.SMOKE_MODEL_GEMINI || "gemini-3.1-pro-preview";
+}
+
+function geminiImageModel() {
+  return process.env.SMOKE_IMAGE_MODEL_GEMINI || "gemini-3.1-flash-image-preview";
 }
 
 function includeScenario(id) {
@@ -134,6 +158,24 @@ async function waitFor(fetch, predicate, { timeoutMs = 60000, intervalMs = 200 }
     await delay(intervalMs);
   }
   throw new Error(`waitFor timed out; last value: ${JSON.stringify(lastValue)}`);
+}
+
+function assistantImageBlocks(history) {
+  return history.messages.flatMap((message) =>
+    message.role === "assistant" || message.role === "block_assistant"
+      ? message.blocks.filter((block) => block.blockType === "image")
+      : [],
+  );
+}
+
+async function assertFetchableImageBlob(client, block) {
+  assert.ok(block.imageId, "assistant image block should expose imageId");
+  assert.ok(block.blobId, "assistant image block should expose blobId");
+  assert.match(block.mediaType || "", /^image\//);
+  const payload = await client.getBlob(block.blobId);
+  assert.equal(payload.blobId, block.blobId);
+  assert.match(payload.mediaType, /^image\//);
+  assert.ok(payload.dataBase64.length > 1024);
 }
 
 describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
@@ -314,8 +356,8 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const scenario = "Scenario 44";
       const client = await withStepTimeout(
         scenario,
-        "connect isolated client",
-        connectClient({ isolated: true }),
+        "connect client",
+        connectClient(),
       );
       const mob = await withStepTimeout(scenario, "create mob", client.createMob({
         definition: {
@@ -509,8 +551,8 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const scenario = "Scenario 59";
       const client = await withStepTimeout(
         scenario,
-        "connect isolated client",
-        connectClient({ isolated: true }),
+        "connect client",
+        connectClient(),
       );
 
       const session = await withStepTimeout(
@@ -605,6 +647,160 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         }
       })());
       assert.equal(closed.type, "channel.closed");
+      },
+    );
+  }
+
+  if (includeScenario(75)) {
+    it(
+      "Scenario 75: OpenAI image generation provider params through the packaged SDK",
+      { skip: !(hasAnthropicKey() && hasOpenAIKey()) },
+      async () => {
+      const scenario = "Scenario 75";
+      const client = await withStepTimeout(
+        scenario,
+        "connect isolated client",
+        connectClient({ isolated: true }),
+      );
+
+      const session = await withStepTimeout(
+        scenario,
+        "create OpenAI image session",
+        client.createSession(
+          `Use the generate_image tool exactly once. Pass request.provider="openai",
+request.model="${openaiImageModel()}", request.intent="generate",
+request.prompt="A clean white placard with TS-OPENAI-75 written in large blue letters",
+request.size="1024x1024", request.quality="low", request.format="webp",
+request.count=1, and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
+After the tool returns, reply with TS-OPENAI-75-DONE and no extra prose.`,
+          {
+            model: anthropicModel(),
+            provider: "anthropic",
+            enableBuiltins: true,
+          },
+        ),
+        180000,
+      );
+      assert.match(session.text.toLowerCase(), /ts-openai-75/);
+
+      const history = await withStepTimeout(
+        scenario,
+        "read session history",
+        client.readSessionHistory(session.id),
+      );
+      const images = assistantImageBlocks(history);
+      assert.ok(images.length >= 1, "OpenAI image generation should append an assistant image block");
+      await withStepTimeout(
+        scenario,
+        "fetch generated image blob",
+        assertFetchableImageBlob(client, images.at(-1)),
+      );
+      },
+    );
+  }
+
+  if (includeScenario(76)) {
+    it(
+      "Scenario 76: cross-provider image generation and model-switch stress",
+      { skip: !(hasOpenAIKey() && hasGeminiKey()) },
+      async () => {
+      const scenario = "Scenario 76";
+      const client = await withStepTimeout(
+        scenario,
+        "connect isolated client",
+        connectClient({ isolated: true }),
+      );
+
+      const initial = await withStepTimeout(
+        scenario,
+        "OpenAI turn delegates image generation to Gemini",
+        client.createSession(
+          `Use the generate_image tool exactly once. You are an OpenAI model, but the image target must be Gemini.
+Pass request.provider="gemini", request.model="${geminiImageModel()}", request.intent="generate",
+request.prompt="A flat white sign with the single word Hello centered in large crisp black letters",
+request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
+and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
+After the tool returns, reply with CROSS-IMAGE-76-FIRST and no extra prose.`,
+          {
+            model: openaiStressModel(),
+            provider: "openai",
+            enableBuiltins: true,
+          },
+        ),
+        240000,
+      );
+      assert.match(initial.text.toLowerCase(), /cross-image-76-first/);
+
+      const firstHistory = await withStepTimeout(
+        scenario,
+        "read first image history",
+        client.readSessionHistory(initial.id),
+      );
+      const firstImages = assistantImageBlocks(firstHistory);
+      assert.ok(firstImages.length >= 1, "first turn should commit a Gemini image block");
+      const firstImage = firstImages.at(-1);
+      await withStepTimeout(
+        scenario,
+        "fetch first image blob",
+        assertFetchableImageBlob(client, firstImage),
+      );
+
+      const edit = await withStepTimeout(
+        scenario,
+        "Gemini turn edits previous generated image",
+        initial.turn(
+          `Switch to Gemini now and use generate_image exactly once to edit the previous assistant image.
+Pass request.provider="gemini", request.model="${geminiImageModel()}", request.intent="edit",
+request.source_images=[{"kind":"assistant_image","image_id":"${firstImage.imageId}"}],
+request.instruction="Modify only the sign text so it says Hello Meerkat in large crisp black letters",
+request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
+and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
+After the tool returns, reply with CROSS-IMAGE-76-EDITED and no extra prose.`,
+          {
+            model: geminiModel(),
+            provider: "gemini",
+            enableBuiltins: true,
+          },
+        ),
+        240000,
+      );
+      assert.match(edit.text.toLowerCase(), /cross-image-76-edited/);
+
+      const editHistory = await withStepTimeout(
+        scenario,
+        "read edited image history",
+        client.readSessionHistory(initial.id),
+      );
+      const editedImages = assistantImageBlocks(editHistory);
+      assert.ok(editedImages.length >= firstImages.length + 1, "edit turn should commit another image block");
+      const editedImage = editedImages.at(-1);
+      assert.notEqual(editedImage.imageId, firstImage.imageId);
+      await withStepTimeout(
+        scenario,
+        "fetch edited image blob",
+        assertFetchableImageBlob(client, editedImage),
+      );
+
+      const description = await withStepTimeout(
+        scenario,
+        "OpenAI turn describes latest generated image",
+        initial.turn(
+          `Switch back to OpenAI. Inspect the latest assistant image and describe the visible text.
+Reply with CROSS-IMAGE-76-DESCRIBE and a short phrase containing the text you can read.`,
+          {
+            model: openaiStressModel(),
+            provider: "openai",
+            enableBuiltins: true,
+          },
+        ),
+        240000,
+      );
+      const descriptionText = description.text.toLowerCase();
+      assert.match(descriptionText, /cross-image-76-describe/);
+      assert.ok(
+        descriptionText.includes("hello") || descriptionText.includes("meerkat"),
+        `expected OpenAI to read some text from the final image, got: ${description.text}`,
+      );
       },
     );
   }

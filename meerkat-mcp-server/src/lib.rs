@@ -2855,7 +2855,7 @@ async fn handle_meerkat_resume(
             .iter()
             .map(|r| ToolResult::new(r.tool_use_id.clone(), r.content.clone(), r.is_error))
             .collect();
-        session.push(Message::ToolResults { results });
+        session.push(Message::tool_results(results));
     }
 
     // Resolve settings from stored metadata, falling back to input overrides
@@ -4383,9 +4383,7 @@ mod tests {
         let session_id = session.id().to_string();
 
         session.push(meerkat_core::types::Message::System(
-            meerkat_core::types::SystemMessage {
-                content: "system rules".to_string(),
-            },
+            meerkat_core::types::SystemMessage::new("system rules"),
         ));
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("Hello".to_string()),
@@ -4396,6 +4394,7 @@ mod tests {
                 tool_calls: vec![],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
                 usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
         session.push(meerkat_core::types::Message::User(
@@ -4407,6 +4406,7 @@ mod tests {
                 tool_calls: vec![],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
                 usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
         store
@@ -4463,9 +4463,7 @@ mod tests {
         let session_id = session.id().to_string();
 
         session.push(meerkat_core::types::Message::System(
-            meerkat_core::types::SystemMessage {
-                content: "system rules".to_string(),
-            },
+            meerkat_core::types::SystemMessage::new("system rules"),
         ));
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("hello".to_string()),
@@ -4480,11 +4478,12 @@ mod tests {
                 }],
                 stop_reason: meerkat_core::types::StopReason::ToolUse,
                 usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             },
         ));
         session.push(meerkat_core::types::Message::BlockAssistant(
-            meerkat_core::types::BlockAssistantMessage {
-                blocks: vec![meerkat_core::types::AssistantBlock::ToolUse {
+            meerkat_core::types::BlockAssistantMessage::new(
+                vec![meerkat_core::types::AssistantBlock::ToolUse {
                     id: "tool-2".to_string(),
                     name: "lookup".into(),
                     args: serde_json::value::RawValue::from_string(
@@ -4493,16 +4492,12 @@ mod tests {
                     .expect("raw tool args"),
                     meta: None,
                 }],
-                stop_reason: meerkat_core::types::StopReason::ToolUse,
-            },
+                meerkat_core::types::StopReason::ToolUse,
+            ),
         ));
-        session.push(meerkat_core::types::Message::ToolResults {
-            results: vec![meerkat_core::types::ToolResult::new(
-                "tool-2".to_string(),
-                "done".to_string(),
-                false,
-            )],
-        });
+        session.push(meerkat_core::types::Message::tool_results(vec![
+            meerkat_core::types::ToolResult::new("tool-2".to_string(), "done".to_string(), false),
+        ]));
         store.save(&session).await.expect("persisted mixed session");
 
         let history = Box::pin(handle_tools_call(

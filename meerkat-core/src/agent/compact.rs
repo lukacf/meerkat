@@ -77,7 +77,7 @@ pub fn estimate_tokens(messages: &[Message]) -> Result<u64, CompactionError> {
                     }
                 }
             }
-            Message::ToolResults { results } => {
+            Message::ToolResults { results, .. } => {
                 for r in results {
                     for block in &r.content {
                         match block {
@@ -313,21 +313,21 @@ mod tests {
     fn load_compaction_cadence_infers_boundary_count_from_existing_history() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("first")));
-        session.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![AssistantBlock::Text {
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
                 text: "ok".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
-        }));
+            StopReason::EndTurn,
+        )));
         session.push(Message::User(UserMessage::text("second")));
-        session.push(Message::BlockAssistant(BlockAssistantMessage {
-            blocks: vec![AssistantBlock::Text {
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
                 text: "done".to_string(),
                 meta: None,
             }],
-            stop_reason: StopReason::EndTurn,
-        }));
+            StopReason::EndTurn,
+        )));
         session.record_usage(Usage::default());
 
         let cadence = load_compaction_cadence(&session);
@@ -357,19 +357,17 @@ mod tests {
                     data: "A".repeat(8_000),
                 },
             }])),
-            Message::ToolResults {
-                results: vec![ToolResult::with_blocks(
-                    "tool-1".to_string(),
-                    vec![ContentBlock::Video {
-                        media_type: "video/webm".to_string(),
-                        duration_ms: 4_000,
-                        data: VideoData::Inline {
-                            data: "B".repeat(4_000),
-                        },
-                    }],
-                    false,
-                )],
-            },
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "tool-1".to_string(),
+                vec![ContentBlock::Video {
+                    media_type: "video/webm".to_string(),
+                    duration_ms: 4_000,
+                    data: VideoData::Inline {
+                        data: "B".repeat(4_000),
+                    },
+                }],
+                false,
+            )]),
         ];
 
         assert_eq!(estimate_tokens(&messages).unwrap(), 3_600);

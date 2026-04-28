@@ -633,3 +633,35 @@ fn generated_header_truthfulness_is_clean() {
         "generated header audit violations: {violations:?}"
     );
 }
+
+#[test]
+fn e2e_smoke_lane_launchers_allow_parallel_test_processes() {
+    let root = repo_root();
+    let cargo_config = read(root.join(".cargo/config.toml"));
+    let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
+    let readme = read(root.join("tests/live_smoke/README.md"));
+
+    let smoke_alias = cargo_config
+        .lines()
+        .find(|line| line.starts_with("e2e-smoke = "))
+        .expect("e2e-smoke cargo alias");
+    assert!(
+        !smoke_alias.contains("--test-threads=1"),
+        "cargo e2e-smoke must not serialize the whole smoke lane: {smoke_alias}"
+    );
+
+    let smoke_rbe_block =
+        find_all_between(&launcher, "e2e-smoke-rbe)", ";;").expect("e2e-smoke-rbe block");
+    assert!(
+        !smoke_rbe_block.contains("--test_arg=--test-threads=1"),
+        "BuildBuddy e2e-smoke-rbe must not serialize the whole smoke lane: {smoke_rbe_block}"
+    );
+
+    let serialized_smoke_doc = readme
+        .lines()
+        .find(|line| line.contains("e2e_smoke_lane") && line.contains("--test-threads=1"));
+    assert!(
+        serialized_smoke_doc.is_none(),
+        "smoke lane docs must not recommend whole-lane serialization: {serialized_smoke_doc:?}"
+    );
+}

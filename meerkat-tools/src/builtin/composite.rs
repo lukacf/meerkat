@@ -55,6 +55,8 @@ pub struct CompositeDispatcher {
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    image_generation_runtime: Option<crate::builtin::image_generation::ImageGenerationToolRuntime>,
     allowed_tools: HashSet<String>,
 }
 
@@ -188,6 +190,7 @@ impl CompositeDispatcher {
             session_id: shell_session_id,
             image_tool_results: _image_tool_results,
             job_manager,
+            image_generation_runtime: None,
             allowed_tools,
         })
     }
@@ -257,10 +260,11 @@ impl CompositeDispatcher {
         runtime: crate::builtin::image_generation::ImageGenerationToolRuntime,
     ) {
         let tool = Arc::new(crate::builtin::image_generation::GenerateImageTool::new(
-            runtime,
+            runtime.clone(),
         ));
         self.allowed_tools.insert(tool.name().to_string());
         self.builtin_tools.push(tool);
+        self.image_generation_runtime = Some(runtime);
     }
 
     /// Get usage instructions for all enabled tools.
@@ -635,6 +639,9 @@ impl AgentToolDispatcher for CompositeDispatcher {
             #[cfg(feature = "skills")]
             if let Some(skill_tools) = owned.skill_tools.take() {
                 rebound.register_skill_tools(skill_tools);
+            }
+            if let Some(runtime) = owned.image_generation_runtime.take() {
+                rebound.register_image_generation_tool(runtime);
             }
 
             Ok(BindOutcome::Bound(Arc::new(rebound)))

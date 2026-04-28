@@ -382,7 +382,7 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                     }
                 }
             }
-            Message::ToolResults { results } => {
+            Message::ToolResults { results, .. } => {
                 for r in results {
                     if r.has_video() {
                         return Err(LlmError::InvalidRequest {
@@ -494,9 +494,7 @@ mod tests {
     use meerkat_core::{AssistantMessage, SystemMessage, ToolCall, ToolResult, UserMessage};
 
     fn sys(text: &str) -> Message {
-        Message::System(SystemMessage {
-            content: text.to_string(),
-        })
+        Message::System(SystemMessage::new(text.to_string()))
     }
 
     fn user(text: &str) -> Message {
@@ -509,6 +507,7 @@ mod tests {
             tool_calls: Vec::new(),
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
         })
     }
 
@@ -558,6 +557,7 @@ mod tests {
             )],
             stop_reason: StopReason::ToolUse,
             usage: Usage::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
         });
         let tool_results = Message::ToolResults {
             results: vec![ToolResult::new(
@@ -565,6 +565,7 @@ mod tests {
                 "file contents".to_string(),
                 false,
             )],
+            created_at: meerkat_core::types::message_timestamp_now(),
         };
 
         let (_, items) =

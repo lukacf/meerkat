@@ -211,7 +211,7 @@ impl GeminiClient {
                         "parts": parts
                     }));
                 }
-                Message::ToolResults { results } => {
+                Message::ToolResults { results, .. } => {
                     // Per spec section 2.3: thoughtSignature NEVER on functionResponse
                     // Signature belongs on functionCall, not on the response
                     let mut parts: Vec<Value> = Vec::new();
@@ -955,12 +955,13 @@ fn strip_gemini_function_parameters_unsupported_keywords(value: &mut Value) {
             obj.remove("$anchor");
             obj.remove("const");
             obj.remove("title");
+            obj.remove("additionalProperties");
             obj.remove("if");
             obj.remove("then");
             obj.remove("else");
+            obj.remove("dependentRequired");
             obj.remove("dependentSchemas");
             obj.remove("unevaluatedProperties");
-            obj.remove("additionalProperties");
 
             for (key, child) in obj.iter_mut() {
                 if key == "properties" {
@@ -1701,6 +1702,7 @@ mod tests {
                         })),
                     }],
                     stop_reason: StopReason::ToolUse,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::new(
@@ -1708,6 +1710,7 @@ mod tests {
                         "Sunny".to_string(),
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );
@@ -1987,6 +1990,7 @@ mod tests {
                     }],
                     false,
                 )],
+                created_at: meerkat_core::types::message_timestamp_now(),
             }],
         );
 
@@ -2527,6 +2531,65 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_schema_parameters_strip_conditionals_inside_compositions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "target": {
+                    "oneOf": [
+                        {
+                            "allOf": [
+                                {
+                                    "if": {"properties": {"kind": {"const": "model"}}},
+                                    "then": {"required": ["model"]},
+                                    "else": {"required": ["provider"]}
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            "additionalProperties": false
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "test_tool".into(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+
+        assert!(
+            !serde_json::to_string(parameters)?.contains("\"additionalProperties\""),
+            "Gemini function parameters should strip additionalProperties at every depth"
+        );
+        assert!(
+            !serde_json::to_string(parameters)?.contains("\"if\""),
+            "Gemini function parameters should strip conditional schemas"
+        );
+        assert!(
+            !serde_json::to_string(parameters)?.contains("\"then\""),
+            "Gemini function parameters should strip conditional schemas"
+        );
+        assert!(
+            !serde_json::to_string(parameters)?.contains("\"else\""),
+            "Gemini function parameters should strip conditional schemas"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_tool_schema_parameters_inline_ref_inside_anyof()
     -> Result<(), Box<dyn std::error::Error>> {
         use meerkat_core::ToolDef;
@@ -2819,6 +2882,7 @@ mod tests {
                         })),
                     }],
                     stop_reason: StopReason::ToolUse,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::new(
@@ -2826,6 +2890,7 @@ mod tests {
                         "Sunny, 25C".to_string(),
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );
@@ -3053,6 +3118,7 @@ mod tests {
                         meta: None,
                     }],
                     stop_reason: StopReason::ToolUse,
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 }),
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::with_blocks(
@@ -3068,6 +3134,7 @@ mod tests {
                         ],
                         false,
                     )],
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ],
         );

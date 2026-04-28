@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from .session import Session
     from .types import RunResult
 
+RPC_STDOUT_LIMIT_BYTES = 64 * 1024 * 1024
+
 
 class _StdoutDispatcher:
     """Background reader that multiplexes stdout lines to response futures and event queues."""

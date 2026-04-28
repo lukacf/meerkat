@@ -58,6 +58,11 @@ from .generated.types import (
     RuntimeRetireResult as RuntimeRetireResult,
     RuntimeStateParams as RuntimeStateParams,
     RuntimeStateResult as RuntimeStateResult,
+    WireAssistantImageRef as WireAssistantImageRef,
+    WireGenerateImageExecutionPlan as WireGenerateImageExecutionPlan,
+    WireGenerateImageRequest as WireGenerateImageRequest,
+    WireImageGenerationToolResult as WireImageGenerationToolResult,
+    WireImageOperationPhase as WireImageOperationPhase,
     WireInputState as WireInputState,
 )
 
@@ -391,6 +396,12 @@ class SessionAssistantBlock:
     id: str | None = None
     name: str | None = None
     args: Any = None
+    image_id: str | None = None
+    blob_id: str | None = None
+    media_type: str | None = None
+    width: int | None = None
+    height: int | None = None
+    revised_prompt: dict[str, Any] | None = None
     meta: dict[str, Any] | None = None
 
 
@@ -399,6 +410,7 @@ class SessionMessage:
     """Canonical transcript message returned by session history APIs."""
 
     role: str = ""
+    created_at: str = ""
     content: ContentInput | None = None
     tool_calls: list[SessionToolCall] = field(default_factory=list)
     stop_reason: str | None = None

@@ -302,7 +302,7 @@ impl OpenAiCompatibleClient {
                         "tool_calls": tool_calls
                     }));
                 }
-                Message::ToolResults { results } => {
+                Message::ToolResults { results, .. } => {
                     for result in results {
                         out.push(serde_json::json!({
                             "role": "tool",

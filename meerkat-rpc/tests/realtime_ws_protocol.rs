@@ -602,9 +602,7 @@ async fn provider_managed_text_input_emits_transcript_events_and_commits_history
         new_messages.iter().any(|message| {
             matches!(
                 message,
-                WireSessionMessage::User {
-                    content: WireContentInput::Text(text),
-                } if text == "hello from provider managed"
+                WireSessionMessage::User { content: WireContentInput::Text(text), .. } if text == "hello from provider managed"
             )
         }),
         "provider-managed commit should append the user transcript to canonical history"
@@ -791,9 +789,7 @@ async fn explicit_commit_text_input_stays_local_until_commit_turn() {
         new_messages.iter().any(|message| {
             matches!(
                 message,
-                WireSessionMessage::User {
-                    content: WireContentInput::Text(text),
-                } if text == "hello world"
+                WireSessionMessage::User { content: WireContentInput::Text(text), .. } if text == "hello world"
             )
         }),
         "explicit commit should append the staged transcript to canonical history"
@@ -1847,9 +1843,11 @@ async fn interrupted_provider_turn_followed_by_new_commit_appends_new_user_turn_
         .filter_map(|message| match message {
             WireSessionMessage::User {
                 content: WireContentInput::Text(text),
+                ..
             } => Some(text.clone()),
             WireSessionMessage::User {
                 content: WireContentInput::Blocks(blocks),
+                ..
             } => Some(
                 blocks
                     .iter()

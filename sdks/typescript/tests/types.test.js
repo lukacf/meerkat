@@ -340,6 +340,44 @@ describe("Typed Events", () => {
     assert.equal(history.messages[2].blocks[0].name, "lookup");
   });
 
+  it("should preserve assistant image blocks from session history", () => {
+    const history = MeerkatClient.parseSessionHistory({
+      session_id: "s1",
+      message_count: 1,
+      offset: 0,
+      has_more: false,
+      messages: [
+        {
+          role: "block_assistant",
+          blocks: [
+            {
+              block_type: "image",
+              data: {
+                image_id: "img_1",
+                blob_ref: { blob_id: "blob_1", media_type: "image/png" },
+                media_type: "image/png",
+                width: 1024,
+                height: 1536,
+                revised_prompt: { disposition: "not_requested" },
+                meta: { provider: "open_ai", target_model: "gpt-image-1" },
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const block = history.messages[0].blocks[0];
+    assert.equal(block.blockType, "image");
+    assert.equal(block.imageId, "img_1");
+    assert.equal(block.blobId, "blob_1");
+    assert.equal(block.mediaType, "image/png");
+    assert.equal(block.width, 1024);
+    assert.equal(block.height, 1536);
+    assert.deepEqual(block.revisedPrompt, { disposition: "not_requested" });
+    assert.deepEqual(block.meta, { provider: "open_ai", target_model: "gpt-image-1" });
+  });
+
   it("should parse inline video content blocks from history payloads", () => {
     const history = MeerkatClient.parseSessionHistory({
       session_id: "s1",

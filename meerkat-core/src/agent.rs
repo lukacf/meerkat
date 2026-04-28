@@ -118,10 +118,7 @@ impl LlmStreamResult {
     }
 
     pub fn into_message(self) -> BlockAssistantMessage {
-        BlockAssistantMessage {
-            blocks: self.blocks,
-            stop_reason: self.stop_reason,
-        }
+        BlockAssistantMessage::new(self.blocks, self.stop_reason)
     }
 
     pub fn into_parts(self) -> (Vec<AssistantBlock>, StopReason, Usage) {

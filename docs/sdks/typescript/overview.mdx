@@ -100,6 +100,20 @@ The SDK also exposes the runtime/product realtime helpers and auth-profile wrapp
 - `mcpAdd(...)`, `mcpRemove(...)`, `mcpReload(...)`
 - `getBlob(...)`, `listSkills()`
 
+### Generated assistant images
+
+When a session model calls the built-in `generate_image` tool, generated images appear in committed history as `SessionAssistantBlock` entries with `blockType === "image"`. The SDK preserves `imageId`, `blobId`, `mediaType`, `width`, `height`, `revisedPrompt`, and provider metadata.
+
+```typescript
+const history = await session.history();
+const image = history.messages
+  .flatMap((message) => [...message.blocks])
+  .find((block) => block.blockType === "image");
+const payload = image?.blobId ? await client.getBlob(image.blobId) : undefined;
+```
+
+Image-generation wire contracts are exported for integrations that inspect tool results directly: `WireGenerateImageRequest`, `WireGenerateImageExecutionPlan`, `WireImageGenerationToolResult`, `WireImageOperationPhase`, and `WireAssistantImageRef`.
+
 ### Capability methods
 
 | Method | Description |

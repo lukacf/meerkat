@@ -2584,6 +2584,7 @@ export class MeerkatClient {
       : [];
     return {
       role,
+      createdAt: String(data.created_at ?? ""),
       content:
         contentValue != null ? MeerkatClient.parseContentInput(contentValue) : undefined,
       toolCalls: rawToolCalls.map(
@@ -2650,12 +2651,23 @@ export class MeerkatClient {
 
   static parseSessionAssistantBlock(data: Record<string, unknown>): SessionAssistantBlock {
     const blockData = (data.data as Record<string, unknown> | undefined) ?? {};
+    const blobRef = blockData.blob_ref as Record<string, unknown> | undefined;
+    const revisedPrompt =
+      blockData.revised_prompt != null && typeof blockData.revised_prompt === "object"
+        ? (blockData.revised_prompt as Record<string, unknown>)
+        : undefined;
     return {
       blockType: String(data.block_type ?? ""),
       text: blockData.text != null ? String(blockData.text) : undefined,
       id: blockData.id != null ? String(blockData.id) : undefined,
       name: blockData.name != null ? String(blockData.name) : undefined,
       args: blockData.args,
+      imageId: blockData.image_id != null ? String(blockData.image_id) : undefined,
+      blobId: blobRef?.blob_id != null ? String(blobRef.blob_id) : undefined,
+      mediaType: blockData.media_type != null ? String(blockData.media_type) : undefined,
+      width: blockData.width != null ? Number(blockData.width) : undefined,
+      height: blockData.height != null ? Number(blockData.height) : undefined,
+      revisedPrompt,
       meta: blockData.meta as Record<string, unknown> | undefined,
     };
   }

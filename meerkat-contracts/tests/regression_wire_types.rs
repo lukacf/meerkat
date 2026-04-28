@@ -202,9 +202,11 @@ fn wire_session_history_required_fields() {
         messages: vec![
             WireSessionMessage::System {
                 content: "system".to_string(),
+                created_at: "2026-04-27T00:00:00Z".to_string(),
             },
             WireSessionMessage::User {
                 content: meerkat_contracts::WireContentInput::Text("user".to_string()),
+                created_at: "2026-04-27T00:00:01Z".to_string(),
             },
         ],
     };
@@ -237,6 +239,7 @@ fn wire_session_history_roundtrip() {
             WireSessionMessage::BlockAssistant {
                 blocks: vec![],
                 stop_reason: meerkat_contracts::WireStopReason::EndTurn,
+                created_at: "2026-04-27T00:00:02Z".to_string(),
             },
             WireSessionMessage::ToolResults {
                 results: vec![meerkat_contracts::WireToolResult {
@@ -244,6 +247,7 @@ fn wire_session_history_roundtrip() {
                     content: meerkat_contracts::WireToolResultContent::Text("ok".to_string()),
                     is_error: false,
                 }],
+                created_at: "2026-04-27T00:00:03Z".to_string(),
             },
         ],
     };

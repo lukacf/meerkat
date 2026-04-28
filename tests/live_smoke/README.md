@@ -19,6 +19,7 @@ Typical full-matrix prereqs:
 
 - `ANTHROPIC_API_KEY`
 - `OPENAI_API_KEY`
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY`
 - Rust toolchain + built binaries
 - `python3` + `pytest` for Python SDK scenarios
 - `node` + `npm` for TypeScript / web / browser scenarios
@@ -61,7 +62,7 @@ cargo nextest run -p meerkat-integration-tests --test e2e_live_lane e2e_live_s15
 Run one smoke suite:
 
 ```bash
-cargo nextest run -p meerkat-integration-tests --test e2e_smoke_lane e2e_smoke_mob_flow_runtime_suite --run-ignored ignored-only --test-threads=1
+cargo nextest run -p meerkat-integration-tests --test e2e_smoke_lane e2e_smoke_mob_flow_runtime_suite --run-ignored ignored-only
 ```
 
 Browser fixtures under `tests/live_smoke/browser` are still used by the WASM

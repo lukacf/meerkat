@@ -7,7 +7,7 @@
 //! respawn, and comms collaboration through the public mob/runtime surfaces.
 //!
 //! Run with:
-//!   cargo test -p meerkat-mob --test smoke_mob_resume --features integration-real-tests -- --ignored --test-threads=1
+//!   cargo test -p meerkat-mob --test smoke_mob_resume --features integration-real-tests -- --ignored
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder, SessionHistoryQuery, SessionStore};
 use meerkat_core::types::HandlingMode;

@@ -283,10 +283,10 @@ where
                 }
                 crate::ops::SessionEffect::AppendAssistantBlocks { blocks } => {
                     self.session.push(crate::types::Message::BlockAssistant(
-                        crate::types::BlockAssistantMessage {
-                            blocks: blocks.clone(),
-                            stop_reason: crate::types::StopReason::EndTurn,
-                        },
+                        crate::types::BlockAssistantMessage::new(
+                            blocks.clone(),
+                            crate::types::StopReason::EndTurn,
+                        ),
                     ));
                 }
             }

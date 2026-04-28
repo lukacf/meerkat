@@ -408,11 +408,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += '    """Provider continuity metadata."""\n'
     types_content += "    provider: str = ''\n\n\n"
 
-    types_content += "@dataclass\nclass WireAssistantBlock:\n"
-    types_content += '    """Block assistant transcript item."""\n'
-    types_content += "    block_type: str = ''\n"
-    types_content += "    data: Optional[dict] = None\n\n\n"
-
     types_content += "@dataclass\nclass WireToolCall:\n"
     types_content += '    """Legacy assistant tool call."""\n'
     types_content += "    id: str = ''\n"
@@ -428,6 +423,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "@dataclass\nclass WireSessionMessage:\n"
     types_content += '    """Canonical transcript message."""\n'
     types_content += "    role: str = ''\n"
+    types_content += "    created_at: str = ''\n"
     types_content += "    content: Optional[WireContentInput] = None\n"
     types_content += "    tool_calls: Optional[list[WireToolCall]] = None\n"
     types_content += "    stop_reason: Optional[WireStopReason] = None\n"
@@ -633,6 +629,10 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("ProviderCatalog", schemas.get("models", {}), "Provider grouping in the model catalog.")
     append_python_dataclass("ModelsCatalogResponse", schemas.get("models", {}), "Response payload for models/catalog.")
     append_python_dataclass("WireModelProfile", schemas.get("models", {}), "Wire-level model capability profile.")
+    append_python_dataclass("WireAssistantImageRef", wire_schema, "Generated assistant image reference.")
+    append_python_dataclass("WireGenerateImageRequest", wire_schema, "Canonical generate_image request payload.")
+    append_python_dataclass("WireGenerateImageExecutionPlan", wire_schema, "Provider-owned image generation execution plan.")
+    append_python_dataclass("WireImageGenerationToolResult", wire_schema, "Canonical generate_image tool result payload.")
 
     # Phase 4c — connection/auth wire types.
     append_python_dataclass("WireConnectionRef", wire_schema, "Session-facing reference to a binding inside a realm.")
@@ -676,6 +676,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
     append_python_alias("WireStopReason", wire_schema, "Canonical stop reason for transcript messages.")
     append_python_alias("WireToolResultContent", wire_schema, "Wire-safe tool result content.")
+    append_python_alias("WireAssistantBlock", wire_schema, "Block assistant transcript item.")
+    append_python_alias("WireImageOperationPhase", wire_schema, "Machine-owned image operation phase.")
     append_python_alias("WireModelTier", schemas.get("models", {}), "Wire-level model recommendation tier.")
     append_python_alias(
         "CommsCommandRequest",
@@ -747,11 +749,6 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  [key: string]: unknown;\n"
     types_content += "}\n\n"
 
-    types_content += "export interface WireAssistantBlock {\n"
-    types_content += "  block_type: string;\n"
-    types_content += "  data: Record<string, unknown>;\n"
-    types_content += "}\n\n"
-
     types_content += "export interface WireToolCall {\n"
     types_content += "  id: string;\n"
     types_content += "  name: string;\n"
@@ -766,6 +763,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     types_content += "export interface WireSessionMessage {\n"
     types_content += "  role: string;\n"
+    types_content += "  created_at: string;\n"
     types_content += "  content?: WireContentInput;\n"
     types_content += "  tool_calls?: WireToolCall[];\n"
     types_content += "  stop_reason?: WireStopReason;\n"
@@ -964,6 +962,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("ProviderCatalog", schemas.get("models", {}))
     append_typescript_interface("ModelsCatalogResponse", schemas.get("models", {}))
     append_typescript_interface("WireModelProfile", schemas.get("models", {}))
+    append_typescript_interface("WireAssistantImageRef", wire_schema)
+    append_typescript_interface("WireGenerateImageRequest", wire_schema)
+    append_typescript_interface("WireGenerateImageExecutionPlan", wire_schema)
+    append_typescript_interface("WireImageGenerationToolResult", wire_schema)
 
     # Phase 4c — connection/auth wire types.
     append_typescript_interface("WireConnectionRef", wire_schema)
@@ -973,6 +975,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireRealmConnectionSet", wire_schema)
     append_typescript_interface("WireAuthStatus", wire_schema)
     append_typescript_alias("WireAuthError", wire_schema)
+    append_typescript_alias("WireAssistantBlock", wire_schema)
+    append_typescript_alias("WireImageOperationPhase", wire_schema)
 
     (output_dir / "types.ts").write_text(types_content)
 

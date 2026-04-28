@@ -94,9 +94,12 @@ Surface binaries:
 
 | Type | Purpose |
 |------|---------|
-| `ContentBlock` | Text or Image content unit |
+| `ContentBlock` | Text, Image, or Video content unit |
 | `ContentInput` | Prompt type for session requests |
 | `ToolOutput` | Return type for `BuiltinTool::call()` (defined in meerkat-tools) |
+| `GenerateImageRequest` / `ImageGenerationToolResult` | Universal model-facing image-generation request/result contract |
+| `ImageGenerationProviderProfile` | Provider-owned image target profile; implemented by image-capable provider crates |
+| `AssistantBlock::Image` | Canonical generated-image transcript block with durable `image_id` and `blob_ref` |
 
 ### Post-0.5.0 load-bearing types
 

@@ -109,6 +109,10 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/requests/{request_id}/cancel` | Cancel an uncommitted in-flight request |
 
 <Note>
+Generated images are not returned as inline bytes in history. `GET /sessions/{id}/history` returns assistant image blocks with `image_id`, `blob_ref`, dimensions, and metadata; fetch image bytes through the blob/artifact surface exposed by the runtime-backed RPC/SDK path.
+</Note>
+
+<Note>
 REST keeps observation and helper endpoints for mobs, but typed lifecycle/control
 for app hosts lives on the canonical RPC/SDK `mob/*` surface. Inside running
 sessions, mob capability is still exposed by composing `meerkat-mob-mcp`

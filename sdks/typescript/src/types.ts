@@ -146,11 +146,18 @@ export interface SessionAssistantBlock {
   readonly id?: string;
   readonly name?: string;
   readonly args?: unknown;
+  readonly imageId?: string;
+  readonly blobId?: string;
+  readonly mediaType?: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly revisedPrompt?: Record<string, unknown>;
   readonly meta?: Record<string, unknown>;
 }
 
 export interface SessionMessage {
   readonly role: string;
+  readonly createdAt: string;
   readonly content?: ContentInput;
   readonly toolCalls: readonly SessionToolCall[];
   readonly stopReason?: string;

@@ -43,13 +43,6 @@ class WireProviderMeta:
 
 
 @dataclass
-class WireAssistantBlock:
-    """Block assistant transcript item."""
-    block_type: str = ''
-    data: Optional[dict] = None
-
-
-@dataclass
 class WireToolCall:
     """Legacy assistant tool call."""
     id: str = ''
@@ -69,6 +62,7 @@ class WireToolResult:
 class WireSessionMessage:
     """Canonical transcript message."""
     role: str = ''
+    created_at: str = ''
     content: Optional[WireContentInput] = None
     tool_calls: Optional[list[WireToolCall]] = None
     stop_reason: Optional[WireStopReason] = None
@@ -671,6 +665,51 @@ class WireModelProfile:
 
 
 @dataclass
+class WireAssistantImageRef:
+    """Generated assistant image reference."""
+    blob_ref: dict[str, Any]
+    height: int
+    image_id: str
+    media_type: str
+    width: int
+
+
+@dataclass
+class WireGenerateImageRequest:
+    """Canonical generate_image request payload."""
+    count: int
+    format: Literal['auto', 'png', 'jpeg', 'webp']
+    intent: dict[str, Any]
+    quality: Literal['auto', 'low', 'medium', 'high']
+    size: dict[str, Any]
+    target: dict[str, Any]
+    provider_params: Optional[Any] = None
+
+
+@dataclass
+class WireGenerateImageExecutionPlan:
+    """Provider-owned image generation execution plan."""
+    backend: Literal['hosted_tool', 'provider_api', 'native_model']
+    capabilities: dict[str, Any]
+    max_count: int
+    provider: str
+    requires_scoped_override: bool
+    provider_plan: Optional[Any] = None
+
+
+@dataclass
+class WireImageGenerationToolResult:
+    """Canonical generate_image tool result payload."""
+    native_metadata: dict[str, Any]
+    operation_id: str
+    provider_text: dict[str, Any]
+    revised_prompt: dict[str, Any]
+    terminal: dict[str, Any]
+    images: Optional[list[dict[str, Any]]] = None
+    warnings: Optional[list[dict[str, Any]]] = None
+
+
+@dataclass
 class WireConnectionRef:
     """Wire projection of [`meerkat_core::ConnectionRef`].
 
@@ -1071,6 +1110,74 @@ WireStopReason = Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 
 
 # Wire-safe tool result content that handles both legacy string and array formats.
 WireToolResultContent = str | list[dict[str, Any]]
+
+# Transcript block inside a block-assistant message.
+#
+# Not `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through
+# fidelity (core invariant — opaque from provider to dispatcher), and
+# `RawValue` does not derive equality. Equivalence checks should
+# round-trip through serialization and compare the serialized bytes.
+class WireAssistantBlockText(TypedDict, total=False):
+    block_type: Required[Literal['text']]
+    data: Required[dict[str, Any]]
+
+class WireAssistantBlockReasoning(TypedDict, total=False):
+    block_type: Required[Literal['reasoning']]
+    data: Required[dict[str, Any]]
+
+class WireAssistantBlockToolUse(TypedDict, total=False):
+    block_type: Required[Literal['tool_use']]
+    data: Required[dict[str, Any]]
+
+class WireAssistantBlockImage(TypedDict, total=False):
+    block_type: Required[Literal['image']]
+    data: Required[dict[str, Any]]
+
+class WireAssistantBlockUnknown(TypedDict, total=False):
+    block_type: Required[Literal['unknown']]
+
+WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockImage | WireAssistantBlockUnknown
+
+# Machine-owned image operation phase.
+class WireImageOperationPhaseRequested(TypedDict, total=False):
+    phase: Required[Literal['requested']]
+
+class WireImageOperationPhaseValidating(TypedDict, total=False):
+    phase: Required[Literal['validating']]
+
+class WireImageOperationPhaseAwaitingApproval(TypedDict, total=False):
+    approval_id: Required[str]
+    phase: Required[Literal['awaiting_approval']]
+
+class WireImageOperationPhasePlanResolved(TypedDict, total=False):
+    phase: Required[Literal['plan_resolved']]
+
+class WireImageOperationPhaseProjectionSnapshotted(TypedDict, total=False):
+    phase: Required[Literal['projection_snapshotted']]
+
+class WireImageOperationPhaseScopedOverrideActive(TypedDict, total=False):
+    phase: Required[Literal['scoped_override_active']]
+
+class WireImageOperationPhaseProviderCallInFlight(TypedDict, total=False):
+    phase: Required[Literal['provider_call_in_flight']]
+
+class WireImageOperationPhaseProviderResultCaptured(TypedDict, total=False):
+    phase: Required[Literal['provider_result_captured']]
+
+class WireImageOperationPhaseBlobCommitPending(TypedDict, total=False):
+    phase: Required[Literal['blob_commit_pending']]
+
+class WireImageOperationPhaseResultCommitted(TypedDict, total=False):
+    phase: Required[Literal['result_committed']]
+
+class WireImageOperationPhaseRestoringScopedOverride(TypedDict, total=False):
+    phase: Required[Literal['restoring_scoped_override']]
+
+class WireImageOperationPhaseTerminal(TypedDict, total=False):
+    phase: Required[Literal['terminal']]
+    terminal: Required[dict[str, Any]]
+
+WireImageOperationPhase = WireImageOperationPhaseRequested | WireImageOperationPhaseValidating | WireImageOperationPhaseAwaitingApproval | WireImageOperationPhasePlanResolved | WireImageOperationPhaseProjectionSnapshotted | WireImageOperationPhaseScopedOverrideActive | WireImageOperationPhaseProviderCallInFlight | WireImageOperationPhaseProviderResultCaptured | WireImageOperationPhaseBlobCommitPending | WireImageOperationPhaseResultCommitted | WireImageOperationPhaseRestoringScopedOverride | WireImageOperationPhaseTerminal
 
 # Model recommendation tier.
 WireModelTier = Literal['recommended', 'supported']

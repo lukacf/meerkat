@@ -92,6 +92,8 @@ These fields are set in the model catalog (`meerkat-models`) and exposed via `Mo
 - **`ContentBlock::Image` in user messages** -- providers that do not support `vision` will not receive image content blocks in user messages.
 - **Provider-native web search** -- injected by default when `supports_web_search` is `true` and the corresponding `provider_tools.*` config is enabled.
 
+Image generation uses provider-owned image profiles rather than `ModelProfile` chat-model flags. OpenAI and Gemini provider crates advertise image targets, supported backend plans, dimensions/aspect ratios, and provider-specific `provider_params`; the runtime exposes one model-facing `generate_image` tool and commits generated outputs as blob-backed assistant image blocks.
+
 ## Provider-native web search
 
 Web search is enabled by default for all catalog models with `supports_web_search: true`. The factory resolves provider-specific tool config at build time and injects it as non-persisted `AgentConfig.provider_tool_defaults`, merged per-turn with explicit `provider_params` via RFC 7396 merge-patch.

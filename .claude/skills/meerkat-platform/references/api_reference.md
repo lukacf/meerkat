@@ -193,6 +193,7 @@ Core methods:
 - `session/list`
 - `session/read`
 - `session/history`
+- `blob/get` — fetch generated image and artifact payload bytes by blob id
 - `session/archive`
 - `turn/start` — accepts `model`, `provider`, `provider_params`, `max_tokens` for mid-session hot-swap
 - `turn/interrupt`
@@ -213,6 +214,8 @@ Core methods:
 - `mob/append_system_context`, `mob/flows`, `mob/flow_run`, `mob/flow_status`, `mob/flow_cancel` — advanced mob runtime methods (feature-gated)
 - `mob/tools` / `mob/call` — compatibility and escape-hatch mob tool access (feature-gated)
 - `mob/spawn_helper`, `mob/fork_helper` — convenience mob helpers (feature-gated)
+
+Generated assistant images are observed through `session/history` as assistant blocks with `block_type: "image"` and fetched through `blob/get` using `data.blob_ref.blob_id`.
 - `mob/force_cancel` — force-cancel a mob member's in-flight turn (feature-gated)
 - `comms/send` (feature-gated)
 - `comms/peers` (feature-gated)
@@ -299,6 +302,7 @@ Client methods:
 - `list_sessions()` → `list[SessionInfo]`
 - `read_session(session_id)` → dict
 - `read_session_history(session_id, offset=0, limit=None)` → `SessionHistory`
+- `get_blob(blob_id)` → `BlobPayload`
 - `create_mob(definition, ...)` → `Mob`
 - `list_mobs()` → `list[MobSummary]`
 - `get_config()` / `set_config(...)` / `patch_config(...)`
@@ -334,6 +338,8 @@ Type/parsing notes:
 - capability status may arrive as externally-tagged enum maps (e.g. `{"DisabledByPolicy": {...}}`) and is normalized to the tag string.
 - event parsing defaults missing fields to empty/zero values to keep partial stream payloads parseable.
 - `RunResult.skill_diagnostics` is typed as `SkillRuntimeDiagnostics`.
+- generated image blocks preserve `image_id`, `blob_id`, `media_type`, `width`, `height`, `revised_prompt`, and provider `meta`.
+- image-generation wire contracts are exported as `WireGenerateImageRequest`, `WireGenerateImageExecutionPlan`, `WireImageGenerationToolResult`, `WireImageOperationPhase`, and `WireAssistantImageRef`.
 
 ---
 
@@ -362,6 +368,7 @@ Client methods:
 - `listSessions()` → `SessionInfo[]`
 - `readSession(sessionId)` → object
 - `readSessionHistory(sessionId, { offset, limit }?)` → `SessionHistory`
+- `getBlob(blobId)` → `BlobPayload`
 - `createMob(definition, options?)` → `Mob`
 - `listMobs()` → `MobSummary[]`
 - `getConfig()` / `setConfig(...)` / `patchConfig(...)`
@@ -397,6 +404,8 @@ Type/parsing notes:
 - capability status may arrive as externally-tagged enum maps (e.g. `{ DisabledByPolicy: {...} }`) and is normalized to the tag string.
 - event parsing defaults missing fields to empty/zero values to keep partial stream payloads parseable.
 - `RunResult.skillDiagnostics` is typed as `SkillRuntimeDiagnostics`.
+- generated image blocks preserve `imageId`, `blobId`, `mediaType`, `width`, `height`, `revisedPrompt`, and provider `meta`.
+- image-generation wire contracts are exported as `WireGenerateImageRequest`, `WireGenerateImageExecutionPlan`, `WireImageGenerationToolResult`, `WireImageOperationPhase`, and `WireAssistantImageRef`.
 
 ---
 

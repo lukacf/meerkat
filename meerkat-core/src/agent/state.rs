@@ -1600,10 +1600,7 @@ where
                     }
 
                     let (blocks, stop_reason, usage) = result.into_parts();
-                    let mut assistant_msg = BlockAssistantMessage {
-                        blocks,
-                        stop_reason,
-                    };
+                    let mut assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
                     let mut assistant_text = assistant_msg.to_string();
 
                     let post_llm_report = self
@@ -2021,9 +2018,7 @@ where
                         }
 
                         // Add tool results to session
-                        self.session.push(Message::ToolResults {
-                            results: tool_results,
-                        });
+                        self.session.push(Message::tool_results(tool_results));
 
                         if !post_tool_effects.is_empty() {
                             self.apply_session_effects(&post_tool_effects)?;

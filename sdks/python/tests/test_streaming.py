@@ -13,7 +13,7 @@ from meerkat.events import (
     TurnStarted,
     Usage,
 )
-from meerkat.streaming import EventStream, _StdoutDispatcher
+from meerkat.streaming import RPC_STDOUT_LIMIT_BYTES, EventStream, _StdoutDispatcher
 from meerkat.types import RunResult
 
 
@@ -91,6 +91,19 @@ class TestStdoutDispatcher:
         future = d.expect_response(1)
         result = await asyncio.wait_for(future, timeout=1.0)
         assert result == {"text": "hello"}
+        await d.stop()
+
+    @pytest.mark.asyncio
+    async def test_large_response_line_within_rpc_stdout_limit(self):
+        payload = "x" * (128 * 1024)
+        reader = asyncio.StreamReader(limit=RPC_STDOUT_LIMIT_BYTES)
+        reader.feed_data((response(1, {"data": payload}) + "\n").encode())
+        reader.feed_eof()
+        d = _StdoutDispatcher(reader)
+        d.start()
+        future = d.expect_response(1)
+        result = await asyncio.wait_for(future, timeout=1.0)
+        assert result == {"data": payload}
         await d.stop()
 
     @pytest.mark.asyncio

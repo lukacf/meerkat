@@ -8,7 +8,7 @@
 //!
 //! Run with:
 //!   cargo test -p meerkat-mob --test smoke_mob_flow_runtime \
-//!     --features integration-real-tests -- --ignored --test-threads=1 --nocapture
+//!     --features integration-real-tests -- --ignored --nocapture
 
 use indexmap::IndexMap;
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
@@ -27,8 +27,9 @@ use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, Instant, sleep};
 
 fn first_env(vars: &[&str]) -> Option<String> {
@@ -42,6 +43,49 @@ fn first_env(vars: &[&str]) -> Option<String> {
 
 fn anthropic_api_key() -> Option<String> {
     first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"])
+}
+
+fn flow_runtime_smoke_concurrency_from_env(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4)
+}
+
+fn flow_runtime_smoke_semaphore() -> &'static Arc<Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| {
+        Arc::new(Semaphore::new(flow_runtime_smoke_concurrency_from_env(
+            std::env::var("MEERKAT_FLOW_RUNTIME_SMOKE_CONCURRENCY")
+                .ok()
+                .as_deref(),
+        )))
+    })
+}
+
+async fn acquire_flow_runtime_smoke_permit(test_name: &str) -> OwnedSemaphorePermit {
+    let available_before = flow_runtime_smoke_semaphore().available_permits();
+    eprintln!(
+        "Waiting for flow runtime smoke concurrency permit for {test_name} (available={available_before})"
+    );
+    let permit = flow_runtime_smoke_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("flow runtime smoke semaphore should stay open");
+    eprintln!("Acquired flow runtime smoke concurrency permit for {test_name}");
+    permit
+}
+
+#[test]
+fn flow_runtime_smoke_concurrency_defaults_to_bounded_parallelism() {
+    assert_eq!(flow_runtime_smoke_concurrency_from_env(None), 4);
+    assert_eq!(flow_runtime_smoke_concurrency_from_env(Some("0")), 4);
+    assert_eq!(
+        flow_runtime_smoke_concurrency_from_env(Some("not-a-number")),
+        4
+    );
+    assert_eq!(flow_runtime_smoke_concurrency_from_env(Some("8")), 8);
 }
 
 fn openai_api_key() -> Option<String> {
@@ -2571,6 +2615,7 @@ async fn run_smoke_flow_or_skip(test_name: &str, flow_id: &str, params: Value) -
         return None;
     };
 
+    let _permit = acquire_flow_runtime_smoke_permit(test_name).await;
     eprintln!(
         "Running {test_name} with {}",
         flow_smoke_models_label(&models)

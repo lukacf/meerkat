@@ -47,9 +47,7 @@ fn test_session_id_encoding() {
 #[test]
 fn test_message_json_schema() {
     // System message
-    let system = Message::System(SystemMessage {
-        content: "You are a helpful assistant.".to_string(),
-    });
+    let system = Message::System(SystemMessage::new("You are a helpful assistant."));
     let json = serde_json::to_value(&system).unwrap();
     assert_eq!(json["role"], "system");
     assert_eq!(json["content"], "You are a helpful assistant.");
@@ -77,6 +75,7 @@ fn test_message_json_schema() {
         tool_calls: vec![],
         stop_reason: StopReason::EndTurn,
         usage: Usage::default(),
+        created_at: message_timestamp_now(),
     });
     let json = serde_json::to_value(&assistant).unwrap();
     assert_eq!(json["role"], "assistant");
@@ -84,13 +83,11 @@ fn test_message_json_schema() {
     assert_eq!(json["stop_reason"], "end_turn");
 
     // Tool results
-    let tool_results = Message::ToolResults {
-        results: vec![ToolResult::new(
-            "tool_123".to_string(),
-            "Result content".to_string(),
-            false,
-        )],
-    };
+    let tool_results = Message::tool_results(vec![ToolResult::new(
+        "tool_123".to_string(),
+        "Result content".to_string(),
+        false,
+    )]);
     let json = serde_json::to_value(&tool_results).unwrap();
     assert_eq!(json["role"], "tool_results");
     assert!(json["results"].is_array());
@@ -385,9 +382,9 @@ fn test_session_checkpoint_complex() {
     let mut messages = Vec::new();
 
     // Add system message
-    messages.push(Message::System(SystemMessage {
-        content: "You are a helpful coding assistant.".to_string(),
-    }));
+    messages.push(Message::System(SystemMessage::new(
+        "You are a helpful coding assistant.",
+    )));
 
     // Add 25 user/assistant pairs with tool calls
     for i in 0..25 {
@@ -409,15 +406,14 @@ fn test_session_checkpoint_complex() {
                     cache_creation_tokens: None,
                     cache_read_tokens: None,
                 },
+                created_at: message_timestamp_now(),
             }));
 
-            messages.push(Message::ToolResults {
-                results: vec![ToolResult::new(
-                    format!("tc_{i}"),
-                    format!("Tool result for {i}"),
-                    false,
-                )],
-            });
+            messages.push(Message::tool_results(vec![ToolResult::new(
+                format!("tc_{i}"),
+                format!("Tool result for {i}"),
+                false,
+            )]));
 
             messages.push(Message::Assistant(AssistantMessage {
                 content: format!("Completed request {i} with tool result"),
@@ -429,6 +425,7 @@ fn test_session_checkpoint_complex() {
                     cache_creation_tokens: None,
                     cache_read_tokens: None,
                 },
+                created_at: message_timestamp_now(),
             }));
         } else {
             // Without tool calls
@@ -442,6 +439,7 @@ fn test_session_checkpoint_complex() {
                     cache_creation_tokens: None,
                     cache_read_tokens: None,
                 },
+                created_at: message_timestamp_now(),
             }));
         }
     }
@@ -896,8 +894,8 @@ mod ordered_transcript_types {
             ("tool_005", r#""line1\nline2\\\"quoted\\\"""#),
         ] {
             let expected_args: Value = serde_json::from_str(args_json).unwrap();
-            let message = Message::BlockAssistant(BlockAssistantMessage {
-                blocks: vec![
+            let message = Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![
                     AssistantBlock::Text {
                         text: "Checking files".to_string(),
                         meta: None,
@@ -909,8 +907,8 @@ mod ordered_transcript_types {
                         meta: None,
                     },
                 ],
-                stop_reason: StopReason::ToolUse,
-            });
+                StopReason::ToolUse,
+            ));
 
             let json = serde_json::to_string(&message).unwrap();
             let parsed: Message = serde_json::from_str(&json).unwrap();
@@ -1018,6 +1016,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            created_at: message_timestamp_now(),
         };
 
         let tool_calls: Vec<_> = msg.tool_calls().collect();
@@ -1036,6 +1035,7 @@ mod ordered_transcript_types {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            created_at: message_timestamp_now(),
         };
 
         let tool_calls: Vec<_> = msg.tool_calls().collect();
@@ -1054,6 +1054,7 @@ mod ordered_transcript_types {
                 meta: None,
             }],
             stop_reason: StopReason::ToolUse,
+            created_at: message_timestamp_now(),
         };
         assert!(msg_with_tools.has_tool_calls());
 
@@ -1063,6 +1064,7 @@ mod ordered_transcript_types {
                 meta: None,
             }],
             stop_reason: StopReason::EndTurn,
+            created_at: message_timestamp_now(),
         };
         assert!(!msg_without_tools.has_tool_calls());
     }
@@ -1088,6 +1090,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            created_at: message_timestamp_now(),
         };
 
         let found = msg.get_tool_use("tc_second");
@@ -1129,6 +1132,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::ToolUse,
+            created_at: message_timestamp_now(),
         };
 
         let display = format!("{msg}");
@@ -1140,6 +1144,7 @@ mod ordered_transcript_types {
         let msg = BlockAssistantMessage {
             blocks: vec![],
             stop_reason: StopReason::EndTurn,
+            created_at: message_timestamp_now(),
         };
 
         let display = format!("{msg}");
@@ -1176,6 +1181,7 @@ mod ordered_transcript_types {
                 },
             ],
             stop_reason: StopReason::EndTurn,
+            created_at: message_timestamp_now(),
         };
 
         let text_blocks: Vec<_> = msg.text_blocks().collect();

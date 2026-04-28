@@ -75,7 +75,7 @@ e2e-fast = "nextest run -p meerkat-integration-tests --test e2e_fast_lane --no-f
 e2e-build = "nextest run -p meerkat-integration-tests --test e2e_build_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
 e2e-system = "nextest run -p meerkat-integration-tests --test e2e_system_lane --run-ignored ignored-only --no-fail-fast --no-capture --show-progress none --status-level all --final-status-level fail"
 e2e-live = "nextest run -p meerkat-integration-tests --test e2e_live_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
-e2e-smoke = "nextest run -p meerkat-integration-tests --test e2e_smoke_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
+e2e-smoke = "nextest run -p meerkat-integration-tests --test e2e_smoke_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail"
 e2e-models = "nextest run -p meerkat-integration-tests --test e2e_models_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
 e2e-auth = "nextest run -p meerkat-integration-tests --test e2e_auth_lane --run-ignored ignored-only --no-fail-fast --show-progress none --status-level none --final-status-level fail --test-threads=1"
 

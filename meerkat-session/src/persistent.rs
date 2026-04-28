@@ -2299,6 +2299,7 @@ mod tests {
                         tool_calls: Vec::new(),
                         stop_reason: meerkat_core::types::StopReason::EndTurn,
                         usage: meerkat_core::types::Usage::default(),
+                        created_at: meerkat_core::types::message_timestamp_now(),
                     },
                 ));
                 RunResult {
@@ -2716,6 +2717,7 @@ mod tests {
                 tool_calls: vec![],
                 stop_reason: meerkat_core::types::StopReason::EndTurn,
                 usage: meerkat_core::types::Usage::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
             }));
             Ok(RunResult {
                 text: "ok".to_string(),
@@ -2919,6 +2921,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     stop_reason: meerkat_core::types::StopReason::EndTurn,
                     usage: meerkat_core::types::Usage::default(),
+                    created_at: meerkat_core::types::message_timestamp_now(),
                 },
             ));
             Ok(RunResult {
@@ -3131,7 +3134,7 @@ mod tests {
                         );
                     }
                 }
-                Message::ToolResults { results } => {
+                Message::ToolResults { results, .. } => {
                     for result in results {
                         for block in &result.content {
                             assert!(

@@ -20,7 +20,7 @@ icon: "wrench"
 | `datetime` | Utility | Yes | -- | Get current date/time |
 | `apply_patch` | Utility | Yes | -- | Apply structured file patches inside the project root |
 | `view_image` | Utility | Yes | `image_tool_results` | Read an image file and return base64 content |
-| `generate_image` | Utility | Yes | runtime image-generation wiring | Generate or edit assistant-owned images and return blob-backed image refs |
+| `generate_image` | Image generation | Runtime-backed | image provider profile | Generate or edit assistant images and commit blob-backed image blocks |
 | `send_message` | Comms | Yes | `comms` | Send a collaboration message to a peer |
 | `send_request` | Comms | Yes | `comms` | Send a structured request to a peer |
 | `send_response` | Comms | Yes | `comms` | Send a response to a peer request |
@@ -48,7 +48,7 @@ icon: "wrench"
 
 | Flag | Builder Method | Default | Controls |
 |------|---------------|---------|----------|
-| `enable_builtins` | `.builtins(bool)` | `false` | Task tools, utility tools (`datetime`, `apply_patch`, `view_image`) |
+| `enable_builtins` | `.builtins(bool)` | `false` | Task tools, utility tools (`datetime`, `apply_patch`, `view_image`), and runtime-backed `generate_image` when an image runtime is wired |
 | `enable_shell` | `.shell(bool)` | `false` | All shell tools (`shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`) |
 | `enable_memory` | `.memory(bool)` | `false` | `memory_search` (requires `memory-store-session` feature) |
 | `enable_schedule` | `.schedule(bool)` | `false` | Scheduler tools (`meerkat_schedule_*`) |
@@ -83,7 +83,7 @@ Individual tools can be enabled or disabled via `ToolPolicyLayer` in `BuiltinToo
 <Accordion title="Capability registrations">
 Capabilities are registered via the `inventory` crate in `meerkat-tools/src/lib.rs`:
 
-- **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, and runtime-registered `generate_image`. Controlled by `config.tools.builtins_enabled`.
+- **Builtins** (`CapabilityId::Builtins`): `task_list`, `task_create`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, and runtime-backed `generate_image` when image generation wiring is available. Controlled by `config.tools.builtins_enabled`.
 - **Shell** (`CapabilityId::Shell`): `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel`. Controlled by `config.tools.shell_enabled`.
 </Accordion>
 

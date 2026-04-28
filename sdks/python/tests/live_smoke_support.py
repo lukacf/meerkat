@@ -56,6 +56,14 @@ def has_openai_api_key() -> bool:
     )
 
 
+def has_gemini_api_key() -> bool:
+    return bool(
+        os.environ.get("RKAT_GEMINI_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+    )
+
+
 def smoke_model() -> str:
     return os.environ.get("SMOKE_MODEL", "claude-sonnet-4-5")
 
@@ -67,6 +75,14 @@ def openai_model() -> str:
     # failing to repeat the literal `[TS-SWARM]` marker it was told
     # to remember).
     return os.environ.get("SMOKE_MODEL_OPENAI", "gpt-5.4-mini")
+
+
+def gemini_model() -> str:
+    return os.environ.get("SMOKE_MODEL_GEMINI", "gemini-3.1-pro-preview")
+
+
+def gemini_image_model() -> str:
+    return os.environ.get("SMOKE_IMAGE_MODEL_GEMINI", "gemini-3.1-flash-image-preview")
 
 
 @asynccontextmanager

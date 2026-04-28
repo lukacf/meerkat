@@ -444,7 +444,7 @@ interface HookPatchPublishedEvent { type: "hook_patch_published";  hookId: strin
 
 ```typescript
 interface SkillsResolvedEvent       { type: "skills_resolved";         skills: readonly string[]; injectionBytes: number }
-interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; reference: string; error: string }
+interface SkillResolutionFailedEvent { type: "skill_resolution_failed"; skillKey?: SkillKey; reason: SkillResolutionFailureReason; reference: string; error: string }
 ```
 
 ### Comms events

@@ -479,7 +479,25 @@ fn render_event(
             }
         }
 
-        AgentEvent::SkillResolutionFailed { reference, error } => {
+        AgentEvent::SkillResolutionFailed {
+            skill_key,
+            reason,
+            reference,
+            error,
+        } => {
+            let reference_display = if reference.is_empty() {
+                skill_key
+                    .as_ref()
+                    .map(std::string::ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            } else {
+                reference.clone()
+            };
+            let error_display = if error.is_empty() {
+                reason.to_string()
+            } else {
+                error.clone()
+            };
             chrome_line(
                 mux,
                 scope_id,
@@ -487,8 +505,8 @@ fn render_event(
                     "{}{}⚠ skill failed: {}: {}{}",
                     style(ansi, YELLOW),
                     style(ansi, BOLD),
-                    reference,
-                    error,
+                    reference_display,
+                    error_display,
                     reset(ansi)
                 ),
             );

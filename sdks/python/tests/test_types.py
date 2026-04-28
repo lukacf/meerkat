@@ -65,6 +65,8 @@ from meerkat.events import (
     Retrying,
     RunCompleted,
     RunStarted,
+    SkillResolutionFailed,
+    SkillResolutionFailureReason,
     ToolConfigChanged,
     TextDelta,
     ToolCallRequested,
@@ -740,6 +742,49 @@ def test_parse_retrying():
     assert isinstance(event, Retrying)
     assert event.attempt == 2
     assert event.delay_ms == 2000
+
+
+def test_parse_skill_resolution_failed_with_typed_reason():
+    source_uuid = "00000000-0000-4b11-8111-000000000001"
+    raw = {
+        "type": "skill_resolution_failed",
+        "skill_key": {"source_uuid": source_uuid, "skill_name": "email-extractor"},
+        "reason": {
+            "reason_type": "not_found",
+            "key": {"source_uuid": source_uuid, "skill_name": "email-extractor"},
+        },
+        "reference": f"{source_uuid}/email-extractor",
+        "error": f"skill not found: {source_uuid}/email-extractor",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.skill_key == SkillKey(
+        source_uuid=source_uuid,
+        skill_name="email-extractor",
+    )
+    assert isinstance(event.reason, SkillResolutionFailureReason)
+    assert event.reason.reason_type == "not_found"
+    assert event.reason.key == SkillKey(
+        source_uuid=source_uuid,
+        skill_name="email-extractor",
+    )
+    assert event.reference == f"{source_uuid}/email-extractor"
+    assert event.error == f"skill not found: {source_uuid}/email-extractor"
+
+
+def test_parse_legacy_skill_resolution_failed_payload():
+    raw = {
+        "type": "skill_resolution_failed",
+        "reference": "legacy/ref",
+        "error": "missing",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.skill_key is None
+    assert event.reason.reason_type == "unknown"
+    assert event.reason.message == "missing"
+    assert event.reference == "legacy/ref"
+    assert event.error == "missing"
 
 
 def test_parse_inline_video_content_block():

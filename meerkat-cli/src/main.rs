@@ -6589,6 +6589,13 @@ fn scheduled_skill_keys(
     ))
 }
 
+#[cfg(any(feature = "session-store", test))]
+fn materialized_preload_skills(
+    preload_skills: &[meerkat_core::skills::SkillKey],
+) -> Option<Vec<meerkat_core::skills::SkillKey>> {
+    (!preload_skills.is_empty()).then(|| preload_skills.to_vec())
+}
+
 #[cfg(feature = "session-store")]
 #[async_trait::async_trait]
 impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
@@ -6646,16 +6653,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             peer_meta: create.peer_meta.clone(),
             resume_session: Some(session),
             provider_params: create.provider_params.clone(),
-            // Post-wave-a: `SessionMaterializationSpec.preload_skills` is
-            // `Vec<String>` (slug halves); the typed seam expects
-            // `Option<Vec<SkillKey>>` (source_uuid + skill_name). No lossless
-            // projection exists, so drop the legacy path. Typed ingress flows
-            // via `skill_refs` on the schedule dispatch. Mirrors
-            // `meerkat/src/surface/runtime_schedule_host.rs`.
-            preload_skills: {
-                let _ = &create.preload_skills;
-                None
-            },
+            preload_skills: materialized_preload_skills(&create.preload_skills),
             additional_instructions: (!create.additional_instructions.is_empty())
                 .then(|| create.additional_instructions.clone()),
             realm_id: create.realm_id.clone(),
@@ -9484,6 +9482,29 @@ mod tests {
 
     fn hooks_override_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
+    }
+
+    fn fixture_skill_key(name: &str) -> meerkat_core::skills::SkillKey {
+        let skill_name = meerkat_core::skills::SkillName::parse(name)
+            .expect("fixture skill name should be valid");
+        meerkat_core::skills::SkillKey::new(meerkat_core::skills::SourceUuid::builtin(), skill_name)
+    }
+
+    #[test]
+    fn materialized_preload_skills_preserves_typed_skill_keys() {
+        let key = fixture_skill_key("email");
+
+        assert_eq!(
+            materialized_preload_skills(std::slice::from_ref(&key)),
+            Some(vec![key])
+        );
+    }
+
+    #[test]
+    fn materialized_preload_skills_leaves_empty_preload_unset() {
+        let preload_skills: Vec<meerkat_core::skills::SkillKey> = Vec::new();
+
+        assert_eq!(materialized_preload_skills(&preload_skills), None);
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {

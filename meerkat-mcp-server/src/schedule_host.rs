@@ -49,6 +49,12 @@ use crate::{
     MeerkatMcpState, canonical_skill_keys, compose_external_tool_dispatchers, runtime_ingress,
 };
 
+fn materialized_preload_skills(
+    preload_skills: &[meerkat_core::skills::SkillKey],
+) -> Option<Vec<meerkat_core::skills::SkillKey>> {
+    (!preload_skills.is_empty()).then(|| preload_skills.to_vec())
+}
+
 #[derive(Clone)]
 struct McpScheduleContext {
     service: Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
@@ -189,12 +195,7 @@ impl McpScheduleContext {
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             schedule_tools: None,
             mob_tool_authority_context: None,
-            // Schedule wire type `preload_skills: Vec<String>` carries
-            // only the slug half — no lossless projection to the typed
-            // `SkillKey` (source_uuid + skill_name) required by the
-            // session build. Callers use `skill_refs` / `skill_references`
-            // for typed per-turn skill injection.
-            preload_skills: None,
+            preload_skills: materialized_preload_skills(&create.preload_skills),
             realm_id: create
                 .realm_id
                 .clone()
@@ -763,4 +764,32 @@ fn mob_flow_completion_future(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        let skill_name = SkillName::parse(name).expect("fixture skill name should be valid");
+        SkillKey::new(SourceUuid::builtin(), skill_name)
+    }
+
+    #[test]
+    fn materialized_preload_skills_preserves_typed_skill_keys() {
+        let key = fixture_skill_key("email");
+
+        assert_eq!(
+            materialized_preload_skills(std::slice::from_ref(&key)),
+            Some(vec![key])
+        );
+    }
+
+    #[test]
+    fn materialized_preload_skills_leaves_empty_preload_unset() {
+        let preload_skills: Vec<SkillKey> = Vec::new();
+
+        assert_eq!(materialized_preload_skills(&preload_skills), None);
+    }
 }

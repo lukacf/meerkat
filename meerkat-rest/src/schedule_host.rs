@@ -47,6 +47,12 @@ use crate::{
     session_metadata_marks_archived,
 };
 
+fn materialized_preload_skills(
+    preload_skills: &[meerkat_core::skills::SkillKey],
+) -> Option<Vec<meerkat_core::skills::SkillKey>> {
+    (!preload_skills.is_empty()).then(|| preload_skills.to_vec())
+}
+
 #[derive(Default)]
 pub struct ScheduleHostState {
     inner: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
@@ -137,12 +143,7 @@ impl RestScheduleContext {
         build_config.provider_params = create.provider_params.clone();
         build_config.comms_name = create.comms_name.clone();
         build_config.peer_meta = create.peer_meta.clone();
-        // Schedule wire type `SessionMaterializationSpec.preload_skills: Vec<String>`
-        // carries only slug halves — no lossless projection to the typed
-        // `SkillKey` (source_uuid + skill_name) required by the session
-        // build. Callers use `skill_refs` / `skill_references` for typed
-        // per-turn skill injection.
-        build_config.preload_skills = None;
+        build_config.preload_skills = materialized_preload_skills(&create.preload_skills);
         build_config.additional_instructions = (!create.additional_instructions.is_empty())
             .then(|| create.additional_instructions.clone());
         build_config.realm_id = create
@@ -648,4 +649,32 @@ fn mob_flow_completion_future(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
+
+    fn fixture_skill_key(name: &str) -> SkillKey {
+        let skill_name = SkillName::parse(name).expect("fixture skill name should be valid");
+        SkillKey::new(SourceUuid::builtin(), skill_name)
+    }
+
+    #[test]
+    fn materialized_preload_skills_preserves_typed_skill_keys() {
+        let key = fixture_skill_key("email");
+
+        assert_eq!(
+            materialized_preload_skills(std::slice::from_ref(&key)),
+            Some(vec![key])
+        );
+    }
+
+    #[test]
+    fn materialized_preload_skills_leaves_empty_preload_unset() {
+        let preload_skills: Vec<SkillKey> = Vec::new();
+
+        assert_eq!(materialized_preload_skills(&preload_skills), None);
+    }
 }

@@ -293,7 +293,7 @@ Handshake. Returns server capabilities.
 
 ### session/create
 
-Create a new session and run the first turn.
+Create a new session and run the first turn. Set `initial_turn` to `"deferred"` to return a pending `session_id` without running the first turn; that returned `session_id` is valid for the first `turn/start`, including sessions created with inline `external_tools`.
 
 <CodeGroup>
 ```json Request (minimal)

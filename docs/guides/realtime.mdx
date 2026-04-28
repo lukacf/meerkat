@@ -9,7 +9,7 @@ Realtime in Meerkat is **a delivery mode of the session's LLM, not a separate su
 This guide covers the capability-driven model, how to enable realtime on a session, how to observe the attachment status, and the live-topology reconfigure flow for swapping the session's model while a realtime binding is active.
 
 <Note>
-Public API surfaces describe `realtime`, not `voice`. The converged vocabulary is `ModelCapabilities.realtime`, `session/realtime_attachment_status`, and the `realtime/*` bootstrap methods (`realtime/open_info`, `realtime/status`, `realtime/capabilities`). Internal Rust symbols still use `live_` in some places (for example `attach_live`, `detach_live`, `reconfigure_live_topology`) — those are runtime-internal implementation details, not a caller-invoked surface.
+Public API surfaces consistently use `realtime` vocabulary. The converged terms are `ModelCapabilities.realtime`, `session/realtime_attachment_status`, and the `realtime/*` bootstrap methods (`realtime/open_info`, `realtime/status`, `realtime/capabilities`). Internal Rust symbols still use `live_` in some places (for example `attach_live`, `detach_live`, `reconfigure_live_topology`) — those are runtime-internal implementation details, not a caller-invoked surface.
 </Note>
 
 ## Mental model
@@ -264,7 +264,7 @@ async with MeerkatClient() as client:
 
     # 1. Create a session on a realtime-capable model — transport attaches automatically.
     session = await client.create_session(
-        prompt="Ready for voice.",
+        prompt="Ready for realtime audio.",
         model="gpt-realtime-1.5",
         provider="openai",
     )
@@ -290,7 +290,7 @@ async with MeerkatClient() as client:
 Each mob member has its own session, so realtime attachment is per-member by construction. To make a member realtime-capable, set its profile's `model` to a realtime-capable model (for example in the `MobDefinition` TOML):
 
 ```toml
-id = "voice-demo"
+id = "realtime-demo"
 
 [profiles.host]
 model = "gpt-realtime-1.5"
@@ -314,4 +314,3 @@ Every member spawned under that profile is initialized on `gpt-realtime-1.5` and
 - [JSON-RPC API](/api/rpc) — `session/create`, `session/realtime_attachment_status`, `realtime/*` bootstrap
 - [REST API](/api/rest) — REST routes for session creation and realtime attachment status
 - Internal architecture reference: `.claude/skills/meerkat-architecture/references/realtime-attachment.md`
-- Product design record: `docs/architecture/identity-first-live-voice-proposal.md`

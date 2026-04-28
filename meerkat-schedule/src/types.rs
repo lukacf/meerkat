@@ -1,9 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
 use meerkat_core::ops::ToolAccessPolicy;
-use meerkat_core::skills::{SkillKey, SkillName, SkillRef};
+use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::RenderMetadata;
 use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -446,11 +446,7 @@ pub struct SessionMaterializationSpec {
     pub peer_meta: Option<PeerMeta>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_preload_skills",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preload_skills: Vec<SkillKey>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_instructions: Vec<String>,
@@ -473,28 +469,6 @@ impl SessionMaterializationSpec {
         self.output_schema = Some(output_schema);
         self
     }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum PreloadSkillInput {
-    Key(SkillKey),
-    LegacyBuiltinName(String),
-}
-
-fn deserialize_preload_skills<'de, D>(deserializer: D) -> Result<Vec<SkillKey>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Vec::<PreloadSkillInput>::deserialize(deserializer)?
-        .into_iter()
-        .map(|input| match input {
-            PreloadSkillInput::Key(key) => Ok(key),
-            PreloadSkillInput::LegacyBuiltinName(name) => SkillName::parse(&name)
-                .map(SkillKey::builtin)
-                .map_err(serde::de::Error::custom),
-        })
-        .collect()
 }
 
 impl PartialEq for SessionMaterializationSpec {
@@ -1189,8 +1163,37 @@ mod tests {
     use meerkat_core::ToolNameSet;
     use meerkat_core::skills::{SkillName, SourceUuid};
 
+    fn fixture_source_uuid() -> SourceUuid {
+        SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").unwrap()
+    }
+
     fn fixture_skill_key(name: &str) -> SkillKey {
-        SkillKey::new(SourceUuid::builtin(), SkillName::parse(name).unwrap())
+        SkillKey::new(fixture_source_uuid(), SkillName::parse(name).unwrap())
+    }
+
+    fn fixture_session_materialization(
+        preload_skills: Vec<SkillKey>,
+    ) -> SessionMaterializationSpec {
+        SessionMaterializationSpec {
+            model: "claude-sonnet-4-6".into(),
+            system_prompt: None,
+            max_tokens: None,
+            provider: None,
+            output_schema: None,
+            structured_output_retries: 0,
+            provider_params: None,
+            comms_name: None,
+            peer_meta: None,
+            labels: BTreeMap::new(),
+            preload_skills,
+            additional_instructions: Vec::new(),
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            keep_alive: false,
+            app_context: None,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1415,32 +1418,36 @@ mod tests {
     }
 
     #[test]
-    fn session_materialization_preload_skills_are_canonical_skill_keys() {
+    fn session_materialization_preload_skills_round_trip_typed_skill_keys() {
         let key = fixture_skill_key("email");
-        let json = serde_json::json!({
-            "model": "claude-sonnet-4-6",
-            "preload_skills": [
-                {
-                    "source_uuid": key.source_uuid.to_string(),
-                    "skill_name": key.skill_name.to_string()
-                }
-            ]
-        });
+        let spec = fixture_session_materialization(vec![key.clone()]);
+
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            json["preload_skills"][0]["source_uuid"],
+            key.source_uuid.to_string()
+        );
+        assert_eq!(
+            json["preload_skills"][0]["skill_name"],
+            key.skill_name.to_string()
+        );
 
         let parsed: SessionMaterializationSpec = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.preload_skills, vec![key]);
+        assert_eq!(parsed, spec);
     }
 
     #[test]
-    fn session_materialization_converts_legacy_string_preload_skills() {
-        let key = fixture_skill_key("email");
+    fn session_materialization_rejects_legacy_string_preload_skills() {
         let json = serde_json::json!({
             "model": "claude-sonnet-4-6",
             "preload_skills": ["email"]
         });
 
-        let parsed: SessionMaterializationSpec = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed.preload_skills, vec![key]);
+        let err = serde_json::from_value::<SessionMaterializationSpec>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid type: string"),
+            "unexpected error: {err}"
+        );
     }
 
     // -----------------------------------------------------------------------

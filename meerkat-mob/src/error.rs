@@ -125,6 +125,13 @@ pub enum MobError {
         to_role: ProfileName,
     },
 
+    /// A bridge accepted the delivery command but rejected the member input.
+    #[error("bridge delivery rejected ({cause}): {reason}")]
+    BridgeDeliveryRejected {
+        cause: meerkat_contracts::wire::supervisor_bridge::BridgeDeliveryRejectionCause,
+        reason: String,
+    },
+
     /// Supervisor escalation happened.
     #[error("supervisor escalation: {0}")]
     SupervisorEscalation(String),

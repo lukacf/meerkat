@@ -5,9 +5,9 @@
 use crate::error::MobError;
 use crate::runtime::bridge::MobBoundMemberRuntimeBridge;
 use crate::runtime::bridge_protocol::{
-    BridgeAck, BridgeDeliveryOutcome, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
-    BridgeRetireResponse,
+    BridgeAck, BridgeDeliveryOutcome, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
+    BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
+    BridgePeerConnectivity, BridgePeerSpec, BridgeRetireResponse,
 };
 use async_trait::async_trait;
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
@@ -48,6 +48,31 @@ fn runtime_state_to_bridge(
         )),
     };
     Ok(state)
+}
+
+fn bridge_delivery_rejection_cause(
+    reason: &meerkat_runtime::RejectReason,
+) -> BridgeDeliveryRejectionCause {
+    match reason {
+        meerkat_runtime::RejectReason::NotReady { state } => {
+            BridgeDeliveryRejectionCause::NotReady {
+                state: state.clone(),
+            }
+        }
+        meerkat_runtime::RejectReason::DurabilityViolation { detail } => {
+            BridgeDeliveryRejectionCause::DurabilityViolation {
+                detail: detail.clone(),
+            }
+        }
+        meerkat_runtime::RejectReason::PeerHandlingModeInvalid { detail } => {
+            BridgeDeliveryRejectionCause::PeerHandlingModeInvalid {
+                detail: detail.clone(),
+            }
+        }
+        _ => BridgeDeliveryRejectionCause::Internal {
+            detail: reason.to_string(),
+        },
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -132,17 +157,24 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                             },
                         }
                     }
-                    meerkat_runtime::AcceptOutcome::Rejected { reason } => BridgeDeliveryResponse {
-                        input_id: input_id.to_string(),
-                        canonical_input_id: None,
-                        outcome: BridgeDeliveryOutcome::Rejected {
-                            reason: reason.to_string(),
-                        },
-                    },
+                    meerkat_runtime::AcceptOutcome::Rejected { reason } => {
+                        let cause = bridge_delivery_rejection_cause(&reason);
+                        BridgeDeliveryResponse {
+                            input_id: input_id.to_string(),
+                            canonical_input_id: None,
+                            outcome: BridgeDeliveryOutcome::Rejected {
+                                cause,
+                                reason: reason.to_string(),
+                            },
+                        }
+                    }
                     _ => BridgeDeliveryResponse {
                         input_id: input_id.to_string(),
                         canonical_input_id: None,
                         outcome: BridgeDeliveryOutcome::Rejected {
+                            cause: BridgeDeliveryRejectionCause::Internal {
+                                detail: "unexpected accept outcome".to_string(),
+                            },
                             reason: "unexpected accept outcome".to_string(),
                         },
                     },

@@ -1851,10 +1851,8 @@ impl MobProvisioner for MultiBackendProvisioner {
                 match response.outcome {
                     super::bridge_protocol::BridgeDeliveryOutcome::Accepted
                     | super::bridge_protocol::BridgeDeliveryOutcome::Deduplicated { .. } => {}
-                    super::bridge_protocol::BridgeDeliveryOutcome::Rejected { reason } => {
-                        return Err(MobError::Internal(format!(
-                            "peer-only turn delivery rejected: {reason}"
-                        )));
+                    super::bridge_protocol::BridgeDeliveryOutcome::Rejected { cause, reason } => {
+                        return Err(MobError::BridgeDeliveryRejected { cause, reason });
                     }
                 }
                 self.session

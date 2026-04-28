@@ -20,11 +20,11 @@ use meerkat_core::types::SessionId;
 
 use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryOutcome,
-    BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
-    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgeRejectionCause,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
-    SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_INTENT,
-    SUPERVISOR_BRIDGE_PROTOCOL_VERSION, canonicalize_bridge_address,
+    BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
+    BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
+    BridgePeerConnectivity, BridgePeerSpec, BridgeRejectionCause, BridgeReply,
+    BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM,
+    SUPERVISOR_BRIDGE_INTENT, SUPERVISOR_BRIDGE_PROTOCOL_VERSION, canonicalize_bridge_address,
 };
 
 use crate::comms_bridge::classified_interaction_to_runtime_input;
@@ -491,6 +491,26 @@ fn peer_input_from_delivery_payload(
             mode => Some(mode),
         },
     })
+}
+
+fn bridge_delivery_rejection_cause(
+    reason: &crate::accept::RejectReason,
+) -> BridgeDeliveryRejectionCause {
+    match reason {
+        crate::accept::RejectReason::NotReady { state } => BridgeDeliveryRejectionCause::NotReady {
+            state: state.clone(),
+        },
+        crate::accept::RejectReason::DurabilityViolation { detail } => {
+            BridgeDeliveryRejectionCause::DurabilityViolation {
+                detail: detail.clone(),
+            }
+        }
+        crate::accept::RejectReason::PeerHandlingModeInvalid { detail } => {
+            BridgeDeliveryRejectionCause::PeerHandlingModeInvalid {
+                detail: detail.clone(),
+            }
+        }
+    }
 }
 
 fn advertised_bind_bootstrap_token(
@@ -1410,10 +1430,12 @@ async fn try_handle_supervisor_bridge_command(
                             }
                         }
                         crate::accept::AcceptOutcome::Rejected { reason } => {
+                            let cause = bridge_delivery_rejection_cause(&reason);
                             BridgeDeliveryResponse {
                                 input_id: request_input_id,
                                 canonical_input_id: None,
                                 outcome: BridgeDeliveryOutcome::Rejected {
+                                    cause,
                                     reason: reason.to_string(),
                                 },
                             }

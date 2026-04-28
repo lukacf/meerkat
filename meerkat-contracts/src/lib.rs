@@ -38,9 +38,10 @@ pub use session_locator::{SessionLocator, SessionLocatorError, format_session_re
 pub use version::ContractVersion;
 pub use wire::supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
-    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryResponse, BridgeDestroyResponse,
-    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
-    BridgePeerWiringPayload, BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
+    BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
+    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload,
+    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
 };
 pub use wire::{
     ApprovalActionKind,

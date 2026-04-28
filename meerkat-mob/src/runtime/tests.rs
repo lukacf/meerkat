@@ -22284,6 +22284,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::SchemaValidation { .. } => "schema_validation".to_string(),
         MobError::InsufficientTargets { .. } => "insufficient_targets".to_string(),
         MobError::TopologyViolation { .. } => "topology_violation".to_string(),
+        MobError::BridgeDeliveryRejected { cause, .. } => {
+            format!("bridge_delivery_rejected:{cause}")
+        }
         MobError::SupervisorEscalation(_) => "supervisor_escalation".to_string(),
         MobError::UnsupportedForMode { .. } => "unsupported_for_mode".to_string(),
         MobError::ResetBarrier => "reset_barrier".to_string(),

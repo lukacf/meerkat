@@ -20,7 +20,9 @@ pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootst
 /// - `1`: initial protocol with untyped `BridgeReply::Rejected { reason: String }`.
 /// - `2`: `BridgeReply::Rejected { cause: BridgeRejectionCause, reason: String }`
 ///   so callers branch on typed cause; runtime-side emitters pass typed
-///   `BridgeReply` values through to the transport.
+///   `BridgeReply` values through to the transport. Delivery rejections
+///   carry typed `BridgeDeliveryRejectionCause` data; the string `reason`
+///   remains diagnostic presentation only.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: u32 = 2;
 
 /// Remove the one-time bind bootstrap token from an advertised bridge address.
@@ -507,8 +509,48 @@ pub struct BridgeDeliveryPayload {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum BridgeDeliveryOutcome {
     Accepted,
-    Deduplicated { existing_input_id: String },
-    Rejected { reason: String },
+    Deduplicated {
+        existing_input_id: String,
+    },
+    Rejected {
+        cause: BridgeDeliveryRejectionCause,
+        reason: String,
+    },
+}
+
+/// Typed vocabulary for why member input delivery was rejected.
+///
+/// This mirrors the runtime accept-boundary rejection vocabulary at the
+/// bridge wire boundary. Callers should branch on this typed cause and treat
+/// the sibling `reason` string on [`BridgeDeliveryOutcome::Rejected`] as
+/// operator-facing presentation only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BridgeDeliveryRejectionCause {
+    /// Runtime was not in a state that accepts input.
+    NotReady { state: String },
+    /// Input failed durability validation.
+    DurabilityViolation { detail: String },
+    /// Peer input carried a forbidden handling mode.
+    PeerHandlingModeInvalid { detail: String },
+    /// The bridge could not map the rejection to a known typed cause.
+    Internal { detail: String },
+}
+
+impl std::fmt::Display for BridgeDeliveryRejectionCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotReady { state } => write!(f, "not_ready(state={state})"),
+            Self::DurabilityViolation { detail } => {
+                write!(f, "durability_violation(detail={detail})")
+            }
+            Self::PeerHandlingModeInvalid { detail } => {
+                write!(f, "peer_handling_mode_invalid(detail={detail})")
+            }
+            Self::Internal { detail } => write!(f, "internal(detail={detail})"),
+        }
+    }
 }
 
 /// Full response to a delivery command.
@@ -1058,6 +1100,32 @@ mod tests {
                 "input_id": "in-1",
                 "canonical_input_id": null,
                 "outcome": { "outcome": "accepted" },
+            }),
+        );
+
+        assert_reply_round_trip(
+            BridgeReply::Delivery(BridgeDeliveryResponse {
+                input_id: "in-2".to_string(),
+                canonical_input_id: None,
+                outcome: BridgeDeliveryOutcome::Rejected {
+                    cause: BridgeDeliveryRejectionCause::DurabilityViolation {
+                        detail: "derived durable input cannot be accepted".to_string(),
+                    },
+                    reason: "derived durable input cannot be accepted".to_string(),
+                },
+            }),
+            json!({
+                "result": "delivery",
+                "input_id": "in-2",
+                "canonical_input_id": null,
+                "outcome": {
+                    "outcome": "rejected",
+                    "cause": {
+                        "kind": "durability_violation",
+                        "detail": "derived durable input cannot be accepted",
+                    },
+                    "reason": "derived durable input cannot be accepted",
+                },
             }),
         );
     }

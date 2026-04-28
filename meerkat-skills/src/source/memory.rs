@@ -35,7 +35,11 @@ impl SkillSource for InMemorySkillSource {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
-    use meerkat_core::skills::{SkillName, SkillScope, SourceUuid};
+    use meerkat_core::skills::{
+        SkillKeyRemap, SkillName, SkillScope, SourceIdentityLineage, SourceIdentityLineageEvent,
+        SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
+        SourceUuid,
+    };
 
     fn test_key(skill: &str) -> SkillKey {
         SkillKey {
@@ -57,6 +61,32 @@ mod tests {
             },
             body: format!("Body for {skill}"),
             extensions: IndexMap::new(),
+        }
+    }
+
+    fn make_skill_with_key(key: SkillKey, name: &str) -> SkillDocument {
+        SkillDocument {
+            descriptor: SkillDescriptor {
+                key,
+                name: name.into(),
+                description: format!("Desc for {name}"),
+                scope: SkillScope::Builtin,
+                metadata: IndexMap::new(),
+                capability_requirements: Vec::new(),
+                source_name: String::new(),
+            },
+            body: format!("Body for {name}"),
+            extensions: IndexMap::new(),
+        }
+    }
+
+    fn source_record(source_uuid: SourceUuid, name: &str) -> SourceIdentityRecord {
+        SourceIdentityRecord {
+            source_uuid,
+            display_name: name.to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: format!("fixture:{name}"),
+            status: SourceIdentityStatus::Active,
         }
     }
 
@@ -88,5 +118,52 @@ mod tests {
         let source = InMemorySkillSource::new(vec![make_skill("email", "email")]);
         let result = source.load(&test_key("email")).await.unwrap();
         assert_eq!(result.descriptor.name, "email");
+    }
+
+    #[tokio::test]
+    async fn test_load_with_source_identity_registry_applies_remap() {
+        let legacy_source = SourceUuid::parse("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa").unwrap();
+        let canonical_source = SourceUuid::parse("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb").unwrap();
+        let skill_name = SkillName::parse("email").unwrap();
+        let legacy_key = SkillKey::new(legacy_source.clone(), skill_name.clone());
+        let canonical_key = SkillKey::new(canonical_source.clone(), skill_name);
+        let registry = SourceIdentityRegistry::build(
+            vec![
+                source_record(legacy_source.clone(), "legacy"),
+                source_record(canonical_source.clone(), "canonical"),
+            ],
+            vec![SourceIdentityLineage {
+                event_id: "legacy-to-canonical".to_string(),
+                recorded_at_unix_secs: 1,
+                required_from_skills: Vec::new(),
+                event: SourceIdentityLineageEvent::RenameOrRelocate {
+                    from: legacy_source,
+                    to: canonical_source,
+                },
+            }],
+            vec![SkillKeyRemap {
+                from: legacy_key.clone(),
+                to: canonical_key.clone(),
+                reason: Some("test remap".to_string()),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let source = InMemorySkillSource::new(vec![make_skill_with_key(
+            canonical_key.clone(),
+            "canonical-email",
+        )]);
+
+        assert!(matches!(
+            source.load(&legacy_key).await,
+            Err(SkillError::NotFound { .. })
+        ));
+
+        let result = source
+            .load_with_source_identity_registry(&legacy_key, &registry)
+            .await
+            .unwrap();
+        assert_eq!(result.descriptor.key, canonical_key);
+        assert_eq!(result.descriptor.name, "canonical-email");
     }
 }

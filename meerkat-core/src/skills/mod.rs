@@ -735,11 +735,34 @@ pub trait SkillSource: Send + Sync {
         filter: &SkillFilter,
     ) -> impl Future<Output = Result<Vec<SkillDescriptor>, SkillError>> + Send;
 
-    /// Load a skill document by its canonical key.
+    /// Load a skill document by its already-resolved canonical key.
     fn load(
         &self,
         key: &SkillKey,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send;
+
+    /// Resolve `key` through the canonical source-identity registry before
+    /// loading. Direct callers outside a registry-backed [`SkillEngine`] should
+    /// use this path so source lineage remaps and lifecycle gates remain
+    /// authoritative at resolution time.
+    fn load_with_source_identity_registry(
+        &self,
+        key: &SkillKey,
+        registry: &SourceIdentityRegistry,
+    ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
+        async move {
+            let canonical_key =
+                registry
+                    .resolve(key)
+                    .map(|resolved| resolved.key)
+                    .map_err(|e| {
+                        SkillError::Load(
+                            format!("source identity resolution failed for {key}: {e}").into(),
+                        )
+                    })?;
+            self.load(&canonical_key).await
+        }
+    }
 
     /// List collections with counts. Default derives from `list()`.
     fn collections(&self) -> impl Future<Output = Result<Vec<SkillCollection>, SkillError>> + Send {

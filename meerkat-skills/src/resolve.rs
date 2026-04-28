@@ -1,6 +1,7 @@
 //! Skill repository resolution.
 
 use std::path::Path;
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -41,7 +42,7 @@ pub async fn resolve_repositories_with_roots(
         return Ok(None);
     }
 
-    let registry = config.build_source_identity_registry()?;
+    let registry = Arc::new(config.build_source_identity_registry()?);
     let records = config.source_identity_records();
 
     #[cfg(target_arch = "wasm32")]
@@ -57,12 +58,13 @@ pub async fn resolve_repositories_with_roots(
             return Err(error);
         }
         let builtin_identity = active_source_identity(&registry, &records, &SourceUuid::builtin())?;
-        Ok(Some(CompositeSkillSource::from_named(vec![
-            NamedSource::new(
+        Ok(Some(CompositeSkillSource::from_named_with_registry(
+            vec![NamedSource::new(
                 builtin_identity,
                 SourceNode::Embedded(EmbeddedSkillSource::new()),
-            ),
-        ])))
+            )],
+            registry,
+        )))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -235,7 +237,9 @@ pub async fn resolve_repositories_with_roots(
             }
         }
 
-        Ok(Some(CompositeSkillSource::from_named(sources)))
+        Ok(Some(CompositeSkillSource::from_named_with_registry(
+            sources, registry,
+        )))
     }
 }
 

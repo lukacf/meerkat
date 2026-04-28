@@ -1007,6 +1007,37 @@ describe("Auth wrappers", () => {
     ]);
   });
 
+  it("preserves explicit empty profile overrides for backend validation", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return {};
+    };
+
+    await client.authStatusGet("prod", "claude-console", "");
+    await client.authLogout("prod", "claude-console", "");
+
+    assert.deepEqual(calls, [
+      {
+        method: "auth/status/get",
+        params: {
+          realm_id: "prod",
+          binding_id: "claude-console",
+          profile_id: "",
+        },
+      },
+      {
+        method: "auth/logout",
+        params: {
+          realm_id: "prod",
+          binding_id: "claude-console",
+          profile_id: "",
+        },
+      },
+    ]);
+  });
+
   it("keeps status and logout params unchanged without profile overrides", async () => {
     const client = new MeerkatClient();
     const calls = [];

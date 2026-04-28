@@ -2023,7 +2023,7 @@ export class MeerkatClient {
       realm_id: realmId,
       binding_id: bindingId,
     };
-    if (profileId) params.profile_id = profileId;
+    if (profileId !== undefined) params.profile_id = profileId;
     return this.request("auth/status/get", params);
   }
 
@@ -2036,7 +2036,7 @@ export class MeerkatClient {
       realm_id: realmId,
       binding_id: bindingId,
     };
-    if (profileId) params.profile_id = profileId;
+    if (profileId !== undefined) params.profile_id = profileId;
     return this.request("auth/logout", params);
   }
 

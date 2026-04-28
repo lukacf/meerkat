@@ -327,6 +327,7 @@ def test_typescript_auth_status_logout_helpers_send_profile_scoped_params():
         assert "bindingId" in body
         assert "binding_id" in body
         assert "profileId?: string" in body
+        assert "profileId !== undefined" in body
         assert "params.profile_id = profileId" in body
 
 
@@ -341,6 +342,7 @@ def test_web_auth_status_logout_helpers_send_profile_scoped_params():
         body = source[start:end]
         assert "binding_id" in body
         assert "profile_id?: string" in body
+        assert "profile_id !== undefined" in body
         assert "params.profile_id = profile_id" in body
 
 

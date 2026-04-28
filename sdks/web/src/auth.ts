@@ -253,7 +253,7 @@ export class Auth {
       realm_id,
       binding_id,
     };
-    if (profile_id) params.profile_id = profile_id;
+    if (profile_id !== undefined) params.profile_id = profile_id;
     return this.transport.request<
       typeof params,
       AuthStatus
@@ -273,7 +273,7 @@ export class Auth {
       realm_id,
       binding_id,
     };
-    if (profile_id) params.profile_id = profile_id;
+    if (profile_id !== undefined) params.profile_id = profile_id;
     return this.transport.request<
       typeof params,
       AuthCredentialsCleared

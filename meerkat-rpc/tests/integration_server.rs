@@ -409,6 +409,95 @@ async fn deferred_callback_direct_sessions_expose_control_plane_tools_on_first_t
 }
 
 #[tokio::test]
+async fn deferred_inline_external_tools_accept_explicit_keep_alive_false_turn() {
+    let client = Arc::new(RecordingToolClient::default());
+    let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        }),
+    )
+    .await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/create",
+            "params": {
+                "prompt": "Bootstrap deferred session",
+                "initial_turn": "deferred",
+                "enable_builtins": false,
+                "enable_shell": false,
+                "enable_memory": false,
+                "enable_mob": false,
+                "keep_alive": false,
+                "external_tools": [{
+                    "name": "linear_graphql",
+                    "description": "Execute GraphQL",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "variables": {"type": "object"}
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }
+                }]
+            }
+        }),
+    )
+    .await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "session/create failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .expect("session_id missing")
+        .to_string();
+
+    send_request(
+        &mut writer,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "turn/start",
+            "params": {
+                "session_id": session_id,
+                "prompt": "Inspect the deferred inline callback tool surface.",
+                "keep_alive": false
+            }
+        }),
+    )
+    .await;
+    let turn_resp = read_response(&mut reader).await;
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start failed: {turn_resp}"
+    );
+
+    let seen = client.seen_tools();
+    assert_eq!(seen.len(), 1, "expected exactly one LLM call, got {seen:?}");
+
+    drop(writer);
+    server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn late_registered_deferred_callbacks_keep_control_plane_after_inline_build() {
     let client = Arc::new(RecordingToolClient::default());
     let (mut writer, mut reader, server_handle) = spawn_test_server_with_client(client.clone());

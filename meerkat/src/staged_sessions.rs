@@ -139,6 +139,30 @@ impl StagedSessionRegistry {
         slots.get(id).map(|s| s.effective_llm_identity.clone())
     }
 
+    /// Apply a keep-alive override to a staged session before its first turn
+    /// materializes it in the session service.
+    pub async fn update_keep_alive(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+        updated_at_secs: u64,
+    ) -> Result<bool, StagedLifecycleError> {
+        let mut slots = self.slots.write().await;
+        let Some(slot) = slots.get_mut(id) else {
+            return Ok(false);
+        };
+        match &mut slot.phase {
+            StagedPhase::Staged { build_config } => {
+                build_config.keep_alive = keep_alive;
+                slot.updated_at_secs = updated_at_secs;
+                Ok(true)
+            }
+            StagedPhase::Promoting { .. } => {
+                Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
+            }
+        }
+    }
+
     /// All slots, optionally filtered by labels, as (id, info) pairs.
     pub async fn list(
         &self,

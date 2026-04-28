@@ -244,6 +244,56 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse skill_resolution_failed with typed key and reason", () => {
+    const sourceUuid = "00000000-0000-4b11-8111-000000000001";
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      skill_key: { source_uuid: sourceUuid, skill_name: "email-extractor" },
+      reason: {
+        reason_type: "not_found",
+        key: { source_uuid: sourceUuid, skill_name: "email-extractor" },
+      },
+      reference: `${sourceUuid}/email-extractor`,
+      error: `skill not found: ${sourceUuid}/email-extractor`,
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.deepEqual(event.skillKey, {
+        sourceUuid,
+        skillName: "email-extractor",
+      });
+      assert.equal(event.reason.reasonType, "not_found");
+      if (event.reason.reasonType === "not_found") {
+        assert.deepEqual(event.reason.key, {
+          sourceUuid,
+          skillName: "email-extractor",
+        });
+      }
+      assert.equal(event.reference, `${sourceUuid}/email-extractor`);
+      assert.equal(event.error, `skill not found: ${sourceUuid}/email-extractor`);
+    }
+  });
+
+  it("should parse legacy skill_resolution_failed payloads", () => {
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      reference: "legacy/ref",
+      error: "missing",
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.equal(event.skillKey, undefined);
+      assert.deepEqual(event.reason, {
+        reasonType: "unknown",
+        message: "missing",
+      });
+      assert.equal(event.reference, "legacy/ref");
+      assert.equal(event.error, "missing");
+    }
+  });
+
   it("should return UnknownEvent for unrecognised types", () => {
     const event = parseEvent({ type: "future_event_v2", data: "something" });
     // Unknown events have the raw type string

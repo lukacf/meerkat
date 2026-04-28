@@ -346,7 +346,7 @@ match event {
 
     // Skills
     AgentEvent::SkillsResolved { skills, injection_bytes } => {}
-    AgentEvent::SkillResolutionFailed { reference, error } => {}
+    AgentEvent::SkillResolutionFailed { skill_key, reason, reference, error } => {}
 
     // Comms interaction lifecycle
     AgentEvent::InteractionComplete { interaction_id, result } => {}

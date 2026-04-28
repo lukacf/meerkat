@@ -17,7 +17,8 @@ use meerkat_contracts::{
 };
 use meerkat_core::{
     AgentErrorClass, AgentEvent, BudgetType, ContentInput, HookPatch, HookPoint, HookReasonCode,
-    RunResult, SessionId, StopReason, ToolConfigChangeOperation, ToolConfigChangedPayload, Usage,
+    RunResult, SessionId, SkillResolutionFailureReason, StopReason, ToolConfigChangeOperation,
+    ToolConfigChangedPayload, Usage,
 };
 
 // ---------------------------------------------------------------------------
@@ -334,6 +335,9 @@ fn wire_error_shape() {
 #[test]
 fn agent_event_all_variants_roundtrip() {
     let session_id = SessionId::new();
+    let failed_skill_key = meerkat_core::skills::SkillKey::builtin(
+        meerkat_core::skills::SkillName::parse("bad-skill").expect("valid name"),
+    );
 
     // Variants that can be constructed without chrono or uuid (direct construction).
     let direct_variants: Vec<AgentEvent> = vec![
@@ -462,8 +466,12 @@ fn agent_event_all_variants_roundtrip() {
             injection_bytes: 256,
         },
         AgentEvent::SkillResolutionFailed {
-            reference: "bad/ref".to_string(),
-            error: "not found".to_string(),
+            skill_key: Some(failed_skill_key.clone()),
+            reason: SkillResolutionFailureReason::NotFound {
+                key: failed_skill_key.clone(),
+            },
+            reference: failed_skill_key.to_string(),
+            error: format!("skill not found: {failed_skill_key}"),
         },
         // InteractionComplete and InteractionFailed are constructed via JSON
         // below to avoid a direct uuid crate dependency.
@@ -491,6 +499,16 @@ fn agent_event_all_variants_roundtrip() {
             json.get("type").is_some(),
             "missing type tag on event: {event:?}"
         );
+        if json["type"] == "skill_resolution_failed" {
+            assert!(json.get("skill_key").is_some(), "missing typed skill_key");
+            assert!(json.get("reason").is_some(), "missing typed failure reason");
+            assert_eq!(json["reason"]["reason_type"], "not_found");
+            assert_eq!(json["reference"], failed_skill_key.to_string());
+            assert_eq!(
+                json["error"],
+                format!("skill not found: {failed_skill_key}")
+            );
+        }
 
         // Roundtrip
         let roundtrip: AgentEvent = serde_json::from_value(json.clone()).unwrap();
@@ -696,6 +714,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             injection_bytes: 0,
         },
         AgentEvent::SkillResolutionFailed {
+            skill_key: None,
+            reason: SkillResolutionFailureReason::Unknown {
+                message: "missing".to_string(),
+            },
             reference: "skill".to_string(),
             error: "missing".to_string(),
         },

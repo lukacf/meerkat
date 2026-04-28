@@ -24,7 +24,10 @@ Example::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .types import SkillKey
 
 ContentInput = str | list[dict[str, Any]]
 
@@ -298,9 +301,36 @@ class SkillsResolved(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class SkillResolutionFailureReason:
+    """Structured reason a skill reference could not be resolved."""
+
+    reason_type: str = "unknown"
+    key: SkillKey | None = None
+    capability: str | None = None
+    message: str = ""
+    source_uuid: str = ""
+    skill_name: str = ""
+    existing_fingerprint: str = ""
+    new_fingerprint: str = ""
+    fingerprint: str = ""
+    existing_source_uuid: str = ""
+    mutated_source_uuid: str = ""
+    event_id: str = ""
+    event_kind: str = ""
+    from_source_uuid: str = ""
+    from_skill_name: str = ""
+    to_source_uuid: str = ""
+    to_skill_name: str = ""
+    alias: str = ""
+    raw_reason_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SkillResolutionFailed(Event):
     """A skill reference could not be resolved."""
 
+    skill_key: SkillKey | None = None
+    reason: SkillResolutionFailureReason = field(default_factory=SkillResolutionFailureReason)
     reference: str = ""
     error: str = ""
 
@@ -433,6 +463,70 @@ def _parse_usage(raw: dict[str, Any] | None) -> Usage:
     )
 
 
+def _parse_skill_key(raw: Any) -> SkillKey | None:
+    if not isinstance(raw, dict):
+        return None
+
+    from .types import SkillKey
+
+    return SkillKey(
+        source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
+        skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
+    )
+
+
+def _parse_skill_resolution_failure_reason(
+    raw: Any,
+    fallback_message: str,
+) -> SkillResolutionFailureReason:
+    if not isinstance(raw, dict):
+        return SkillResolutionFailureReason(message=fallback_message)
+
+    reason_type = str(raw.get("reason_type", raw.get("reasonType", "unknown")))
+    known_reason_types = {
+        "not_found",
+        "capability_unavailable",
+        "load",
+        "parse",
+        "source_uuid_collision",
+        "source_uuid_mutation_without_lineage",
+        "missing_skill_remaps",
+        "remap_without_lineage",
+        "unknown_skill_alias",
+        "remap_cycle",
+        "unknown",
+    }
+    normalized_reason_type = reason_type if reason_type in known_reason_types else "unknown"
+
+    return SkillResolutionFailureReason(
+        reason_type=normalized_reason_type,
+        key=_parse_skill_key(raw.get("key")),
+        capability=str(raw.get("capability", "")),
+        message=str(raw.get("message", fallback_message)),
+        source_uuid=str(raw.get("source_uuid", raw.get("sourceUuid", ""))),
+        skill_name=str(raw.get("skill_name", raw.get("skillName", ""))),
+        existing_fingerprint=str(
+            raw.get("existing_fingerprint", raw.get("existingFingerprint", ""))
+        ),
+        new_fingerprint=str(raw.get("new_fingerprint", raw.get("newFingerprint", ""))),
+        fingerprint=str(raw.get("fingerprint", "")),
+        existing_source_uuid=str(
+            raw.get("existing_source_uuid", raw.get("existingSourceUuid", ""))
+        ),
+        mutated_source_uuid=str(
+            raw.get("mutated_source_uuid", raw.get("mutatedSourceUuid", ""))
+        ),
+        event_id=str(raw.get("event_id", raw.get("eventId", ""))),
+        event_kind=str(raw.get("event_kind", raw.get("eventKind", ""))),
+        from_source_uuid=str(raw.get("from_source_uuid", raw.get("fromSourceUuid", ""))),
+        from_skill_name=str(raw.get("from_skill_name", raw.get("fromSkillName", ""))),
+        to_source_uuid=str(raw.get("to_source_uuid", raw.get("toSourceUuid", ""))),
+        to_skill_name=str(raw.get("to_skill_name", raw.get("toSkillName", ""))),
+        alias=str(raw.get("alias", "")),
+        raw_reason_type=reason_type if reason_type not in known_reason_types else None,
+    )
+
+
 def parse_event(raw: dict[str, Any]) -> Event:
     """Parse a raw event dict (from the wire) into a typed :class:`Event`.
 
@@ -458,6 +552,13 @@ def parse_event(raw: dict[str, Any]) -> Event:
     for f in cls.__dataclass_fields__:
         if f == "usage":
             kwargs["usage"] = _parse_usage(raw.get("usage"))
+        elif f == "skill_key" and cls is SkillResolutionFailed:
+            kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
+        elif f == "reason" and cls is SkillResolutionFailed:
+            kwargs["reason"] = _parse_skill_resolution_failure_reason(
+                raw.get("reason"),
+                str(raw.get("error", "")),
+            )
         elif f == "payload" and cls is ToolConfigChanged:
             payload_raw = raw.get("payload", {})
             if isinstance(payload_raw, dict):

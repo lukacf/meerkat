@@ -25,7 +25,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import type { ContentInput } from "./types.js";
+import type { ContentInput, SkillKey } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -313,9 +313,42 @@ export interface SkillsResolvedEvent {
   readonly injectionBytes: number;
 }
 
+export type SkillResolutionFailureReason =
+  | { readonly reasonType: "not_found"; readonly key: SkillKey }
+  | { readonly reasonType: "capability_unavailable"; readonly key: SkillKey; readonly capability: string }
+  | { readonly reasonType: "load"; readonly message: string }
+  | { readonly reasonType: "parse"; readonly message: string }
+  | {
+      readonly reasonType: "source_uuid_collision";
+      readonly sourceUuid: string;
+      readonly existingFingerprint: string;
+      readonly newFingerprint: string;
+    }
+  | {
+      readonly reasonType: "source_uuid_mutation_without_lineage";
+      readonly fingerprint: string;
+      readonly existingSourceUuid: string;
+      readonly mutatedSourceUuid: string;
+    }
+  | { readonly reasonType: "missing_skill_remaps"; readonly eventId: string; readonly eventKind: string }
+  | {
+      readonly reasonType: "remap_without_lineage";
+      readonly fromSourceUuid: string;
+      readonly fromSkillName: string;
+      readonly toSourceUuid: string;
+      readonly toSkillName: string;
+    }
+  | { readonly reasonType: "unknown_skill_alias"; readonly alias: string }
+  | { readonly reasonType: "remap_cycle"; readonly sourceUuid: string; readonly skillName: string }
+  | { readonly reasonType: "unknown"; readonly message: string; readonly rawReasonType?: string };
+
 export interface SkillResolutionFailedEvent {
   readonly type: "skill_resolution_failed";
+  readonly skillKey?: SkillKey;
+  readonly reason: SkillResolutionFailureReason;
+  /** Legacy display mirror. Prefer `skillKey` when present. */
   readonly reference: string;
+  /** Legacy display mirror. Prefer `reason` for structured handling. */
   readonly error: string;
 }
 
@@ -462,6 +495,90 @@ function parseContentInput(raw: unknown): ContentInput {
   return String(raw ?? "");
 }
 
+function parseSkillKey(raw: unknown): SkillKey | undefined {
+  if (raw == null || typeof raw !== "object") {
+    return undefined;
+  }
+  const value = raw as Record<string, unknown>;
+  return {
+    sourceUuid: String(value.source_uuid ?? value.sourceUuid ?? ""),
+    skillName: String(value.skill_name ?? value.skillName ?? ""),
+  };
+}
+
+function emptySkillKey(): SkillKey {
+  return { sourceUuid: "", skillName: "" };
+}
+
+function parseSkillResolutionFailureReason(
+  raw: unknown,
+  fallbackMessage: string,
+): SkillResolutionFailureReason {
+  if (raw == null || typeof raw !== "object") {
+    return { reasonType: "unknown", message: fallbackMessage };
+  }
+
+  const value = raw as Record<string, unknown>;
+  const reasonType = String(value.reason_type ?? value.reasonType ?? "unknown");
+  switch (reasonType) {
+    case "not_found":
+      return { reasonType, key: parseSkillKey(value.key) ?? emptySkillKey() };
+    case "capability_unavailable":
+      return {
+        reasonType,
+        key: parseSkillKey(value.key) ?? emptySkillKey(),
+        capability: String(value.capability ?? ""),
+      };
+    case "load":
+    case "parse":
+      return { reasonType, message: String(value.message ?? "") };
+    case "source_uuid_collision":
+      return {
+        reasonType,
+        sourceUuid: String(value.source_uuid ?? value.sourceUuid ?? ""),
+        existingFingerprint: String(value.existing_fingerprint ?? value.existingFingerprint ?? ""),
+        newFingerprint: String(value.new_fingerprint ?? value.newFingerprint ?? ""),
+      };
+    case "source_uuid_mutation_without_lineage":
+      return {
+        reasonType,
+        fingerprint: String(value.fingerprint ?? ""),
+        existingSourceUuid: String(value.existing_source_uuid ?? value.existingSourceUuid ?? ""),
+        mutatedSourceUuid: String(value.mutated_source_uuid ?? value.mutatedSourceUuid ?? ""),
+      };
+    case "missing_skill_remaps":
+      return {
+        reasonType,
+        eventId: String(value.event_id ?? value.eventId ?? ""),
+        eventKind: String(value.event_kind ?? value.eventKind ?? ""),
+      };
+    case "remap_without_lineage":
+      return {
+        reasonType,
+        fromSourceUuid: String(value.from_source_uuid ?? value.fromSourceUuid ?? ""),
+        fromSkillName: String(value.from_skill_name ?? value.fromSkillName ?? ""),
+        toSourceUuid: String(value.to_source_uuid ?? value.toSourceUuid ?? ""),
+        toSkillName: String(value.to_skill_name ?? value.toSkillName ?? ""),
+      };
+    case "unknown_skill_alias":
+      return { reasonType, alias: String(value.alias ?? "") };
+    case "remap_cycle":
+      return {
+        reasonType,
+        sourceUuid: String(value.source_uuid ?? value.sourceUuid ?? ""),
+        skillName: String(value.skill_name ?? value.skillName ?? ""),
+      };
+    case "unknown":
+      return { reasonType, message: String(value.message ?? fallbackMessage) };
+    default:
+      return {
+        reasonType: "unknown",
+        message: String(value.message ?? fallbackMessage),
+        rawReasonType: reasonType,
+      };
+  }
+}
+
 /**
  * Parse a raw wire event dict into a typed {@link StreamEvent}.
  *
@@ -581,8 +698,17 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     // Skills
     case "skills_resolved":
       return { type, skills: (raw.skills ?? []) as string[], injectionBytes: Number(raw.injection_bytes ?? 0) };
-    case "skill_resolution_failed":
-      return { type, reference: String(raw.reference ?? ""), error: String(raw.error ?? "") };
+    case "skill_resolution_failed": {
+      const error = String(raw.error ?? "");
+      const skillKey = parseSkillKey(raw.skill_key);
+      return {
+        type,
+        ...(skillKey ? { skillKey } : {}),
+        reason: parseSkillResolutionFailureReason(raw.reason, error),
+        reference: String(raw.reference ?? ""),
+        error,
+      };
+    }
 
     // Interaction (comms)
     case "interaction_complete":

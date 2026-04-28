@@ -479,7 +479,9 @@ fn render_event(
             }
         }
 
-        AgentEvent::SkillResolutionFailed { reference, error } => {
+        AgentEvent::SkillResolutionFailed {
+            reference, error, ..
+        } => {
             chrome_line(
                 mux,
                 scope_id,

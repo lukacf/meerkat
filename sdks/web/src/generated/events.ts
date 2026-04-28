@@ -66,6 +66,8 @@ export type BlobId = string;
 
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
+export type CapabilityId = string;
+
 export type ContentBlock = {
   text: string;
   type: "text";
@@ -159,6 +161,51 @@ export interface SkillKey {
 }
 
 export type SkillName = string;
+
+export type SkillResolutionFailureReason = {
+  key: SkillKey;
+  reason_type: "not_found";
+} | {
+  capability: CapabilityId;
+  key: SkillKey;
+  reason_type: "capability_unavailable";
+} | {
+  message: string;
+  reason_type: "load";
+} | {
+  message: string;
+  reason_type: "parse";
+} | {
+  existing_fingerprint: string;
+  new_fingerprint: string;
+  reason_type: "source_uuid_collision";
+  source_uuid: string;
+} | {
+  existing_source_uuid: string;
+  fingerprint: string;
+  mutated_source_uuid: string;
+  reason_type: "source_uuid_mutation_without_lineage";
+} | {
+  event_id: string;
+  event_kind: string;
+  reason_type: "missing_skill_remaps";
+} | {
+  from_skill_name: string;
+  from_source_uuid: string;
+  reason_type: "remap_without_lineage";
+  to_skill_name: string;
+  to_source_uuid: string;
+} | {
+  alias: string;
+  reason_type: "unknown_skill_alias";
+} | {
+  reason_type: "remap_cycle";
+  skill_name: string;
+  source_uuid: string;
+} | {
+  message: string;
+  reason_type: "unknown";
+};
 
 export type SourceUuid = string;
 
@@ -360,8 +407,10 @@ export interface SkillsResolvedEvent {
 }
 
 export interface SkillResolutionFailedEvent {
-  error: string;
-  reference: string;
+  error?: string;
+  reason?: SkillResolutionFailureReason;
+  reference?: string;
+  skill_key?: SkillKey | null;
   type: "skill_resolution_failed";
 }
 

@@ -348,6 +348,10 @@
         ],
         "type": "string"
       },
+      "CapabilityId": {
+        "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
+        "type": "string"
+      },
       "ContentBlock": {
         "oneOf": [
           {
@@ -815,6 +819,226 @@
       "SkillName": {
         "description": "Canonical skill slug (lowercase, dash-separated).",
         "type": "string"
+      },
+      "SkillResolutionFailureReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "capability": {
+                "$ref": "#/$defs/CapabilityId"
+              },
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "capability_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "load",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "parse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_fingerprint": {
+                "type": "string"
+              },
+              "new_fingerprint": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_collision",
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "existing_fingerprint",
+              "new_fingerprint"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_source_uuid": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "mutated_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_mutation_without_lineage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "fingerprint",
+              "existing_source_uuid",
+              "mutated_source_uuid"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "event_kind": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "missing_skill_remaps",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "event_id",
+              "event_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_skill_name": {
+                "type": "string"
+              },
+              "from_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "remap_without_lineage",
+                "type": "string"
+              },
+              "to_skill_name": {
+                "type": "string"
+              },
+              "to_source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "from_source_uuid",
+              "from_skill_name",
+              "to_source_uuid",
+              "to_skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "alias": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown_skill_alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "alias"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "remap_cycle",
+                "type": "string"
+              },
+              "skill_name": {
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SourceUuid": {
         "description": "Canonical source identifier.",
@@ -1637,10 +1861,33 @@
         "description": "A skill reference could not be resolved.",
         "properties": {
           "error": {
+            "default": "",
+            "description": "Legacy display mirror for consumers still reading string errors.",
             "type": "string"
           },
+          "reason": {
+            "$ref": "#/$defs/SkillResolutionFailureReason",
+            "default": {
+              "message": "",
+              "reason_type": "unknown"
+            },
+            "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
+          },
           "reference": {
+            "default": "",
+            "description": "Legacy display mirror for consumers still reading string references.",
             "type": "string"
+          },
+          "skill_key": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SkillKey"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Canonical structured skill identity/reference, when resolution had one."
           },
           "type": {
             "const": "skill_resolution_failed",
@@ -1648,9 +1895,7 @@
           }
         },
         "required": [
-          "type",
-          "reference",
-          "error"
+          "type"
         ],
         "type": "object"
       },
@@ -2797,10 +3042,33 @@
             "description": "A skill reference could not be resolved.",
             "properties": {
               "error": {
+                "default": "",
+                "description": "Legacy display mirror for consumers still reading string errors.",
                 "type": "string"
               },
+              "reason": {
+                "$ref": "#/$defs/SkillResolutionFailureReason",
+                "default": {
+                  "message": "",
+                  "reason_type": "unknown"
+                },
+                "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
+              },
               "reference": {
+                "default": "",
+                "description": "Legacy display mirror for consumers still reading string references.",
                 "type": "string"
+              },
+              "skill_key": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SkillKey"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Canonical structured skill identity/reference, when resolution had one."
               },
               "type": {
                 "const": "skill_resolution_failed",
@@ -2808,9 +3076,7 @@
               }
             },
             "required": [
-              "type",
-              "reference",
-              "error"
+              "type"
             ],
             "type": "object"
           },
@@ -2955,6 +3221,10 @@
           "time",
           "tool_calls"
         ],
+        "type": "string"
+      },
+      "CapabilityId": {
+        "description": "Slug-validated capability identifier for skill requirements.\n\nReplaces the legacy `Vec<String>` capability lists with a typed\nnamespace. Parsed at construction, so callers cannot smuggle invalid\nidentifiers into descriptors or requirements.",
         "type": "string"
       },
       "ContentBlock": {
@@ -3424,6 +3694,226 @@
       "SkillName": {
         "description": "Canonical skill slug (lowercase, dash-separated).",
         "type": "string"
+      },
+      "SkillResolutionFailureReason": {
+        "oneOf": [
+          {
+            "properties": {
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "not_found",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "capability": {
+                "$ref": "#/$defs/CapabilityId"
+              },
+              "key": {
+                "$ref": "#/$defs/SkillKey"
+              },
+              "reason_type": {
+                "const": "capability_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "key",
+              "capability"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "load",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "parse",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_fingerprint": {
+                "type": "string"
+              },
+              "new_fingerprint": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_collision",
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "existing_fingerprint",
+              "new_fingerprint"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "existing_source_uuid": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "mutated_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "source_uuid_mutation_without_lineage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "fingerprint",
+              "existing_source_uuid",
+              "mutated_source_uuid"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_id": {
+                "type": "string"
+              },
+              "event_kind": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "missing_skill_remaps",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "event_id",
+              "event_kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "from_skill_name": {
+                "type": "string"
+              },
+              "from_source_uuid": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "remap_without_lineage",
+                "type": "string"
+              },
+              "to_skill_name": {
+                "type": "string"
+              },
+              "to_source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "from_source_uuid",
+              "from_skill_name",
+              "to_source_uuid",
+              "to_skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "alias": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown_skill_alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "alias"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason_type": {
+                "const": "remap_cycle",
+                "type": "string"
+              },
+              "skill_name": {
+                "type": "string"
+              },
+              "source_uuid": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "source_uuid",
+              "skill_name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "reason_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SourceUuid": {
         "description": "Canonical source identifier.",

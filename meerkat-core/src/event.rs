@@ -5,6 +5,7 @@
 use crate::error::{AgentError, LlmFailureReason};
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::retry::LlmRetrySchedule;
+use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::types::{ContentInput, SessionId, StopReason, Usage};
 use serde::{Deserialize, Serialize};
@@ -241,6 +242,133 @@ impl AgentErrorReport {
             reason: AgentErrorReason::from_agent_error(error),
             message: error.to_string(),
         }
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason_type", rename_all = "snake_case")]
+pub enum SkillResolutionFailureReason {
+    NotFound {
+        key: SkillKey,
+    },
+    CapabilityUnavailable {
+        key: SkillKey,
+        capability: CapabilityId,
+    },
+    Load {
+        message: String,
+    },
+    Parse {
+        message: String,
+    },
+    SourceUuidCollision {
+        source_uuid: String,
+        existing_fingerprint: String,
+        new_fingerprint: String,
+    },
+    SourceUuidMutationWithoutLineage {
+        fingerprint: String,
+        existing_source_uuid: String,
+        mutated_source_uuid: String,
+    },
+    MissingSkillRemaps {
+        event_id: String,
+        event_kind: String,
+    },
+    RemapWithoutLineage {
+        from_source_uuid: String,
+        from_skill_name: String,
+        to_source_uuid: String,
+        to_skill_name: String,
+    },
+    UnknownSkillAlias {
+        alias: String,
+    },
+    RemapCycle {
+        source_uuid: String,
+        skill_name: String,
+    },
+    Unknown {
+        message: String,
+    },
+}
+
+impl Default for SkillResolutionFailureReason {
+    fn default() -> Self {
+        Self::Unknown {
+            message: String::new(),
+        }
+    }
+}
+
+impl SkillResolutionFailureReason {
+    pub fn from_skill_error(error: &SkillError) -> Self {
+        match error {
+            SkillError::NotFound { key } => Self::NotFound { key: key.clone() },
+            SkillError::CapabilityUnavailable { key, capability } => Self::CapabilityUnavailable {
+                key: key.clone(),
+                capability: capability.clone(),
+            },
+            SkillError::Load(message) => Self::Load {
+                message: message.to_string(),
+            },
+            SkillError::Parse(message) => Self::Parse {
+                message: message.to_string(),
+            },
+            SkillError::SourceUuidCollision {
+                source_uuid,
+                existing_fingerprint,
+                new_fingerprint,
+            } => Self::SourceUuidCollision {
+                source_uuid: source_uuid.clone(),
+                existing_fingerprint: existing_fingerprint.clone(),
+                new_fingerprint: new_fingerprint.clone(),
+            },
+            SkillError::SourceUuidMutationWithoutLineage {
+                fingerprint,
+                existing_source_uuid,
+                mutated_source_uuid,
+            } => Self::SourceUuidMutationWithoutLineage {
+                fingerprint: fingerprint.clone(),
+                existing_source_uuid: existing_source_uuid.clone(),
+                mutated_source_uuid: mutated_source_uuid.clone(),
+            },
+            SkillError::MissingSkillRemaps {
+                event_id,
+                event_kind,
+            } => Self::MissingSkillRemaps {
+                event_id: event_id.clone(),
+                event_kind: (*event_kind).to_string(),
+            },
+            SkillError::RemapWithoutLineage {
+                from_source_uuid,
+                from_skill_name,
+                to_source_uuid,
+                to_skill_name,
+            } => Self::RemapWithoutLineage {
+                from_source_uuid: from_source_uuid.clone(),
+                from_skill_name: from_skill_name.clone(),
+                to_source_uuid: to_source_uuid.clone(),
+                to_skill_name: to_skill_name.clone(),
+            },
+            SkillError::UnknownSkillAlias { alias } => Self::UnknownSkillAlias {
+                alias: alias.clone(),
+            },
+            SkillError::RemapCycle {
+                source_uuid,
+                skill_name,
+            } => Self::RemapCycle {
+                source_uuid: source_uuid.clone(),
+                skill_name: skill_name.clone(),
+            },
+        }
+    }
+}
+
+impl From<&SkillError> for SkillResolutionFailureReason {
+    fn from(error: &SkillError) -> Self {
+        Self::from_skill_error(error)
     }
 }
 
@@ -637,12 +765,25 @@ pub enum AgentEvent {
     // === Skill Events ===
     /// Skills resolved for this turn.
     SkillsResolved {
-        skills: Vec<crate::skills::SkillKey>,
+        skills: Vec<SkillKey>,
         injection_bytes: usize,
     },
 
     /// A skill reference could not be resolved.
-    SkillResolutionFailed { reference: String, error: String },
+    SkillResolutionFailed {
+        /// Canonical structured skill identity/reference, when resolution had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill_key: Option<SkillKey>,
+        /// Structured reason for the failure. Legacy payloads deserialize as `unknown`.
+        #[serde(default)]
+        reason: SkillResolutionFailureReason,
+        /// Legacy display mirror for consumers still reading string references.
+        #[serde(default)]
+        reference: String,
+        /// Legacy display mirror for consumers still reading string errors.
+        #[serde(default)]
+        error: String,
+    },
 
     // === Interaction-Scoped Streaming ===
     /// An interaction completed successfully (terminal event for tap subscribers).
@@ -926,6 +1067,7 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 mod tests {
     use super::*;
     use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
+    use crate::skills::SkillName;
 
     #[test]
     fn test_agent_event_json_schema() {
@@ -1082,6 +1224,86 @@ mod tests {
         assert_eq!(value["retry"]["failure"]["kind"], "rate_limited");
         assert_eq!(value["retry"]["plan"]["attempt"], 1);
         assert_eq!(value["retry"]["plan"]["selected_delay_ms"], 30_000);
+    }
+
+    #[test]
+    fn skill_resolution_failed_carries_typed_key_and_reason_with_legacy_mirrors() {
+        let key = SkillKey::builtin(SkillName::parse("test-skill").unwrap());
+        let error = SkillError::NotFound { key: key.clone() };
+        let reason = SkillResolutionFailureReason::from_skill_error(&error);
+        let event = AgentEvent::SkillResolutionFailed {
+            skill_key: Some(key.clone()),
+            reason: reason.clone(),
+            reference: key.to_string(),
+            error: error.to_string(),
+        };
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            value["skill_key"]["source_uuid"],
+            key.source_uuid.to_string()
+        );
+        assert_eq!(value["skill_key"]["skill_name"], key.skill_name.as_str());
+        assert_eq!(value["reason"]["reason_type"], "not_found");
+        assert_eq!(
+            value["reason"]["key"]["source_uuid"],
+            key.source_uuid.to_string()
+        );
+        assert_eq!(
+            value["reason"]["key"]["skill_name"],
+            key.skill_name.as_str()
+        );
+        assert_eq!(value["reference"], key.to_string());
+        assert_eq!(value["error"], error.to_string());
+
+        let roundtrip: AgentEvent = serde_json::from_value(value).unwrap();
+        match roundtrip {
+            AgentEvent::SkillResolutionFailed {
+                skill_key,
+                reason,
+                reference,
+                error,
+            } => {
+                assert_eq!(skill_key, Some(key.clone()));
+                assert_eq!(
+                    reason,
+                    SkillResolutionFailureReason::NotFound { key: key.clone() }
+                );
+                assert_eq!(reference, key.to_string());
+                assert_eq!(error, error.to_string());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_skill_resolution_failed_payload_deserializes() {
+        let value = serde_json::json!({
+            "type": "skill_resolution_failed",
+            "reference": "legacy/ref",
+            "error": "missing",
+        });
+
+        let event: AgentEvent = serde_json::from_value(value).unwrap();
+        match event {
+            AgentEvent::SkillResolutionFailed {
+                skill_key,
+                reason,
+                reference,
+                error,
+            } => {
+                assert_eq!(skill_key, None);
+                assert_eq!(
+                    reason,
+                    SkillResolutionFailureReason::Unknown {
+                        message: String::new()
+                    }
+                );
+                assert_eq!(reference, "legacy/ref");
+                assert_eq!(error, "missing");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
@@ -1242,6 +1464,10 @@ mod tests {
                 injection_bytes: 0,
             },
             AgentEvent::SkillResolutionFailed {
+                skill_key: None,
+                reason: SkillResolutionFailureReason::Unknown {
+                    message: "missing".to_string(),
+                },
                 reference: "skill".to_string(),
                 error: "missing".to_string(),
             },

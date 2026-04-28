@@ -206,6 +206,7 @@ export type {
   HookPatchPublishedEvent,
   SkillsResolvedEvent,
   SkillResolutionFailedEvent,
+  SkillResolutionFailureReason,
   InteractionCompleteEvent,
   InteractionFailedEvent,
   StreamTruncatedEvent,

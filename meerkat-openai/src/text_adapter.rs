@@ -439,16 +439,7 @@ fn map_usage(u: &OaiUsage) -> Usage {
 fn map_oai_error(err: oai_rt_rs::Error) -> LlmError {
     use oai_rt_rs::Error;
     match err {
-        Error::Http(e) => {
-            let msg = e.to_string();
-            if msg.to_lowercase().contains("401") || msg.to_lowercase().contains("unauthorized") {
-                LlmError::AuthenticationFailed { message: msg }
-            } else if msg.to_lowercase().contains("timeout") {
-                LlmError::NetworkTimeout { duration_ms: 30000 }
-            } else {
-                LlmError::Unknown { message: msg }
-            }
-        }
+        Error::Http(e) => map_http_error(e),
         Error::Serialization(e) => LlmError::Unknown {
             message: format!("openai realtime json: {e}"),
         },
@@ -467,13 +458,39 @@ fn map_oai_error(err: oai_rt_rs::Error) -> LlmError {
     }
 }
 
+fn map_http_error(error: reqwest::Error) -> LlmError {
+    let message = error.to_string();
+    if let Some(status) = error.status() {
+        return map_http_status(status, message);
+    }
+    if error.is_timeout() {
+        return LlmError::NetworkTimeout { duration_ms: 30000 };
+    }
+    LlmError::Unknown { message }
+}
+
+fn map_http_status(status: reqwest::StatusCode, message: String) -> LlmError {
+    match status.as_u16() {
+        401 | 403 => LlmError::AuthenticationFailed { message },
+        408 | 504 => LlmError::NetworkTimeout { duration_ms: 30000 },
+        404 => LlmError::ModelNotFound { model: message },
+        429 => LlmError::RateLimited {
+            retry_after_ms: None,
+        },
+        503 => LlmError::ServerOverloaded,
+        s if s >= 500 => LlmError::ServerError { status: s, message },
+        s if s >= 400 => LlmError::InvalidRequest { message },
+        _ => LlmError::Unknown { message },
+    }
+}
+
 fn map_server_error(err: oai_rt_rs::error::ServerError) -> LlmError {
     use oai_rt_rs::error::ApiErrorType;
     let message = err.message.clone();
     let code = err.code.as_deref().unwrap_or_default();
     match err.error_type {
         ApiErrorType::InvalidRequestError => {
-            if code == "model_not_found" || message.contains("model_not_found") {
+            if code == "model_not_found" {
                 LlmError::ModelNotFound { model: message }
             } else {
                 LlmError::InvalidRequest { message }
@@ -653,6 +670,73 @@ mod tests {
                 other => panic!("expected clamped Count, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn http_status_unauthorized_maps_to_authentication_failed() {
+        let mapped = map_http_status(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "request failed".to_string(),
+        );
+
+        assert!(matches!(mapped, LlmError::AuthenticationFailed { .. }));
+    }
+
+    #[test]
+    fn http_status_rate_limit_maps_to_rate_limited() {
+        let mapped = map_http_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "request failed".to_string(),
+        );
+
+        assert!(matches!(
+            mapped,
+            LlmError::RateLimited {
+                retry_after_ms: None
+            }
+        ));
+    }
+
+    #[test]
+    fn http_status_request_timeout_maps_to_network_timeout() {
+        let mapped = map_http_status(
+            reqwest::StatusCode::REQUEST_TIMEOUT,
+            "request failed".to_string(),
+        );
+
+        assert!(matches!(mapped, LlmError::NetworkTimeout { .. }));
+    }
+
+    #[test]
+    fn server_error_model_not_found_uses_structured_code() {
+        let mapped = map_server_error(oai_rt_rs::error::ServerError {
+            error_type: oai_rt_rs::error::ApiErrorType::InvalidRequestError,
+            code: Some("model_not_found".to_string()),
+            message: "realtime model is unavailable".to_string(),
+            param: Some("model".to_string()),
+            event_id: None,
+        });
+
+        assert!(matches!(mapped, LlmError::ModelNotFound { .. }));
+    }
+
+    #[test]
+    fn server_error_free_form_message_substrings_do_not_classify() {
+        let message = "free-form provider text mentioning unauthorized timeout 401 model_not_found"
+            .to_string();
+        let mapped = map_server_error(oai_rt_rs::error::ServerError {
+            error_type: oai_rt_rs::error::ApiErrorType::InvalidRequestError,
+            code: None,
+            message: message.clone(),
+            param: None,
+            event_id: None,
+        });
+
+        assert!(matches!(
+            mapped,
+            LlmError::InvalidRequest { message: mapped_message }
+                if mapped_message == message
+        ));
     }
 
     #[test]

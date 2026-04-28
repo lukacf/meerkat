@@ -522,6 +522,17 @@
         },
         "type": "object"
       },
+      "ExternalToolDeltaPhase": {
+        "description": "Canonical lifecycle phase for external-tool boundary deltas.",
+        "enum": [
+          "pending",
+          "applied",
+          "draining",
+          "forced",
+          "failed"
+        ],
+        "type": "string"
+      },
       "HookId": {
         "description": "Stable identifier for a configured hook.",
         "type": "string"
@@ -1107,6 +1118,105 @@
         ],
         "type": "string"
       },
+      "ToolConfigChangeStatus": {
+        "description": "Structured status data for live tool configuration change notifications.",
+        "oneOf": [
+          {
+            "properties": {
+              "base_changed": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "boundary_applied",
+                "type": "string"
+              },
+              "revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "visible_changed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "base_changed",
+              "visible_changed",
+              "revision"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "added_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "deferred_catalog_delta",
+                "type": "string"
+              },
+              "pending_source_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "added_hidden_count",
+              "removed_hidden_count",
+              "pending_source_count"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "warning_failed_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "external_tool_delta",
+                "type": "string"
+              },
+              "phase": {
+                "$ref": "#/$defs/ExternalToolDeltaPhase"
+              }
+            },
+            "required": [
+              "kind",
+              "phase"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ToolConfigChangedPayload": {
         "description": "Payload for tool configuration change notifications.",
         "properties": {
@@ -1146,6 +1256,16 @@
           },
           "status": {
             "type": "string"
+          },
+          "status_info": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolConfigChangeStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "target": {
             "type": "string"
@@ -3428,6 +3548,17 @@
         },
         "type": "object"
       },
+      "ExternalToolDeltaPhase": {
+        "description": "Canonical lifecycle phase for external-tool boundary deltas.",
+        "enum": [
+          "pending",
+          "applied",
+          "draining",
+          "forced",
+          "failed"
+        ],
+        "type": "string"
+      },
       "HookId": {
         "description": "Stable identifier for a configured hook.",
         "type": "string"
@@ -4078,6 +4209,105 @@
         ],
         "type": "string"
       },
+      "ToolConfigChangeStatus": {
+        "description": "Structured status data for live tool configuration change notifications.",
+        "oneOf": [
+          {
+            "properties": {
+              "base_changed": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "boundary_applied",
+                "type": "string"
+              },
+              "revision": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "visible_changed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "base_changed",
+              "visible_changed",
+              "revision"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "added_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "deferred_catalog_delta",
+                "type": "string"
+              },
+              "pending_source_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "removed_hidden_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "added_hidden_count",
+              "removed_hidden_count",
+              "pending_source_count"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "warning_failed_closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "external_tool_delta",
+                "type": "string"
+              },
+              "phase": {
+                "$ref": "#/$defs/ExternalToolDeltaPhase"
+              }
+            },
+            "required": [
+              "kind",
+              "phase"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ToolConfigChangedPayload": {
         "description": "Payload for tool configuration change notifications.",
         "properties": {
@@ -4117,6 +4347,16 @@
           },
           "status": {
             "type": "string"
+          },
+          "status_info": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolConfigChangeStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "target": {
             "type": "string"

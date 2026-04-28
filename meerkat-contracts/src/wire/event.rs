@@ -240,6 +240,7 @@ mod tests {
                     operation: ToolConfigChangeOperation::Remove,
                     target: "filesystem".to_string(),
                     status: "staged".to_string(),
+                    status_info: None,
                     persisted: false,
                     applied_at_turn: Some(3),
                     domain: None,

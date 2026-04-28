@@ -463,9 +463,16 @@ interface ToolConfigChangedPayload {
   operation: "add" | "remove" | "reload";
   target: string;
   status: string;
+  statusInfo?: ToolConfigChangeStatus;
   persisted: boolean;
   appliedAtTurn?: number;
 }
+
+type ToolConfigChangeStatus =
+  | { kind: "boundary_applied"; baseChanged: boolean; visibleChanged: boolean; revision: number }
+  | { kind: "deferred_catalog_delta"; addedHiddenCount: number; removedHiddenCount: number; pendingSourceCount: number }
+  | { kind: "warning_failed_closed"; error: string }
+  | { kind: "external_tool_delta"; phase: "pending" | "applied" | "draining" | "forced" | "failed"; detail?: string };
 ```
 
 ### Stream management

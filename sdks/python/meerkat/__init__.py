@@ -148,11 +148,14 @@ from .errors import (
 
 # Typed event hierarchy — every event variant is a frozen dataclass
 from .events import (
+    BoundaryAppliedToolConfigChangeStatus,
     BudgetWarning,
     CompactionCompleted,
     CompactionFailed,
     CompactionStarted,
+    DeferredCatalogDeltaToolConfigChangeStatus,
     Event,
+    ExternalToolDeltaToolConfigChangeStatus,
     HookCompleted,
     HookDenied,
     HookFailed,
@@ -172,6 +175,7 @@ from .events import (
     StreamTruncated,
     TextComplete,
     TextDelta,
+    ToolConfigChangeStatus,
     ToolConfigChanged,
     ToolConfigChangedPayload,
     ToolCallRequested,
@@ -182,6 +186,7 @@ from .events import (
     TurnCompleted,
     TurnStarted,
     UnknownEvent,
+    WarningFailedClosedToolConfigChangeStatus,
     parse_event,
 )
 
@@ -335,6 +340,11 @@ __all__ = [
     "InteractionComplete",
     "InteractionFailed",
     "StreamTruncated",
+    "BoundaryAppliedToolConfigChangeStatus",
+    "DeferredCatalogDeltaToolConfigChangeStatus",
+    "WarningFailedClosedToolConfigChangeStatus",
+    "ExternalToolDeltaToolConfigChangeStatus",
+    "ToolConfigChangeStatus",
     "ToolConfigChanged",
     "ToolConfigChangedPayload",
     "UnknownEvent",

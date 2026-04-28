@@ -92,6 +92,8 @@ export interface DeferredCatalogDelta {
   removed_hidden_names?: string[];
 }
 
+export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
+
 export type HookId = string;
 
 export type HookPatch = {
@@ -217,6 +219,25 @@ export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
 
 export type ToolConfigChangeOperation = "add" | "remove" | "reload";
 
+export type ToolConfigChangeStatus = {
+  base_changed: boolean;
+  kind: "boundary_applied";
+  revision: number;
+  visible_changed: boolean;
+} | {
+  added_hidden_count: number;
+  kind: "deferred_catalog_delta";
+  pending_source_count: number;
+  removed_hidden_count: number;
+} | {
+  error: string;
+  kind: "warning_failed_closed";
+} | {
+  detail?: string | null;
+  kind: "external_tool_delta";
+  phase: ExternalToolDeltaPhase;
+};
+
 export type ToolConfigChangedPayload = {
   applied_at_turn?: number | null;
   deferred_catalog_delta?: DeferredCatalogDelta | null;
@@ -224,6 +245,7 @@ export type ToolConfigChangedPayload = {
   operation: ToolConfigChangeOperation;
   persisted: boolean;
   status: string;
+  status_info?: ToolConfigChangeStatus | null;
   target: string;
 };
 

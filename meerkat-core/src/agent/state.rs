@@ -4,7 +4,8 @@ use crate::budget::{BudgetDimension, BudgetExceeded};
 use crate::error::{AgentError, ToolError};
 use crate::event::{
     AgentEvent, BackgroundJobTerminalStatus, BudgetType, DeferredCatalogDelta,
-    ToolConfigChangeDomain, ToolConfigChangeOperation, ToolConfigChangedPayload,
+    ToolConfigChangeDomain, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    ToolConfigChangedPayload,
 };
 use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
@@ -1278,17 +1279,18 @@ where
                                     );
                                 }
                                 if applied.changed() {
-                                    let status = format!(
-                                        "boundary_applied(base_changed={},visible_changed={},revision={})",
+                                    let status_info = ToolConfigChangeStatus::boundary_applied(
                                         applied.base_changed(),
                                         applied.visible_changed(),
-                                        applied.applied_revision.0
+                                        applied.applied_revision.0,
                                     );
+                                    let status = status_info.status_text();
                                     emit_event!(AgentEvent::ToolConfigChanged {
                                         payload: ToolConfigChangedPayload {
                                             operation: ToolConfigChangeOperation::Reload,
                                             target: "tool_scope".to_string(),
                                             status: status.clone(),
+                                            status_info: Some(status_info),
                                             persisted: false,
                                             applied_at_turn: Some(turn_count),
                                             domain: Some(ToolConfigChangeDomain::ToolScope),
@@ -1350,17 +1352,19 @@ where
                                 {
                                     let pending_sources =
                                         pending_catalog_sources.iter().cloned().collect::<Vec<_>>();
-                                    let status = format!(
-                                        "deferred_catalog_delta(added_hidden={},removed_hidden={},pending_sources={})",
-                                        added_hidden_names.len(),
-                                        removed_hidden_names.len(),
-                                        pending_sources.len()
-                                    );
+                                    let status_info =
+                                        ToolConfigChangeStatus::deferred_catalog_delta(
+                                            added_hidden_names.len(),
+                                            removed_hidden_names.len(),
+                                            pending_sources.len(),
+                                        );
+                                    let status = status_info.status_text();
                                     emit_event!(AgentEvent::ToolConfigChanged {
                                         payload: ToolConfigChangedPayload {
                                             operation: ToolConfigChangeOperation::Reload,
                                             target: "deferred_catalog".to_string(),
                                             status: status.clone(),
+                                            status_info: Some(status_info),
                                             persisted: false,
                                             applied_at_turn: Some(turn_count),
                                             domain: Some(ToolConfigChangeDomain::DeferredCatalog,),
@@ -1405,7 +1409,9 @@ where
                                 applied.tools
                             }
                             Err(err) => {
-                                let status = format!("warning_failed_closed({err})");
+                                let status_info =
+                                    ToolConfigChangeStatus::warning_failed_closed(err.to_string());
+                                let status = status_info.status_text();
                                 tracing::warn!(
                                     error = %err,
                                     "tool scope boundary apply failed; closing visible tool set for this boundary"
@@ -1415,6 +1421,7 @@ where
                                         operation: ToolConfigChangeOperation::Reload,
                                         target: "tool_scope".to_string(),
                                         status: status.clone(),
+                                        status_info: Some(status_info),
                                         persisted: false,
                                         applied_at_turn: Some(turn_count),
                                         domain: Some(ToolConfigChangeDomain::ToolScope),
@@ -4720,6 +4727,7 @@ mod tests {
 
         let mut added_hidden_batches = Vec::new();
         let mut removed_hidden_batches = Vec::new();
+        let mut deferred_status_counts = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
                 && payload.domain == Some(crate::event::ToolConfigChangeDomain::DeferredCatalog)
@@ -4727,6 +4735,18 @@ mod tests {
             {
                 added_hidden_batches.push(delta.added_hidden_names);
                 removed_hidden_batches.push(delta.removed_hidden_names);
+                if let Some(crate::event::ToolConfigChangeStatus::DeferredCatalogDelta {
+                    added_hidden_count,
+                    removed_hidden_count,
+                    pending_source_count,
+                }) = payload.status_info
+                {
+                    deferred_status_counts.push((
+                        added_hidden_count,
+                        removed_hidden_count,
+                        pending_source_count,
+                    ));
+                }
             }
         }
 
@@ -4741,6 +4761,18 @@ mod tests {
                 .iter()
                 .any(|names| names.iter().any(|name| name == "deferred_tool")),
             "expected a deferred catalog delta that removes deferred_tool after it is loaded"
+        );
+        assert!(
+            deferred_status_counts
+                .iter()
+                .any(|(added, _, _)| *added > 0),
+            "expected structured deferred catalog status for newly hidden tools"
+        );
+        assert!(
+            deferred_status_counts
+                .iter()
+                .any(|(_, removed, _)| *removed > 0),
+            "expected structured deferred catalog status for removed hidden tools"
         );
     }
 
@@ -4842,7 +4874,13 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
                 && payload.status.contains("warning_failed_closed")
+                && let Some(crate::event::ToolConfigChangeStatus::WarningFailedClosed { error }) =
+                    payload.status_info
             {
+                assert!(
+                    error.contains("Injected"),
+                    "unexpected fail-closed error: {error}"
+                );
                 saw_warning_event = true;
             }
         }

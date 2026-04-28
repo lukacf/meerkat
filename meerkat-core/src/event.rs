@@ -652,6 +652,8 @@ pub struct ToolConfigChangedPayload {
     pub operation: ToolConfigChangeOperation,
     pub target: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_info: Option<ToolConfigChangeStatus>,
     pub persisted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_at_turn: Option<u32>,
@@ -693,6 +695,7 @@ pub enum ToolConfigChangeOperation {
 }
 
 /// Canonical lifecycle phase for external-tool boundary deltas.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalToolDeltaPhase {
@@ -712,6 +715,99 @@ impl ExternalToolDeltaPhase {
             Self::Draining => "draining",
             Self::Forced => "forced",
             Self::Failed => "failed",
+        }
+    }
+}
+
+/// Structured status data for live tool configuration change notifications.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolConfigChangeStatus {
+    BoundaryApplied {
+        base_changed: bool,
+        visible_changed: bool,
+        revision: u64,
+    },
+    DeferredCatalogDelta {
+        added_hidden_count: usize,
+        removed_hidden_count: usize,
+        pending_source_count: usize,
+    },
+    WarningFailedClosed {
+        error: String,
+    },
+    ExternalToolDelta {
+        phase: ExternalToolDeltaPhase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+impl ToolConfigChangeStatus {
+    #[must_use]
+    pub fn boundary_applied(base_changed: bool, visible_changed: bool, revision: u64) -> Self {
+        Self::BoundaryApplied {
+            base_changed,
+            visible_changed,
+            revision,
+        }
+    }
+
+    #[must_use]
+    pub fn deferred_catalog_delta(
+        added_hidden_count: usize,
+        removed_hidden_count: usize,
+        pending_source_count: usize,
+    ) -> Self {
+        Self::DeferredCatalogDelta {
+            added_hidden_count,
+            removed_hidden_count,
+            pending_source_count,
+        }
+    }
+
+    #[must_use]
+    pub fn warning_failed_closed(error: impl Into<String>) -> Self {
+        Self::WarningFailedClosed {
+            error: error.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn external_tool_delta(phase: ExternalToolDeltaPhase, detail: Option<String>) -> Self {
+        Self::ExternalToolDelta { phase, detail }
+    }
+
+    #[must_use]
+    pub fn status_text(&self) -> String {
+        match self {
+            Self::BoundaryApplied {
+                base_changed,
+                visible_changed,
+                revision,
+            } => format!(
+                "boundary_applied(base_changed={base_changed},visible_changed={visible_changed},revision={revision})"
+            ),
+            Self::DeferredCatalogDelta {
+                added_hidden_count,
+                removed_hidden_count,
+                pending_source_count,
+            } => format!(
+                "deferred_catalog_delta(added_hidden={added_hidden_count},removed_hidden={removed_hidden_count},pending_sources={pending_source_count})"
+            ),
+            Self::WarningFailedClosed { error } => {
+                format!("warning_failed_closed({error})")
+            }
+            Self::ExternalToolDelta { phase, detail } => {
+                let mut status = phase.as_status().to_string();
+                if *phase == ExternalToolDeltaPhase::Failed
+                    && let Some(detail) = detail
+                {
+                    status = format!("{status}: {detail}");
+                }
+                status
+            }
         }
     }
 }
@@ -766,21 +862,18 @@ impl ExternalToolDelta {
 
     #[must_use]
     pub fn status_text(&self) -> String {
-        let mut status = self.phase.as_status().to_string();
-        if self.phase == ExternalToolDeltaPhase::Failed
-            && let Some(detail) = &self.detail
-        {
-            status = format!("{status}: {detail}");
-        }
-        status
+        ToolConfigChangeStatus::external_tool_delta(self.phase, self.detail.clone()).status_text()
     }
 
     #[must_use]
     pub fn to_tool_config_changed_payload(&self) -> ToolConfigChangedPayload {
+        let status_info =
+            ToolConfigChangeStatus::external_tool_delta(self.phase, self.detail.clone());
         ToolConfigChangedPayload {
             operation: self.operation.clone(),
             target: self.target.clone(),
-            status: self.status_text(),
+            status: status_info.status_text(),
+            status_info: Some(status_info),
             persisted: self.persisted,
             applied_at_turn: self.applied_at_turn,
             domain: None,
@@ -1282,6 +1375,84 @@ mod tests {
     use crate::skills::SkillName;
 
     #[test]
+    fn tool_config_change_status_mirrors_legacy_status_text() {
+        assert_eq!(
+            ToolConfigChangeStatus::boundary_applied(true, false, 7).status_text(),
+            "boundary_applied(base_changed=true,visible_changed=false,revision=7)"
+        );
+        assert_eq!(
+            ToolConfigChangeStatus::deferred_catalog_delta(2, 1, 3).status_text(),
+            "deferred_catalog_delta(added_hidden=2,removed_hidden=1,pending_sources=3)"
+        );
+        assert_eq!(
+            ToolConfigChangeStatus::warning_failed_closed("injected failure").status_text(),
+            "warning_failed_closed(injected failure)"
+        );
+        assert_eq!(
+            ToolConfigChangeStatus::external_tool_delta(
+                ExternalToolDeltaPhase::Failed,
+                Some("exit 1".to_string()),
+            )
+            .status_text(),
+            "failed: exit 1"
+        );
+    }
+
+    #[test]
+    fn tool_config_changed_payload_carries_structured_status_with_legacy_mirror() {
+        let status_info = ToolConfigChangeStatus::boundary_applied(true, true, 42);
+        let event = AgentEvent::ToolConfigChanged {
+            payload: ToolConfigChangedPayload {
+                operation: ToolConfigChangeOperation::Reload,
+                target: "tool_scope".to_string(),
+                status: status_info.status_text(),
+                status_info: Some(status_info),
+                persisted: false,
+                applied_at_turn: Some(3),
+                domain: Some(ToolConfigChangeDomain::ToolScope),
+                deferred_catalog_delta: None,
+            },
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(
+            json["payload"]["status"],
+            "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
+        );
+        assert_eq!(json["payload"]["status_info"]["kind"], "boundary_applied");
+        assert_eq!(json["payload"]["status_info"]["base_changed"], true);
+        assert_eq!(json["payload"]["status_info"]["visible_changed"], true);
+        assert_eq!(json["payload"]["status_info"]["revision"], 42);
+    }
+
+    #[test]
+    fn tool_config_changed_payload_deserializes_legacy_status_without_typed_data() {
+        let event: AgentEvent = serde_json::from_value(serde_json::json!({
+            "type": "tool_config_changed",
+            "payload": {
+                "operation": "reload",
+                "target": "tool_scope",
+                "status": "boundary_applied(base_changed=true,visible_changed=true,revision=42)",
+                "persisted": false,
+                "applied_at_turn": 3,
+                "domain": "tool_scope"
+            }
+        }))
+        .unwrap();
+
+        match event {
+            AgentEvent::ToolConfigChanged { payload } => {
+                assert_eq!(
+                    payload.status,
+                    "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
+                );
+                assert_eq!(payload.status_info, None);
+            }
+            other => panic!("expected tool_config_changed, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_agent_event_json_schema() {
         // Test all event variants serialize correctly
         let events = vec![
@@ -1374,6 +1545,7 @@ mod tests {
                     operation: ToolConfigChangeOperation::Remove,
                     target: "filesystem".to_string(),
                     status: "staged".to_string(),
+                    status_info: None,
                     persisted: false,
                     applied_at_turn: Some(12),
                     domain: None,
@@ -1866,6 +2038,10 @@ mod tests {
                     operation: ToolConfigChangeOperation::Reload,
                     target: "external".to_string(),
                     status: "applied".to_string(),
+                    status_info: Some(ToolConfigChangeStatus::external_tool_delta(
+                        ExternalToolDeltaPhase::Applied,
+                        None,
+                    )),
                     persisted: true,
                     applied_at_turn: Some(1),
                     domain: None,

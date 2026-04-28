@@ -18,7 +18,7 @@ use meerkat_contracts::{
 use meerkat_core::{
     AgentErrorClass, AgentEvent, BudgetType, ContentInput, HookPatch, HookPoint, HookReasonCode,
     RunResult, SessionId, SkillResolutionFailureReason, StopReason, ToolConfigChangeOperation,
-    ToolConfigChangedPayload, Usage,
+    ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
 };
 
 // ---------------------------------------------------------------------------
@@ -483,6 +483,10 @@ fn agent_event_all_variants_roundtrip() {
                 operation: ToolConfigChangeOperation::Add,
                 target: "filesystem".to_string(),
                 status: "applied".to_string(),
+                status_info: Some(ToolConfigChangeStatus::external_tool_delta(
+                    meerkat_core::ExternalToolDeltaPhase::Applied,
+                    None,
+                )),
                 persisted: true,
                 applied_at_turn: Some(5),
                 domain: None,
@@ -743,6 +747,10 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 operation: ToolConfigChangeOperation::Reload,
                 target: "external".to_string(),
                 status: "applied".to_string(),
+                status_info: Some(ToolConfigChangeStatus::external_tool_delta(
+                    meerkat_core::ExternalToolDeltaPhase::Applied,
+                    None,
+                )),
                 persisted: true,
                 applied_at_turn: Some(1),
                 domain: None,

@@ -367,6 +367,9 @@ impl GeneratedMachineKernel {
             }
 
             let guards_hold = transition.guards.iter().try_fold(true, |acc, guard| {
+                if !acc {
+                    return Ok::<bool, TransitionRefusal>(false);
+                }
                 let value = self.eval_expr(state, &bindings, &guard.expr, &transition.name)?;
                 let as_bool =
                     value

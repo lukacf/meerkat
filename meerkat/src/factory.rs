@@ -2928,14 +2928,26 @@ impl AgentFactory {
                         .await
                         .map(|descs| descs.into_iter().map(|desc| desc.key).collect())
                         .unwrap_or_default();
+                    let requested_ids = std::mem::take(ids);
                     let mut dropped = Vec::new();
-                    ids.retain(|id| {
-                        let keep = available.contains(id);
-                        if !keep {
-                            dropped.push(format!("{}:{}", id.source_uuid, id.skill_name));
+                    for requested in requested_ids {
+                        let requested_label =
+                            format!("{}:{}", requested.source_uuid, requested.skill_name);
+                        match engine.canonical_skill_key(&requested).await {
+                            Ok(canonical) if available.contains(&canonical) => {
+                                ids.push(canonical);
+                            }
+                            Ok(canonical) => {
+                                dropped.push(format!(
+                                    "{} (resolved to {}:{})",
+                                    requested_label, canonical.source_uuid, canonical.skill_name
+                                ));
+                            }
+                            Err(err) => {
+                                dropped.push(format!("{requested_label} ({err})"));
+                            }
                         }
-                        keep
-                    });
+                    }
                     if !dropped.is_empty() {
                         tracing::warn!(
                             dropped_skills = ?dropped,
@@ -2949,11 +2961,17 @@ impl AgentFactory {
 
                 // Pre-load requested skills into system prompt (Level 2)
                 let mut preloaded_sections = Vec::new();
+                let mut skill_ids = None;
                 if let Some(ref ids) = preload {
                     match engine.resolve_and_render(ids).await {
                         Ok(resolved) => {
+                            let mut resolved_ids = Vec::with_capacity(resolved.len());
                             for skill in &resolved {
+                                resolved_ids.push(skill.key.clone());
                                 preloaded_sections.push(skill.rendered_body.clone());
+                            }
+                            if !resolved_ids.is_empty() {
+                                skill_ids = Some(resolved_ids);
                             }
                         }
                         Err(e) => {
@@ -2964,8 +2982,7 @@ impl AgentFactory {
                     }
                 }
 
-                // Persist the skills explicitly activated for this session.
-                let skill_ids = preload.clone();
+                // Persist the canonical skills actually activated for this session.
 
                 (inventory, preloaded_sections, skill_ids)
             } else {
@@ -3305,7 +3322,7 @@ impl AgentFactory {
             // (metadata.tooling.comms is left unchanged)
             metadata.tooling.mob = build_config.override_mob;
             metadata.tooling.memory = build_config.override_memory;
-            if build_config.resume_override_mask.preload_skills {
+            if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
                 metadata.tooling.active_skills = active_skill_ids;
             }
             metadata.keep_alive = build_config.keep_alive;
@@ -3360,11 +3377,111 @@ impl AgentFactory {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    #[cfg(feature = "skills")]
+    use meerkat_core::skills::{
+        SkillDocument, SkillKey, SkillKeyRemap, SkillName, SkillRuntime, SourceIdentityLineage,
+        SourceIdentityLineageEvent, SourceIdentityRecord, SourceIdentityRegistry,
+        SourceIdentityStatus, SourceTransportKind, SourceUuid,
+    };
     use meerkat_core::{
         BackendProfileConfig, BindingId, CredentialSourceSpec, ProviderBindingConfig,
         RealmConfigSection, SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig,
         SelfHostedTransport,
     };
+
+    #[cfg(feature = "skills")]
+    fn test_skill_key(source_uuid: &str, skill_name: &str) -> SkillKey {
+        SkillKey::new(
+            SourceUuid::parse(source_uuid).expect("valid source uuid"),
+            SkillName::parse(skill_name).expect("valid skill name"),
+        )
+    }
+
+    #[cfg(feature = "skills")]
+    fn remapped_skill_keys() -> (SkillKey, SkillKey) {
+        (
+            test_skill_key("00000000-0000-4b11-8111-0000000000a1", "legacy-skill"),
+            test_skill_key("00000000-0000-4b11-8111-0000000000b2", "modern-skill"),
+        )
+    }
+
+    #[cfg(feature = "skills")]
+    fn identity_record(key: &SkillKey, display_name: &str) -> SourceIdentityRecord {
+        SourceIdentityRecord {
+            source_uuid: key.source_uuid.clone(),
+            display_name: display_name.to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: display_name.to_string(),
+            status: SourceIdentityStatus::Active,
+        }
+    }
+
+    #[cfg(feature = "skills")]
+    fn remapping_skill_runtime(requested: SkillKey, canonical: SkillKey) -> Arc<SkillRuntime> {
+        let source = meerkat_skills::InMemorySkillSource::new(vec![SkillDocument {
+            descriptor: meerkat_core::skills::SkillDescriptor::new(
+                canonical.clone(),
+                "modern-skill",
+                "Modern remapped skill",
+            ),
+            body: format!("modern body for {canonical}"),
+            extensions: Default::default(),
+        }]);
+        let registry = SourceIdentityRegistry::build(
+            vec![
+                identity_record(&requested, "legacy-source"),
+                identity_record(&canonical, "modern-source"),
+            ],
+            vec![SourceIdentityLineage {
+                event_id: "test-remap".to_string(),
+                recorded_at_unix_secs: 0,
+                required_from_skills: Vec::new(),
+                event: SourceIdentityLineageEvent::RenameOrRelocate {
+                    from: requested.source_uuid.clone(),
+                    to: canonical.source_uuid.clone(),
+                },
+            }],
+            vec![SkillKeyRemap {
+                from: requested,
+                to: canonical,
+                reason: Some("test remap".to_string()),
+            }],
+            Vec::new(),
+        )
+        .expect("source identity registry");
+        let engine = meerkat_skills::DefaultSkillEngine::new(source, Vec::new())
+            .with_source_identity_registry(Arc::new(registry));
+
+        Arc::new(SkillRuntime::new(Arc::new(engine)))
+    }
+
+    #[cfg(feature = "skills")]
+    fn metadata_with_active_skills(active_skills: Option<Vec<SkillKey>>) -> SessionMetadata {
+        let tooling = SessionTooling {
+            builtins: ToolCategoryOverride::Disable,
+            active_skills,
+            ..Default::default()
+        };
+
+        SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "claude-sonnet-4-5".to_string(),
+            max_tokens: 8192,
+            structured_output_retries: 2,
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling,
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            connection_ref: None,
+        }
+    }
 
     #[test]
     fn missing_connection_ref_synthesizes_env_default_binding_for_resolved_provider() {
@@ -3617,6 +3734,70 @@ mod tests {
         assert_eq!(resolved[0].key, skill_key);
         assert_eq!(resolved[0].name, "mob-communication");
         assert!(resolved[0].rendered_body.contains("Mob Communication"));
+    }
+
+    #[cfg(feature = "skills")]
+    #[tokio::test]
+    async fn preloaded_remapped_skill_persists_resolved_canonical_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let (requested, canonical) = remapped_skill_keys();
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.preload_skills = Some(vec![requested.clone()]);
+        build.skill_engine_override = Some(remapping_skill_runtime(
+            requested.clone(),
+            canonical.clone(),
+        ));
+
+        let agent = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("session metadata should be persisted");
+        assert_eq!(
+            metadata.tooling.active_skills,
+            Some(vec![canonical.clone()])
+        );
+        let Some(meerkat_core::Message::System(message)) = agent.session().messages().first()
+        else {
+            unreachable!("expected system prompt");
+        };
+        assert!(message.content.contains(&canonical.to_string()));
+        assert!(!message.content.contains(&requested.to_string()));
+    }
+
+    #[cfg(feature = "skills")]
+    #[tokio::test]
+    async fn resumed_remapped_active_skill_is_canonicalized_before_persisting() {
+        let temp = tempfile::tempdir().unwrap();
+        let (requested, canonical) = remapped_skill_keys();
+        let mut resumed = Session::new();
+        resumed
+            .set_session_metadata(metadata_with_active_skills(Some(vec![requested.clone()])))
+            .expect("resume metadata");
+
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.resume_session = Some(resumed);
+        build.skill_engine_override = Some(remapping_skill_runtime(requested, canonical.clone()));
+
+        let agent = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("session metadata should be persisted");
+        assert_eq!(metadata.tooling.active_skills, Some(vec![canonical]));
     }
 
     #[cfg(all(feature = "skills", feature = "comms"))]

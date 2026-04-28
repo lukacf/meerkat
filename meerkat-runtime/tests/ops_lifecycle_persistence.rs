@@ -1,7 +1,8 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Phase 2 contract tests for ops lifecycle persistence and recovery.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use meerkat_core::completion_feed::CompletionFeed;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
@@ -14,7 +15,9 @@ use meerkat_core::ops_lifecycle::{
 use meerkat_core::runtime_epoch::{EpochCursorState, RuntimeEpochId};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeStore; // needed for trait method calls
-use meerkat_runtime::{PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry};
+use meerkat_runtime::{
+    OpsLifecyclePersistenceRequest, PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry,
+};
 
 fn bg_spec(name: &str) -> OperationSpec {
     OperationSpec {
@@ -308,7 +311,18 @@ fn terminal_persistence_queue_captures_burst_without_loss_for_recovery() {
     let cursor_state = Arc::new(EpochCursorState::new());
     let epoch_id = RuntimeEpochId::new();
     let (persist_tx, mut persist_rx) =
-        tokio::sync::mpsc::unbounded_channel::<PersistedOpsSnapshot>();
+        tokio::sync::mpsc::unbounded_channel::<OpsLifecyclePersistenceRequest>();
+    let snapshots = Arc::new(Mutex::new(Vec::new()));
+    let worker_snapshots = Arc::clone(&snapshots);
+    let worker = std::thread::spawn(move || {
+        while let Some(request) = persist_rx.blocking_recv() {
+            worker_snapshots
+                .lock()
+                .unwrap()
+                .push(request.snapshot().clone());
+            request.complete(Ok(()));
+        }
+    });
     registry.set_persistence_channel(persist_tx, epoch_id.clone(), Arc::clone(&cursor_state));
 
     for i in 0..TERMINAL_COUNT {
@@ -318,11 +332,10 @@ fn terminal_persistence_queue_captures_burst_without_loss_for_recovery() {
         registry.provisioning_succeeded(&id).unwrap();
         registry.complete_operation(&id, op_result(&id)).unwrap();
     }
+    drop(registry);
+    worker.join().unwrap();
 
-    let mut snapshots = Vec::new();
-    while let Ok(snapshot) = persist_rx.try_recv() {
-        snapshots.push(snapshot);
-    }
+    let snapshots = snapshots.lock().unwrap();
 
     assert_eq!(
         snapshots.len(),
@@ -356,7 +369,8 @@ fn terminal_persistence_queue_captures_burst_without_loss_for_recovery() {
 fn terminal_persistence_channel_closed_fails_terminal_transition() {
     let registry = RuntimeOpsLifecycleRegistry::new();
     let cursor_state = Arc::new(EpochCursorState::new());
-    let (persist_tx, persist_rx) = tokio::sync::mpsc::unbounded_channel::<PersistedOpsSnapshot>();
+    let (persist_tx, persist_rx) =
+        tokio::sync::mpsc::unbounded_channel::<OpsLifecyclePersistenceRequest>();
     drop(persist_rx);
     registry.set_persistence_channel(persist_tx, RuntimeEpochId::new(), cursor_state);
 
@@ -371,6 +385,201 @@ fn terminal_persistence_channel_closed_fails_terminal_transition() {
     assert!(
         err.to_string().contains("persistence channel closed"),
         "unexpected error: {err}"
+    );
+}
+
+struct FailingOpsLifecycleStore {
+    inner: meerkat_runtime::InMemoryRuntimeStore,
+    persist_calls: AtomicUsize,
+}
+
+impl FailingOpsLifecycleStore {
+    fn new() -> Self {
+        Self {
+            inner: meerkat_runtime::InMemoryRuntimeStore::new(),
+            persist_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn persist_calls(&self) -> usize {
+        self.persist_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeStore for FailingOpsLifecycleStore {
+    async fn commit_session_boundary(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: meerkat_runtime::SessionDelta,
+        run_id: RunId,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+        input_updates: Vec<meerkat_runtime::input_state::StoredInputState>,
+    ) -> Result<meerkat_core::lifecycle::RunBoundaryReceipt, meerkat_runtime::RuntimeStoreError>
+    {
+        self.inner
+            .commit_session_boundary(
+                runtime_id,
+                session_delta,
+                run_id,
+                boundary,
+                contributing_input_ids,
+                input_updates,
+            )
+            .await
+    }
+
+    async fn atomic_apply(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: Option<meerkat_runtime::SessionDelta>,
+        receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+        input_updates: Vec<meerkat_runtime::input_state::StoredInputState>,
+        session_store_key: Option<SessionId>,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .atomic_apply(
+                runtime_id,
+                session_delta,
+                receipt,
+                input_updates,
+                session_store_key,
+            )
+            .await
+    }
+
+    async fn load_input_states(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<
+        Vec<meerkat_runtime::input_state::StoredInputState>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner.load_input_states(runtime_id).await
+    }
+
+    async fn load_boundary_receipt(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        run_id: &RunId,
+        sequence: u64,
+    ) -> Result<
+        Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner
+            .load_boundary_receipt(runtime_id, run_id, sequence)
+            .await
+    }
+
+    async fn load_session_snapshot(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+        self.inner.load_session_snapshot(runtime_id).await
+    }
+
+    async fn persist_input_state(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        state: &meerkat_runtime::input_state::StoredInputState,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner.persist_input_state(runtime_id, state).await
+    }
+
+    async fn load_input_state(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> Result<
+        Option<meerkat_runtime::input_state::StoredInputState>,
+        meerkat_runtime::RuntimeStoreError,
+    > {
+        self.inner.load_input_state(runtime_id, input_id).await
+    }
+
+    async fn persist_runtime_state(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        state: meerkat_runtime::RuntimeState,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner.persist_runtime_state(runtime_id, state).await
+    }
+
+    async fn load_runtime_state(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeState>, meerkat_runtime::RuntimeStoreError> {
+        self.inner.load_runtime_state(runtime_id).await
+    }
+
+    async fn atomic_lifecycle_commit(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        runtime_state: meerkat_runtime::RuntimeState,
+        input_states: &[meerkat_runtime::input_state::StoredInputState],
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+            .await
+    }
+
+    async fn persist_ops_lifecycle(
+        &self,
+        _runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        _snapshot: &PersistedOpsSnapshot,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+            "synthetic ops lifecycle persist failure".to_string(),
+        ))
+    }
+
+    async fn load_ops_lifecycle(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+    ) -> Result<Option<PersistedOpsSnapshot>, meerkat_runtime::RuntimeStoreError> {
+        self.inner.load_ops_lifecycle(runtime_id).await
+    }
+}
+
+#[tokio::test]
+async fn terminal_transition_surfaces_store_write_failure_after_persistence_request_is_accepted() {
+    let store = Arc::new(FailingOpsLifecycleStore::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+    ));
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
+        .await;
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("persistent session should prepare bindings");
+
+    let spec = bg_spec("durable-store-rejection");
+    let op_id = spec.id.clone();
+    bindings.ops_lifecycle.register_operation(spec).unwrap();
+    bindings
+        .ops_lifecycle
+        .provisioning_succeeded(&op_id)
+        .unwrap();
+
+    let err = bindings
+        .ops_lifecycle
+        .complete_operation(&op_id, op_result(&op_id))
+        .expect_err("terminal transition must fail when the durable store rejects the snapshot");
+    assert!(
+        err.to_string()
+            .contains("synthetic ops lifecycle persist failure"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(
+        store.persist_calls(),
+        1,
+        "terminal transition should wait for the accepted persistence request"
     );
 }
 

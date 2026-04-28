@@ -1,5 +1,85 @@
 use super::*;
 
+type OpsLifecyclePersistenceReceiver = crate::tokio::sync::mpsc::UnboundedReceiver<
+    crate::ops_lifecycle::OpsLifecyclePersistenceRequest,
+>;
+
+async fn persist_ops_lifecycle_request(
+    store: &Arc<dyn RuntimeStore>,
+    runtime_id: &LogicalRuntimeId,
+    request: crate::ops_lifecycle::OpsLifecyclePersistenceRequest,
+) {
+    let result = store
+        .persist_ops_lifecycle(runtime_id, request.snapshot())
+        .await
+        .map_err(|error| {
+            meerkat_core::ops_lifecycle::OpsLifecycleError::Internal(format!(
+                "failed to persist ops lifecycle snapshot: {error}"
+            ))
+        });
+    if let Err(error) = &result {
+        tracing::warn!(
+            %runtime_id,
+            error = %error,
+            "failed to persist ops lifecycle snapshot"
+        );
+    }
+    request.complete(result);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_ops_lifecycle_persistence_worker(
+    store: Arc<dyn RuntimeStore>,
+    runtime_id: LogicalRuntimeId,
+    mut persist_rx: OpsLifecyclePersistenceReceiver,
+) {
+    let thread_name = format!("ops-lifecycle-persist-{runtime_id}");
+    let worker_runtime_id = runtime_id.clone();
+    let spawn_result = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let runtime = match crate::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::error!(
+                        %worker_runtime_id,
+                        error = %error,
+                        "failed to start ops lifecycle persistence worker runtime"
+                    );
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                while let Some(request) = persist_rx.recv().await {
+                    persist_ops_lifecycle_request(&store, &worker_runtime_id, request).await;
+                }
+            });
+        });
+    if let Err(error) = spawn_result {
+        tracing::error!(
+            %runtime_id,
+            error = %error,
+            "failed to spawn ops lifecycle persistence worker"
+        );
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_ops_lifecycle_persistence_worker(
+    store: Arc<dyn RuntimeStore>,
+    runtime_id: LogicalRuntimeId,
+    mut persist_rx: OpsLifecyclePersistenceReceiver,
+) {
+    crate::tokio::spawn(async move {
+        while let Some(request) = persist_rx.recv().await {
+            persist_ops_lifecycle_request(&store, &runtime_id, request).await;
+        }
+    });
+}
+
 impl MeerkatMachine {
     fn replay_recovered_runtime_phase_through_dsl_authority(
         session_id: &SessionId,
@@ -342,8 +422,8 @@ impl MeerkatMachine {
 
         // Wire persistence channel if a durable store is available.
         if let Some(ref store) = self.store {
-            let (persist_tx, mut persist_rx) = crate::tokio::sync::mpsc::unbounded_channel::<
-                crate::ops_lifecycle::PersistedOpsSnapshot,
+            let (persist_tx, persist_rx) = crate::tokio::sync::mpsc::unbounded_channel::<
+                crate::ops_lifecycle::OpsLifecyclePersistenceRequest,
             >();
             let entry_epoch_id = {
                 let sessions = self.sessions.read().await;
@@ -359,24 +439,9 @@ impl MeerkatMachine {
                     .map(|e| Arc::clone(&e.cursor_state))
                     .unwrap_or_else(|| Arc::new(meerkat_core::EpochCursorState::new()))
             };
-            ops_lifecycle.set_persistence_channel(persist_tx, entry_epoch_id, entry_cursor);
-
-            // Spawn persistence task
-            let store_clone = Arc::clone(store);
             let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
-            crate::tokio::spawn(async move {
-                while let Some(snapshot) = persist_rx.recv().await {
-                    if let Err(e) = store_clone
-                        .persist_ops_lifecycle(&runtime_id, &snapshot)
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            "failed to persist ops lifecycle snapshot"
-                        );
-                    }
-                }
-            });
+            spawn_ops_lifecycle_persistence_worker(Arc::clone(store), runtime_id, persist_rx);
+            ops_lifecycle.set_persistence_channel(persist_tx, entry_epoch_id, entry_cursor);
         }
 
         // Get the completion feed from the registry for feed-based idle wake.

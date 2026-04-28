@@ -128,7 +128,10 @@ pub use meerkat_machine_types::{
     MeerkatOpsSnapshot, canonical_meerkat_machine_command_classifications,
     canonical_meerkat_machine_command_manifest,
 };
-pub use ops_lifecycle::{OpsLifecycleConfig, PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry};
+pub use ops_lifecycle::{
+    OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,
+    RuntimeOpsLifecycleRegistry,
+};
 
 #[doc(hidden)]
 pub mod machine_schema_exports {

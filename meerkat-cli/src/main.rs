@@ -33,9 +33,8 @@ use meerkat_core::CommsRuntimeMode;
 #[cfg(feature = "mob")]
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, DeferredPromptPolicy, ResumeOverrideMask, SessionBuildOptions,
-    SessionError, SessionQuery, SessionService, SessionServiceCommsExt, StartTurnRequest,
-    TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, SessionBuildOptions, SessionError, SessionQuery,
+    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, BlobId, ConnectionRef, EventEnvelope, RealmConfig, RealmLocator, RealmSelection,
@@ -433,6 +432,7 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
     }
 }
 
+#[cfg(test)]
 fn apply_yolo_tooling_override(tooling: &mut meerkat_core::SessionTooling) {
     let yolo = resolve_tool_preset(ToolPreset::Safe, true);
     tooling.builtins = meerkat_core::ToolCategoryOverride::from_effective(yolo.builtins);
@@ -1167,14 +1167,8 @@ enum Commands {
         app_context: Option<String>,
 
         /// Tool preset
-        #[arg(
-            long,
-            short = 't',
-            value_enum,
-            default_value = "safe",
-            help_heading = "Common options"
-        )]
-        tools: ToolPreset,
+        #[arg(long, short = 't', value_enum, help_heading = "Common options")]
+        tools: Option<ToolPreset>,
 
         /// Alias for --tools full
         #[arg(long, hide_short_help = true, help_heading = "Advanced options")]
@@ -2177,7 +2171,7 @@ async fn handle_run_command(
     labels: Vec<(String, String)>,
     instructions: Vec<String>,
     app_context: Option<String>,
-    tools: ToolPreset,
+    tools: Option<ToolPreset>,
     yolo: bool,
     wait_for_mcp: bool,
     verbose: bool,
@@ -2187,40 +2181,40 @@ async fn handle_run_command(
     connection_ref: Option<ConnectionRef>,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
+    let output = if json { "json".to_string() } else { output };
+    let json_output = output.eq_ignore_ascii_case("json");
+
     if let Some(session_id) = resume {
-        if model.is_some()
-            || provider.is_some()
-            || max_tokens.is_some()
-            || output_schema.is_some()
-            || !labels.is_empty()
-            || app_context.is_some()
-            || keep_alive
-            || !matches!(tools, ToolPreset::Safe)
-        {
-            return Err(anyhow::anyhow!(
-                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --label, --app-context, --keep-alive, and --tools are not supported there yet"
-            ));
-        }
         return resume_session(
             &session_id,
             prompt,
             system_prompt,
+            model,
+            provider,
+            max_tokens,
+            output_schema,
             skills,
             allow_tools,
             block_tools,
+            labels,
             instructions,
+            app_context,
             max_duration,
             max_tool_calls,
+            output,
             params,
             provider_params_json,
             stream,
             no_stream,
             stdin,
             line_format,
+            connection_ref,
             scope,
             verbose,
             wait_for_mcp,
+            tools,
             yolo,
+            keep_alive,
         )
         .await;
     }
@@ -2236,7 +2230,6 @@ async fn handle_run_command(
     let provider_params = parse_provider_params(&params);
     let provider_params_json = parse_provider_params_json(provider_params_json);
     let hooks_override = HookRunOverrides::default();
-    let json_output = json || output.eq_ignore_ascii_case("json");
     let stream = resolve_stream_enabled(stream, no_stream, !json_output)?;
     let stream_policy = if stream {
         Some(stream_renderer::StreamRenderPolicy::PrimaryOnly)
@@ -2248,8 +2241,7 @@ async fn handle_run_command(
         .as_ref()
         .map(|s| parse_output_schema(s))
         .transpose()?;
-    let tooling = resolve_tool_preset(tools, yolo);
-    let output = if json { "json".to_string() } else { output };
+    let tooling = resolve_tool_preset(tools.unwrap_or(ToolPreset::Safe), yolo);
     if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
         prompt = prepend_stdin_blob_context(prompt);
     }
@@ -5732,46 +5724,69 @@ async fn resume_session(
     session_id: &str,
     mut prompt: String,
     system_prompt: Option<String>,
+    model: Option<String>,
+    provider: Option<Provider>,
+    max_tokens: Option<u32>,
+    output_schema: Option<String>,
     skills: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    labels: Vec<(String, String)>,
     instructions: Vec<String>,
+    app_context: Option<String>,
     max_duration: Option<String>,
     max_tool_calls: Option<usize>,
+    output: String,
     params: Vec<String>,
     provider_params_json: Option<String>,
     stream: bool,
     no_stream: bool,
     stdin: StdinMode,
-    _line_format: LineFormat,
+    line_format: LineFormat,
+    connection_ref: Option<ConnectionRef>,
     scope: &RuntimeScope,
     verbose: bool,
     wait_for_mcp: bool,
+    tools: Option<ToolPreset>,
     yolo: bool,
+    keep_alive: bool,
 ) -> anyhow::Result<()> {
-    if matches!(resolve_stdin_mode(stdin), StdinMode::Blob | StdinMode::Auto) {
+    let stdin = resolve_stdin_mode(stdin);
+    if matches!(stdin, StdinMode::Blob | StdinMode::Auto) {
         prompt = prepend_stdin_blob_context(prompt);
     }
     resume_session_with_llm_override(
         session_id,
         &prompt,
         system_prompt,
+        model,
+        provider,
+        max_tokens,
+        output_schema,
         HookRunOverrides::default(),
         skills,
         allow_tools,
         block_tools,
+        labels,
         instructions,
+        app_context,
         max_duration,
         max_tool_calls,
+        output,
         params,
         provider_params_json,
         stream,
         no_stream,
+        stdin,
+        line_format,
+        connection_ref,
         scope,
         None,
         verbose,
         wait_for_mcp,
+        tools,
         yolo,
+        keep_alive,
     )
     .await
 }
@@ -5781,22 +5796,34 @@ async fn resume_session_with_llm_override(
     session_id: &str,
     prompt: &str,
     system_prompt: Option<String>,
+    model: Option<String>,
+    provider: Option<Provider>,
+    max_tokens: Option<u32>,
+    output_schema: Option<String>,
     hooks_override: HookRunOverrides,
     skills: Vec<String>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
+    labels: Vec<(String, String)>,
     instructions: Vec<String>,
+    app_context: Option<String>,
     max_duration: Option<String>,
     max_tool_calls: Option<usize>,
+    output: String,
     params: Vec<String>,
     provider_params_json: Option<String>,
     stream: bool,
     no_stream: bool,
+    stdin: StdinMode,
+    line_format: LineFormat,
+    connection_ref: Option<ConnectionRef>,
     scope: &RuntimeScope,
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
     wait_for_mcp: bool,
+    tools: Option<ToolPreset>,
     yolo: bool,
+    keep_alive: bool,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
@@ -5804,22 +5831,34 @@ async fn resume_session_with_llm_override(
             session_id,
             prompt,
             system_prompt,
+            model,
+            provider,
+            max_tokens,
+            output_schema,
             hooks_override,
             skills,
             allow_tools,
             block_tools,
+            labels,
             instructions,
+            app_context,
             max_duration,
             max_tool_calls,
+            output,
             params,
             provider_params_json,
             stream,
             no_stream,
+            stdin,
+            line_format,
+            connection_ref,
             scope,
             llm_override,
             verbose,
             wait_for_mcp,
+            tools,
             yolo,
+            keep_alive,
         );
         anyhow::bail!("resume requires rkat built with session-store support");
     }
@@ -5842,23 +5881,21 @@ async fn resume_session_with_llm_override(
         let has_max_duration = max_duration.is_some();
         let has_max_tool_calls = max_tool_calls.is_some();
         let duration = max_duration.map(|s| parse_duration(&s)).transpose()?;
-        let stream = resolve_stream_enabled(stream, no_stream, true)?;
+        let json_output = output.eq_ignore_ascii_case("json");
+        let stream = resolve_stream_enabled(stream, no_stream, !json_output)?;
         let parsed_params = parse_provider_params(&params)?;
         let parsed_params_json = parse_provider_params_json(provider_params_json)?;
         let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
-        let provider_params_override = merged_provider_params.is_some();
-        let mut limits = config.budget_limits();
-        if let Some(dur) = duration {
-            limits.max_duration = Some(dur);
-        }
-        if let Some(calls) = max_tool_calls {
-            limits.max_tool_calls = Some(calls);
-        }
-        let budget_override = if has_max_duration || has_max_tool_calls {
-            Some(limits)
-        } else {
-            None
-        };
+        let parsed_output_schema = output_schema
+            .as_ref()
+            .map(|s| parse_output_schema(s))
+            .transpose()?;
+        let parsed_app_context = app_context
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?;
+        let stdin_events = matches!(stdin, StdinMode::Lines);
 
         // Resolve session identifier (full UUID, short prefix, or relative alias).
         log_stage("resolve_session_id");
@@ -5873,40 +5910,55 @@ async fn resume_session_with_llm_override(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to load session: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
-        let stored_metadata = session.session_metadata();
-        let mut tooling = stored_metadata
-            .as_ref()
-            .map(|meta| meta.tooling.clone())
-            .unwrap_or_default();
-        if yolo {
-            apply_yolo_tooling_override(&mut tooling);
-        }
-        let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
-        let keep_alive = resolve_keep_alive(keep_alive_requested)?;
-        let comms_name = stored_metadata
-            .as_ref()
-            .and_then(|meta| meta.comms_name.clone());
-
-        let model = stored_metadata
-            .as_ref()
-            .map_or_else(|| config.agent.model.clone(), |meta| meta.model.clone());
-        let max_tokens = stored_metadata
-            .as_ref()
-            .map_or(config.agent.max_tokens_per_turn, |meta| meta.max_tokens);
-
-        let provider_core = if let Some(meta) = stored_metadata.as_ref() {
-            meta.provider
+        let message_count = session.messages().len();
+        let stored_metadata = session
+            .session_metadata()
+            .ok_or_else(|| anyhow::anyhow!("persisted session {session_id} is missing metadata"))?;
+        let build_state = session.build_state().unwrap_or_default();
+        let mut tooling = stored_metadata.tooling.clone();
+        let explicit_tooling = if yolo || tools.is_some() {
+            Some(resolve_tool_preset(tools.unwrap_or(ToolPreset::Safe), yolo))
         } else {
-            resolve_cli_provider(&config, &model, None)?.as_core()
+            None
+        };
+        if let Some(resolved) = explicit_tooling {
+            tooling.builtins =
+                meerkat_core::ToolCategoryOverride::from_effective(resolved.builtins);
+            tooling.shell = meerkat_core::ToolCategoryOverride::from_effective(resolved.shell);
+            tooling.memory = meerkat_core::ToolCategoryOverride::from_effective(resolved.memory);
+            tooling.mob = meerkat_core::ToolCategoryOverride::from_effective(resolved.mob);
+        }
+
+        let model_override = if provider.is_some() && model.is_none() {
+            Some(stored_metadata.model.clone())
+        } else {
+            model
+        };
+        if provider.is_none()
+            && let Some(model_override) = model_override.as_deref()
+        {
+            let _ = resolve_cli_provider(&config, model_override, None)?;
+        }
+
+        let mut limits = build_state
+            .budget_limits
+            .clone()
+            .unwrap_or_else(|| config.budget_limits());
+        if let Some(dur) = duration {
+            limits.max_duration = Some(dur);
+        }
+        if let Some(calls) = max_tool_calls {
+            limits.max_tool_calls = Some(calls);
+        }
+        let budget_override = if has_max_duration || has_max_tool_calls {
+            Some(limits)
+        } else {
+            None
         };
 
-        tracing::info!(
-            "Resuming session {} with {} messages (provider: {:?}, model: {})",
-            session_id,
-            session.messages().len(),
-            provider_core,
-            model
-        );
+        let keep_alive_override = (keep_alive || stdin_events).then_some(true);
+        let keep_alive =
+            resolve_keep_alive(keep_alive_override.unwrap_or(stored_metadata.keep_alive))?;
         log_stage("load_mcp_external_tools");
 
         // Build factory with flags restored from stored session metadata
@@ -6030,67 +6082,70 @@ async fn resume_session_with_llm_override(
                 Some(keys?)
             };
 
-        let mut build = SessionBuildOptions {
-            provider: Some(provider_core),
-            self_hosted_server_id: stored_metadata
-                .as_ref()
-                .and_then(|m| m.self_hosted_server_id.clone()),
-            output_schema: None,
-            structured_output_retries: 2,
-            hooks_override,
-            comms_name: comms_name.clone(),
-            resume_session: Some(session),
-            budget_limits: budget_override,
+        let hooks_override =
+            (hooks_override != HookRunOverrides::default()).then_some(hooks_override);
+        let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
+            model: model_override,
+            provider: provider.map(Provider::as_core),
             provider_params: merged_provider_params,
-            external_tools,
-            recoverable_tool_defs: None,
-            llm_client_override: llm_override.map(meerkat::encode_llm_client_override_for_service),
-            override_builtins: tooling.builtins,
-            override_shell: tooling.shell,
-            override_memory: tooling.memory,
-            override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
-            override_mob: meerkat_core::ToolCategoryOverride::Inherit,
-            schedule_tools: None,
-            mob_tool_authority_context: None,
+            max_tokens,
+            system_prompt,
+            output_schema: parsed_output_schema,
+            keep_alive: keep_alive_override,
+            hooks_override,
+            budget_limits: budget_override,
+            override_builtins: explicit_tooling.map(|resolved| resolved.builtins),
+            override_shell: explicit_tooling.map(|resolved| resolved.shell),
+            override_memory: explicit_tooling.map(|resolved| resolved.memory),
+            override_mob: explicit_tooling.map(|resolved| resolved.mob),
             preload_skills: resumed_preload_skills,
-            peer_meta: stored_metadata.as_ref().and_then(|m| m.peer_meta.clone()),
-            realm_id: stored_metadata
-                .as_ref()
-                .and_then(|m| m.realm_id.clone())
-                .or_else(|| Some(scope.locator.realm.as_str().to_owned())),
-            instance_id: stored_metadata
-                .as_ref()
-                .and_then(|m| m.instance_id.clone())
-                .or_else(|| scope.instance_id.clone()),
-            backend: stored_metadata
-                .as_ref()
-                .and_then(|m| m.backend.clone())
-                .or_else(|| Some(manifest.backend.as_str().to_string())),
-            config_generation: stored_metadata.as_ref().and_then(|m| m.config_generation),
-            connection_ref: None,
-            keep_alive,
-            checkpointer: None,
-            silent_comms_intents: Vec::new(),
-            max_inline_peer_notifications: None,
-            app_context: None,
-            additional_instructions: None,
-            shell_env: None,
-            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
-            resume_override_mask: ResumeOverrideMask {
-                provider_params: provider_params_override,
+            app_context: parsed_app_context,
+            ..Default::default()
+        };
+        let recovered = meerkat_core::session_recovery::build_recovered_session(
+            session,
+            &recovery_overrides,
+            meerkat_core::session_recovery::SurfaceSessionRecoveryContext {
+                realm_id: Some(scope.locator.realm.as_str().to_owned()),
+                instance_id: scope.instance_id.clone(),
+                backend: Some(manifest.backend.as_str().to_string()),
+                config_generation: stored_metadata.config_generation,
                 ..Default::default()
             },
-            call_timeout_override: Default::default(),
-            blob_store_override: None,
-            mob_tools: mob_tools_factory,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let model = recovered.model;
+        let system_prompt = recovered.system_prompt;
+        let max_tokens = recovered.max_tokens;
+        let keep_alive = resolve_keep_alive(recovered.keep_alive)?;
+        let mut build = recovered.build;
+        build.external_tools = external_tools;
+        build.llm_client_override =
+            llm_override.map(meerkat::encode_llm_client_override_for_service);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings);
+        if let Some(connection_ref) = connection_ref {
+            build.connection_ref = Some(connection_ref);
+        }
+        build.mob_tools = mob_tools_factory;
+
+        let parsed_labels = if labels.is_empty() {
+            None
+        } else {
+            Some(std::collections::BTreeMap::from_iter(labels))
         };
-        build.apply_persisted_mob_operator_access(
-            tooling.mob,
-            build
-                .resume_session
-                .as_ref()
-                .and_then(Session::mob_tool_authority_context),
+        meerkat::surface::validate_raw_labels(parsed_labels.as_ref())
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        tracing::info!(
+            "Resuming session {} with {} messages (provider: {:?}, model: {})",
+            session_id,
+            message_count,
+            build.provider,
+            model
         );
+
+        #[cfg(feature = "comms")]
+        let mut stdin_reader_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         let turn_result = async {
             // Route through SessionService::create_session() with the resumed session
@@ -6103,7 +6158,7 @@ async fn resume_session_with_llm_override(
                     prompt: prompt.to_string().into(),
                     render_metadata: None,
                     system_prompt,
-                    max_tokens: Some(max_tokens),
+                    max_tokens,
                     event_tx: output_pipeline.event_sender(),
 
                     skill_references: None,
@@ -6111,7 +6166,7 @@ async fn resume_session_with_llm_override(
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
-                    labels: None,
+                    labels: parsed_labels,
                 })
                 .await
                 .map_err(session_err_to_anyhow)?;
@@ -6135,6 +6190,18 @@ async fn resume_session_with_llm_override(
             resume_adapter
                 .register_session_with_executor(session_id.clone(), executor)
                 .await;
+
+            #[cfg(feature = "comms")]
+            if stdin_events && keep_alive {
+                stdin_reader_handle = Some(stdin_events::spawn_stdin_reader(
+                    resume_adapter.clone(),
+                    session_id.clone(),
+                    match line_format {
+                        LineFormat::Text => stdin_events::StdinLineFormat::Text,
+                        LineFormat::Json => stdin_events::StdinLineFormat::Json,
+                    },
+                ));
+            }
 
             // Post-wave-a: `keep_alive` is typed `KeepAlivePolicy`, and
             // `additional_instructions` is typed `Vec<TurnInstruction>`.
@@ -6195,6 +6262,14 @@ async fn resume_session_with_llm_override(
         }
         .await;
 
+        if keep_alive && matches!(&turn_result, Ok(CliRuntimeTurnResult::Completed(_))) {
+            eprintln!("Keep-alive: resume turn complete, waiting for events (Ctrl+C to exit)...");
+            tokio::signal::ctrl_c()
+                .await
+                .map_err(|e| anyhow::anyhow!("signal wait failed: {e}"))?;
+            eprintln!("\nShutting down...");
+        }
+
         let result = Box::pin(finalize_cli_runtime_backed_turn(
             output_pipeline,
             turn_result,
@@ -6204,6 +6279,11 @@ async fn resume_session_with_llm_override(
                 #[cfg(feature = "comms")]
                 {
                     resume_adapter.abort_comms_drain(&session_id).await;
+                }
+
+                #[cfg(feature = "comms")]
+                if let Some(h) = stdin_reader_handle {
+                    h.abort();
                 }
 
                 log_stage("service.create_session(done)");
@@ -6227,21 +6307,40 @@ async fn resume_session_with_llm_override(
         // Output the result
         log_stage("print_result");
         match result {
-            CliRuntimeTurnResult::Completed(result) => {
-                if !stream {
-                    println!("{}", result.text);
+            CliRuntimeTurnResult::Completed(result) => match output.as_str() {
+                "json" => {
+                    let json = serde_json::json!({
+                        "text": result.text,
+                        "session_id": result.session_id.to_string(),
+                        "session_ref": format_session_ref(&scope.locator.realm, &result.session_id),
+                        "turns": result.turns,
+                        "tool_calls": result.tool_calls,
+                        "usage": {
+                            "input_tokens": result.usage.input_tokens,
+                            "output_tokens": result.usage.output_tokens,
+                        },
+                        "structured_output": result.structured_output,
+                        "schema_warnings": result.schema_warnings,
+                        "skill_diagnostics": result.skill_diagnostics,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
                 }
-                eprintln!(
-                    "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
-                    result.session_id,
-                    format_session_ref(&scope.locator.realm, &result.session_id),
-                    result.turns,
-                    result.usage.input_tokens,
-                    result.usage.output_tokens
-                );
-            }
+                _ => {
+                    if !stream {
+                        println!("{}", result.text);
+                    }
+                    eprintln!(
+                        "\n[Session: {} | Ref: {} | Turns: {} | Tokens: {} in / {} out]",
+                        result.session_id,
+                        format_session_ref(&scope.locator.realm, &result.session_id),
+                        result.turns,
+                        result.usage.input_tokens,
+                        result.usage.output_tokens
+                    );
+                }
+            },
             CliRuntimeTurnResult::CallbackPending(pending) => {
-                print_cli_callback_pending(&pending, None)?;
+                print_cli_callback_pending(&pending, Some(&output))?;
             }
         }
         log_stage("done");
@@ -10160,13 +10259,19 @@ mod tests {
         assert_eq!(tooling.comms, meerkat_core::ToolCategoryOverride::Enable);
     }
 
-    #[tokio::test]
-    async fn test_run_resume_yolo_reaches_resume_path() {
+    async fn run_resume_probe_error(
+        scope_name: &str,
+        tools: Option<ToolPreset>,
+        yolo: bool,
+        stdin: StdinMode,
+        line_format: LineFormat,
+        connection_ref: Option<meerkat_core::ConnectionRef>,
+    ) -> String {
         let temp = tempfile::tempdir().expect("temp dir");
         let state_root = temp.path().join("state");
-        let scope = test_scope(state_root, "resume-yolo");
+        let scope = test_scope(state_root, scope_name);
 
-        let err = handle_run_command(
+        handle_run_command(
             "Continue.".to_string(),
             Some("last".to_string()),
             None,
@@ -10188,23 +10293,104 @@ mod tests {
             Vec::new(),
             Vec::new(),
             None,
-            ToolPreset::Safe,
+            tools,
+            yolo,
+            false,
+            false,
+            false,
+            stdin,
+            line_format,
+            connection_ref,
+            &scope,
+        )
+        .await
+        .expect_err("resume probe should fail in the expected layer")
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn test_run_resume_yolo_reaches_resume_path() {
+        let message = run_resume_probe_error(
+            "resume-yolo",
+            None,
             true,
-            false,
-            false,
+            StdinMode::Off,
+            LineFormat::Text,
+            None,
+        )
+        .await;
+        assert!(
+            !message.contains("create-only") && !message.contains("--yolo"),
+            "`--yolo` should be allowed through run --resume; got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_resume_tools_full_reaches_resume_path() {
+        let message = run_resume_probe_error(
+            "resume-tools-full",
+            Some(ToolPreset::Full),
             false,
             StdinMode::Off,
             LineFormat::Text,
             None,
-            &scope,
         )
-        .await
-        .expect_err("empty test realm should not have a resumable session");
-
-        let message = err.to_string();
+        .await;
         assert!(
-            !message.contains("create-only") && !message.contains("--yolo"),
-            "`--yolo` should be allowed through run --resume; got: {message}"
+            !message.contains("create-only") && !message.contains("--tools"),
+            "`--tools full` should be allowed through run --resume; got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_resume_session_shaping_flags_reach_resume_path() {
+        let stdin_lines_err = run_resume_probe_error(
+            "resume-stdin-lines",
+            None,
+            false,
+            StdinMode::Lines,
+            LineFormat::Text,
+            None,
+        )
+        .await;
+        assert!(
+            !stdin_lines_err.contains("create-only") && !stdin_lines_err.contains("--stdin lines"),
+            "`--stdin lines` should be allowed through run --resume; got: {stdin_lines_err}"
+        );
+
+        let line_format_err = run_resume_probe_error(
+            "resume-line-format",
+            None,
+            false,
+            StdinMode::Off,
+            LineFormat::Json,
+            None,
+        )
+        .await;
+        assert!(
+            !line_format_err.contains("create-only")
+                && !line_format_err.contains("--line-format json"),
+            "`--line-format json` should be allowed through run --resume; got: {line_format_err}"
+        );
+
+        let connection_ref = meerkat_core::ConnectionRef {
+            realm: meerkat_core::RealmId::parse("test").expect("valid realm"),
+            binding: meerkat_core::BindingId::parse("default").expect("valid binding"),
+            profile: None,
+        };
+        let connection_ref_err = run_resume_probe_error(
+            "resume-connection-ref",
+            None,
+            false,
+            StdinMode::Off,
+            LineFormat::Text,
+            Some(connection_ref),
+        )
+        .await;
+        assert!(
+            !connection_ref_err.contains("create-only")
+                && !connection_ref_err.contains("--connection-ref"),
+            "`--connection-ref` should be allowed through run --resume; got: {connection_ref_err}"
         );
     }
 
@@ -10311,7 +10497,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(prompt, "hello");
-                assert!(matches!(tools, ToolPreset::Workspace));
+                assert!(matches!(tools, Some(ToolPreset::Workspace)));
                 assert!(yolo);
                 #[cfg(feature = "skills")]
                 assert!(skills.is_empty());

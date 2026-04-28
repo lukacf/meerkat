@@ -124,8 +124,7 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
             .args([
                 "run",
                 "Say the word 'ok' and nothing else.",
-                "--tools",
-                "safe",
+                "--yolo",
                 "--output",
                 "json",
             ])
@@ -190,6 +189,16 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         meerkat_core::ToolCategoryOverride::Enable,
         "builtins should be recorded"
     );
+    assert_eq!(
+        metadata.tooling.shell,
+        meerkat_core::ToolCategoryOverride::Enable,
+        "shell should be recorded for yolo"
+    );
+    assert_eq!(
+        metadata.tooling.memory,
+        meerkat_core::ToolCategoryOverride::Enable,
+        "memory should be recorded for yolo"
+    );
 
     let original_model = metadata.model.clone();
     let original_max_tokens = metadata.max_tokens;
@@ -220,29 +229,6 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
         .into());
     }
 
-    let rejected_override = Command::new(&rkat)
-        .current_dir(&project_dir)
-        .env("RKAT_TEST_CLIENT", "1")
-        .args([
-            "run",
-            "--resume",
-            &session_id,
-            "--tools",
-            "full",
-            "Continue.",
-        ])
-        .output()
-        .await?;
-    assert!(
-        !rejected_override.status.success(),
-        "run --resume should reject create-only --tools overrides"
-    );
-    let rejected_stderr = String::from_utf8_lossy(&rejected_override.stderr);
-    assert!(
-        rejected_stderr.contains("--tools"),
-        "resume override rejection should mention --tools, got: {rejected_stderr}"
-    );
-
     let session = store
         .load(&SessionId::parse(&session_id)?)
         .await?
@@ -263,5 +249,50 @@ async fn inner_test_cli_resume_tools() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(metadata.tooling.builtins, original_tooling.builtins);
     assert_eq!(metadata.tooling.shell, original_tooling.shell);
     assert_eq!(metadata.tooling.comms, original_tooling.comms);
+
+    let output = timeout(
+        Duration::from_secs(120),
+        Command::new(&rkat)
+            .current_dir(&project_dir)
+            .env("RKAT_TEST_CLIENT", "1")
+            .args([
+                "run",
+                "--resume",
+                &session_id,
+                "--tools",
+                "workspace",
+                "Continue.",
+            ])
+            .output(),
+    )
+    .await??;
+
+    if !output.status.success() {
+        return Err(format!(
+            "rkat run --resume --tools workspace failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let session = store
+        .load(&SessionId::parse(&session_id)?)
+        .await?
+        .ok_or("session not found after resume override")?;
+    let metadata = session
+        .session_metadata()
+        .ok_or("metadata missing after resume override")?;
+    assert_eq!(
+        metadata.tooling.builtins,
+        meerkat_core::ToolCategoryOverride::Enable
+    );
+    assert_eq!(
+        metadata.tooling.shell,
+        meerkat_core::ToolCategoryOverride::Enable
+    );
+    assert_eq!(
+        metadata.tooling.memory,
+        meerkat_core::ToolCategoryOverride::Disable
+    );
     Ok(())
 }

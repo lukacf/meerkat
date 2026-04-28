@@ -3286,6 +3286,7 @@ impl AgentFactory {
             metadata.instance_id = build_config.instance_id;
             metadata.backend = build_config.backend;
             metadata.config_generation = build_config.config_generation;
+            metadata.connection_ref = build_config.connection_ref.clone();
             metadata
         } else {
             SessionMetadata {

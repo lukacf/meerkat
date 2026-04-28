@@ -30,7 +30,8 @@ use std::collections::HashSet;
 
 use crate::image_generation::{
     OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
-    OpenAiImagesApiPlan, OpenAiResponsesImagePlan,
+    OpenAiImagesApiPlan, OpenAiImagesApiRequestShape, OpenAiResponsesImagePlan,
+    openai_images_api_request_shape,
 };
 
 /// Extract the typed OpenAI provider tag from a request.
@@ -535,15 +536,22 @@ impl OpenAiClient {
             "prompt": Self::image_prompt(&request),
             "n": request.generate_request.count.get(),
         });
+        let request_shape =
+            openai_images_api_request_shape(&model).ok_or_else(|| LlmError::InvalidRequest {
+                message: format!("OpenAI Images API plan does not support model {model}"),
+            })?;
         if let Some(obj) = body.as_object_mut() {
-            if model.starts_with("gpt-image") {
-                Self::apply_image_output_options(obj, &plan.output);
-                Self::apply_openai_image_provider_params(obj, &plan.provider_params, false);
-            } else {
-                obj.insert(
-                    "response_format".to_string(),
-                    serde_json::Value::String("b64_json".to_string()),
-                );
+            match request_shape {
+                OpenAiImagesApiRequestShape::GptImage => {
+                    Self::apply_image_output_options(obj, &plan.output);
+                    Self::apply_openai_image_provider_params(obj, &plan.provider_params, false);
+                }
+                OpenAiImagesApiRequestShape::DallE => {
+                    obj.insert(
+                        "response_format".to_string(),
+                        serde_json::Value::String("b64_json".to_string()),
+                    );
+                }
             }
         }
         let endpoint = format!("{}{}", self.base_url, endpoint_path);

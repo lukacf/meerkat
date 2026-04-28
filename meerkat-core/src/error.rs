@@ -1,6 +1,7 @@
 //! Core error types for Meerkat
 
 use crate::hooks::{HookPoint, HookReasonCode};
+use crate::tool_catalog::ToolUnavailableReason;
 use crate::types::SessionId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +59,10 @@ pub enum ToolError {
 
     /// The tool exists but is currently unavailable
     #[error("Tool '{name}' is currently unavailable: {reason}")]
-    Unavailable { name: String, reason: String },
+    Unavailable {
+        name: String,
+        reason: ToolUnavailableReason,
+    },
 
     /// The tool arguments failed validation
     #[error("Invalid arguments for tool '{name}': {reason}")]
@@ -116,10 +120,10 @@ impl ToolError {
     pub fn not_found(name: impl Into<String>) -> Self {
         Self::NotFound { name: name.into() }
     }
-    pub fn unavailable(name: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn unavailable(name: impl Into<String>, reason: ToolUnavailableReason) -> Self {
         Self::Unavailable {
             name: name.into(),
-            reason: reason.into(),
+            reason,
         }
     }
     pub fn invalid_arguments(name: impl Into<String>, reason: impl Into<String>) -> Self {

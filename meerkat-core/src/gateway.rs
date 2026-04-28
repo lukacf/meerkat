@@ -244,7 +244,7 @@ impl AgentToolDispatcher for ToolGateway {
             return Err(ToolError::not_found(call.name));
         };
         if let Some(reason) = catalog_entry.callability.unavailable_reason() {
-            return Err(ToolError::unavailable(call.name, reason.to_string()));
+            return Err(ToolError::unavailable(call.name, reason));
         }
         entry.dispatcher.dispatch(call).await
     }
@@ -494,10 +494,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
                     .find(|entry| entry.tool.name == call.name)
                 {
                     if let Some(reason) = entry.callability.unavailable_reason() {
-                        return Err(crate::error::ToolError::unavailable(
-                            call.name,
-                            reason.to_string(),
-                        ));
+                        return Err(crate::error::ToolError::unavailable(call.name, reason));
                     }
                     return d.dispatch(call).await;
                 }
@@ -742,6 +739,28 @@ mod tests {
                 prefix: prefix.to_string(),
             }
         }
+
+        fn with_unavailable_reason(
+            prefix: &str,
+            name: &str,
+            reason: ToolUnavailableReason,
+        ) -> Self {
+            let tool = Arc::new(ToolDef {
+                name: name.into(),
+                description: format!("{prefix} tool: {name}"),
+                input_schema: empty_object_schema(),
+                provenance: None,
+            });
+            let catalog = Arc::from([crate::ToolCatalogEntry::session_inline_with_callability(
+                Arc::clone(&tool),
+                ToolCallability::unavailable(reason),
+            )]);
+            Self {
+                tools: Vec::<Arc<ToolDef>>::new().into(),
+                catalog,
+                prefix: prefix.to_string(),
+            }
+        }
     }
 
     struct LiveExactMockDispatcher {
@@ -841,7 +860,7 @@ mod tests {
                 return Err(ToolError::not_found(call.name));
             };
             if let Some(reason) = entry.callability.unavailable_reason() {
-                return Err(ToolError::unavailable(call.name, reason.to_string()));
+                return Err(ToolError::unavailable(call.name, reason));
             }
             Ok(ToolResult::new(
                 call.id.to_string(),
@@ -884,7 +903,7 @@ mod tests {
             if !self.callable.load(Ordering::SeqCst) {
                 return Err(ToolError::unavailable(
                     call.name,
-                    "tool is not currently callable",
+                    ToolUnavailableReason::NotCurrentlyCallable,
                 ));
             }
             Ok(ToolResult::new(
@@ -1165,6 +1184,30 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, ToolError::Unavailable { .. }));
         assert!(err.to_string().contains("not currently callable"));
+    }
+
+    #[tokio::test]
+    async fn gateway_preserves_typed_unavailable_reason() {
+        let exact = Arc::new(ExactMockDispatcher::with_unavailable_reason(
+            "exact",
+            "peers",
+            ToolUnavailableReason::NoPeersConfigured,
+        ));
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(exact)
+            .build()
+            .unwrap();
+
+        let err = dispatch_json(&gateway, "peers", json!({}))
+            .await
+            .unwrap_err();
+
+        let reason = match &err {
+            ToolError::Unavailable { reason, .. } => Some(*reason),
+            _ => None,
+        };
+        assert_eq!(reason, Some(ToolUnavailableReason::NoPeersConfigured));
+        assert!(err.to_string().contains("no peers configured"));
     }
 
     #[test]

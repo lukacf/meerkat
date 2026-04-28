@@ -91,11 +91,11 @@ impl ToolDispatcher {
             else {
                 return Err(ToolError::unavailable(
                     name,
-                    ToolUnavailableReason::NotCurrentlyCallable.to_string(),
+                    ToolUnavailableReason::NotCurrentlyCallable,
                 ));
             };
             if let Some(reason) = entry.callability.unavailable_reason() {
-                return Err(ToolError::unavailable(name, reason.to_string()));
+                return Err(ToolError::unavailable(name, reason));
             }
             return Ok(entry.tool);
         }
@@ -106,10 +106,7 @@ impl ToolDispatcher {
             .find(|tool| tool.name == name)
             .cloned()
             .ok_or_else(|| {
-                ToolError::unavailable(
-                    name,
-                    ToolUnavailableReason::NotCurrentlyCallable.to_string(),
-                )
+                ToolError::unavailable(name, ToolUnavailableReason::NotCurrentlyCallable)
             })
     }
 
@@ -422,6 +419,20 @@ mod tests {
                 .into();
             Self { catalog }
         }
+
+        fn with_unavailable_reason(name: &str, reason: ToolUnavailableReason) -> Self {
+            let catalog = vec![ToolCatalogEntry::session_inline_with_callability(
+                Arc::new(ToolDef {
+                    name: name.into(),
+                    description: format!("{name} tool"),
+                    input_schema: json!({"type": "object"}),
+                    provenance: None,
+                }),
+                ToolCallability::unavailable(reason),
+            )]
+            .into();
+            Self { catalog }
+        }
     }
 
     fn make_call<'a>(name: &'a str, args_raw: &'a serde_json::value::RawValue) -> ToolCallView<'a> {
@@ -533,7 +544,7 @@ mod tests {
                 });
             };
             if let Some(reason) = entry.callability.unavailable_reason() {
-                return Err(ToolError::unavailable(call.name, reason.to_string()));
+                return Err(ToolError::unavailable(call.name, reason));
             }
             Ok(ToolResult::new(
                 call.id.to_string(),
@@ -586,6 +597,28 @@ mod tests {
             .dispatch(make_call("denied_hidden", &args_raw))
             .await;
         assert!(matches!(denied_result, Err(ToolError::AccessDenied { .. })));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_preserves_typed_unavailable_reason() {
+        let router = Arc::new(ExactMockDispatcher::with_unavailable_reason(
+            "peers",
+            ToolUnavailableReason::NoPeersConfigured,
+        ));
+        let dispatcher = ToolDispatcher::new(router);
+
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let err = dispatcher
+            .dispatch(make_call("peers", &args_raw))
+            .await
+            .unwrap_err();
+
+        let reason = match &err {
+            ToolError::Unavailable { reason, .. } => Some(*reason),
+            _ => None,
+        };
+        assert_eq!(reason, Some(ToolUnavailableReason::NoPeersConfigured));
+        assert!(err.to_string().contains("no peers configured"));
     }
 
     #[tokio::test]

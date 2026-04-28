@@ -122,7 +122,7 @@ impl AgentToolDispatcher for CommsToolSurface {
             });
         }
         if let Some(reason) = self.callability().unavailable_reason() {
-            return Err(ToolError::unavailable(call.name, reason.to_string()));
+            return Err(ToolError::unavailable(call.name, reason));
         }
 
         let args: Value = serde_json::from_str(call.args.get())

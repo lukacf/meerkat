@@ -538,7 +538,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     .find(|entry| entry.tool.name == call.name)
                 {
                     if let Some(reason) = entry.callability.unavailable_reason() {
-                        return Err(ToolError::unavailable(call.name, reason.to_string()));
+                        return Err(ToolError::unavailable(call.name, reason));
                     }
                     return ext.dispatch(call).await;
                 }

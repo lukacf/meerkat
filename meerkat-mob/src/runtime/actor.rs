@@ -410,20 +410,8 @@ impl MobActor {
         }
     }
 
-    fn trusted_peer_pubkey_string(peer: &TrustedPeerDescriptor) -> String {
-        meerkat_comms::PubKey::new(peer.pubkey).to_pubkey_string()
-    }
-
     fn trusted_peer_removal_key(peer: &TrustedPeerDescriptor) -> String {
-        Self::trusted_peer_pubkey_string(peer)
-    }
-
-    fn supervisor_peer_removal_key(peer_id: &str) -> String {
-        if peer_id.starts_with("ed25519:") {
-            peer_id.to_string()
-        } else {
-            format!("ed25519:{peer_id}")
-        }
+        peer.peer_id.to_string()
     }
 
     async fn remove_trusted_peer_by_descriptor(
@@ -431,23 +419,7 @@ impl MobActor {
         peer: &TrustedPeerDescriptor,
     ) -> Result<bool, meerkat_core::comms::SendError> {
         let peer_id = peer.peer_id.to_string();
-        match comms.remove_trusted_peer(&peer_id).await {
-            Ok(true) => Ok(true),
-            Ok(false) => {
-                let pubkey_key = Self::trusted_peer_removal_key(peer);
-                comms.remove_trusted_peer(&pubkey_key).await
-            }
-            Err(peer_id_error) => match comms.remove_trusted_peer(&peer_id).await {
-                Ok(removed) => Ok(removed),
-                Err(_) => {
-                    let pubkey_key = Self::trusted_peer_removal_key(peer);
-                    match comms.remove_trusted_peer(&pubkey_key).await {
-                        Ok(removed) => Ok(removed),
-                        Err(_) => Err(peer_id_error),
-                    }
-                }
-            },
-        }
+        comms.remove_trusted_peer(&peer_id).await
     }
 
     fn supervisor_spec_for_authority(
@@ -594,7 +566,7 @@ impl MobActor {
             {
                 let previous_removal_key = previous_private_trust_removal_key
                     .map(str::to_string)
-                    .unwrap_or_else(|| Self::supervisor_peer_removal_key(previous_peer_id));
+                    .unwrap_or_else(|| previous_peer_id.clone());
                 if let Err(error) = comms
                     .remove_private_trusted_peer(&previous_removal_key)
                     .await
@@ -608,7 +580,7 @@ impl MobActor {
                             next_epoch,
                         )
                         .await;
-                    let next_removal_key = Self::trusted_peer_pubkey_string(&spec);
+                    let next_removal_key = Self::trusted_peer_removal_key(&spec);
                     let cleanup = comms.remove_private_trusted_peer(&next_removal_key).await;
                     let mut reason = format!(
                         "previous supervisor private trust removal failed for session '{session_id}': {error}"
@@ -628,7 +600,7 @@ impl MobActor {
             Ok(SupervisorPrivateTrustInstall {
                 peer_id: next_peer_id,
                 epoch: next_epoch,
-                removal_key: Self::trusted_peer_pubkey_string(&spec),
+                removal_key: Self::trusted_peer_removal_key(&spec),
             })
         }
     }
@@ -8228,7 +8200,7 @@ impl MobActor {
             .put_supervisor_authority(&self.definition.id, next)
             .await?;
         self.supervisor_bridge.rotate(next.clone()).await?;
-        let previous_private_trust_removal_key = current.keypair().public_key().to_pubkey_string();
+        let previous_private_trust_removal_key = current.public_peer_id.clone();
         let session_member_refs = {
             let roster = self.roster.read().await;
             roster

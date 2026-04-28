@@ -789,7 +789,7 @@ async fn apply_target_attachment_effects(
                     .map(|p| p.pubkey)
                     .collect();
                 for pk in stale_keys {
-                    router.remove_trusted_peer(&pk);
+                    router.remove_trusted_peer(&pk.to_peer_id());
                 }
                 comms_runtime
                     .register_trusted_peer(TrustedPeer {
@@ -1676,7 +1676,7 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
                         }
                         KennelPayload::PeerUnwire { peer_id } => {
                             if let Ok(pk) = meerkat_comms::identity::PubKey::from_pubkey_string(&peer_id) {
-                                comms_runtime.router_arc().remove_trusted_peer(&pk);
+                                comms_runtime.router_arc().remove_trusted_peer(&pk.to_peer_id());
                                 eprintln!("[target] peer unwired: {peer_id}");
                             }
                         }

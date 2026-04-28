@@ -611,7 +611,7 @@ pub enum CommsCapabilityError {
 pub trait CommsRuntime: Send + Sync {
     /// Runtime-local public key identifier, if available.
     ///
-    /// Returns a peer ID string in `ed25519:<base64>` format.
+    /// Returns an Ed25519 public key string in `ed25519:<base64>` format.
     fn public_key(&self) -> Option<String> {
         None
     }
@@ -1032,8 +1032,9 @@ mod tests {
         let runtime = NoopCommsRuntime {
             notify: Arc::new(Notify::new()),
         };
+        let peer_id = PeerId::new().to_string();
         let result =
-            <NoopCommsRuntime as CommsRuntime>::remove_trusted_peer(&runtime, "ed25519:test").await;
+            <NoopCommsRuntime as CommsRuntime>::remove_trusted_peer(&runtime, &peer_id).await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
     }
 

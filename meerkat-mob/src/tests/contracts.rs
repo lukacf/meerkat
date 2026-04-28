@@ -647,9 +647,9 @@ async fn contract_mob_005_remove_trusted_peer_revokes_send() {
     // Drain the message so it doesn't interfere
     let _ = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
 
-    // Remove trusted peer
-    let peer_pubkey = receiver.public_key().to_pubkey_string();
-    let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_pubkey)
+    // Remove trusted peer by canonical PeerId.
+    let peer_id = receiver.public_key().to_peer_id().to_string();
+    let removed = CoreCommsRuntime::remove_trusted_peer(&sender, &peer_id)
         .await
         .expect("remove should succeed");
     assert!(removed, "should return true for existing peer");
@@ -688,7 +688,6 @@ async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer
     let runtime = CommsRuntime::inproc_only(&runtime_name).unwrap();
     let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
     let peer_id = peer.public_key().to_peer_id().to_string();
-    let peer_pubkey = peer.public_key().to_pubkey_string();
     let backend_address = format!("tcp://backend.example.invalid:{}", 10_000 + suffix.len());
 
     let spec = TrustedPeerDescriptor::unsigned_with_pubkey(
@@ -718,7 +717,7 @@ async fn contract_mobx_001_trust_accepts_non_inproc_addresses_and_preserves_peer
         "runtime should preserve backend-provided address string"
     );
 
-    let removed = CoreCommsRuntime::remove_trusted_peer(&runtime, &peer_pubkey)
+    let removed = CoreCommsRuntime::remove_trusted_peer(&runtime, &peer_id)
         .await
         .expect("remove_trusted_peer should succeed by peer_id");
     assert!(

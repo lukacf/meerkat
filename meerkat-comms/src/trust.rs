@@ -294,10 +294,23 @@ impl TrustedPeers {
     }
 
     /// Remove a peer by pubkey.
+    ///
+    /// Legacy helper retained for direct trust-list tests and low-level
+    /// callers. Runtime trust removal is keyed by [`PeerId`]; use
+    /// [`Self::remove_by_peer_id`] on control-plane paths.
     pub fn remove(&mut self, pubkey: &PubKey) -> bool {
         let len_before = self.peers.len();
         self.peers.retain(|p| &p.pubkey != pubkey);
         self.peers.len() != len_before
+    }
+
+    /// Remove a peer by canonical [`PeerId`].
+    pub fn remove_by_peer_id(&mut self, peer_id: &PeerId) -> Option<TrustedPeer> {
+        let index = self
+            .peers
+            .iter()
+            .position(|p| crate::router::peer_id_from_pubkey(&p.pubkey) == *peer_id)?;
+        Some(self.peers.remove(index))
     }
 
     /// Insert or replace a peer, keyed by `pubkey`.
@@ -633,6 +646,36 @@ mod tests {
 
         let removed = peers.remove(&PubKey::new([1u8; 32]));
         assert!(removed);
+        assert_eq!(peers.peers.len(), 1);
+        assert_eq!(peers.peers[0].name, "peer2");
+    }
+
+    #[test]
+    fn test_remove_existing_peer_by_peer_id() {
+        let mut peers = TrustedPeers {
+            peers: vec![
+                TrustedPeer {
+                    name: "peer1".to_string(),
+                    pubkey: PubKey::new([1u8; 32]),
+                    addr: "tcp://localhost:4201".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+                TrustedPeer {
+                    name: "peer2".to_string(),
+                    pubkey: PubKey::new([2u8; 32]),
+                    addr: "tcp://localhost:4202".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+            ],
+        };
+        let peer_id = PubKey::new([1u8; 32]).to_peer_id();
+
+        let removed = peers.remove_by_peer_id(&peer_id);
+
+        assert_eq!(
+            removed.as_ref().map(|peer| peer.name.as_str()),
+            Some("peer1")
+        );
         assert_eq!(peers.peers.len(), 1);
         assert_eq!(peers.peers[0].name, "peer2");
     }

@@ -105,7 +105,7 @@ async fn revoked_sender_is_rejected_at_admission() {
     .expect("seed trust");
     let removed = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
         &receiver,
-        &sender.public_key().to_pubkey_string(),
+        &sender.public_key().to_peer_id().to_string(),
     )
     .await
     .expect("revoke trust");
@@ -191,7 +191,7 @@ async fn concurrent_revokes_and_admissions_never_admit_untrusted() {
                 if i % 2 == 0 {
                     let _ = meerkat_core::agent::CommsRuntime::remove_trusted_peer(
                         receiver_for_task.as_ref(),
-                        &sender_for_task.public_key().to_pubkey_string(),
+                        &sender_for_task.public_key().to_peer_id().to_string(),
                     )
                     .await;
                 } else {

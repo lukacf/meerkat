@@ -105,7 +105,7 @@ pub struct Router {
     /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
     /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
     /// for the supervisor bridge in session-backed mob members.
-    private_pubkeys: Arc<RwLock<std::collections::HashSet<crate::identity::PubKey>>>,
+    private_peer_ids: Arc<RwLock<std::collections::HashSet<PeerId>>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -123,7 +123,7 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
-            private_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -141,7 +141,7 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
-            private_pubkeys: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -151,22 +151,26 @@ impl Router {
 
     /// Mark a peer as private (hidden from `resolve_peer_directory`).
     pub fn mark_private(&self, pubkey: crate::identity::PubKey) {
-        self.private_pubkeys.write().insert(pubkey);
+        self.private_peer_ids
+            .write()
+            .insert(peer_id_from_pubkey(&pubkey));
     }
 
     /// Remove the private marker for a peer. Returns `true` if the marker
     /// was present and removed.
-    pub fn unmark_private(&self, pubkey: &crate::identity::PubKey) -> bool {
-        self.private_pubkeys.write().remove(pubkey)
+    pub fn unmark_private(&self, peer_id: &PeerId) -> bool {
+        self.private_peer_ids.write().remove(peer_id)
     }
 
     /// Returns `true` if the peer is currently marked private.
     pub fn is_private(&self, pubkey: &crate::identity::PubKey) -> bool {
-        self.private_pubkeys.read().contains(pubkey)
+        self.private_peer_ids
+            .read()
+            .contains(&peer_id_from_pubkey(pubkey))
     }
 
-    pub(crate) fn private_pubkeys(&self) -> std::collections::HashSet<crate::identity::PubKey> {
-        self.private_pubkeys.read().clone()
+    pub(crate) fn private_peer_ids(&self) -> std::collections::HashSet<PeerId> {
+        self.private_peer_ids.read().clone()
     }
 
     /// Scope in-process routing to a namespace.
@@ -193,8 +197,11 @@ impl Router {
         self.trusted_peers.write().upsert(peer);
     }
 
-    pub fn remove_trusted_peer(&self, pubkey: &crate::identity::PubKey) -> bool {
-        self.trusted_peers.write().remove(pubkey)
+    pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
+        self.trusted_peers
+            .write()
+            .remove_by_peer_id(peer_id)
+            .is_some()
     }
 
     /// Get the trusted peers Arc.

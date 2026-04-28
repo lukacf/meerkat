@@ -234,16 +234,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
             }
         }
         let mut peers = self.trusted_peers.write().await;
-        if peers.remove(peer_id).is_some() {
-            return Ok(true);
-        }
-        let matching_peer_id = peers.iter().find_map(|(stored_peer_id, peer)| {
-            (meerkat_comms::PubKey::new(peer.pubkey).to_pubkey_string() == peer_id)
-                .then(|| stored_peer_id.clone())
-        });
-        Ok(matching_peer_id
-            .and_then(|stored_peer_id| peers.remove(&stored_peer_id))
-            .is_some())
+        Ok(peers.remove(peer_id).is_some())
     }
 
     async fn remove_private_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
@@ -2649,22 +2640,9 @@ impl LiveExternalPeerHarness {
             .collect()
     }
 
-    async fn remove_trusted_peer(&self, peer_id_or_pubkey: &str) {
-        let Some(remove_key) = (if peer_id_or_pubkey.starts_with("ed25519:") {
-            Some(peer_id_or_pubkey.to_string())
-        } else {
-            self.runtime
-                .trusted_peers_shared()
-                .read()
-                .peers
-                .iter()
-                .find(|entry| entry.pubkey.to_peer_id().as_str() == peer_id_or_pubkey)
-                .map(|entry| entry.pubkey.to_pubkey_string())
-        }) else {
-            return;
-        };
+    async fn remove_trusted_peer(&self, peer_id: &str) {
         self.runtime
-            .remove_trusted_peer(&remove_key)
+            .remove_trusted_peer(peer_id)
             .await
             .expect("remove trusted peer from harness runtime");
     }
@@ -2674,7 +2652,7 @@ impl LiveExternalPeerHarness {
         peer: &meerkat_core::comms::TrustedPeerDescriptor,
     ) {
         runtime
-            .remove_trusted_peer(&meerkat_comms::PubKey::new(peer.pubkey).to_pubkey_string())
+            .remove_trusted_peer(&peer.peer_id.to_string())
             .await
             .expect("remove trusted peer from harness runtime");
     }
@@ -3080,10 +3058,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         )
                                         .expect("valid peer spec");
                                     let _ = responder_runtime
-                                        .remove_trusted_peer(
-                                            &meerkat_comms::PubKey::new(peer_spec.pubkey)
-                                                .to_pubkey_string(),
-                                        )
+                                        .remove_trusted_peer(&peer_spec.peer_id.to_string())
                                         .await;
                                     serde_json::to_value(super::bridge_protocol::BridgeAck {
                                         ok: true,
@@ -3163,10 +3138,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         )
                                         .expect("peer lifecycle trusted peer spec");
                                     let _ = responder_runtime
-                                        .remove_trusted_peer(
-                                            &meerkat_comms::PubKey::new(peer_spec.pubkey)
-                                                .to_pubkey_string(),
-                                        )
+                                        .remove_trusted_peer(&peer_spec.peer_id.to_string())
                                         .await;
                                     serde_json::json!({ "ok": true })
                                 }
@@ -3188,7 +3160,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                         responder_runtime.mark_interaction_complete(candidate.interaction.id.0);
                         for supervisor_pubkey in remove_supervisors_after_response {
                             let _ = responder_runtime
-                                .remove_trusted_peer(&supervisor_pubkey.to_pubkey_string())
+                                .remove_trusted_peer(&supervisor_pubkey.to_peer_id().to_string())
                                 .await;
                         }
                     }
@@ -8654,16 +8626,8 @@ async fn test_resume_reconciles_mixed_topology_without_losing_external_member_re
         .real_comms(&old_sub_sid)
         .await
         .expect("session-backed member comms");
-    let old_ext_pubkey = old_sub_comms
-        .trusted_peers_shared()
-        .read()
-        .peers
-        .iter()
-        .find(|peer| peer.pubkey.to_peer_id().as_str() == old_ext_peer_id)
-        .map(|peer| peer.pubkey.to_pubkey_string())
-        .expect("external trust should exist before resume removal");
     old_sub_comms
-        .remove_trusted_peer(&old_ext_pubkey)
+        .remove_trusted_peer(&old_ext_peer_id)
         .await
         .expect("remove external trust before resume");
     if let Some(old_ext_sid) = &old_ext_sid {
@@ -19022,7 +18986,7 @@ async fn test_supervisor_trust_does_not_leak_into_member_peer_directory() {
     // it's a control-plane edge and would otherwise surface as an ordinary
     // sendable peer in the member's `comms.peers` output (and downstream
     // REST/RPC/MCP). The private-trust seam uses the router's
-    // `private_pubkeys` directory-filter to keep the entry invisible.
+    // private peer-id directory-filter to keep the entry invisible.
     //
     // The *positive* complement — "the supervisor is still trusted enough
     // for the member to send back to it" — is enforced by

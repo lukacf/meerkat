@@ -4,7 +4,68 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::error::AuthErrorKind;
+use super::token_store::PersistedTokens;
+use crate::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase};
 use crate::provider::Provider;
+
+/// Public auth status phase shared by REST, RPC, CLI, and generated SDK wire
+/// payloads.
+///
+/// This is the compatibility projection of typed auth lease truth. Surfaces
+/// should map to this enum first and only then emit [`Self::as_public_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AuthStatusPhase {
+    Valid,
+    Expiring,
+    Expired,
+    ReauthRequired,
+    RefreshFailed,
+    Unknown,
+}
+
+impl AuthStatusPhase {
+    pub const fn as_public_str(self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Expiring => "expiring",
+            Self::Expired => "expired",
+            Self::ReauthRequired => "reauth_required",
+            Self::RefreshFailed => "refresh_failed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub const fn from_lease_phase(phase: Option<AuthLeasePhase>) -> Self {
+        match phase {
+            Some(AuthLeasePhase::Valid) => Self::Valid,
+            Some(AuthLeasePhase::Expiring) | Some(AuthLeasePhase::Refreshing) => Self::Expiring,
+            Some(AuthLeasePhase::ReauthRequired) => Self::ReauthRequired,
+            Some(AuthLeasePhase::Released) | None => Self::Unknown,
+        }
+    }
+
+    pub fn from_persisted_tokens(now: DateTime<Utc>, tokens: Option<&PersistedTokens>) -> Self {
+        match tokens {
+            Some(tokens) => Self::from_expires_at(now, tokens.expires_at),
+            None => Self::Unknown,
+        }
+    }
+
+    pub fn from_expires_at(now: DateTime<Utc>, expires_at: Option<DateTime<Utc>>) -> Self {
+        match expires_at {
+            Some(expires_at) if expires_at <= now => Self::Expired,
+            Some(expires_at)
+                if expires_at - now
+                    < chrono::Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64) =>
+            {
+                Self::Expiring
+            }
+            Some(_) | None => Self::Valid,
+        }
+    }
+}
 
 /// Status snapshot of a resolved (or unresolved) auth profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +105,21 @@ pub struct AuthErrorSummary {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use chrono::{Duration, TimeZone};
+
+    fn tokens_with_expiry(expires_at: Option<DateTime<Utc>>) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: crate::auth::PersistedAuthMode::ApiKey,
+            primary_secret: Some("secret".into()),
+            refresh_token: None,
+            id_token: None,
+            expires_at,
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
 
     #[test]
     fn auth_status_roundtrip() {
@@ -76,6 +152,44 @@ mod tests {
         let back: AuthErrorSummary = serde_json::from_str(&s).unwrap();
         assert_eq!(back.kind, summary.kind);
         assert_eq!(back.message, summary.message);
+    }
+
+    #[test]
+    fn auth_status_phase_maps_persisted_token_expiry_to_public_values() {
+        let now = Utc.with_ymd_and_hms(2026, 4, 28, 12, 0, 0).unwrap();
+
+        let valid = tokens_with_expiry(Some(now + Duration::minutes(10)));
+        assert_eq!(
+            AuthStatusPhase::from_persisted_tokens(now, Some(&valid)).as_public_str(),
+            "valid"
+        );
+
+        let expired = tokens_with_expiry(Some(now - Duration::seconds(1)));
+        assert_eq!(
+            AuthStatusPhase::from_persisted_tokens(now, Some(&expired)).as_public_str(),
+            "expired"
+        );
+
+        assert_eq!(
+            AuthStatusPhase::from_persisted_tokens(now, None).as_public_str(),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn auth_status_phase_maps_typed_lease_phase_to_public_values() {
+        assert_eq!(
+            AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::Valid)).as_public_str(),
+            "valid"
+        );
+        assert_eq!(
+            AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::Expiring)).as_public_str(),
+            "expiring"
+        );
+        assert_eq!(
+            AuthStatusPhase::from_lease_phase(None).as_public_str(),
+            "unknown"
+        );
     }
 
     #[cfg(feature = "schema")]

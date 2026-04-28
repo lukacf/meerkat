@@ -27,7 +27,7 @@ pub use principal::{
     PrincipalKind, PrincipalRef, VisibilityClass, can_observe_visibility,
     metadata_grants_no_visibility,
 };
-pub use status::{AuthErrorSummary, AuthStatus};
+pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{
     PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
     TokenStore, TokenStoreError,

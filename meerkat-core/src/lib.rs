@@ -282,9 +282,9 @@ pub use types::{
 pub use auth::{
     AnthropicAuthMetadata, AnthropicRouteHints, AuthConstraints, AuthError, AuthErrorKind,
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
-    AuthRouteHints, AuthStatus, GoogleAuthMetadata, GoogleRouteHints, HttpAuthorizationRequest,
-    HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints, ProviderAuthMetadata,
-    ResolvedAuthEnvelope, ResolvedAuthKind,
+    AuthRouteHints, AuthStatus, AuthStatusPhase, GoogleAuthMetadata, GoogleRouteHints,
+    HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints,
+    ProviderAuthMetadata, ResolvedAuthEnvelope, ResolvedAuthKind,
 };
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,

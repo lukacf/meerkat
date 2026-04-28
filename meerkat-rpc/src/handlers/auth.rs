@@ -16,8 +16,8 @@ use meerkat_contracts::{
     WireProviderBinding, WireRealmConnectionSet,
 };
 use meerkat_core::{
-    ConnectionRef, ConnectionTargetError, CredentialSourceSpec, Provider, RealmConnectionSet,
-    ResolvedConnectionTarget,
+    AuthStatusPhase, ConnectionRef, ConnectionTargetError, CredentialSourceSpec, Provider,
+    RealmConnectionSet, ResolvedConnectionTarget,
 };
 use meerkat_gemini::runtime::oauth as g_oauth;
 use meerkat_openai::runtime::oauth as o_oauth;
@@ -1055,14 +1055,7 @@ pub async fn handle_auth_status_get(
     } else {
         None
     };
-    let state_label = match &stored {
-        Some(t) => match t.expires_at {
-            Some(exp) if exp - chrono::Utc::now() < chrono::Duration::zero() => "expired",
-            Some(exp) if exp - chrono::Utc::now() < chrono::Duration::seconds(60) => "expiring",
-            _ => "valid",
-        },
-        None => "unknown",
-    };
+    let state_phase = AuthStatusPhase::from_persisted_tokens(chrono::Utc::now(), stored.as_ref());
     RpcResponse::success(
         id,
         WireAuthStatusDetail {
@@ -1070,7 +1063,7 @@ pub async fn handle_auth_status_get(
             profile_id: auth_profile.id,
             provider: auth_profile.provider.as_str().to_string(),
             auth_method: auth_profile.auth_method,
-            state: state_label.to_string(),
+            state: state_phase.as_public_str().to_string(),
             expires_at: stored
                 .as_ref()
                 .and_then(|t| t.expires_at.map(|e| e.to_rfc3339())),

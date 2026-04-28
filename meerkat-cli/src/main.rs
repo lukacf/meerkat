@@ -37,8 +37,8 @@ use meerkat_core::service::{
     SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
-    AgentEvent, BlobId, ConnectionRef, EventEnvelope, RealmConfig, RealmLocator, RealmSelection,
-    ScopedAgentEvent, StreamScopeFrame, format_verbose_event,
+    AgentEvent, AuthStatusPhase, BlobId, ConnectionRef, EventEnvelope, RealmConfig, RealmLocator,
+    RealmSelection, ScopedAgentEvent, StreamScopeFrame, format_verbose_event,
 };
 use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, FileConfigStore,
@@ -2891,7 +2891,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             };
             match registry.resolve(&realm_set, &connection_ref, &env).await {
                 Ok(conn) => {
-                    println!("state: valid");
+                    println!("state: {}", AuthStatusPhase::Valid.as_public_str());
                     println!("provider: {}", conn.provider.as_str());
                     println!("backend_profile_id: {}", conn.backend_profile.id);
                     println!(
@@ -2936,7 +2936,9 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?
                 {
                     Some(tokens) => {
-                        println!("state:       present");
+                        let state_phase =
+                            AuthStatusPhase::from_persisted_tokens(Utc::now(), Some(&tokens));
+                        println!("state:       {}", state_phase.as_public_str());
                         println!("auth_mode:   {:?}", tokens.auth_mode);
                         println!(
                             "has_secret:  {}",
@@ -2969,7 +2971,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                         println!("backend:     {}", store.backend_name());
                     }
                     None => {
-                        println!("state:       absent");
+                        println!("state:       {}", AuthStatusPhase::Unknown.as_public_str());
                         println!("backend:     {}", store.backend_name());
                         println!(
                             "note:        no persisted credential for '{realm}:{profile_id}';"
@@ -2983,7 +2985,10 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             }
             #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
             {
-                println!("state:       unknown (TokenStore disabled at build time)");
+                println!(
+                    "state:       {} (TokenStore disabled at build time)",
+                    AuthStatusPhase::Unknown.as_public_str()
+                );
             }
         }
         AuthCommands::ProfileDelete {

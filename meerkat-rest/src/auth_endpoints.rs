@@ -26,7 +26,8 @@ use meerkat_contracts::{
 };
 use meerkat_core::connection::{BindingId, ConnectionTargetError, ProfileId, RealmId};
 use meerkat_core::{
-    ConnectionRef, CredentialSourceSpec, Provider, RealmConnectionSet, ResolvedConnectionTarget,
+    AuthStatusPhase, ConnectionRef, CredentialSourceSpec, Provider, RealmConnectionSet,
+    ResolvedConnectionTarget,
 };
 use meerkat_gemini::runtime::oauth as g_oauth;
 use meerkat_openai::runtime::oauth as o_oauth;
@@ -1028,22 +1029,7 @@ pub async fn get_auth_status(
                 .into_response();
         }
     };
-    let state_label = match &stored {
-        Some(t) => {
-            if let Some(expiry) = t.expires_at {
-                if expiry - chrono::Utc::now() < chrono::Duration::zero() {
-                    "expired"
-                } else if expiry - chrono::Utc::now() < chrono::Duration::seconds(60) {
-                    "expiring"
-                } else {
-                    "valid"
-                }
-            } else {
-                "valid"
-            }
-        }
-        None => "unknown",
-    };
+    let state_phase = AuthStatusPhase::from_persisted_tokens(chrono::Utc::now(), stored.as_ref());
     (
         StatusCode::OK,
         Json(WireAuthStatusDetail {
@@ -1051,7 +1037,7 @@ pub async fn get_auth_status(
             profile_id: auth_profile.id.clone(),
             provider: auth_profile.provider.as_str().to_string(),
             auth_method: auth_profile.auth_method.clone(),
-            state: state_label.to_string(),
+            state: state_phase.as_public_str().to_string(),
             expires_at: stored
                 .as_ref()
                 .and_then(|t| t.expires_at.map(|e| e.to_rfc3339())),

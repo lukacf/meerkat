@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+use meerkat_contracts::capability::MobpackCapabilityRequirement;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MobpackManifest {
     pub mobpack: MobpackSection,
@@ -28,6 +30,16 @@ pub struct RequiresSection {
     pub capabilities: Vec<String>,
 }
 
+impl RequiresSection {
+    pub fn typed_capabilities(
+        &self,
+    ) -> impl Iterator<Item = MobpackCapabilityRequirement<'_>> + '_ {
+        self.capabilities
+            .iter()
+            .map(|capability| MobpackCapabilityRequirement::parse(capability))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -40,6 +52,9 @@ pub struct ProfileSection {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use meerkat_contracts::capability::{
+        CapabilityId, HostProcessCapabilityId, MobpackCapabilityId, MobpackCapabilityRequirement,
+    };
 
     #[test]
     fn test_manifest_toml_roundtrip() {
@@ -80,5 +95,45 @@ mod tests {
         let encoded = toml::to_string(&manifest).unwrap();
         let decoded: MobpackManifest = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn test_requires_section_preserves_strings_and_exposes_typed_capabilities() {
+        let manifest: MobpackManifest = toml::from_str(
+            r#"
+[mobpack]
+name = "browser-test"
+version = "1.0.0"
+
+[requires]
+capabilities = ["comms", "shell", "mcp_stdio", "vendor.custom"]
+"#,
+        )
+        .unwrap();
+        let requires = manifest.requires.unwrap();
+
+        assert_eq!(
+            requires.capabilities,
+            vec![
+                "comms".to_string(),
+                "shell".to_string(),
+                "mcp_stdio".to_string(),
+                "vendor.custom".to_string(),
+            ]
+        );
+
+        let typed = requires
+            .typed_capabilities()
+            .map(MobpackCapabilityRequirement::id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            typed,
+            vec![
+                MobpackCapabilityId::Known(CapabilityId::Comms),
+                MobpackCapabilityId::Known(CapabilityId::Shell),
+                MobpackCapabilityId::HostProcess(HostProcessCapabilityId::McpStdio),
+                MobpackCapabilityId::Unknown,
+            ]
+        );
     }
 }

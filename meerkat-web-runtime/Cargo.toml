@@ -40,6 +40,7 @@ meerkat-session = { workspace = true }
 meerkat-hooks = { workspace = true }
 meerkat-comms = { workspace = true }
 meerkat-mob = { workspace = true }
+meerkat-mob-pack = { workspace = true }
 meerkat-mob-mcp = { workspace = true }
 meerkat = { workspace = true, features = ["comms", "memory-store", "anthropic", "openai", "gemini"] }
 async-trait = { workspace = true }

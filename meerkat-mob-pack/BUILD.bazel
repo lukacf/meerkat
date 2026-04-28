@@ -45,6 +45,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-contracts:meerkat_contracts",
         "//meerkat-mob:meerkat_mob",
     ] + all_crate_deps(
         package_name = "meerkat-mob-pack",
@@ -90,6 +91,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-contracts:meerkat_contracts",
         "//meerkat-mob:meerkat_mob",
     ] + all_crate_deps(
         package_name = "meerkat-mob-pack",

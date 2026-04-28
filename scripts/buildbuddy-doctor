@@ -200,6 +200,15 @@ else
   bad "Vendored oai-rt-rs runfiles target is missing from checked-in or lock-generated BUILD content"
 fi
 
+if grep -Fq -- '--retry 5' scripts/install-buildbuddy-cli &&
+  grep -Fq -- '--retry-delay 2' scripts/install-buildbuddy-cli &&
+  grep -Fq -- '--retry-max-time 120' scripts/install-buildbuddy-cli &&
+  grep -Fq -- '--connect-timeout 20' scripts/install-buildbuddy-cli; then
+  pass "BuildBuddy CLI installer retries transient release download failures"
+else
+  bad "BuildBuddy CLI installer does not retry transient release download failures"
+fi
+
 if grep -Fq 'Cache Bazel external repositories' .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq -- '--repository_cache=' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'MEERKAT_BUILDBUDDY_FETCH_RETRIES' scripts/buildbuddy-ci-lane &&

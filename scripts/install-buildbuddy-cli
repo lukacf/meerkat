@@ -72,7 +72,17 @@ cleanup() {
 trap cleanup EXIT
 
 url="https://github.com/buildbuddy-io/bazel/releases/download/${version}/bazel-${version}-${os}-${arch}"
-curl -fsSL "${url}" -o "${tmp}"
+curl \
+  --fail \
+  --location \
+  --show-error \
+  --silent \
+  --connect-timeout 20 \
+  --retry 5 \
+  --retry-delay 2 \
+  --retry-max-time 120 \
+  "${url}" \
+  -o "${tmp}"
 
 actual="$(shasum -a 256 "${tmp}" | awk '{print $1}')"
 if [[ "${actual}" != "${sha256}" ]]; then

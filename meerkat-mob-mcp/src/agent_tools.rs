@@ -29,7 +29,7 @@ use ::tokio::sync::RwLock;
 use tokio_with_wasm::alias::sync::RwLock;
 
 use crate::MobMcpState;
-use meerkat_core::comms::{CommsCommand, PeerName, PeerRoute};
+use meerkat_core::comms::{CommsCommand, PeerId, PeerName, PeerRoute};
 
 // ─── Tool name constants ─────────────────────────────────────────────────
 
@@ -84,8 +84,8 @@ pub struct AgentMobToolSurface {
     model: String,
     /// Parent agent's comms name (for building TrustedPeerDescriptor when wiring helpers).
     comms_name: Option<String>,
-    /// Parent agent's comms peer ID (ed25519 public key).
-    comms_peer_id: Option<String>,
+    /// Parent agent's canonical comms peer ID.
+    comms_peer_id: Option<PeerId>,
     /// Parent agent's comms runtime for bidirectional wiring.
     comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     /// Context for capturing a parent agent's tool scope snapshot.
@@ -159,7 +159,7 @@ impl AgentMobToolSurface {
         model: String,
         owner_bridge_session_id: SessionId,
         comms_name: Option<String>,
-        comms_peer_id: Option<String>,
+        comms_peer_id: Option<PeerId>,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
     ) -> Self {
         Self::new_with_effective_authority(
@@ -187,7 +187,7 @@ impl AgentMobToolSurface {
         model: String,
         owner_bridge_session_id: SessionId,
         comms_name: Option<String>,
-        comms_peer_id: Option<String>,
+        comms_peer_id: Option<PeerId>,
         comms_runtime: Option<Arc<dyn meerkat_core::agent::CommsRuntime>>,
         snapshot_context: meerkat_core::service::MobToolSnapshotContext,
     ) -> Self {
@@ -497,12 +497,12 @@ impl AgentMobToolSurface {
 
         // Inproc delegation wiring: the parent and helper live on the same
         // node, so identity authorization is the router's identity map, not
-        // envelope signatures. `test_only_unsigned` stamps a zero pubkey —
+        // envelope signatures. `test_only_unsigned_typed` stamps a zero pubkey —
         // signature verification would fail closed, which is the correct
         // property here because the inproc transport bypasses it.
-        let Ok(parent_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned(
+        let Ok(parent_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned_typed(
             name.as_str(),
-            peer_id.as_str(),
+            *peer_id,
             format!("inproc://{name}"),
         ) else {
             return false;
@@ -1087,8 +1087,8 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
             .find_implicit_mob_for_bridge_session(&session_id_str)
             .await;
 
-        // Extract parent comms identity for wiring helpers.
-        let comms_peer_id = args.comms_runtime.as_ref().and_then(|r| r.public_key());
+        // Extract parent canonical comms identity for wiring helpers.
+        let comms_peer_id = args.comms_runtime.as_ref().and_then(|r| r.peer_id());
         // Use the shared effective-authority handle if provided (runtime-backed
         // sessions). The agent/turn owner updates this handle via
         // apply_session_effects; mob tools read from it for authorization.
@@ -1929,7 +1929,7 @@ mod tests {
             self.runtimes
                 .write()
                 .await
-                .insert(runtime.key.clone(), runtime);
+                .insert(runtime.peer_id.as_str(), runtime);
         }
 
         async fn get(&self, peer_id: &str) -> Option<Arc<TestCommsRuntime>> {
@@ -1939,7 +1939,8 @@ mod tests {
 
     struct TestCommsRuntime {
         name: String,
-        key: String,
+        peer_id: PeerId,
+        public_key: String,
         trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerDescriptor>>,
         inbox: tokio::sync::RwLock<Vec<InboxInteraction>>,
         notify: Arc<tokio::sync::Notify>,
@@ -1950,7 +1951,8 @@ mod tests {
         async fn new(name: &str, registry: Arc<TestCommsRegistry>) -> Arc<Self> {
             let runtime = Arc::new(Self {
                 name: name.into(),
-                key: meerkat_core::comms::PeerId::new().to_string(),
+                peer_id: PeerId::new(),
+                public_key: "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
                 trusted: tokio::sync::RwLock::new(HashMap::new()),
                 inbox: tokio::sync::RwLock::new(Vec::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
@@ -1963,8 +1965,12 @@ mod tests {
 
     #[async_trait]
     impl CoreCommsRuntime for TestCommsRuntime {
+        fn peer_id(&self) -> Option<PeerId> {
+            Some(self.peer_id)
+        }
+
         fn public_key(&self) -> Option<String> {
-            Some(self.key.clone())
+            Some(self.public_key.clone())
         }
 
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
@@ -3000,7 +3006,17 @@ mod tests {
         let state = Arc::new(MobMcpState::new(service.clone()));
         let parent_name = "parent/lead/l-1".to_string();
         let parent_comms = service.register_external_comms(&parent_name).await;
-        let parent_peer_id = parent_comms.public_key().expect("parent public key");
+        let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
+        let parent_public_key = parent_comms.public_key().expect("parent public key");
+        assert!(
+            parent_public_key.starts_with("ed25519:"),
+            "test fixture should expose transport public-key material separately"
+        );
+        assert_ne!(
+            parent_peer_id.to_string(),
+            parent_public_key,
+            "regression fixture must keep canonical peer id distinct from public key"
+        );
         let session_id = SessionId::new();
         let surface = AgentMobToolSurface::new(
             Arc::clone(&state),
@@ -3009,7 +3025,7 @@ mod tests {
             "claude-sonnet-4-5".to_string(),
             session_id.clone(),
             Some(parent_name.clone()),
-            Some(parent_peer_id.clone()),
+            Some(parent_peer_id),
             Some(parent_comms.clone() as Arc<dyn CoreCommsRuntime>),
         );
 

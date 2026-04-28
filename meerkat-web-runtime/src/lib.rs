@@ -143,34 +143,12 @@ fn patch_fetch_response_url() {}
 // ═══════════════════════════════════════════════════════════
 
 const MAX_SYSTEM_PROMPT_BYTES: usize = 100 * 1024;
-const FORBIDDEN_CAPABILITIES: &[&str] = &["shell", "mcp_stdio", "process_spawn"];
 const SKILL_SEPARATOR: &str = "\n\n---\n\n";
 const MAX_SESSIONS: usize = 64;
 
 // ═══════════════════════════════════════════════════════════
 // Mobpack Types
 // ═══════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-struct WebManifest {
-    mobpack: MobpackSection,
-    #[serde(default)]
-    requires: Option<RequiresSection>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MobpackSection {
-    name: String,
-    version: String,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct RequiresSection {
-    #[serde(default)]
-    capabilities: Vec<String>,
-}
 
 #[derive(Debug, Deserialize)]
 struct MobDefinitionHeader {
@@ -631,7 +609,7 @@ async fn resolve_mob_member_bridge_session_id(
 
 #[derive(Debug)]
 struct ParsedMobpack {
-    manifest: WebManifest,
+    manifest: meerkat_mob_pack::manifest::MobpackManifest,
     definition: MobDefinitionHeader,
     skills: BTreeMap<String, String>,
 }
@@ -647,7 +625,7 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     )
     .map_err(|e| format!("manifest.toml is not valid UTF-8: {e}"))?;
 
-    let manifest: WebManifest =
+    let manifest: meerkat_mob_pack::manifest::MobpackManifest =
         toml::from_str(manifest_text).map_err(|e| format!("invalid manifest.toml: {e}"))?;
 
     let definition: MobDefinitionHeader = serde_json::from_slice(
@@ -658,10 +636,13 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     .map_err(|e| format!("invalid definition.json: {e}"))?;
 
     if let Some(requires) = &manifest.requires {
-        for cap in &requires.capabilities {
-            if FORBIDDEN_CAPABILITIES.contains(&cap.as_str()) {
+        for capability in requires.typed_capabilities() {
+            if meerkat_contracts::capability::browser_mobpack_capability_decision(capability)
+                .is_forbidden()
+            {
                 return Err(format!(
-                    "forbidden capability '{cap}' is not allowed in browser-safe mode"
+                    "forbidden capability '{}' is not allowed in browser-safe mode",
+                    capability.raw()
                 ));
             }
         }
@@ -2488,7 +2469,7 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 mod tests {
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        merge_runtime_system_context_state, poll_subscription,
+        merge_runtime_system_context_state, parse_mobpack, poll_subscription,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2513,6 +2494,45 @@ mod tests {
     use serde_json::json;
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::HashMap;
+
+    fn test_mobpack_bytes(capabilities: &[&str]) -> Vec<u8> {
+        let capability_values = capabilities
+            .iter()
+            .map(|capability| format!("\"{capability}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!(
+            r#"[mobpack]
+name = "browser-test"
+version = "1.0.0"
+
+[requires]
+capabilities = [{capability_values}]
+"#
+        );
+
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        append_test_mobpack_file(&mut builder, "manifest.toml", manifest.as_bytes());
+        append_test_mobpack_file(&mut builder, "definition.json", br#"{"id":"browser-test"}"#);
+        builder.finish().expect("finish tar archive");
+        let encoder = builder.into_inner().expect("take gzip encoder");
+        encoder.finish().expect("finish gzip archive")
+    }
+
+    fn append_test_mobpack_file<W: std::io::Write>(
+        builder: &mut tar::Builder<W>,
+        path: &str,
+        bytes: &[u8],
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).expect("set test mobpack path");
+        header.set_size(bytes.len() as u64);
+        header.set_cksum();
+        builder
+            .append(&header, bytes)
+            .expect("append test mobpack file");
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn test_connection_ref() -> meerkat_core::ConnectionRef {
@@ -2612,6 +2632,41 @@ mod tests {
             merged.seen.get("ctx-concurrent").map(|seen| seen.state),
             Some(SeenSystemContextState::Pending)
         );
+    }
+
+    #[test]
+    fn parse_mobpack_accepts_browser_safe_typed_capabilities() {
+        let bytes = test_mobpack_bytes(&["sessions", "comms", "vendor.custom"]);
+
+        let parsed = parse_mobpack(&bytes).expect("browser-safe mobpack should parse");
+
+        assert_eq!(
+            parsed
+                .manifest
+                .requires
+                .as_ref()
+                .expect("requires section")
+                .capabilities,
+            vec![
+                "sessions".to_string(),
+                "comms".to_string(),
+                "vendor.custom".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_mobpack_rejects_browser_forbidden_typed_capabilities() {
+        for capability in ["shell", "mcp_stdio", "process_spawn"] {
+            let bytes = test_mobpack_bytes(&[capability]);
+
+            let error = parse_mobpack(&bytes).expect_err("browser-forbidden capability rejected");
+
+            assert!(
+                error.contains(&format!("forbidden capability '{capability}'")),
+                "unexpected error for {capability}: {error}"
+            );
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]

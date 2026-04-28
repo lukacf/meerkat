@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+meerkat-contracts = { workspace = true }
 meerkat-mob = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

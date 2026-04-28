@@ -12,7 +12,7 @@ pub use registry::{
     CapabilityRegistration, available_capabilities, build_capabilities, resolve_capabilities,
 };
 
-use std::borrow::Cow;
+use std::{borrow::Cow, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,99 @@ pub enum CapabilityId {
     McpLive,
 }
 
+/// Capability tokens that appear in mobpack manifests.
+///
+/// Manifests remain string-based for compatibility, but policy checks should
+/// classify those strings before making allow/forbid decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MobpackCapabilityRequirement<'a> {
+    raw: &'a str,
+    id: MobpackCapabilityId,
+}
+
+impl<'a> MobpackCapabilityRequirement<'a> {
+    pub fn parse(raw: &'a str) -> Self {
+        let id = CapabilityId::from_str(raw).map_or_else(
+            |_| {
+                HostProcessCapabilityId::parse(raw).map_or(
+                    MobpackCapabilityId::Unknown,
+                    MobpackCapabilityId::HostProcess,
+                )
+            },
+            MobpackCapabilityId::Known,
+        );
+        Self { raw, id }
+    }
+
+    pub fn raw(self) -> &'a str {
+        self.raw
+    }
+
+    pub fn id(self) -> MobpackCapabilityId {
+        self.id
+    }
+}
+
+/// Typed identity for a mobpack capability requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobpackCapabilityId {
+    Known(CapabilityId),
+    HostProcess(HostProcessCapabilityId),
+    Unknown,
+}
+
+/// Host process capabilities named by existing mobpack manifests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostProcessCapabilityId {
+    McpStdio,
+    ProcessSpawn,
+}
+
+impl HostProcessCapabilityId {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "mcp_stdio" => Some(Self::McpStdio),
+            "process_spawn" => Some(Self::ProcessSpawn),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::McpStdio => "mcp_stdio",
+            Self::ProcessSpawn => "process_spawn",
+        }
+    }
+}
+
+/// Browser mobpack policy decision for a typed capability requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserMobpackCapabilityDecision {
+    Allowed,
+    Forbidden { capability: MobpackCapabilityId },
+}
+
+impl BrowserMobpackCapabilityDecision {
+    pub fn is_forbidden(self) -> bool {
+        matches!(self, Self::Forbidden { .. })
+    }
+}
+
+pub fn browser_mobpack_capability_decision(
+    requirement: MobpackCapabilityRequirement<'_>,
+) -> BrowserMobpackCapabilityDecision {
+    match requirement.id() {
+        MobpackCapabilityId::Known(CapabilityId::Shell) | MobpackCapabilityId::HostProcess(_) => {
+            BrowserMobpackCapabilityDecision::Forbidden {
+                capability: requirement.id(),
+            }
+        }
+        MobpackCapabilityId::Known(_) | MobpackCapabilityId::Unknown => {
+            BrowserMobpackCapabilityDecision::Allowed
+        }
+    }
+}
+
 /// Where a capability applies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -61,6 +154,62 @@ pub enum CapabilityScope {
     Universal,
     /// Available only on specific protocols.
     Extension { protocols: Cow<'static, [Protocol]> },
+}
+
+#[cfg(test)]
+mod mobpack_policy_tests {
+    use super::{
+        BrowserMobpackCapabilityDecision, CapabilityId, HostProcessCapabilityId,
+        MobpackCapabilityId, MobpackCapabilityRequirement, browser_mobpack_capability_decision,
+    };
+
+    #[test]
+    fn mobpack_capability_requirement_classifies_known_capabilities() {
+        let requirement = MobpackCapabilityRequirement::parse("comms");
+
+        assert_eq!(
+            requirement.id(),
+            MobpackCapabilityId::Known(CapabilityId::Comms)
+        );
+        assert_eq!(requirement.raw(), "comms");
+    }
+
+    #[test]
+    fn mobpack_capability_requirement_classifies_host_process_capabilities() {
+        assert_eq!(
+            MobpackCapabilityRequirement::parse("mcp_stdio").id(),
+            MobpackCapabilityId::HostProcess(HostProcessCapabilityId::McpStdio)
+        );
+        assert_eq!(
+            MobpackCapabilityRequirement::parse("process_spawn").id(),
+            MobpackCapabilityId::HostProcess(HostProcessCapabilityId::ProcessSpawn)
+        );
+    }
+
+    #[test]
+    fn browser_mobpack_policy_forbids_shell_and_host_process_capabilities() {
+        for raw in ["shell", "mcp_stdio", "process_spawn"] {
+            assert!(
+                browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(raw))
+                    .is_forbidden(),
+                "{raw} should be forbidden in browser mobpacks"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_mobpack_policy_allows_safe_known_and_unknown_capabilities() {
+        assert_eq!(
+            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse("comms")),
+            BrowserMobpackCapabilityDecision::Allowed
+        );
+        assert_eq!(
+            browser_mobpack_capability_decision(MobpackCapabilityRequirement::parse(
+                "vendor.custom"
+            )),
+            BrowserMobpackCapabilityDecision::Allowed
+        );
+    }
 }
 
 /// Runtime status of a capability.

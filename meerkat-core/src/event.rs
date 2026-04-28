@@ -4,6 +4,7 @@
 
 use crate::error::{AgentError, LlmFailureReason};
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
+use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
 use crate::retry::LlmRetrySchedule;
 use crate::time_compat::SystemTime;
 use crate::types::{ContentInput, SessionId, StopReason, Usage};
@@ -51,6 +52,57 @@ pub enum AgentErrorClass {
     Hook,
     Terminal,
     NoPendingBoundary,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundJobTerminalStatus {
+    Completed,
+    Failed,
+    Aborted,
+    Cancelled,
+    Retired,
+    Terminated,
+}
+
+impl BackgroundJobTerminalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Aborted => "aborted",
+            Self::Cancelled => "cancelled",
+            Self::Retired => "retired",
+            Self::Terminated => "terminated",
+        }
+    }
+
+    pub fn from_terminal_outcome(outcome: &OperationTerminalOutcome) -> Self {
+        match outcome {
+            OperationTerminalOutcome::Completed(_) => Self::Completed,
+            OperationTerminalOutcome::Failed { .. } => Self::Failed,
+            OperationTerminalOutcome::Aborted { .. } => Self::Aborted,
+            OperationTerminalOutcome::Cancelled { .. } => Self::Cancelled,
+            OperationTerminalOutcome::Retired => Self::Retired,
+            OperationTerminalOutcome::Terminated { .. } => Self::Terminated,
+        }
+    }
+
+    pub fn from_operation_status(status: OperationStatus) -> Option<Self> {
+        match status {
+            OperationStatus::Completed => Some(Self::Completed),
+            OperationStatus::Failed => Some(Self::Failed),
+            OperationStatus::Aborted => Some(Self::Aborted),
+            OperationStatus::Cancelled => Some(Self::Cancelled),
+            OperationStatus::Retired => Some(Self::Retired),
+            OperationStatus::Terminated => Some(Self::Terminated),
+            OperationStatus::Absent
+            | OperationStatus::Provisioning
+            | OperationStatus::Running
+            | OperationStatus::Retiring => None,
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -677,6 +729,8 @@ pub enum AgentEvent {
         job_id: String,
         display_name: String,
         status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_status: Option<BackgroundJobTerminalStatus>,
         detail: String,
     },
 }
@@ -888,10 +942,16 @@ pub fn format_verbose_event_with_config(
             job_id,
             display_name,
             status,
+            terminal_status,
             detail,
-        } => Some(format!(
-            "  BG job {job_id} ({display_name}) {status}: {detail}"
-        )),
+        } => {
+            let status = terminal_status
+                .map(BackgroundJobTerminalStatus::as_str)
+                .unwrap_or(status.as_str());
+            Some(format!(
+                "  BG job {job_id} ({display_name}) {status}: {detail}"
+            ))
+        }
         AgentEvent::InteractionCallbackPending {
             tool_name, args, ..
         } => Some(format!(
@@ -1030,6 +1090,7 @@ mod tests {
                 job_id: "j_123".to_string(),
                 display_name: "sleep 2".to_string(),
                 status: "completed".to_string(),
+                terminal_status: Some(BackgroundJobTerminalStatus::Completed),
                 detail: "exit_code: 0".to_string(),
             },
         ];
@@ -1048,6 +1109,142 @@ mod tests {
             let json2 = serde_json::to_value(&roundtrip).unwrap();
             assert_eq!(json, json2);
         }
+    }
+
+    #[test]
+    fn background_job_completed_carries_typed_terminal_status() {
+        let event = AgentEvent::BackgroundJobCompleted {
+            job_id: "j_123".to_string(),
+            display_name: "sleep 2".to_string(),
+            status: BackgroundJobTerminalStatus::Failed.as_str().to_string(),
+            terminal_status: Some(BackgroundJobTerminalStatus::Failed),
+            detail: "exit_code: 1".to_string(),
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "background_job_completed");
+        assert_eq!(json["status"], "failed");
+        assert_eq!(json["terminal_status"], "failed");
+
+        let roundtrip: AgentEvent = serde_json::from_value(json).unwrap();
+        match roundtrip {
+            AgentEvent::BackgroundJobCompleted {
+                status,
+                terminal_status,
+                ..
+            } => {
+                assert_eq!(status, "failed");
+                assert_eq!(terminal_status, Some(BackgroundJobTerminalStatus::Failed));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let legacy_json = serde_json::json!({
+            "type": "background_job_completed",
+            "job_id": "j_123",
+            "display_name": "sleep 2",
+            "status": "failed",
+            "detail": "exit_code: 1"
+        });
+        let legacy_event: AgentEvent = serde_json::from_value(legacy_json).unwrap();
+        match legacy_event {
+            AgentEvent::BackgroundJobCompleted {
+                job_id,
+                display_name,
+                status,
+                terminal_status,
+                detail,
+            } => {
+                assert_eq!(job_id, "j_123");
+                assert_eq!(display_name, "sleep 2");
+                assert_eq!(status, "failed");
+                assert_eq!(terminal_status, None);
+                assert_eq!(detail, "exit_code: 1");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn background_job_terminal_status_maps_operation_truth() {
+        use crate::ops::{OperationId, OperationResult};
+        use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
+
+        let result = OperationResult {
+            id: OperationId(uuid::Uuid::new_v4()),
+            content: String::new(),
+            is_error: false,
+            duration_ms: 0,
+            tokens_used: 0,
+        };
+
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_terminal_outcome(
+                &OperationTerminalOutcome::Completed(result)
+            ),
+            BackgroundJobTerminalStatus::Completed
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_terminal_outcome(&OperationTerminalOutcome::Failed {
+                error: "boom".to_string(),
+            }),
+            BackgroundJobTerminalStatus::Failed
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_terminal_outcome(
+                &OperationTerminalOutcome::Aborted { reason: None }
+            ),
+            BackgroundJobTerminalStatus::Aborted
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_terminal_outcome(
+                &OperationTerminalOutcome::Cancelled {
+                    reason: Some("user".to_string()),
+                }
+            ),
+            BackgroundJobTerminalStatus::Cancelled
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_terminal_outcome(&OperationTerminalOutcome::Retired),
+            BackgroundJobTerminalStatus::Retired
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_terminal_outcome(
+                &OperationTerminalOutcome::Terminated {
+                    reason: "channel closed".to_string(),
+                }
+            ),
+            BackgroundJobTerminalStatus::Terminated
+        );
+
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Completed),
+            Some(BackgroundJobTerminalStatus::Completed)
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Failed),
+            Some(BackgroundJobTerminalStatus::Failed)
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Aborted),
+            Some(BackgroundJobTerminalStatus::Aborted)
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Cancelled),
+            Some(BackgroundJobTerminalStatus::Cancelled)
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Retired),
+            Some(BackgroundJobTerminalStatus::Retired)
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Terminated),
+            Some(BackgroundJobTerminalStatus::Terminated)
+        );
+        assert_eq!(
+            BackgroundJobTerminalStatus::from_operation_status(OperationStatus::Running),
+            None
+        );
     }
 
     #[test]
@@ -1276,6 +1473,7 @@ mod tests {
                 job_id: "j_123".to_string(),
                 display_name: "sleep 2".to_string(),
                 status: "completed".to_string(),
+                terminal_status: Some(BackgroundJobTerminalStatus::Completed),
                 detail: "exit_code: 0".to_string(),
             },
         ];

@@ -3,8 +3,8 @@
 use crate::budget::{BudgetDimension, BudgetExceeded};
 use crate::error::{AgentError, ToolError};
 use crate::event::{
-    AgentEvent, BudgetType, DeferredCatalogDelta, ToolConfigChangeDomain,
-    ToolConfigChangeOperation, ToolConfigChangedPayload,
+    AgentEvent, BackgroundJobTerminalStatus, BudgetType, DeferredCatalogDelta,
+    ToolConfigChangeDomain, ToolConfigChangeOperation, ToolConfigChangedPayload,
 };
 use crate::hooks::{
     HookDecision, HookInvocation, HookLlmRequest, HookLlmResponse, HookPatch, HookPoint,
@@ -1127,12 +1127,17 @@ where
                                 .as_ref()
                                 .map(|e| e.detail.clone())
                                 .unwrap_or_default();
-                            let status_str = completion_outcome_status_str(&entry.terminal_outcome);
+                            let terminal_status =
+                                BackgroundJobTerminalStatus::from_terminal_outcome(
+                                    &entry.terminal_outcome,
+                                );
+                            let status_str = terminal_status.as_str();
 
                             emit_event!(AgentEvent::BackgroundJobCompleted {
                                 job_id: job_id.clone(),
                                 display_name: entry.display_name.clone(),
                                 status: status_str.to_string(),
+                                terminal_status: Some(terminal_status),
                                 detail: detail.clone(),
                             });
 
@@ -1158,20 +1163,32 @@ where
                     // without wiring into the ops-lifecycle registry. This runs
                     // independently of the feed — they are complementary sources.
                     for completion in &ext.background_completions {
-                        if !completion.status.is_terminal() {
+                        let Some(terminal_status) = completion
+                            .terminal_outcome
+                            .as_ref()
+                            .map(BackgroundJobTerminalStatus::from_terminal_outcome)
+                            .or_else(|| {
+                                BackgroundJobTerminalStatus::from_operation_status(
+                                    completion.status,
+                                )
+                            })
+                        else {
                             continue;
-                        }
+                        };
+                        let status_str = terminal_status.as_str();
+
                         emit_event!(AgentEvent::BackgroundJobCompleted {
                             job_id: completion.job_id.clone(),
                             display_name: completion.display_name.clone(),
-                            status: completion.status.as_str().to_string(),
+                            status: status_str.to_string(),
+                            terminal_status: Some(terminal_status),
                             detail: completion.detail.clone(),
                         });
                         let mut notice = format!(
                             "Background job `{}` (id={}) {}: {}",
                             completion.display_name,
                             completion.job_id,
-                            completion.status.as_str(),
+                            status_str,
                             completion.detail,
                         );
                         notice.push_str("\nUse shell_job_status to get the full output.");
@@ -2444,21 +2461,6 @@ impl ToolCallOwned {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 fn fallback_raw_value() -> Box<RawValue> {
     RawValue::from_string("{}".to_string()).expect("static JSON is valid")
-}
-
-/// Map a terminal outcome to a stable status string for display.
-fn completion_outcome_status_str(
-    outcome: &crate::ops_lifecycle::OperationTerminalOutcome,
-) -> &'static str {
-    use crate::ops_lifecycle::OperationTerminalOutcome;
-    match outcome {
-        OperationTerminalOutcome::Completed(_) => "completed",
-        OperationTerminalOutcome::Failed { .. } => "failed",
-        OperationTerminalOutcome::Aborted { .. } => "aborted",
-        OperationTerminalOutcome::Cancelled { .. } => "cancelled",
-        OperationTerminalOutcome::Retired => "retired",
-        OperationTerminalOutcome::Terminated { .. } => "terminated",
-    }
 }
 
 #[cfg(test)]

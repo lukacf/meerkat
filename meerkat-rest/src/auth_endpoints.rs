@@ -17,7 +17,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
-use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
     WireAuthProfile, WireAuthProfileCleared, WireAuthProfileCreated, WireAuthProfileDetail,
     WireAuthProfilesList, WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity,
@@ -29,23 +28,16 @@ use meerkat_core::{
     AuthStatusPhase, ConnectionRef, CredentialSourceSpec, Provider, RealmConnectionSet,
     ResolvedConnectionTarget,
 };
-use meerkat_gemini::runtime::oauth as g_oauth;
-use meerkat_openai::runtime::oauth as o_oauth;
 use meerkat_providers::auth_oauth::{
-    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
-    poll_device_code, request_device_code,
+    DevicePollOutcome, OAuthError, PkcePair, exchange_authorization_code, poll_device_code,
+    request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
-use meerkat_providers::oauth_flow::{OAuthFlowError, global_oauth_flow_registry};
+use meerkat_providers::oauth_flow::{
+    OAuthFlowError, global_oauth_flow_registry, resolve_oauth_provider,
+};
 
 use crate::AppState;
-
-type ProviderEndpointResolution = (
-    Provider,
-    OAuthEndpoints,
-    PersistedAuthMode,
-    Option<&'static str>,
-);
 
 async fn load_config(state: &AppState) -> Result<meerkat_core::Config, (StatusCode, String)> {
     state
@@ -531,36 +523,6 @@ pub async fn test_auth_binding(
 // The server owns the state -> PKCE verifier correlation. The client receives
 // only the authorize URL and state, then posts the provider code with that state.
 
-fn provider_endpoints(
-    provider: &str,
-    redirect_uri: &str,
-) -> Result<ProviderEndpointResolution, (StatusCode, String)> {
-    match provider {
-        "anthropic" | "claude" | "claude.ai" => Ok((
-            Provider::Anthropic,
-            a_oauth::claude_ai_endpoints(redirect_uri),
-            PersistedAuthMode::ClaudeAiOauth,
-            None,
-        )),
-        "openai" | "chatgpt" => Ok((
-            Provider::OpenAI,
-            o_oauth::chatgpt_endpoints(redirect_uri),
-            PersistedAuthMode::ChatgptOauth,
-            None,
-        )),
-        "google" | "gemini" | "code_assist" => Ok((
-            Provider::Gemini,
-            g_oauth::code_assist_endpoints(redirect_uri),
-            PersistedAuthMode::GoogleOauth,
-            Some(g_oauth::CODE_ASSIST_CLIENT_SECRET),
-        )),
-        other => Err((
-            StatusCode::BAD_REQUEST,
-            format!("Unknown provider '{other}'. Supported: anthropic, openai, google."),
-        )),
-    }
-}
-
 #[derive(serde::Deserialize)]
 pub struct LoginStartBody {
     pub provider: String,
@@ -570,17 +532,20 @@ pub struct LoginStartBody {
 }
 
 pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse {
-    let (_provider, endpoints, _mode, _secret) =
-        match provider_endpoints(&body.provider, &body.redirect_uri) {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
+    let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().to_string();
     let state_token = match global_oauth_flow_registry().start(
-        body.provider.clone(),
+        resolved.identity,
         body.redirect_uri.clone(),
         verifier,
     ) {
@@ -600,7 +565,9 @@ pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse 
                 .into_response();
         }
     };
-    let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
+    let authorize_url = resolved
+        .endpoints
+        .authorize_url_with_pkce(&pkce.challenge, &state_token);
     (
         StatusCode::OK,
         Json(WireLoginStart {
@@ -631,13 +598,17 @@ pub async fn complete_login(
     State(state): State<AppState>,
     Json(body): Json<LoginCompleteBody>,
 ) -> impl IntoResponse {
-    let (provider, endpoints, mode, client_secret) =
-        match provider_endpoints(&body.provider, &body.redirect_uri) {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
+    let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let provider = resolved.provider;
     let (realm_id, binding_id) =
         match require_explicit_oauth_identity(body.realm_id.as_ref(), body.binding_id.as_ref()) {
             Ok(v) => v,
@@ -677,35 +648,37 @@ pub async fn complete_login(
             .into_response();
     }
 
-    let flow =
-        match global_oauth_flow_registry().consume(&body.state, &body.provider, &body.redirect_uri)
-        {
-            Ok(flow) => flow,
-            Err(OAuthFlowError::Missing) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": "oauth state is missing or expired" })),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                return (
+    let flow = match global_oauth_flow_registry().consume(
+        &body.state,
+        resolved.identity,
+        &body.redirect_uri,
+    ) {
+        Ok(flow) => flow,
+        Err(OAuthFlowError::Missing) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "oauth state is missing or expired" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
                 StatusCode::BAD_REQUEST,
                 Json(
                     serde_json::json!({ "error": format!("oauth state verification failed: {e}") }),
                 ),
             )
                 .into_response();
-            }
-        };
+        }
+    };
 
     let http = reqwest::Client::new();
     let result = match exchange_authorization_code(
         &http,
-        &endpoints,
+        &resolved.endpoints,
         &body.code,
         &flow.pkce_verifier,
-        client_secret,
+        resolved.client_secret,
     )
     .await
     {
@@ -734,7 +707,7 @@ pub async fn complete_login(
         .expires_in_secs
         .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
     let tokens = PersistedTokens {
-        auth_mode: mode,
+        auth_mode: resolved.auth_mode,
         primary_secret: Some(result.access_token),
         refresh_token: result.refresh_token,
         id_token: result.id_token,
@@ -788,13 +761,17 @@ pub struct DeviceStartBody {
 }
 
 pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoResponse {
-    let (_provider, endpoints, _mode, _secret) = match provider_endpoints(&body.provider, "") {
+    let resolved = match resolve_oauth_provider(&body.provider, "") {
         Ok(v) => v,
-        Err((status, msg)) => {
-            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     };
-    if endpoints.device_code_url.is_none() {
+    if resolved.endpoints.device_code_url.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -807,7 +784,7 @@ pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoR
             .into_response();
     }
     let http = reqwest::Client::new();
-    match request_device_code(&http, &endpoints).await {
+    match request_device_code(&http, &resolved.endpoints).await {
         Ok(resp) => (
             StatusCode::OK,
             Json(WireDeviceStart {
@@ -855,13 +832,18 @@ pub async fn complete_device_login(
     State(state): State<AppState>,
     Json(body): Json<DeviceCompleteBody>,
 ) -> impl IntoResponse {
-    let (provider, endpoints, mode, client_secret) = match provider_endpoints(&body.provider, "") {
+    let resolved = match resolve_oauth_provider(&body.provider, "") {
         Ok(v) => v,
-        Err((status, msg)) => {
-            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     };
-    if endpoints.device_code_url.is_none() {
+    let provider = resolved.provider;
+    if resolved.endpoints.device_code_url.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -912,7 +894,13 @@ pub async fn complete_device_login(
             .into_response();
     }
     let http = reqwest::Client::new();
-    let outcome = match poll_device_code(&http, &endpoints, &body.device_code, client_secret).await
+    let outcome = match poll_device_code(
+        &http,
+        &resolved.endpoints,
+        &body.device_code,
+        resolved.client_secret,
+    )
+    .await
     {
         Ok(o) => o,
         Err(e) => {
@@ -951,7 +939,7 @@ pub async fn complete_device_login(
                 .expires_in_secs
                 .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
             let tokens = PersistedTokens {
-                auth_mode: mode,
+                auth_mode: resolved.auth_mode,
                 primary_secret: Some(result.access_token),
                 refresh_token: result.refresh_token,
                 id_token: result.id_token,

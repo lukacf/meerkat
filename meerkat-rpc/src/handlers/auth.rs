@@ -19,26 +19,19 @@ use meerkat_core::{
     AuthStatusPhase, ConnectionRef, ConnectionTargetError, CredentialSourceSpec, Provider,
     RealmConnectionSet, ResolvedConnectionTarget,
 };
-use meerkat_gemini::runtime::oauth as g_oauth;
-use meerkat_openai::runtime::oauth as o_oauth;
 use meerkat_providers::auth_oauth::{
-    DevicePollOutcome, OAuthEndpoints, OAuthError, PkcePair, exchange_authorization_code,
-    poll_device_code, request_device_code,
+    DevicePollOutcome, OAuthError, PkcePair, exchange_authorization_code, poll_device_code,
+    request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey};
-use meerkat_providers::oauth_flow::{OAuthFlowError, global_oauth_flow_registry};
+use meerkat_providers::oauth_flow::{
+    OAuthFlowError, global_oauth_flow_registry, resolve_oauth_provider,
+};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
-
-type ProviderEndpointResolution = (
-    Provider,
-    OAuthEndpoints,
-    PersistedAuthMode,
-    Option<&'static str>,
-);
 
 #[derive(serde::Deserialize)]
 struct RealmIdParams {
@@ -229,35 +222,6 @@ fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
         CredentialSourceSpec::PlatformDefault => "platform_default",
         CredentialSourceSpec::Command { .. } => "command",
         CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
-    }
-}
-
-fn provider_endpoints(
-    provider: &str,
-    redirect_uri: &str,
-) -> Result<ProviderEndpointResolution, String> {
-    match provider {
-        "anthropic" | "claude" | "claude.ai" => Ok((
-            Provider::Anthropic,
-            a_oauth::claude_ai_endpoints(redirect_uri),
-            PersistedAuthMode::ClaudeAiOauth,
-            None,
-        )),
-        "openai" | "chatgpt" => Ok((
-            Provider::OpenAI,
-            o_oauth::chatgpt_endpoints(redirect_uri),
-            PersistedAuthMode::ChatgptOauth,
-            None,
-        )),
-        "google" | "gemini" | "code_assist" => Ok((
-            Provider::Gemini,
-            g_oauth::code_assist_endpoints(redirect_uri),
-            PersistedAuthMode::GoogleOauth,
-            Some(g_oauth::CODE_ASSIST_CLIENT_SECRET),
-        )),
-        other => Err(format!(
-            "Unknown provider '{other}'. Supported: anthropic, openai, google."
-        )),
     }
 }
 
@@ -545,17 +509,16 @@ pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (_provider, endpoints, _mode, _secret) =
-        match provider_endpoints(&parsed.provider, &parsed.redirect_uri) {
-            Ok(v) => v,
-            Err(msg) => {
-                return RpcResponse::error(id, error::INVALID_PARAMS, msg);
-            }
-        };
+    let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
+        Ok(v) => v,
+        Err(e) => {
+            return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
+        }
+    };
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().clone();
     let state_token = match global_oauth_flow_registry().start(
-        parsed.provider.clone(),
+        resolved.identity,
         parsed.redirect_uri.clone(),
         verifier,
     ) {
@@ -575,7 +538,9 @@ pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue
             );
         }
     };
-    let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
+    let authorize_url = resolved
+        .endpoints
+        .authorize_url_with_pkce(&pkce.challenge, &state_token);
     RpcResponse::success(
         id,
         serde_json::json!({
@@ -610,13 +575,13 @@ pub async fn handle_auth_login_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (provider, endpoints, mode, client_secret) =
-        match provider_endpoints(&parsed.provider, &parsed.redirect_uri) {
-            Ok(v) => v,
-            Err(msg) => {
-                return RpcResponse::error(id, error::INVALID_PARAMS, msg);
-            }
-        };
+    let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
+        Ok(v) => v,
+        Err(e) => {
+            return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
+        }
+    };
+    let provider = resolved.provider;
     let target = match resolve_oauth_target(
         runtime,
         provider,
@@ -647,7 +612,7 @@ pub async fn handle_auth_login_complete(
 
     let flow = match global_oauth_flow_registry().consume(
         &parsed.state,
-        &parsed.provider,
+        resolved.identity,
         &parsed.redirect_uri,
     ) {
         Ok(flow) => flow,
@@ -674,10 +639,10 @@ pub async fn handle_auth_login_complete(
     let http = reqwest::Client::new();
     let result = match exchange_authorization_code(
         &http,
-        &endpoints,
+        &resolved.endpoints,
         &parsed.code,
         &flow.pkce_verifier,
-        client_secret,
+        resolved.client_secret,
     )
     .await
     {
@@ -701,7 +666,7 @@ pub async fn handle_auth_login_complete(
         .expires_in_secs
         .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
     let tokens = PersistedTokens {
-        auth_mode: mode,
+        auth_mode: resolved.auth_mode,
         primary_secret: Some(result.access_token),
         refresh_token: result.refresh_token,
         id_token: result.id_token,
@@ -759,11 +724,11 @@ pub async fn handle_auth_login_device_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (_provider, endpoints, _mode, _secret) = match provider_endpoints(&parsed.provider, "") {
+    let resolved = match resolve_oauth_provider(&parsed.provider, "") {
         Ok(v) => v,
-        Err(msg) => return RpcResponse::error(id, error::INVALID_PARAMS, msg),
+        Err(e) => return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string()),
     };
-    if endpoints.device_code_url.is_none() {
+    if resolved.endpoints.device_code_url.is_none() {
         return RpcResponse::error(
             id,
             error::INVALID_PARAMS,
@@ -774,7 +739,7 @@ pub async fn handle_auth_login_device_start(
         );
     }
     let http = reqwest::Client::new();
-    match request_device_code(&http, &endpoints).await {
+    match request_device_code(&http, &resolved.endpoints).await {
         Ok(resp) => RpcResponse::success(
             id,
             serde_json::json!({
@@ -824,12 +789,12 @@ pub async fn handle_auth_login_device_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (provider, endpoints, mode, client_secret) = match provider_endpoints(&parsed.provider, "")
-    {
+    let resolved = match resolve_oauth_provider(&parsed.provider, "") {
         Ok(v) => v,
-        Err(msg) => return RpcResponse::error(id, error::INVALID_PARAMS, msg),
+        Err(e) => return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string()),
     };
-    if endpoints.device_code_url.is_none() {
+    let provider = resolved.provider;
+    if resolved.endpoints.device_code_url.is_none() {
         return RpcResponse::error(
             id,
             error::INVALID_PARAMS,
@@ -867,17 +832,23 @@ pub async fn handle_auth_login_device_complete(
         );
     }
     let http = reqwest::Client::new();
-    let outcome =
-        match poll_device_code(&http, &endpoints, &parsed.device_code, client_secret).await {
-            Ok(o) => o,
-            Err(e) => {
-                return RpcResponse::error(
-                    id,
-                    error::INTERNAL_ERROR,
-                    format!("device-code poll failed: {e}"),
-                );
-            }
-        };
+    let outcome = match poll_device_code(
+        &http,
+        &resolved.endpoints,
+        &parsed.device_code,
+        resolved.client_secret,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("device-code poll failed: {e}"),
+            );
+        }
+    };
     match outcome {
         DevicePollOutcome::Pending => {
             RpcResponse::success(id, serde_json::json!({ "state": "pending" }))
@@ -900,7 +871,7 @@ pub async fn handle_auth_login_device_complete(
                 .expires_in_secs
                 .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
             let tokens = PersistedTokens {
-                auth_mode: mode,
+                auth_mode: resolved.auth_mode,
                 primary_secret: Some(result.access_token),
                 refresh_token: result.refresh_token,
                 id_token: result.id_token,

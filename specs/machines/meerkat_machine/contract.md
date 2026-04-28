@@ -96,7 +96,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `next_completion_seq`: `u64`
 - `known_surfaces`: `Set<String>`
 - `active_surfaces`: `Set<String>`
-- `visible_surfaces`: `Set<String>`
 - `surface_base_state`: `Map<String, ExternalToolSurfaceBaseState>`
 - `surface_pending_op`: `Map<String, SurfacePendingOp>`
 - `surface_staged_op`: `Map<String, SurfaceStagedOp>`
@@ -112,10 +111,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `snapshot_epoch`: `u64`
 - `snapshot_aligned_epoch`: `u64`
 - `surface_draining_since_ms`: `Map<String, u64>`
-- `surface_removal_timeout_at_ms`: `Map<String, u64>`
 - `surface_removal_applied_at_turn`: `Map<String, u64>`
 - `surface_phase`: `SurfacePhase`
-- `removal_timeout_ms`: `u64`
 - `realtime_intent_present`: `Bool`
 - `realtime_binding_state`: `RealtimeBindingState`
 - `realtime_binding_authority_epoch`: `Option<u64>`

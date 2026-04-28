@@ -1244,7 +1244,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             // --- External tool surface substate ---
             known_surfaces: Set<String>,
             active_surfaces: Set<String>,
-            visible_surfaces: Set<String>,
             surface_base_state: Map<String, Enum<ExternalToolSurfaceBaseState>>,
             surface_pending_op: Map<String, SurfacePendingOp>,
             surface_staged_op: Map<String, SurfaceStagedOp>,
@@ -1260,10 +1259,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             snapshot_epoch: u64,
             snapshot_aligned_epoch: u64,
             surface_draining_since_ms: Map<String, u64>,
-            surface_removal_timeout_at_ms: Map<String, u64>,
             surface_removal_applied_at_turn: Map<String, u64>,
             surface_phase: SurfacePhase,
-            removal_timeout_ms: u64,
 
             // --- Realtime-attachment authority (per-session) ---
             realtime_intent_present: bool,
@@ -1559,7 +1556,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             next_completion_seq = 0,
             known_surfaces = EmptySet,
             active_surfaces = EmptySet,
-            visible_surfaces = EmptySet,
             surface_base_state = EmptyMap,
             surface_pending_op = EmptyMap,
             surface_staged_op = EmptyMap,
@@ -1575,10 +1571,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             snapshot_epoch = 0,
             snapshot_aligned_epoch = 0,
             surface_draining_since_ms = EmptyMap,
-            surface_removal_timeout_at_ms = EmptyMap,
             surface_removal_applied_at_turn = EmptyMap,
             surface_phase = SurfacePhase::Operating,
-            removal_timeout_ms = 30000,
             realtime_intent_present = false,
             realtime_binding_state = RealtimeBindingState::Unbound,
             realtime_binding_authority_epoch = None,
@@ -4798,9 +4792,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.reload_staged_surfaces.remove(surface_id);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removing);
                 self.active_surfaces.remove(surface_id);
-                self.visible_surfaces.remove(surface_id);
                 self.surface_draining_since_ms.insert(surface_id, now_ms);
-                self.surface_removal_timeout_at_ms.insert(surface_id, now_ms + self.removal_timeout_ms);
                 self.surface_removal_applied_at_turn.insert(surface_id, applied_at_turn);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Draining);
@@ -4835,9 +4827,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.reload_staged_surfaces.remove(surface_id);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removing);
                 self.active_surfaces.remove(surface_id);
-                self.visible_surfaces.remove(surface_id);
                 self.surface_draining_since_ms.insert(surface_id, now_ms);
-                self.surface_removal_timeout_at_ms.insert(surface_id, now_ms + self.removal_timeout_ms);
                 self.surface_removal_applied_at_turn.insert(surface_id, applied_at_turn);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Draining);
@@ -4915,7 +4905,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
-                self.visible_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Add);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
                 self.snapshot_epoch = self.snapshot_epoch + 1;
@@ -4941,7 +4930,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
-                self.visible_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Add);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
                 self.snapshot_epoch = self.snapshot_epoch + 1;
@@ -4967,7 +4955,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
-                self.visible_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Reload);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
                 self.snapshot_epoch = self.snapshot_epoch + 1;
@@ -4993,7 +4980,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Active);
                 self.active_surfaces.insert(surface_id);
-                self.visible_surfaces.insert(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Reload);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
                 self.snapshot_epoch = self.snapshot_epoch + 1;
@@ -5151,12 +5137,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
-                self.visible_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_pending_task_sequence.insert(surface_id, 0);
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_draining_since_ms.remove(surface_id);
-                self.surface_removal_timeout_at_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
@@ -5182,12 +5166,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
-                self.visible_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_pending_task_sequence.insert(surface_id, 0);
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_draining_since_ms.remove(surface_id);
-                self.surface_removal_timeout_at_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Applied);
@@ -5210,13 +5192,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
-                self.visible_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_pending_task_sequence.insert(surface_id, 0);
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_inflight_calls.insert(surface_id, 0);
                 self.surface_draining_since_ms.remove(surface_id);
-                self.surface_removal_timeout_at_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Forced);
@@ -5238,13 +5218,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.surface_base_state.insert(surface_id, ExternalToolSurfaceBaseState::Removed);
                 self.active_surfaces.remove(surface_id);
-                self.visible_surfaces.remove(surface_id);
                 self.surface_pending_op.insert(surface_id, SurfacePendingOp::None);
                 self.surface_pending_task_sequence.insert(surface_id, 0);
                 self.surface_pending_lineage_sequence.insert(surface_id, 0);
                 self.surface_inflight_calls.insert(surface_id, 0);
                 self.surface_draining_since_ms.remove(surface_id);
-                self.surface_removal_timeout_at_ms.remove(surface_id);
                 self.surface_removal_applied_at_turn.remove(surface_id);
                 self.surface_last_delta_operation.insert(surface_id, ExternalToolSurfaceDeltaOperation::Remove);
                 self.surface_last_delta_phase.insert(surface_id, ExternalToolSurfaceDeltaPhase::Forced);

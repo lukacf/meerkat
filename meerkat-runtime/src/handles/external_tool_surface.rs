@@ -88,9 +88,23 @@ impl RuntimeExternalToolSurfaceHandle {
                 .copied()
                 .map(ExternalToolSurfaceDeltaPhase::from),
             removal_draining_since_ms: state.surface_draining_since_ms.get(&key).copied(),
-            removal_timeout_at_ms: state.surface_removal_timeout_at_ms.get(&key).copied(),
+            removal_timeout_at_ms: None,
             removal_applied_at_turn: state.surface_removal_applied_at_turn.get(&key).copied(),
         })
+    }
+
+    fn visible_surfaces_from_state(state: &mm_dsl::MeerkatMachineState) -> BTreeSet<String> {
+        state
+            .surface_base_state
+            .iter()
+            .filter_map(|(surface_id, base_state)| {
+                if *base_state == mm_dsl::ExternalToolSurfaceBaseState::Active {
+                    Some(surface_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn apply_input_with_effects(
@@ -348,10 +362,11 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
             .filter_map(|surface_id| Self::snapshot_entry(&state, surface_id))
             .collect();
         entries.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
+        let visible_surfaces = Self::visible_surfaces_from_state(&state);
         SurfaceDiagnosticSnapshot {
             surface_phase: map_surface_phase(state.surface_phase),
             known_surfaces: state.known_surfaces.clone(),
-            visible_surfaces: state.visible_surfaces.clone(),
+            visible_surfaces,
             snapshot_epoch: state.snapshot_epoch,
             snapshot_aligned_epoch: state.snapshot_aligned_epoch,
             has_pending_or_staged: entries.iter().any(|entry| {
@@ -363,7 +378,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
     }
 
     fn visible_surfaces(&self) -> BTreeSet<String> {
-        self.dsl.snapshot_state().visible_surfaces
+        Self::visible_surfaces_from_state(&self.dsl.snapshot_state())
     }
 
     fn removing_surfaces(&self) -> BTreeSet<String> {
@@ -579,6 +594,48 @@ mod tests {
         );
         assert_eq!(snapshot.staged_op, ExternalToolSurfaceStagedOp::Reload);
         assert_eq!(snapshot.staged_intent_sequence, Some(1));
+    }
+
+    #[test]
+    fn visible_surfaces_are_derived_from_active_base_state() {
+        let handle = handle_with_active_surface("alpha");
+
+        assert!(
+            handle.visible_surfaces().contains("alpha"),
+            "active surface should be visible without a stored visible_surfaces mirror"
+        );
+        assert!(
+            handle
+                .diagnostic_snapshot()
+                .visible_surfaces
+                .contains("alpha"),
+            "diagnostics should derive visible surfaces from machine base state"
+        );
+    }
+
+    #[test]
+    fn removing_surface_snapshot_exposes_drain_start_but_not_timeout_mirror() {
+        let handle = handle_with_active_surface("alpha");
+
+        handle
+            .stage_remove("alpha".to_owned(), 50)
+            .expect("stage remove");
+        let remove_lineage = handle
+            .surface_snapshot("alpha")
+            .and_then(|entry| entry.staged_intent_sequence)
+            .expect("staged remove sequence");
+
+        handle
+            .apply_boundary("alpha".to_owned(), 60, remove_lineage, 101)
+            .expect("apply remove boundary");
+
+        let removing = handle.surface_snapshot("alpha").expect("removing alpha");
+        assert_eq!(removing.removal_draining_since_ms, Some(60));
+        assert_eq!(removing.removal_applied_at_turn, Some(101));
+        assert_eq!(
+            removing.removal_timeout_at_ms, None,
+            "runtime surfaces should derive timeout_at from router configuration, not a fixed DSL mirror"
+        );
     }
 
     #[test]

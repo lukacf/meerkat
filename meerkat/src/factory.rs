@@ -2929,13 +2929,16 @@ impl AgentFactory {
                         .map(|descs| descs.into_iter().map(|desc| desc.key).collect())
                         .unwrap_or_default();
                     let requested_ids = std::mem::take(ids);
+                    let mut retained = std::collections::HashSet::new();
                     let mut dropped = Vec::new();
                     for requested in requested_ids {
                         let requested_label =
                             format!("{}:{}", requested.source_uuid, requested.skill_name);
                         match engine.canonical_skill_key(&requested).await {
                             Ok(canonical) if available.contains(&canonical) => {
-                                ids.push(canonical);
+                                if retained.insert(canonical.clone()) {
+                                    ids.push(canonical);
+                                }
                             }
                             Ok(canonical) => {
                                 dropped.push(format!(
@@ -3779,7 +3782,10 @@ mod tests {
         let (requested, canonical) = remapped_skill_keys();
         let mut resumed = Session::new();
         resumed
-            .set_session_metadata(metadata_with_active_skills(Some(vec![requested.clone()])))
+            .set_session_metadata(metadata_with_active_skills(Some(vec![
+                requested.clone(),
+                canonical.clone(),
+            ])))
             .expect("resume metadata");
 
         let mut build = AgentBuildConfig::new("claude-sonnet-4-5");

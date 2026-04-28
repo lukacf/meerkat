@@ -274,7 +274,7 @@ pub trait SessionAgentBuilder: Send + Sync {
     ///
     /// Implementations with a richer configured model registry can override
     /// this; the default uses the built-in model capability catalog.
-    fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
+    async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
         meerkat_core::model_profile::inline_video_support_for(
             identity.provider.as_str(),
             &identity.model,
@@ -675,13 +675,14 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
+    async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
         self.builder
             .model_supports_inline_video(identity)
+            .await
             .unwrap_or(false)
     }
 
-    fn validate_prompt_video_input(
+    async fn validate_prompt_video_input(
         &self,
         prompt: &ContentInput,
         identity: &SessionLlmIdentity,
@@ -689,7 +690,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         validate_prompt_video_input_against_capability(
             prompt,
             identity,
-            self.model_supports_inline_video(identity),
+            self.model_supports_inline_video(identity).await,
         )
     }
 
@@ -1450,7 +1451,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
         let llm_identity = Self::llm_identity_from_create_request(&req);
-        self.validate_prompt_video_input(&prompt, &llm_identity)?;
+        self.validate_prompt_video_input(&prompt, &llm_identity)
+            .await?;
         let labels = req.labels.clone().unwrap_or_default();
         let resumed_session = req
             .build
@@ -1694,7 +1696,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 .get(id)
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
             let identity = handle.llm_identity_rx.borrow().clone();
-            self.validate_prompt_video_input(&prompt, &identity)?;
+            self.validate_prompt_video_input(&prompt, &identity).await?;
 
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.

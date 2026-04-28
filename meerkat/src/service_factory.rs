@@ -499,11 +499,12 @@ impl FactoryAgentBuilder {
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
-    fn model_supports_inline_video(
+    async fn model_supports_inline_video(
         &self,
         identity: &meerkat_core::SessionLlmIdentity,
     ) -> Option<bool> {
-        self.config_snapshot
+        self.resolve_config()
+            .await
             .model_registry()
             .ok()
             .and_then(|registry| registry.profile_for(&identity.model))
@@ -715,6 +716,68 @@ mod tests {
     }
 
     struct FakeImageGenerationExecutor;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn self_hosted_inline_video_config(inline_video: bool) -> Config {
+        let mut config = Config::default();
+        config.self_hosted.servers.insert(
+            "local".to_string(),
+            meerkat_core::SelfHostedServerConfig {
+                transport: meerkat_core::SelfHostedTransport::OpenAiCompatible,
+                base_url: "http://127.0.0.1:11434".to_string(),
+                api_style: meerkat_core::SelfHostedApiStyle::Responses,
+                bearer_token: None,
+                bearer_token_env: None,
+            },
+        );
+        config.self_hosted.models.insert(
+            "video-alias".to_string(),
+            meerkat_core::SelfHostedModelConfig {
+                server: "local".to_string(),
+                remote_model: "video-model".to_string(),
+                display_name: "Video Alias".to_string(),
+                family: "video-family".to_string(),
+                tier: meerkat_core::model_profile::catalog::ModelTier::Supported,
+                context_window: None,
+                max_output_tokens: None,
+                vision: true,
+                image_tool_results: true,
+                inline_video,
+                supports_temperature: true,
+                supports_thinking: false,
+                supports_reasoning: false,
+                supports_web_search: false,
+                call_timeout_secs: None,
+            },
+        );
+        config
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn inline_video_capability_reads_current_config_store() {
+        let initial_config = self_hosted_inline_video_config(false);
+        let current_config = self_hosted_inline_video_config(true);
+        let store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(current_config));
+        let builder = FactoryAgentBuilder::new_with_config_store(
+            AgentFactory::minimal(),
+            initial_config,
+            store,
+        );
+        let identity = meerkat_core::SessionLlmIdentity {
+            model: "video-alias".to_string(),
+            provider: Provider::SelfHosted,
+            self_hosted_server_id: Some("local".to_string()),
+            provider_params: None,
+            connection_ref: None,
+        };
+
+        assert_eq!(
+            builder.model_supports_inline_video(&identity).await,
+            Some(true)
+        );
+    }
 
     #[async_trait]
     impl ImageGenerationExecutor for FakeImageGenerationExecutor {

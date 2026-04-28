@@ -99,8 +99,22 @@ impl ModelRegistry {
         self.entries.get(model_id)
     }
 
+    pub fn entry_for_provider(
+        &self,
+        provider: Provider,
+        model_id: &str,
+    ) -> Option<&ModelRegistryEntry> {
+        self.entry(model_id)
+            .filter(|entry| entry.provider == provider)
+    }
+
     pub fn profile_for(&self, model_id: &str) -> Option<ModelProfile> {
         self.entry(model_id).map(|entry| entry.profile.clone())
+    }
+
+    pub fn profile_for_provider(&self, provider: Provider, model_id: &str) -> Option<ModelProfile> {
+        self.entry_for_provider(provider, model_id)
+            .map(|entry| entry.profile.clone())
     }
 
     pub fn default_model(&self, provider: Provider) -> Option<&str> {
@@ -378,5 +392,29 @@ mod tests {
         assert!(registry.profile_for("gpt-unknown-preview").is_none());
         assert!(registry.profile_for("claude-unknown-preview").is_none());
         assert!(registry.profile_for("gemini-unknown-preview").is_none());
+    }
+
+    #[test]
+    fn provider_aware_profile_lookup_requires_matching_provider() {
+        let registry = match ModelRegistry::from_config(&Config::default()) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
+
+        let profile = registry.profile_for_provider(Provider::OpenAI, "gpt-5.4");
+        assert_eq!(
+            profile.and_then(|profile| profile.call_timeout_secs),
+            Some(600)
+        );
+        assert!(
+            registry
+                .profile_for_provider(Provider::Anthropic, "gpt-5.4")
+                .is_none(),
+            "provider-aware lookup must not share OpenAI defaults with Anthropic"
+        );
+        assert!(
+            registry.profile_for("gpt-5.4").is_some(),
+            "legacy unambiguous model-id lookup remains available"
+        );
     }
 }

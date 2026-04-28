@@ -654,21 +654,21 @@ pub enum BuildAgentError {
     KeepAliveRequiresCommsName,
 }
 
-/// Resolver that delegates to `meerkat_models::profile::profile_for()`
-/// to look up model-specific operational defaults at call time.
+/// Resolver that delegates to [`ModelRegistry`] to look up model-specific
+/// operational defaults at call time.
 ///
 /// This struct bridges the dependency gap: `meerkat-core` owns the
 /// `ModelOperationalDefaultsResolver` trait, and this facade-layer
-/// implementation provides the concrete `meerkat-models` lookup.
+/// implementation provides the concrete registry lookup.
 struct RegistryBackedDefaultsResolver {
     registry: Arc<ModelRegistry>,
 }
 
 impl meerkat_core::ModelOperationalDefaultsResolver for RegistryBackedDefaultsResolver {
     fn call_timeout_for(&self, provider: &str, model: &str) -> Option<std::time::Duration> {
-        let _ = provider;
+        let provider = Provider::parse_strict(provider)?;
         self.registry
-            .profile_for(model)
+            .profile_for_provider(provider, model)
             .and_then(|p| p.call_timeout_secs)
             .map(std::time::Duration::from_secs)
     }
@@ -3391,6 +3391,30 @@ mod tests {
         RealmConfigSection, SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig,
         SelfHostedTransport,
     };
+
+    #[test]
+    fn registry_backed_defaults_resolver_respects_provider_identity() {
+        let registry = ModelRegistry::from_config(&Config::default()).expect("registry");
+        let resolver = RegistryBackedDefaultsResolver {
+            registry: Arc::new(registry),
+        };
+
+        assert_eq!(
+            meerkat_core::ModelOperationalDefaultsResolver::call_timeout_for(
+                &resolver, "openai", "gpt-5.4"
+            ),
+            Some(std::time::Duration::from_secs(600))
+        );
+        assert_eq!(
+            meerkat_core::ModelOperationalDefaultsResolver::call_timeout_for(
+                &resolver,
+                "anthropic",
+                "gpt-5.4"
+            ),
+            None,
+            "provider-aware default lookup must not reuse OpenAI defaults for Anthropic"
+        );
+    }
 
     #[cfg(feature = "skills")]
     fn test_skill_key(source_uuid: &str, skill_name: &str) -> SkillKey {

@@ -192,6 +192,21 @@ impl RuntimeStore for FailPersistInputStore {
             .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
             .await
     }
+
+    async fn persist_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        snapshot: &meerkat_runtime::PersistedOpsSnapshot,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+    }
+
+    async fn load_ops_lifecycle(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::PersistedOpsSnapshot>, RuntimeStoreError> {
+        self.inner.load_ops_lifecycle(runtime_id).await
+    }
 }
 
 fn make_prompt(text: &str) -> Input {

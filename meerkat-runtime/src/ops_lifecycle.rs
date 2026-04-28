@@ -326,7 +326,7 @@ struct ShellState {
     /// Shared feed buffer for completion events.
     feed_buffer: Arc<FeedBuffer>,
     /// Persistence channel for durable snapshot writes (set via `set_persistence_channel`).
-    persist_tx: Option<crate::tokio::sync::mpsc::Sender<PersistedOpsSnapshot>>,
+    persist_tx: Option<crate::tokio::sync::mpsc::UnboundedSender<PersistedOpsSnapshot>>,
     /// Epoch ID for persistence snapshots.
     persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
     /// Shared cursor state for persistence snapshots.
@@ -812,22 +812,25 @@ impl ShellState {
     ///
     /// Called after terminal transitions. Captures authority + entries + cursors
     /// under the write lock (caller already holds it) and queues to the channel.
-    fn maybe_persist(&self) {
+    fn maybe_persist(&self) -> Result<(), OpsLifecycleError> {
         let (tx, epoch_id, cursor_state) = match (
             &self.persist_tx,
             &self.persist_epoch_id,
             &self.persist_cursor_state,
         ) {
             (Some(tx), Some(epoch_id), Some(cs)) => (tx, epoch_id, cs),
-            _ => return,
+            _ => return Ok(()),
         };
 
         let snapshot = self.capture_snapshot(epoch_id.clone(), cursor_state);
 
-        // Non-blocking send — bounded-loss is the acknowledged contract.
-        if tx.try_send(snapshot).is_err() {
-            tracing::warn!("ops lifecycle persistence channel full or closed; snapshot dropped");
-        }
+        tx.send(snapshot).map_err(|_| {
+            OpsLifecycleError::Internal(
+                "ops lifecycle persistence channel closed before terminal snapshot could be queued"
+                    .into(),
+            )
+        })?;
+        Ok(())
     }
 
     /// Capture the full persisted snapshot for the current state.
@@ -1005,7 +1008,7 @@ impl RuntimeOpsLifecycleRegistry {
     /// persistence task should drain the channel and write to the store.
     pub fn set_persistence_channel(
         &self,
-        tx: crate::tokio::sync::mpsc::Sender<PersistedOpsSnapshot>,
+        tx: crate::tokio::sync::mpsc::UnboundedSender<PersistedOpsSnapshot>,
         epoch_id: meerkat_core::RuntimeEpochId,
         cursor_state: Arc<meerkat_core::EpochCursorState>,
     ) {
@@ -1440,7 +1443,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         state.finalize_terminal(id);
-        state.maybe_persist();
+        state.maybe_persist()?;
         Ok(())
     }
 
@@ -1536,7 +1539,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         state.finalize_terminal(id);
-        state.maybe_persist();
+        state.maybe_persist()?;
         Ok(())
     }
 
@@ -1559,7 +1562,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         state.finalize_terminal(id);
-        state.maybe_persist();
+        state.maybe_persist()?;
         Ok(())
     }
 
@@ -1586,7 +1589,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         state.finalize_terminal(id);
-        state.maybe_persist();
+        state.maybe_persist()?;
         Ok(())
     }
 
@@ -1613,7 +1616,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         state.finalize_terminal(id);
-        state.maybe_persist();
+        state.maybe_persist()?;
         Ok(())
     }
 
@@ -1651,7 +1654,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         state.finalize_terminal(id);
-        state.maybe_persist();
+        state.maybe_persist()?;
         Ok(())
     }
 
@@ -1702,7 +1705,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         }
 
         if !to_terminate.is_empty() {
-            state.maybe_persist();
+            state.maybe_persist()?;
         }
         Ok(())
     }

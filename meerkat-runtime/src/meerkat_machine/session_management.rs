@@ -342,8 +342,9 @@ impl MeerkatMachine {
 
         // Wire persistence channel if a durable store is available.
         if let Some(ref store) = self.store {
-            let (persist_tx, mut persist_rx) =
-                crate::tokio::sync::mpsc::channel::<crate::ops_lifecycle::PersistedOpsSnapshot>(16);
+            let (persist_tx, mut persist_rx) = crate::tokio::sync::mpsc::unbounded_channel::<
+                crate::ops_lifecycle::PersistedOpsSnapshot,
+            >();
             let entry_epoch_id = {
                 let sessions = self.sessions.read().await;
                 sessions

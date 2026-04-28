@@ -300,6 +300,80 @@ fn snapshot_captures_entries_beyond_authority_retention() {
     );
 }
 
+#[test]
+fn terminal_persistence_queue_captures_burst_without_loss_for_recovery() {
+    const TERMINAL_COUNT: usize = 32;
+
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let cursor_state = Arc::new(EpochCursorState::new());
+    let epoch_id = RuntimeEpochId::new();
+    let (persist_tx, mut persist_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistedOpsSnapshot>();
+    registry.set_persistence_channel(persist_tx, epoch_id.clone(), Arc::clone(&cursor_state));
+
+    for i in 0..TERMINAL_COUNT {
+        let spec = bg_spec(&format!("queued-terminal-{i}"));
+        let id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&id).unwrap();
+        registry.complete_operation(&id, op_result(&id)).unwrap();
+    }
+
+    let mut snapshots = Vec::new();
+    while let Ok(snapshot) = persist_rx.try_recv() {
+        snapshots.push(snapshot);
+    }
+
+    assert_eq!(
+        snapshots.len(),
+        TERMINAL_COUNT,
+        "every terminal transition must queue a snapshot"
+    );
+    let latest_snapshot = snapshots
+        .last()
+        .expect("at least one terminal snapshot")
+        .clone();
+    assert_eq!(latest_snapshot.epoch_id, epoch_id);
+    assert_eq!(
+        latest_snapshot.completion_entries.len(),
+        TERMINAL_COUNT,
+        "latest persisted snapshot must include the full terminal completion feed"
+    );
+
+    let recovered = RuntimeOpsLifecycleRegistry::from_recovered(latest_snapshot);
+    let recovered_feed = recovered
+        .completion_feed()
+        .expect("recovered registry should expose completion feed");
+    let batch = recovered_feed.list_since(0);
+    assert_eq!(
+        batch.entries.len(),
+        TERMINAL_COUNT,
+        "restart recovery must see every terminal completion from the queued snapshot"
+    );
+}
+
+#[test]
+fn terminal_persistence_channel_closed_fails_terminal_transition() {
+    let registry = RuntimeOpsLifecycleRegistry::new();
+    let cursor_state = Arc::new(EpochCursorState::new());
+    let (persist_tx, persist_rx) = tokio::sync::mpsc::unbounded_channel::<PersistedOpsSnapshot>();
+    drop(persist_rx);
+    registry.set_persistence_channel(persist_tx, RuntimeEpochId::new(), cursor_state);
+
+    let spec = bg_spec("closed-persist-channel");
+    let id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&id).unwrap();
+
+    let err = registry
+        .complete_operation(&id, op_result(&id))
+        .expect_err("closed persistence channel must fail the terminal transition");
+    assert!(
+        err.to_string().contains("persistence channel closed"),
+        "unexpected error: {err}"
+    );
+}
+
 // ─── Regression: cold ensure_session_with_executor recovers persisted epoch ───
 
 /// Simple executor for recovery tests.

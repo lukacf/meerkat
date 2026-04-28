@@ -34,6 +34,9 @@ pub enum RuntimeStoreError {
     /// Not found.
     #[error("Not found: {0}")]
     NotFound(String),
+    /// Operation is not supported by this store implementation.
+    #[error("Unsupported store operation: {0}")]
+    Unsupported(String),
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -183,7 +186,9 @@ pub trait RuntimeStore: Send + Sync {
         snapshot: &crate::ops_lifecycle::PersistedOpsSnapshot,
     ) -> Result<(), RuntimeStoreError> {
         let _ = (runtime_id, snapshot);
-        Ok(())
+        Err(RuntimeStoreError::Unsupported(
+            "persist_ops_lifecycle".into(),
+        ))
     }
 
     /// Load a previously persisted ops lifecycle snapshot.
@@ -192,7 +197,7 @@ pub trait RuntimeStore: Send + Sync {
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<crate::ops_lifecycle::PersistedOpsSnapshot>, RuntimeStoreError> {
         let _ = runtime_id;
-        Ok(None)
+        Err(RuntimeStoreError::Unsupported("load_ops_lifecycle".into()))
     }
 }
 

@@ -752,6 +752,20 @@ impl Session {
         self.updated_at = SystemTime::now();
     }
 
+    /// Backfill a missing metadata value without changing `updated_at`.
+    ///
+    /// This is only for compatibility reads that need to hydrate metadata from
+    /// an older projection. Semantic metadata mutations must use
+    /// [`Session::set_metadata`] so the session timestamp advances.
+    pub fn backfill_metadata_if_absent(&mut self, key: &str, value: serde_json::Value) -> bool {
+        if self.metadata.contains_key(key) {
+            false
+        } else {
+            self.metadata.insert(key.to_string(), value);
+            true
+        }
+    }
+
     /// Remove a metadata value.
     pub fn remove_metadata(&mut self, key: &str) {
         self.metadata.remove(key);
@@ -1346,6 +1360,21 @@ mod tests {
         session.set_metadata("key", serde_json::json!("value"));
 
         assert_eq!(session.metadata().get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_session_metadata_backfill_preserves_timestamp() {
+        let mut session = Session::new();
+        let initial_updated = session.updated_at();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        assert!(session.backfill_metadata_if_absent("key", serde_json::json!("value")));
+        assert_eq!(session.metadata().get("key").unwrap(), "value");
+        assert_eq!(session.updated_at(), initial_updated);
+        assert!(!session.backfill_metadata_if_absent("key", serde_json::json!("other")));
+        assert_eq!(session.metadata().get("key").unwrap(), "value");
+        assert_eq!(session.updated_at(), initial_updated);
     }
 
     #[test]

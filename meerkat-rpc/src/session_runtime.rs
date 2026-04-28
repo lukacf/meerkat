@@ -56,7 +56,7 @@ use meerkat_runtime::{
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
 };
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 
 use crate::error;
 use crate::protocol::RpcError;
@@ -110,6 +110,22 @@ fn render_runtime_system_context_message(append: &PendingSystemContextAppend) ->
 }
 
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
+
+#[derive(Clone)]
+struct PendingSessionEventStreams {
+    events: broadcast::Sender<EventEnvelope<AgentEvent>>,
+    receiver_dropped: Arc<Notify>,
+}
+
+struct PendingSessionEventStreamDrop {
+    receiver_dropped: Arc<Notify>,
+}
+
+impl Drop for PendingSessionEventStreamDrop {
+    fn drop(&mut self) {
+        self.receiver_dropped.notify_one();
+    }
+}
 
 fn realtime_projection_root_system_message(session: &Session) -> Option<Message> {
     let build_state = session.build_state().unwrap_or_default();
@@ -647,8 +663,7 @@ pub struct SessionRuntime {
     /// Event streams opened while a deferred session is still staged. The
     /// first materializing turn fans out events here, then bridges the stream
     /// to the live session service after promotion.
-    pending_session_event_streams:
-        Arc<Mutex<HashMap<SessionId, broadcast::Sender<EventEnvelope<AgentEvent>>>>>,
+    pending_session_event_streams: Arc<Mutex<HashMap<SessionId, PendingSessionEventStreams>>>,
     max_sessions: usize,
     /// Override LLM client for all sessions (primarily for testing).
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
@@ -3797,10 +3812,10 @@ impl SessionRuntime {
         self.service.event_injector(session_id).await
     }
 
-    async fn pending_session_event_sender(
+    async fn pending_session_event_stream_state(
         &self,
         session_id: &meerkat_core::SessionId,
-    ) -> Option<broadcast::Sender<EventEnvelope<AgentEvent>>> {
+    ) -> Option<PendingSessionEventStreams> {
         self.pending_session_event_streams
             .lock()
             .await
@@ -3818,20 +3833,29 @@ impl SessionRuntime {
                 .entry(session_id.clone())
                 .or_insert_with(|| {
                     let (tx, _rx) = broadcast::channel(PENDING_SESSION_EVENT_CHANNEL_CAPACITY);
-                    tx
+                    PendingSessionEventStreams {
+                        events: tx,
+                        receiver_dropped: Arc::new(Notify::new()),
+                    }
                 })
                 .clone()
         };
-        let rx = sender.subscribe();
-        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => return Some((event, rx)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
+        let rx = sender.events.subscribe();
+        let drop_guard = PendingSessionEventStreamDrop {
+            receiver_dropped: Arc::clone(&sender.receiver_dropped),
+        };
+        Ok(Box::pin(futures::stream::unfold(
+            (rx, drop_guard),
+            |(mut rx, drop_guard)| async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => return Some((event, (rx, drop_guard))),
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    }
                 }
-            }
-        })))
+            },
+        )))
     }
 
     async fn pending_session_event_fanout_tx(
@@ -3839,7 +3863,8 @@ impl SessionRuntime {
         session_id: &meerkat_core::SessionId,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
     ) -> mpsc::Sender<EventEnvelope<AgentEvent>> {
-        let Some(pending_tx) = self.pending_session_event_sender(session_id).await else {
+        let Some(pending_streams) = self.pending_session_event_stream_state(session_id).await
+        else {
             return event_tx;
         };
 
@@ -3847,7 +3872,7 @@ impl SessionRuntime {
             mpsc::channel::<EventEnvelope<AgentEvent>>(PENDING_SESSION_EVENT_CHANNEL_CAPACITY);
         tokio::spawn(async move {
             while let Some(event) = fanout_rx.recv().await {
-                let _ = pending_tx.send(event.clone());
+                let _ = pending_streams.events.send(event.clone());
                 let _ = event_tx.send(event).await;
             }
         });
@@ -3855,7 +3880,8 @@ impl SessionRuntime {
     }
 
     async fn bridge_pending_session_event_streams(&self, session_id: &meerkat_core::SessionId) {
-        let Some(pending_tx) = self.pending_session_event_sender(session_id).await else {
+        let Some(pending_streams) = self.pending_session_event_stream_state(session_id).await
+        else {
             return;
         };
         let Ok(mut live_stream) = self.service.subscribe_session_events(session_id).await else {
@@ -3863,15 +3889,32 @@ impl SessionRuntime {
         };
 
         let session_id = session_id.clone();
-        let pending_streams = Arc::clone(&self.pending_session_event_streams);
+        let pending_stream_registry = Arc::clone(&self.pending_session_event_streams);
         tokio::spawn(async move {
-            while let Some(event) = live_stream.next().await {
-                if pending_tx.receiver_count() == 0 {
+            loop {
+                if pending_streams.events.receiver_count() == 0 {
                     break;
                 }
-                let _ = pending_tx.send(event);
+                tokio::select! {
+                    event = live_stream.next() => {
+                        match event {
+                            Some(event) => {
+                                if pending_streams.events.receiver_count() == 0 {
+                                    break;
+                                }
+                                let _ = pending_streams.events.send(event);
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = pending_streams.receiver_dropped.notified() => {
+                        if pending_streams.events.receiver_count() == 0 {
+                            break;
+                        }
+                    }
+                }
             }
-            pending_streams.lock().await.remove(&session_id);
+            pending_stream_registry.lock().await.remove(&session_id);
         });
     }
 
@@ -4452,7 +4495,7 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use futures::stream;
+    use futures::{StreamExt, stream};
     use meerkat::AgentBuildConfig;
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::StopReason;
@@ -7122,6 +7165,68 @@ mod tests {
             .unwrap();
 
         assert!(result.text.contains("Hello from mock"));
+    }
+
+    #[tokio::test]
+    async fn pending_session_stream_bridge_removes_entry_when_listener_closes_after_promotion() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+        let mut stream = runtime
+            .subscribe_session_events(&session_id)
+            .await
+            .expect("subscribe pending session events");
+
+        assert!(
+            runtime
+                .pending_session_event_streams
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "pending stream entry should exist before materialization"
+        );
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let result = runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.text.contains("Hello from mock"));
+
+        let _first_event = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("pending stream event timeout")
+            .expect("pending stream should receive first-turn event");
+
+        drop(stream);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !runtime
+                    .pending_session_event_streams
+                    .lock()
+                    .await
+                    .contains_key(&session_id)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pending stream entry should be removed after listener close");
     }
 
     /// turn/start with keep_alive override on a materialized session is not rejected.

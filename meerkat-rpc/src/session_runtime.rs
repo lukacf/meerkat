@@ -98,17 +98,6 @@ fn pending_system_context_appends(
         .collect()
 }
 
-fn render_runtime_system_context_message(append: &PendingSystemContextAppend) -> Message {
-    let mut content = String::from("[Runtime System Context]");
-    if let Some(source) = &append.source {
-        content.push_str("\nsource: ");
-        content.push_str(source);
-    }
-    content.push_str("\n\n");
-    content.push_str(&append.text);
-    Message::System(SystemMessage::new(content))
-}
-
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 
 #[derive(Clone)]
@@ -175,18 +164,14 @@ fn realtime_projection_messages(session: &Session) -> Vec<Message> {
             _ => projected.insert(0, root_system),
         }
     }
-    let pending = session.system_context_state().unwrap_or_default().pending;
-    if !pending.is_empty() {
-        // Projection-only and rebuildable:
-        // runtime-owned system-context appends are canonical in live session
-        // metadata, not in transcript messages. For provider reconstruction we
-        // preserve those appends as explicit synthetic system history items
-        // instead of burying them inside the root instruction string. That
-        // keeps async runtime facts closer to the way the local runtime applies
-        // them: authoritative, replayable, and distinct from the base prompt.
-        projected.extend(pending.iter().map(render_runtime_system_context_message));
-    }
     projected
+}
+
+fn realtime_projection_runtime_system_context(
+    session: &Session,
+) -> Vec<PendingSystemContextAppend> {
+    let state = session.system_context_state().unwrap_or_default();
+    state.applied.into_iter().chain(state.pending).collect()
 }
 
 #[cfg(test)]
@@ -1101,7 +1086,8 @@ impl SessionRuntime {
             llm_identity,
             visible_tools,
             realtime_projection_messages(&session),
-        ))
+        )
+        .with_runtime_system_context(realtime_projection_runtime_system_context(&session)))
     }
 
     fn recovery_overrides_from_turn(
@@ -4511,6 +4497,39 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
 
+    #[test]
+    fn realtime_open_config_context_comes_from_typed_system_context_state() {
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    text: "Authoritative peer token is birch seventeen.".to_string(),
+                    source: Some("peer_response_terminal:analyst:req-123".to_string()),
+                    idempotency_key: Some("req-123".to_string()),
+                },
+                meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
+            )
+            .expect("append should stage");
+        state.mark_pending_applied();
+
+        let mut session = Session::new();
+        session
+            .set_system_context_state(state)
+            .expect("state should serialize");
+
+        let runtime_context = realtime_projection_runtime_system_context(&session);
+
+        assert_eq!(runtime_context.len(), 1);
+        assert_eq!(
+            runtime_context[0].text,
+            "Authoritative peer token is birch seventeen."
+        );
+        assert_eq!(
+            runtime_context[0].source.as_deref(),
+            Some("peer_response_terminal:analyst:req-123")
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Mock LLM client
     // -----------------------------------------------------------------------
@@ -4614,7 +4633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realtime_open_config_projects_pending_system_context_into_seed_messages() {
+    async fn realtime_open_config_carries_pending_system_context_as_typed_runtime_context() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -4656,20 +4675,27 @@ mod tests {
             .await
             .expect("realtime_session_open_config");
 
-        let system_messages = open_config
+        assert_eq!(open_config.runtime_system_context.len(), 1);
+        assert_eq!(
+            open_config.runtime_system_context[0].text,
+            "Authoritative peer token is birch seventeen."
+        );
+        assert_eq!(
+            open_config.runtime_system_context[0].source.as_deref(),
+            Some("peer_response_terminal:analyst:req-123")
+        );
+        let seed_system_text = open_config
             .seed_messages
             .iter()
             .filter_map(|message| match message {
                 Message::System(system) => Some(system.content.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            system_messages.iter().any(|text| {
-                text.contains("[Runtime System Context]")
-                    && text.contains("Authoritative peer token is birch seventeen.")
-            }),
-            "projected realtime seed messages should include pending runtime system context: {system_messages:?}"
+            !seed_system_text.contains("[Runtime System Context]"),
+            "runtime system context must travel through typed config, not marker seed text: {seed_system_text}"
         );
     }
 

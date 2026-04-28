@@ -339,7 +339,9 @@ test(
       assert.ok(reviewer);
       assert.ok(reviewer.member_ref);
       const reviewerSnapshot = await mob.memberStatus("reviewer-1");
-      assert.ok(reviewerSnapshot.agent_runtime_id);
+      assert.equal(reviewerSnapshot.agent_runtime_id, undefined);
+      assert.equal(reviewerSnapshot.fence_token, undefined);
+      assert.equal(reviewerSnapshot.incarnation_ref, undefined);
 
       const ledger = await mob.events("", 200);
       assert.ok(Array.isArray(ledger));
@@ -456,7 +458,7 @@ test(
       const preRespawnSnapshot = await mob.memberStatus("reviewer-1").catch(
         () => undefined,
       );
-      const preRespawnRuntimeRef = preRespawnSnapshot?.agent_runtime_id;
+      assert.equal(preRespawnSnapshot?.agent_runtime_id, undefined);
       await mob.respawn("reviewer-1", "Return online and say REVIEWER_RESPAWN_48.");
       const withRespawnedReviewer = await waitFor(
         "reviewer respawn",
@@ -468,15 +470,10 @@ test(
       assert.ok(
         withRespawnedReviewer.some((member) => member.agent_identity === "reviewer-1"),
       );
-      const postRespawnSnapshot = await waitFor(
-        "reviewer respawn incarnation rotated",
-        () => mob.memberStatus("reviewer-1"),
-        (snapshot) =>
-          snapshot.agent_runtime_id.length > 0
-          && snapshot.agent_runtime_id !== preRespawnRuntimeRef,
-        { timeoutMs: 60000, intervalMs: 200 },
-      );
-      assert.ok(postRespawnSnapshot.agent_runtime_id);
+      const postRespawnSnapshot = await mob.memberStatus("reviewer-1");
+      assert.equal(postRespawnSnapshot.agent_runtime_id, undefined);
+      assert.equal(postRespawnSnapshot.fence_token, undefined);
+      assert.equal(postRespawnSnapshot.incarnation_ref, undefined);
 
       await mob.lifecycle("stop");
       const stopped = await mob.status();

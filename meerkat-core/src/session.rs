@@ -146,6 +146,8 @@ pub const SYSTEM_CONTEXT_SEPARATOR: &str = "\n\n---\n\n";
 pub struct SessionSystemContextState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending: Vec<PendingSystemContextAppend>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied: Vec<PendingSystemContextAppend>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub seen: std::collections::BTreeMap<String, SeenSystemContextKey>,
 }
@@ -381,6 +383,11 @@ impl SessionSystemContextState {
 
     /// Mark all currently-pending appends as applied and clear the pending queue.
     pub fn mark_pending_applied(&mut self) {
+        for pending in &self.pending {
+            if !self.applied.contains(pending) {
+                self.applied.push(pending.clone());
+            }
+        }
         for pending in &self.pending {
             if let Some(key) = pending.idempotency_key.as_ref()
                 && let Some(seen) = self.seen.get_mut(key)
@@ -688,6 +695,16 @@ impl Session {
             _ => rendered,
         };
         self.set_system_prompt(next);
+
+        let mut state = self.system_context_state().unwrap_or_default();
+        for append in appends {
+            if !state.applied.contains(append) {
+                state.applied.push(append.clone());
+            }
+        }
+        if let Err(err) = self.set_system_context_state(state) {
+            tracing::warn!(error = %err, "failed to persist applied system-context state");
+        }
     }
 
     /// Get the last assistant message text content.
@@ -1457,5 +1474,57 @@ mod tests {
         let mut session = Session::new();
         session.push(Message::System(SystemMessage::new("system")));
         assert!(!session.has_pending_boundary());
+    }
+
+    #[test]
+    fn system_context_state_preserves_applied_runtime_context() {
+        let accepted_at = SystemTime::UNIX_EPOCH;
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    text: "Authoritative peer token is birch seventeen.".to_string(),
+                    source: Some("peer_response_terminal:analyst:req-123".to_string()),
+                    idempotency_key: Some("req-123".to_string()),
+                },
+                accepted_at,
+            )
+            .expect("append should stage");
+
+        state.mark_pending_applied();
+
+        assert!(state.pending.is_empty());
+        assert_eq!(state.applied.len(), 1);
+        assert_eq!(
+            state.applied[0].text,
+            "Authoritative peer token is birch seventeen."
+        );
+        assert_eq!(
+            state.applied[0].source.as_deref(),
+            Some("peer_response_terminal:analyst:req-123")
+        );
+
+        let round_tripped: SessionSystemContextState =
+            serde_json::from_value(serde_json::to_value(&state).expect("serialize state"))
+                .expect("deserialize state");
+        assert_eq!(round_tripped.applied, state.applied);
+    }
+
+    #[test]
+    fn append_system_context_blocks_records_typed_applied_context() {
+        let append = PendingSystemContextAppend {
+            text: "Authoritative peer token is birch seventeen.".to_string(),
+            source: Some("peer_response_terminal:analyst:req-123".to_string()),
+            idempotency_key: Some("req-123".to_string()),
+            accepted_at: SystemTime::UNIX_EPOCH,
+        };
+        let mut session = Session::new();
+
+        session.append_system_context_blocks(std::slice::from_ref(&append));
+
+        let state = session
+            .system_context_state()
+            .expect("append should persist typed context state");
+        assert_eq!(state.applied, vec![append]);
     }
 }

@@ -180,6 +180,29 @@ fn target_error_response(error: ConnectionTargetError) -> RpcResponse {
 }
 
 #[allow(clippy::result_large_err)]
+fn require_explicit_oauth_identity<'a>(
+    id: Option<RpcId>,
+    realm_id: Option<&'a str>,
+    binding_id: Option<&'a str>,
+) -> Result<(&'a str, &'a str), RpcResponse> {
+    let realm_id = realm_id.ok_or_else(|| {
+        RpcResponse::error(
+            id.clone(),
+            error::INVALID_PARAMS,
+            "realm_id is required for OAuth login completion",
+        )
+    })?;
+    let binding_id = binding_id.ok_or_else(|| {
+        RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "binding_id is required for OAuth login completion",
+        )
+    })?;
+    Ok((realm_id, binding_id))
+}
+
+#[allow(clippy::result_large_err)]
 fn require_token_store(
     runtime: &SessionRuntime,
     id: Option<RpcId>,
@@ -575,6 +598,14 @@ pub async fn handle_auth_login_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    let (realm_id, binding_id) = match require_explicit_oauth_identity(
+        id.clone(),
+        parsed.realm_id.as_deref(),
+        parsed.binding_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
         Ok(v) => v,
         Err(e) => {
@@ -585,8 +616,8 @@ pub async fn handle_auth_login_complete(
     let target = match resolve_oauth_target(
         runtime,
         provider,
-        parsed.realm_id.as_deref(),
-        parsed.binding_id.as_deref(),
+        Some(realm_id),
+        Some(binding_id),
         parsed.profile_id.as_deref(),
     )
     .await
@@ -789,6 +820,14 @@ pub async fn handle_auth_login_device_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    let (realm_id, binding_id) = match require_explicit_oauth_identity(
+        id.clone(),
+        parsed.realm_id.as_deref(),
+        parsed.binding_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let resolved = match resolve_oauth_provider(&parsed.provider, "") {
         Ok(v) => v,
         Err(e) => return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string()),
@@ -807,8 +846,8 @@ pub async fn handle_auth_login_device_complete(
     let target = match resolve_oauth_target(
         runtime,
         provider,
-        parsed.realm_id.as_deref(),
-        parsed.binding_id.as_deref(),
+        Some(realm_id),
+        Some(binding_id),
         parsed.profile_id.as_deref(),
     )
     .await
@@ -950,11 +989,19 @@ pub async fn handle_auth_login_provision_api_key(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
+    let (realm_id, binding_id) = match require_explicit_oauth_identity(
+        id.clone(),
+        parsed.realm_id.as_deref(),
+        parsed.binding_id.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let target = match resolve_oauth_target(
         runtime,
         Provider::Anthropic,
-        parsed.realm_id.as_deref(),
-        parsed.binding_id.as_deref(),
+        Some(realm_id),
+        Some(binding_id),
         parsed.profile_id.as_deref(),
     )
     .await
@@ -1107,6 +1154,58 @@ pub async fn handle_auth_logout(
 mod tests {
     use super::*;
 
+    fn raw_params(value: serde_json::Value) -> Box<RawValue> {
+        serde_json::value::to_raw_value(&value).unwrap()
+    }
+
+    fn test_runtime() -> SessionRuntime {
+        test_runtime_with_config(meerkat_core::Config::default())
+    }
+
+    fn test_runtime_with_config(config: meerkat_core::Config) -> SessionRuntime {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = meerkat::AgentFactory::new(temp.path().join("sessions"));
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(config.clone()));
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            config_store,
+            temp.path().join("config_state.json"),
+        )));
+        runtime
+    }
+
+    fn config_with_anthropic_default_binding() -> meerkat_core::Config {
+        let mut config = meerkat_core::Config::default();
+        config.realm.insert(
+            "default".to_string(),
+            meerkat_core::RealmConfigSection::from_inline_api_keys(&[("anthropic", "secret")]),
+        );
+        config
+    }
+
+    fn assert_invalid_params_message(resp: RpcResponse, expected: &str) {
+        assert!(resp.error.is_some(), "response should be an error");
+        let Some(error) = resp.error else {
+            return;
+        };
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+        assert!(
+            error.message.contains(expected),
+            "expected error message to contain `{expected}`, got `{}`",
+            error.message
+        );
+    }
+
     #[test]
     fn oauth_completion_params_keep_missing_identity_unowned_by_surface() {
         let login: LoginCompleteParams = serde_json::from_value(serde_json::json!({
@@ -1133,5 +1232,86 @@ mod tests {
         .unwrap();
         assert!(provision.realm_id.is_none());
         assert!(provision.binding_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_complete_requires_explicit_realm_and_binding() {
+        let runtime = test_runtime();
+        let params = raw_params(serde_json::json!({
+            "provider": "anthropic",
+            "code": "code",
+            "state": "state",
+            "redirect_uri": "http://127.0.0.1:0/callback"
+        }));
+
+        let resp =
+            handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+    }
+
+    #[tokio::test]
+    async fn login_complete_does_not_fall_through_to_default_binding() {
+        let runtime = test_runtime_with_config(config_with_anthropic_default_binding());
+        let params = raw_params(serde_json::json!({
+            "provider": "anthropic",
+            "code": "code",
+            "state": "state",
+            "redirect_uri": "http://127.0.0.1:0/callback"
+        }));
+
+        let resp =
+            handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+    }
+
+    #[tokio::test]
+    async fn device_complete_requires_explicit_realm_and_binding() {
+        let runtime = test_runtime();
+        let params = raw_params(serde_json::json!({
+            "provider": "anthropic",
+            "device_code": "device-code"
+        }));
+
+        let resp =
+            handle_auth_login_device_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime)
+                .await;
+
+        assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+    }
+
+    #[tokio::test]
+    async fn provision_api_key_requires_explicit_realm_and_binding() {
+        let runtime = test_runtime();
+        let params = raw_params(serde_json::json!({
+            "access_token": "token"
+        }));
+
+        let resp = handle_auth_login_provision_api_key(
+            Some(RpcId::Num(1)),
+            Some(params.as_ref()),
+            &runtime,
+        )
+        .await;
+
+        assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+    }
+
+    #[tokio::test]
+    async fn oauth_completion_requires_binding_when_realm_is_present() {
+        let runtime = test_runtime();
+        let params = raw_params(serde_json::json!({
+            "provider": "anthropic",
+            "code": "code",
+            "state": "state",
+            "redirect_uri": "http://127.0.0.1:0/callback",
+            "realm_id": "dev"
+        }));
+
+        let resp =
+            handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        assert_invalid_params_message(resp, "binding_id is required for OAuth login completion");
     }
 }

@@ -219,6 +219,7 @@ export type {
   WarningFailedClosedToolConfigChangeStatus,
   ExternalToolDeltaToolConfigChangeStatus,
   ExternalToolDeltaPhase,
+  MalformedEvent,
   UnknownEvent,
   StopReason,
   BudgetType,

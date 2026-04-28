@@ -4075,7 +4075,7 @@ mod tests {
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_member_status_projects_runtime_identity_fields() {
+    async fn mob_member_status_omits_runtime_identity_fields() {
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -4125,15 +4125,17 @@ mod tests {
             .await
             .unwrap();
         let status = result_value(&status_resp);
-        assert_eq!(status["agent_runtime_id"]["identity"], "worker-1");
         assert!(
-            status["agent_runtime_id"]["generation"].is_number(),
-            "mob/member_status must include runtime incarnation generation"
+            status.get("agent_runtime_id").is_none(),
+            "binding-era agent_runtime_id must not leak to app-facing mob/member_status"
         );
         assert!(
-            status["fence_token"].is_number(),
-            "mob/member_status must include runtime fence token"
+            status.get("fence_token").is_none(),
+            "binding-era fence_token must not leak to app-facing mob/member_status"
         );
+        assert_eq!(status["status"], "active");
+        assert!(status["tokens_used"].is_number());
+        assert!(status["is_final"].is_boolean());
     }
 
     #[cfg(feature = "mob")]

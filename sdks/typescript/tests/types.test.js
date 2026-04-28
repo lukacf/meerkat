@@ -152,22 +152,51 @@ describe("Typed Events", () => {
     }
   });
 
-  it("should not default missing or malformed turn_completed stop_reason", () => {
-    const missing = parseEvent({ type: "turn_completed" });
-    const invalidString = parseEvent({ type: "turn_completed", stop_reason: "not_real" });
-    const nonString = parseEvent({ type: "turn_completed", stop_reason: 0 });
+  it("preserves malformed known event payloads instead of fabricating semantics", () => {
+    const cases = [
+      {
+        raw: { type: "turn_completed", usage: { input_tokens: 50, output_tokens: 20 } },
+        reason: "missing stop_reason must not become end_turn",
+      },
+      {
+        raw: {
+          type: "turn_completed",
+          stop_reason: "end_turn",
+          usage: { input_tokens: "oops", output_tokens: 20 },
+        },
+        reason: "malformed usage must not become token counts",
+      },
+      {
+        raw: {
+          type: "tool_config_changed",
+          payload: {
+            operation: "add",
+            target: "filesystem",
+            status: "staged",
+            persisted: "false",
+          },
+        },
+        reason: "non-boolean persisted must not become false",
+      },
+      {
+        raw: {
+          type: "tool_config_changed",
+          payload: {
+            operation: "bogus",
+            target: 0,
+            status: 0,
+            persisted: "false",
+          },
+        },
+        reason: "malformed operation/status semantics must not become an empty typed payload",
+      },
+    ];
 
-    assert.equal(missing.type, "turn_completed");
-    assert.equal(invalidString.type, "turn_completed");
-    assert.equal(nonString.type, "turn_completed");
-    if (
-      missing.type === "turn_completed" &&
-      invalidString.type === "turn_completed" &&
-      nonString.type === "turn_completed"
-    ) {
-      assert.equal(missing.stopReason, undefined);
-      assert.equal(invalidString.stopReason, undefined);
-      assert.equal(nonString.stopReason, undefined);
+    for (const { raw, reason } of cases) {
+      const event = parseEvent(raw);
+      assert.equal(event.type, "malformed_event", reason);
+      assert.equal(event.rawType, raw.type);
+      assert.deepEqual(event.raw, raw);
     }
   });
 
@@ -238,6 +267,8 @@ describe("Typed Events", () => {
     if (missing.type === "tool_execution_completed" && malformed.type === "tool_execution_completed") {
       assert.equal(missing.isError, undefined);
       assert.equal(malformed.isError, undefined);
+      assert.equal(missing.durationMs, undefined);
+      assert.equal(malformed.durationMs, undefined);
     }
   });
 
@@ -373,14 +404,8 @@ describe("Typed Events", () => {
       assert.equal(event.scopePath[0].scope, "mob_member");
       if (event.scopePath[0].scope === "mob_member") {
         assert.equal(event.scopePath[0].agent_identity, "writer");
-        // SDK re-encodes the wire "identity:generation" display string as
-        // an opaque `AgentRuntimeRef` token.
-        const expected = Buffer.from(JSON.stringify({ i: "writer", g: 1 }), "utf-8")
-          .toString("base64")
-          .replace(/\+/g, "-")
-          .replace(/\//g, "_")
-          .replace(/=+$/, "");
-        assert.equal(event.scopePath[0].agent_runtime_id, expected);
+        assert.equal(event.scopePath[0].agent_runtime_id, undefined);
+        assert.equal(event.scopePath[0].fence_token, undefined);
       }
     }
   });
@@ -577,20 +602,18 @@ describe("Typed Events", () => {
     assert.equal(history, expected);
   });
 
-  it("should tolerate malformed tool_config_changed payload", () => {
+  it("should preserve malformed tool_config_changed payload", () => {
+    const raw = {
+      type: "tool_config_changed",
+      payload: "not-an-object",
+    };
     const event = parseEvent({
       type: "tool_config_changed",
       payload: "not-an-object",
     });
-    assert.equal(event.type, "tool_config_changed");
-    if (event.type === "tool_config_changed") {
-      assert.equal(event.payload.operation, undefined);
-      assert.equal(event.payload.target, undefined);
-      assert.equal(event.payload.status, undefined);
-      assert.equal(event.payload.status_info, undefined);
-      assert.equal(event.payload.persisted, undefined);
-      assert.equal(event.payload.applied_at_turn, undefined);
-    }
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "tool_config_changed");
+    assert.deepEqual(event.raw, raw);
   });
 
   it("should ignore malformed applied_at_turn in tool_config_changed", () => {
@@ -610,8 +633,8 @@ describe("Typed Events", () => {
     }
   });
 
-  it("should not coerce non-boolean persisted in tool_config_changed", () => {
-    const event = parseEvent({
+  it("should preserve non-boolean persisted in tool_config_changed", () => {
+    const raw = {
       type: "tool_config_changed",
       payload: {
         operation: "add",
@@ -619,15 +642,15 @@ describe("Typed Events", () => {
         status: "staged",
         persisted: "false",
       },
-    });
-    assert.equal(event.type, "tool_config_changed");
-    if (event.type === "tool_config_changed") {
-      assert.equal(event.payload.persisted, undefined);
-    }
+    };
+    const event = parseEvent(raw);
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "tool_config_changed");
+    assert.deepEqual(event.raw, raw);
   });
 
   it("should not default malformed tool_config_changed operation/status semantics", () => {
-    const event = parseEvent({
+    const raw = {
       type: "tool_config_changed",
       payload: {
         operation: "bogus",
@@ -635,15 +658,12 @@ describe("Typed Events", () => {
         status: 0,
         persisted: "false",
       },
-    });
+    };
+    const event = parseEvent(raw);
 
-    assert.equal(event.type, "tool_config_changed");
-    if (event.type === "tool_config_changed") {
-      assert.equal(event.payload.operation, undefined);
-      assert.equal(event.payload.target, undefined);
-      assert.equal(event.payload.status, undefined);
-      assert.equal(event.payload.persisted, undefined);
-    }
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "tool_config_changed");
+    assert.deepEqual(event.raw, raw);
   });
 
   it("should not fabricate standalone event envelope metadata or payload", () => {
@@ -993,6 +1013,33 @@ describe("RunResult parsing", () => {
     };
     const result = MeerkatClient.parseRunResult(raw);
     assert.equal(result.skillDiagnostics, undefined);
+  });
+
+  it("rejects malformed run results instead of fabricating counters", () => {
+    assert.throws(
+      () => MeerkatClient.parseRunResult({ session_id: "s1", text: "ok", turns: 1, tool_calls: 0 }),
+      /missing usage/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: "1",
+        tool_calls: 0,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      /turns must be number/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseRunResult({
+        session_id: "s1",
+        text: "ok",
+        turns: 1,
+        tool_calls: 0,
+        usage: { input_tokens: "oops", output_tokens: 1 },
+      }),
+      /usage.input_tokens must be number/,
+    );
   });
 });
 
@@ -1539,6 +1586,36 @@ describe("Mob kickoff wait wrappers", () => {
     assert.equal(legacy[0].agentRuntimeId, undefined);
     assert.equal(fromHandle[0].agentIdentity, "lead");
     assert.equal(fromHandle[0].agentRuntimeId, undefined);
+  });
+});
+
+describe("Mob decoder strictness", () => {
+  it("rejects missing mob status instead of fabricating unknown", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ mob_id: "mob-1" });
+
+    await assert.rejects(
+      () => client.mobStatus("mob-1"),
+      /missing status/,
+    );
+  });
+
+  it("rejects malformed wait member snapshots instead of fabricating booleans", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({
+      members: [
+        {
+          agent_identity: "lead",
+          status: "active",
+          tokens_used: 42,
+        },
+      ],
+    });
+
+    await assert.rejects(
+      () => client.waitMobReady("mob-1"),
+      /is_final must be boolean/,
+    );
   });
 });
 

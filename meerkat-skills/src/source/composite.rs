@@ -30,108 +30,6 @@ impl NamedSource {
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::source::InMemorySkillSource;
-    use indexmap::IndexMap;
-    use meerkat_core::skills::{
-        SkillKeyRemap, SkillName, SkillScope, SourceIdentityLineage, SourceIdentityLineageEvent,
-    };
-
-    fn source_uuid(raw: &str) -> SourceUuid {
-        SourceUuid::parse(raw).unwrap()
-    }
-
-    fn skill_key(source_uuid: &SourceUuid, skill: &str) -> SkillKey {
-        SkillKey::new(source_uuid.clone(), SkillName::parse(skill).unwrap())
-    }
-
-    fn skill_doc(key: SkillKey, display: &str, body: &str) -> SkillDocument {
-        SkillDocument {
-            descriptor: SkillDescriptor {
-                key,
-                name: display.to_string(),
-                description: format!("description for {display}"),
-                scope: SkillScope::Project,
-                metadata: IndexMap::new(),
-                capability_requirements: Vec::new(),
-                source_name: String::new(),
-            },
-            body: body.to_string(),
-            extensions: IndexMap::new(),
-        }
-    }
-
-    fn source_record(source_uuid: SourceUuid, name: &str) -> SourceIdentityRecord {
-        SourceIdentityRecord {
-            source_uuid,
-            display_name: name.to_string(),
-            transport_kind: SourceTransportKind::Filesystem,
-            fingerprint: format!("fixture:{name}"),
-            status: SourceIdentityStatus::Active,
-        }
-    }
-
-    #[tokio::test]
-    async fn load_applies_registry_remap_before_first_wins_lookup() {
-        let legacy_source = source_uuid("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
-        let canonical_source = source_uuid("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
-        let legacy_key = skill_key(&legacy_source, "alpha");
-        let canonical_key = skill_key(&canonical_source, "alpha");
-        let registry = SourceIdentityRegistry::build(
-            vec![
-                source_record(legacy_source.clone(), "legacy"),
-                source_record(canonical_source.clone(), "canonical"),
-            ],
-            vec![SourceIdentityLineage {
-                event_id: "legacy-to-canonical".to_string(),
-                recorded_at_unix_secs: 1,
-                required_from_skills: Vec::new(),
-                event: SourceIdentityLineageEvent::RenameOrRelocate {
-                    from: legacy_source.clone(),
-                    to: canonical_source.clone(),
-                },
-            }],
-            vec![SkillKeyRemap {
-                from: legacy_key.clone(),
-                to: canonical_key.clone(),
-                reason: Some("test remap".to_string()),
-            }],
-            Vec::new(),
-        )
-        .unwrap();
-        let legacy = NamedSource::new(
-            source_record(legacy_source, "legacy"),
-            SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
-                legacy_key.clone(),
-                "Legacy Alpha",
-                "legacy body",
-            )])),
-        );
-        let canonical = NamedSource::new(
-            source_record(canonical_source, "canonical"),
-            SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
-                canonical_key.clone(),
-                "Canonical Alpha",
-                "canonical body",
-            )])),
-        );
-        let composite = CompositeSkillSource::from_named_with_registry(
-            vec![legacy, canonical],
-            Arc::new(registry),
-        );
-
-        let doc = composite.load(&legacy_key).await.unwrap();
-
-        assert_eq!(doc.descriptor.key, canonical_key);
-        assert_eq!(doc.descriptor.name, "Canonical Alpha");
-        assert_eq!(doc.descriptor.source_name, "canonical");
-        assert_eq!(doc.body, "canonical body");
-    }
-}
-
 /// Merges skills from multiple named sources with precedence.
 ///
 /// First source wins for duplicate `SkillKey`s. Each skill's `source_name`
@@ -379,5 +277,107 @@ impl SkillSource for CompositeSkillSource {
             }
         }
         Err(SkillError::NotFound { key: canonical_key })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::source::InMemorySkillSource;
+    use indexmap::IndexMap;
+    use meerkat_core::skills::{
+        SkillKeyRemap, SkillName, SkillScope, SourceIdentityLineage, SourceIdentityLineageEvent,
+    };
+
+    fn source_uuid(raw: &str) -> SourceUuid {
+        SourceUuid::parse(raw).unwrap()
+    }
+
+    fn skill_key(source_uuid: &SourceUuid, skill: &str) -> SkillKey {
+        SkillKey::new(source_uuid.clone(), SkillName::parse(skill).unwrap())
+    }
+
+    fn skill_doc(key: SkillKey, display: &str, body: &str) -> SkillDocument {
+        SkillDocument {
+            descriptor: SkillDescriptor {
+                key,
+                name: display.to_string(),
+                description: format!("description for {display}"),
+                scope: SkillScope::Project,
+                metadata: IndexMap::new(),
+                capability_requirements: Vec::new(),
+                source_name: String::new(),
+            },
+            body: body.to_string(),
+            extensions: IndexMap::new(),
+        }
+    }
+
+    fn source_record(source_uuid: SourceUuid, name: &str) -> SourceIdentityRecord {
+        SourceIdentityRecord {
+            source_uuid,
+            display_name: name.to_string(),
+            transport_kind: SourceTransportKind::Filesystem,
+            fingerprint: format!("fixture:{name}"),
+            status: SourceIdentityStatus::Active,
+        }
+    }
+
+    #[tokio::test]
+    async fn load_applies_registry_remap_before_first_wins_lookup() {
+        let legacy_source = source_uuid("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa");
+        let canonical_source = source_uuid("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb");
+        let legacy_key = skill_key(&legacy_source, "alpha");
+        let canonical_key = skill_key(&canonical_source, "alpha");
+        let registry = SourceIdentityRegistry::build(
+            vec![
+                source_record(legacy_source.clone(), "legacy"),
+                source_record(canonical_source.clone(), "canonical"),
+            ],
+            vec![SourceIdentityLineage {
+                event_id: "legacy-to-canonical".to_string(),
+                recorded_at_unix_secs: 1,
+                required_from_skills: Vec::new(),
+                event: SourceIdentityLineageEvent::RenameOrRelocate {
+                    from: legacy_source.clone(),
+                    to: canonical_source.clone(),
+                },
+            }],
+            vec![SkillKeyRemap {
+                from: legacy_key.clone(),
+                to: canonical_key.clone(),
+                reason: Some("test remap".to_string()),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let legacy = NamedSource::new(
+            source_record(legacy_source, "legacy"),
+            SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
+                legacy_key.clone(),
+                "Legacy Alpha",
+                "legacy body",
+            )])),
+        );
+        let canonical = NamedSource::new(
+            source_record(canonical_source, "canonical"),
+            SourceNode::Memory(InMemorySkillSource::new(vec![skill_doc(
+                canonical_key.clone(),
+                "Canonical Alpha",
+                "canonical body",
+            )])),
+        );
+        let composite = CompositeSkillSource::from_named_with_registry(
+            vec![legacy, canonical],
+            Arc::new(registry),
+        );
+
+        let doc = composite.load(&legacy_key).await.unwrap();
+
+        assert_eq!(doc.descriptor.key, canonical_key);
+        assert_eq!(doc.descriptor.name, "Canonical Alpha");
+        assert_eq!(doc.descriptor.source_name, "canonical");
+        assert_eq!(doc.body, "canonical body");
     }
 }

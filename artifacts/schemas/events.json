@@ -4153,30 +4153,8 @@
               "agent_identity": {
                 "type": "string"
               },
-              "agent_runtime_id": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "fence_token": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
               "flow_run_id": {
                 "type": "string"
-              },
-              "generation": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
               },
               "scope": {
                 "const": "mob_member",

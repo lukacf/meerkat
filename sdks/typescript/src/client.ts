@@ -820,8 +820,14 @@ export class MeerkatClient {
     const status = typeof rawStatus === "string"
       ? rawStatus
       : (typeof rawStatus === "object" && rawStatus !== null
-        ? String(Object.keys(rawStatus)[0] ?? "unknown")
-        : String(rawStatus ?? "unknown"));
+        ? Object.keys(rawStatus)[0]
+        : undefined);
+    if (!status) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/status response: missing status",
+      );
+    }
     return { mobId: String(result.mob_id ?? mobId), status };
   }
 
@@ -1266,18 +1272,33 @@ export class MeerkatClient {
           "Invalid mob/wait_kickoff response: member missing agent_identity",
         );
       }
+      const status = MeerkatClient.requireStringField(
+        member,
+        "status",
+        "Invalid mob/wait_kickoff response",
+      );
+      const tokensUsed = MeerkatClient.requireNumberField(
+        member,
+        "tokens_used",
+        "Invalid mob/wait_kickoff response",
+      );
+      const isFinal = MeerkatClient.requireBooleanField(
+        member,
+        "is_final",
+        "Invalid mob/wait_kickoff response",
+      );
       const rawConnectivity =
         member.peer_connectivity && typeof member.peer_connectivity === "object"
           ? (member.peer_connectivity as Record<string, unknown>)
           : undefined;
       return {
         agentIdentity,
-        status: String(member.status ?? "unknown"),
+        status,
         outputPreview:
           member.output_preview != null ? String(member.output_preview) : undefined,
         error: member.error != null ? String(member.error) : undefined,
-        tokensUsed: Number(member.tokens_used ?? 0),
-        isFinal: Boolean(member.is_final),
+        tokensUsed,
+        isFinal,
         peerConnectivity: rawConnectivity
           ? {
               reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
@@ -1321,18 +1342,33 @@ export class MeerkatClient {
           "Invalid mob/wait_ready response: member missing agent_identity",
         );
       }
+      const status = MeerkatClient.requireStringField(
+        member,
+        "status",
+        "Invalid mob/wait_ready response",
+      );
+      const tokensUsed = MeerkatClient.requireNumberField(
+        member,
+        "tokens_used",
+        "Invalid mob/wait_ready response",
+      );
+      const isFinal = MeerkatClient.requireBooleanField(
+        member,
+        "is_final",
+        "Invalid mob/wait_ready response",
+      );
       const rawConnectivity =
         member.peer_connectivity && typeof member.peer_connectivity === "object"
           ? (member.peer_connectivity as Record<string, unknown>)
           : undefined;
       return {
         agentIdentity,
-        status: String(member.status ?? "unknown"),
+        status,
         outputPreview:
           member.output_preview != null ? String(member.output_preview) : undefined,
         error: member.error != null ? String(member.error) : undefined,
-        tokensUsed: Number(member.tokens_used ?? 0),
-        isFinal: Boolean(member.is_final),
+        tokensUsed,
+        isFinal,
         peerConnectivity: rawConnectivity
           ? {
               reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
@@ -2208,6 +2244,54 @@ export class MeerkatClient {
     return String(raw);
   }
 
+  private static requireRecord(
+    raw: unknown,
+    field: string,
+    context: string,
+  ): Record<string, unknown> {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
+    }
+    return raw as Record<string, unknown>;
+  }
+
+  private static requireStringField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): string {
+    const value = raw[field];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
+    }
+    return value;
+  }
+
+  private static requireNumberField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+    displayField = field,
+  ): number {
+    const value = raw[field];
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: ${displayField} must be number`);
+    }
+    return value;
+  }
+
+  private static requireBooleanField(
+    raw: Record<string, unknown>,
+    field: string,
+    context: string,
+  ): boolean {
+    const value = raw[field];
+    if (typeof value !== "boolean") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: ${field} must be boolean`);
+    }
+    return value;
+  }
+
   private static parseSkillDiagnostics(raw: unknown): SkillRuntimeDiagnostics | undefined {
     if (!raw || typeof raw !== "object") return undefined;
     const data = raw as Record<string, unknown>;
@@ -2254,15 +2338,36 @@ export class MeerkatClient {
   }
 
   static parseRunResult(data: Record<string, unknown>): RunResult {
-    const usageRaw = data.usage as Record<string, unknown> | undefined;
+    const context = "Invalid run result";
+    const usageRaw = MeerkatClient.requireRecord(data.usage, "usage", context);
     const usage: Usage = {
-      inputTokens: Number(usageRaw?.input_tokens ?? 0),
-      outputTokens: Number(usageRaw?.output_tokens ?? 0),
+      inputTokens: MeerkatClient.requireNumberField(
+        usageRaw,
+        "input_tokens",
+        context,
+        "usage.input_tokens",
+      ),
+      outputTokens: MeerkatClient.requireNumberField(
+        usageRaw,
+        "output_tokens",
+        context,
+        "usage.output_tokens",
+      ),
       cacheCreationTokens: usageRaw?.cache_creation_tokens != null
-        ? Number(usageRaw.cache_creation_tokens)
+        ? MeerkatClient.requireNumberField(
+            usageRaw,
+            "cache_creation_tokens",
+            context,
+            "usage.cache_creation_tokens",
+          )
         : undefined,
       cacheReadTokens: usageRaw?.cache_read_tokens != null
-        ? Number(usageRaw.cache_read_tokens)
+        ? MeerkatClient.requireNumberField(
+            usageRaw,
+            "cache_read_tokens",
+            context,
+            "usage.cache_read_tokens",
+          )
         : undefined,
     };
 
@@ -2279,8 +2384,8 @@ export class MeerkatClient {
       sessionId: String(data.session_id ?? ""),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
       text: String(data.text ?? ""),
-      turns: Number(data.turns ?? 0),
-      toolCalls: Number(data.tool_calls ?? 0),
+      turns: MeerkatClient.requireNumberField(data, "turns", context),
+      toolCalls: MeerkatClient.requireNumberField(data, "tool_calls", context),
       usage,
       structuredOutput: data.structured_output,
       schemaWarnings,

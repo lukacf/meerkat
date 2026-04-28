@@ -106,12 +106,12 @@ fn member_list_entry_wire(
     }
 }
 
-/// Project the deep member-status snapshot into its explicit RPC control
-/// shape. The domain snapshot intentionally skips runtime incarnation atoms in
-/// generic serde so app-facing receipts cannot leak them by accident; this
-/// endpoint owns the diagnostic/control contract and therefore opts in.
+/// Project the deep member-status snapshot into the app-facing RPC shape.
+/// Runtime incarnation ids and fence tokens are bridge-internal binding atoms;
+/// `MobMemberSnapshot` intentionally keeps them out of generic serde, and this
+/// endpoint must not reinsert them.
 fn member_status_payload(snapshot: &MobMemberSnapshot) -> serde_json::Value {
-    let mut value = match serde_json::to_value(snapshot) {
+    match serde_json::to_value(snapshot) {
         Ok(value) => value,
         Err(error) => {
             tracing::error!(
@@ -120,19 +120,7 @@ fn member_status_payload(snapshot: &MobMemberSnapshot) -> serde_json::Value {
             );
             serde_json::Value::Object(serde_json::Map::new())
         }
-    };
-    let (agent_runtime_id, fence_token) = snapshot.runtime_identity_fields();
-    if let serde_json::Value::Object(fields) = &mut value {
-        fields.insert(
-            "agent_runtime_id".to_string(),
-            serde_json::to_value(agent_runtime_id).unwrap_or(serde_json::Value::Null),
-        );
-        fields.insert(
-            "fence_token".to_string(),
-            serde_json::json!(fence_token.get()),
-        );
     }
-    value
 }
 
 pub async fn handle_create(

@@ -240,6 +240,35 @@ def test_parse_run_result_skill_diagnostics():
     assert result.skill_diagnostics.quarantined[0].skill_id == "extract/email"
 
 
+def test_parse_run_result_rejects_malformed_counters():
+    with pytest.raises(MeerkatError, match="missing usage"):
+        MeerkatClient._parse_run_result(
+            {"session_id": "s1", "text": "ok", "turns": 1, "tool_calls": 0}
+        )
+
+    with pytest.raises(MeerkatError, match="turns must be number"):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": "1",
+                "tool_calls": 0,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+    with pytest.raises(MeerkatError, match="usage.input_tokens must be number"):
+        MeerkatClient._parse_run_result(
+            {
+                "session_id": "s1",
+                "text": "ok",
+                "turns": 1,
+                "tool_calls": 0,
+                "usage": {"input_tokens": "oops", "output_tokens": 1},
+            }
+        )
+
+
 def test_parse_session_history():
     raw = {
         "session_id": "s1",
@@ -604,6 +633,50 @@ def test_parse_turn_started():
     assert event.turn_number == 3
 
 
+def test_parse_scoped_mob_event_omits_runtime_binding_atoms():
+    raw = {
+        "scope_id": "mob:writer",
+        "scope_path": [
+            {
+                "scope": "mob_member",
+                "flow_run_id": "run_1",
+                "agent_identity": "writer",
+                "agent_runtime_id": "writer:1",
+                "fence_token": 1,
+                "generation": 1,
+            }
+        ],
+        "event": {"type": "text_delta", "delta": "hi"},
+    }
+
+    event = parse_event(raw)
+
+    assert event.scope_id == "mob:writer"
+    assert event.scope_path == [
+        {
+            "scope": "mob_member",
+            "flow_run_id": "run_1",
+            "agent_identity": "writer",
+        }
+    ]
+
+
+def test_parse_attributed_mob_event_omits_source_fence_token():
+    event = MeerkatClient._parse_attributed_mob_event(
+        {
+            "source": "writer",
+            "source_fence_token": 7,
+            "role": "worker",
+            "envelope": {
+                "payload": {"type": "text_delta", "delta": "hi"},
+            },
+        }
+    )
+
+    assert event.source == "writer"
+    assert not hasattr(event, "source_fence_token")
+
+
 def test_parse_tool_config_changed():
     raw = {
         "type": "tool_config_changed",
@@ -640,13 +713,9 @@ def test_parse_tool_config_changed_with_malformed_payload():
         "payload": "not-an-object",
     }
     event = parse_event(raw)
-    assert isinstance(event, ToolConfigChanged)
-    assert event.payload.operation is None
-    assert event.payload.target is None
-    assert event.payload.status is None
-    assert event.payload.status_info is None
-    assert event.payload.persisted is None
-    assert event.payload.applied_at_turn is None
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_tool_config_changed_with_bad_applied_at_turn():
@@ -676,26 +745,9 @@ def test_parse_tool_config_changed_with_non_boolean_persisted():
         },
     }
     event = parse_event(raw)
-    assert isinstance(event, ToolConfigChanged)
-    assert event.payload.persisted is None
-
-
-def test_parse_tool_config_changed_with_malformed_operation_status_semantics():
-    raw = {
-        "type": "tool_config_changed",
-        "payload": {
-            "operation": "bogus",
-            "target": 0,
-            "status": 0,
-            "persisted": "false",
-        },
-    }
-    event = parse_event(raw)
-    assert isinstance(event, ToolConfigChanged)
-    assert event.payload.operation is None
-    assert event.payload.target is None
-    assert event.payload.status is None
-    assert event.payload.persisted is None
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_turn_completed_with_usage():
@@ -712,17 +764,51 @@ def test_parse_turn_completed_with_usage():
     assert event.usage.cache_creation_tokens is None
 
 
-def test_parse_turn_completed_does_not_default_missing_or_malformed_stop_reason():
-    missing = parse_event({"type": "turn_completed"})
-    invalid_string = parse_event({"type": "turn_completed", "stop_reason": "not_real"})
-    non_string = parse_event({"type": "turn_completed", "stop_reason": 0})
+def test_parse_malformed_known_events_preserves_raw_payload():
+    cases = [
+        (
+            {"type": "turn_completed", "usage": {"input_tokens": 50, "output_tokens": 20}},
+            "missing stop_reason must not become end_turn",
+        ),
+        (
+            {
+                "type": "turn_completed",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": "oops", "output_tokens": 20},
+            },
+            "malformed usage must not become token counts",
+        ),
+        (
+            {
+                "type": "tool_config_changed",
+                "payload": {
+                    "operation": "add",
+                    "target": "filesystem",
+                    "status": "staged",
+                    "persisted": "false",
+                },
+            },
+            "non-boolean persisted must not become false",
+        ),
+        (
+            {
+                "type": "tool_config_changed",
+                "payload": {
+                    "operation": "bogus",
+                    "target": 0,
+                    "status": 0,
+                    "persisted": "false",
+                },
+            },
+            "malformed operation/status semantics must not become an empty typed payload",
+        ),
+    ]
 
-    assert isinstance(missing, TurnCompleted)
-    assert isinstance(invalid_string, TurnCompleted)
-    assert isinstance(non_string, TurnCompleted)
-    assert missing.stop_reason is None
-    assert invalid_string.stop_reason is None
-    assert non_string.stop_reason is None
+    for raw, reason in cases:
+        event = parse_event(raw)
+        assert isinstance(event, UnknownEvent), reason
+        assert event.type == "malformed_event"
+        assert event.data == raw
 
 
 def test_parse_run_completed():
@@ -773,6 +859,8 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
     assert isinstance(malformed, ToolExecutionCompleted)
     assert missing.is_error is None
     assert malformed.is_error is None
+    assert missing.duration_ms is None
+    assert malformed.duration_ms is None
 
 
 def test_parse_unknown_event_type():
@@ -1426,6 +1514,40 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     }
     assert calls[13][1] == {"mob_id": "mob-1", "timeout_ms": 99}
     assert calls[4][1]["agent_identity"] == "agent-a"
+
+
+@pytest.mark.asyncio
+async def test_mob_status_rejects_missing_status():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {"mob_id": "mob-1"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="missing status"):
+        await client.mob_status("mob-1")
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_ready_rejects_malformed_member_snapshot():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "active",
+                    "tokens_used": 42,
+                }
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match="is_final must be boolean"):
+        await client.wait_mob_ready("mob-1")
 
 
 @pytest.mark.asyncio

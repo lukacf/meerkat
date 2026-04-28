@@ -8,7 +8,7 @@ use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeCapabilities, RealtimeEvent, RealtimeInputChunk,
     RealtimeTurningMode, RealtimeVideoChunk,
 };
-use meerkat_core::ToolResult;
+use meerkat_core::{PendingSystemContextAppend, ToolResult};
 use meerkat_core::{SessionLlmIdentity, StopReason, ToolDef, types::Message, types::Usage};
 use serde_json::Value;
 
@@ -192,6 +192,12 @@ pub struct RealtimeSessionOpenConfig {
     pub llm_identity: SessionLlmIdentity,
     pub visible_tools: Vec<ToolDef>,
     pub seed_messages: Vec<Message>,
+    /// Runtime-authored system context carried as typed provenance.
+    ///
+    /// Provider adapters must treat this as the only authoritative realtime
+    /// reconstruction source for runtime context. Rendered transcript markers
+    /// are projections only and must not be parsed back into authority.
+    pub runtime_system_context: Vec<PendingSystemContextAppend>,
     /// Per-channel override for the "nudge the provider" timeout the OpenAI
     /// adapter uses while waiting for the first real delta after a turn is
     /// admitted. `None` inherits the adapter's compile-time default.
@@ -214,9 +220,20 @@ impl RealtimeSessionOpenConfig {
             llm_identity,
             visible_tools,
             seed_messages,
+            runtime_system_context: Vec::new(),
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
         }
+    }
+
+    /// Builder-style typed runtime context for provider reconstruction.
+    #[must_use]
+    pub fn with_runtime_system_context(
+        mut self,
+        runtime_system_context: Vec<PendingSystemContextAppend>,
+    ) -> Self {
+        self.runtime_system_context = runtime_system_context;
+        self
     }
 
     /// Builder-style override for the per-channel nudge timeout.

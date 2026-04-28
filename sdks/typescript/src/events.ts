@@ -5,6 +5,8 @@
  * the wire protocol).  All other fields use idiomatic camelCase.
  * Missing semantic fields remain absent during parsing so partial streaming
  * payloads do not become authoritative SDK state.
+ * Malformed known event payloads are preserved as `malformed_event` frames
+ * instead of being coerced into typed semantic events with fabricated defaults.
  *
  * @example
  * ```ts
@@ -24,40 +26,11 @@
  * ```
  */
 
-import { Buffer } from "node:buffer";
 import type { ContentInput, SkillKey } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
 // ---------------------------------------------------------------------------
-
-/**
- * Re-encode the wire `"identity:generation"` display string that appears
- * on event scope frames into the canonical opaque `AgentRuntimeRef`
- * token. Returns `undefined` for absent values; returns `""` for
- * malformed values (unlike the object form in `client.ts` which throws —
- * events flow through many code paths and softer degradation is
- * acceptable for frame metadata).
- */
-function encodeAgentRuntimeRefFromDisplay(raw: unknown): string | undefined {
-  if (raw == null) {
-    return undefined;
-  }
-  const display = String(raw);
-  const sep = display.lastIndexOf(":");
-  if (sep <= 0 || sep >= display.length - 1) {
-    return "";
-  }
-  const identity = display.slice(0, sep);
-  const generationStr = display.slice(sep + 1);
-  const generation = Number(generationStr);
-  if (!identity || !Number.isFinite(generation) || !Number.isInteger(generation)) {
-    return "";
-  }
-  const payload = JSON.stringify({ i: identity, g: generation });
-  const b64 = Buffer.from(payload, "utf-8").toString("base64");
-  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
 
 /** Token usage for a single LLM turn. */
 export interface Usage {
@@ -103,14 +76,6 @@ export type StreamScopeFrame =
       readonly scope: "mob_member";
       readonly flow_run_id: string;
       readonly agent_identity: string;
-      /**
-       * Opaque incarnation handle. Compare for equality to detect
-       * incarnation rotation; internals are not parseable. Encoded
-       * client-side from the wire `"identity:generation"` display string,
-       * matching the `MemberRef` pattern.
-       */
-      readonly agent_runtime_id?: string;
-      readonly fence_token?: number;
     };
 
 export interface ScopedAgentEvent {
@@ -199,7 +164,7 @@ export interface ToolExecutionCompletedEvent {
   readonly name: string;
   readonly result: string;
   readonly isError?: boolean;
-  readonly durationMs: number;
+  readonly durationMs?: number;
 }
 
 export interface ToolExecutionTimedOutEvent {
@@ -434,6 +399,13 @@ export interface UnknownEvent {
   readonly [key: string]: unknown;
 }
 
+export interface MalformedEvent {
+  readonly type: "malformed_event";
+  readonly rawType: string;
+  readonly raw: Record<string, unknown>;
+  readonly error: string;
+}
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -469,6 +441,7 @@ export type AgentEvent =
   | InteractionFailedEvent
   | StreamTruncatedEvent
   | ToolConfigChangedEvent
+  | MalformedEvent
   | UnknownEvent;
 
 /** Backward-compatible alias retained for SDK consumers. */
@@ -509,16 +482,61 @@ export function isRunFailed(event: StreamEvent): event is RunFailedEvent {
 // Wire → typed parser
 // ---------------------------------------------------------------------------
 
-function parseUsage(raw: Record<string, unknown> | undefined): Usage {
-  if (!raw) return { inputTokens: 0, outputTokens: 0 };
+function isPlainRecord(raw: unknown): raw is Record<string, unknown> {
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+}
+
+function malformedEvent(raw: Record<string, unknown>, rawType: string, error: string): MalformedEvent {
+  return { type: "malformed_event", rawType, raw, error };
+}
+
+function requireStringField(raw: Record<string, unknown>, field: string): string {
+  const value = raw[field];
+  if (typeof value !== "string") {
+    throw new Error(`${field} must be string`);
+  }
+  return value;
+}
+
+function requireNumberField(raw: Record<string, unknown>, field: string): number {
+  const value = raw[field];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${field} must be number`);
+  }
+  return value;
+}
+
+function requireBooleanField(raw: Record<string, unknown>, field: string): boolean {
+  const value = raw[field];
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be boolean`);
+  }
+  return value;
+}
+
+function requireOneOf<T extends string>(
+  value: string,
+  field: string,
+  allowed: readonly T[],
+): T {
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${field} must be one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+function parseUsage(raw: unknown): Usage {
+  if (!isPlainRecord(raw)) {
+    throw new Error("missing usage");
+  }
   return {
-    inputTokens: Number(raw.input_tokens ?? 0),
-    outputTokens: Number(raw.output_tokens ?? 0),
+    inputTokens: requireNumberField(raw, "input_tokens"),
+    outputTokens: requireNumberField(raw, "output_tokens"),
     cacheCreationTokens: raw.cache_creation_tokens != null
-      ? Number(raw.cache_creation_tokens)
+      ? requireNumberField(raw, "cache_creation_tokens")
       : undefined,
     cacheReadTokens: raw.cache_read_tokens != null
-      ? Number(raw.cache_read_tokens)
+      ? requireNumberField(raw, "cache_read_tokens")
       : undefined,
   };
 }
@@ -710,9 +728,6 @@ export function parseEvent(raw: Record<string, unknown>): StreamEvent {
           scope: "mob_member",
           flow_run_id: String(frame.flow_run_id ?? ""),
           agent_identity: String(frame.agent_identity ?? ""),
-          agent_runtime_id: encodeAgentRuntimeRefFromDisplay(frame.agent_runtime_id),
-          fence_token:
-            typeof frame.fence_token === "number" ? frame.fence_token : undefined,
         } as StreamScopeFrame;
       }
       return {
@@ -744,135 +759,132 @@ export function parseEvent(raw: Record<string, unknown>): StreamEvent {
 export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
   const type = String(raw.type ?? "");
 
+  try {
   switch (type) {
     // Session lifecycle
     case "run_started":
-      return { type, sessionId: String(raw.session_id ?? ""), prompt: parseContentInput(raw.prompt) };
+      return { type, sessionId: requireStringField(raw, "session_id"), prompt: parseContentInput(raw.prompt) };
     case "run_completed":
-      return { type, sessionId: String(raw.session_id ?? ""), result: String(raw.result ?? ""), usage: parseUsage(raw.usage as Record<string, unknown>) };
+      return { type, sessionId: requireStringField(raw, "session_id"), result: requireStringField(raw, "result"), usage: parseUsage(raw.usage) };
     case "run_failed":
-      return { type, sessionId: String(raw.session_id ?? ""), errorClass: String(raw.error_class ?? ""), error: String(raw.error ?? "") };
+      return { type, sessionId: requireStringField(raw, "session_id"), errorClass: requireStringField(raw, "error_class"), error: requireStringField(raw, "error") };
 
     // Turn / LLM
     case "turn_started":
-      return { type, turnNumber: Number(raw.turn_number ?? 0) };
+      return { type, turnNumber: requireNumberField(raw, "turn_number") };
     case "text_delta":
-      return { type, delta: String(raw.delta ?? "") };
+      return { type, delta: requireStringField(raw, "delta") };
     case "text_complete":
-      return { type, content: String(raw.content ?? "") };
+      return { type, content: requireStringField(raw, "content") };
     case "tool_call_requested":
-      return { type, id: String(raw.id ?? ""), name: String(raw.name ?? ""), args: raw.args };
-    case "tool_result_received": {
-      const isError = parseWireBoolean(raw.is_error);
+      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), args: raw.args };
+    case "tool_result_received":
+      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), isError: requireBooleanField(raw, "is_error") };
+    case "turn_completed":
       return {
         type,
-        id: String(raw.id ?? ""),
-        name: String(raw.name ?? ""),
-        ...(isError != null ? { isError } : {}),
+        stopReason: requireOneOf(
+          requireStringField(raw, "stop_reason"),
+          "stop_reason",
+          ["end_turn", "tool_use", "max_tokens", "stop_sequence", "content_filter", "cancelled"] as const,
+        ),
+        usage: parseUsage(raw.usage),
       };
-    }
-    case "turn_completed": {
-      const stopReason = parseStopReason(raw.stop_reason);
-      return {
-        type,
-        ...(stopReason != null ? { stopReason } : {}),
-        usage: parseUsage(raw.usage as Record<string, unknown>),
-      };
-    }
 
     // Tool execution
     case "tool_execution_started":
-      return { type, id: String(raw.id ?? ""), name: String(raw.name ?? "") };
-    case "tool_execution_completed": {
-      const isError = parseWireBoolean(raw.is_error);
+      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name") };
+    case "tool_execution_completed":
       return {
         type,
-        id: String(raw.id ?? ""),
-        name: String(raw.name ?? ""),
-        result: String(raw.result ?? ""),
-        ...(isError != null ? { isError } : {}),
-        durationMs: Number(raw.duration_ms ?? 0),
+        id: requireStringField(raw, "id"),
+        name: requireStringField(raw, "name"),
+        result: requireStringField(raw, "result"),
+        ...(parseWireBoolean(raw.is_error) != null ? { isError: parseWireBoolean(raw.is_error) } : {}),
+        ...(typeof raw.duration_ms === "number" && Number.isFinite(raw.duration_ms)
+          ? { durationMs: raw.duration_ms }
+          : {}),
       };
-    }
     case "tool_execution_timed_out":
-      return { type, id: String(raw.id ?? ""), name: String(raw.name ?? ""), timeoutMs: Number(raw.timeout_ms ?? 0) };
+      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), timeoutMs: requireNumberField(raw, "timeout_ms") };
 
     // Compaction
     case "compaction_started":
-      return { type, inputTokens: Number(raw.input_tokens ?? 0), estimatedHistoryTokens: Number(raw.estimated_history_tokens ?? 0), messageCount: Number(raw.message_count ?? 0) };
+      return { type, inputTokens: requireNumberField(raw, "input_tokens"), estimatedHistoryTokens: requireNumberField(raw, "estimated_history_tokens"), messageCount: requireNumberField(raw, "message_count") };
     case "compaction_completed":
-      return { type, summaryTokens: Number(raw.summary_tokens ?? 0), messagesBefore: Number(raw.messages_before ?? 0), messagesAfter: Number(raw.messages_after ?? 0) };
+      return { type, summaryTokens: requireNumberField(raw, "summary_tokens"), messagesBefore: requireNumberField(raw, "messages_before"), messagesAfter: requireNumberField(raw, "messages_after") };
     case "compaction_failed":
-      return { type, error: String(raw.error ?? "") };
+      return { type, error: requireStringField(raw, "error") };
 
     // Budget
     case "budget_warning":
-      return { type, budgetType: String(raw.budget_type ?? "") as BudgetType, used: Number(raw.used ?? 0), limit: Number(raw.limit ?? 0), percent: Number(raw.percent ?? 0) };
+      return { type, budgetType: requireOneOf(requireStringField(raw, "budget_type"), "budget_type", ["tokens", "time", "tool_calls"] as const), used: requireNumberField(raw, "used"), limit: requireNumberField(raw, "limit"), percent: requireNumberField(raw, "percent") };
 
     // Retry
     case "retrying":
-      return { type, attempt: Number(raw.attempt ?? 0), maxAttempts: Number(raw.max_attempts ?? 0), error: String(raw.error ?? ""), delayMs: Number(raw.delay_ms ?? 0) };
+      return { type, attempt: requireNumberField(raw, "attempt"), maxAttempts: requireNumberField(raw, "max_attempts"), error: requireStringField(raw, "error"), delayMs: requireNumberField(raw, "delay_ms") };
 
     // Hooks
     case "hook_started":
-      return { type, hookId: String(raw.hook_id ?? ""), point: String(raw.point ?? "") as HookPoint };
+      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint };
     case "hook_completed":
-      return { type, hookId: String(raw.hook_id ?? ""), point: String(raw.point ?? "") as HookPoint, durationMs: Number(raw.duration_ms ?? 0) };
+      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, durationMs: requireNumberField(raw, "duration_ms") };
     case "hook_failed":
-      return { type, hookId: String(raw.hook_id ?? ""), point: String(raw.point ?? "") as HookPoint, error: String(raw.error ?? "") };
+      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, error: requireStringField(raw, "error") };
     case "hook_denied":
-      return { type, hookId: String(raw.hook_id ?? ""), point: String(raw.point ?? "") as HookPoint, reasonCode: String(raw.reason_code ?? ""), message: String(raw.message ?? ""), ...(raw.payload != null ? { payload: raw.payload } : {}) };
+      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, reasonCode: requireStringField(raw, "reason_code"), message: requireStringField(raw, "message"), ...(raw.payload != null ? { payload: raw.payload } : {}) };
     case "hook_rewrite_applied":
-      return { type, hookId: String(raw.hook_id ?? ""), point: String(raw.point ?? "") as HookPoint, patch: (raw.patch ?? {}) as Record<string, unknown> };
+      if (!isPlainRecord(raw.patch)) throw new Error("patch must be object");
+      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, patch: raw.patch };
     case "hook_patch_published":
-      return { type, hookId: String(raw.hook_id ?? ""), point: String(raw.point ?? "") as HookPoint, envelope: (raw.envelope ?? {}) as Record<string, unknown> };
+      if (!isPlainRecord(raw.envelope)) throw new Error("envelope must be object");
+      return { type, hookId: requireStringField(raw, "hook_id"), point: requireStringField(raw, "point") as HookPoint, envelope: raw.envelope };
 
     // Skills
     case "skills_resolved":
-      return { type, skills: (raw.skills ?? []) as string[], injectionBytes: Number(raw.injection_bytes ?? 0) };
+      if (!Array.isArray(raw.skills) || !raw.skills.every((skill) => typeof skill === "string")) {
+        throw new Error("skills must be string array");
+      }
+      return { type, skills: raw.skills, injectionBytes: requireNumberField(raw, "injection_bytes") };
     case "skill_resolution_failed": {
-      const error = String(raw.error ?? "");
+      const reference = requireStringField(raw, "reference");
+      const error = requireStringField(raw, "error");
       const skillKey = parseSkillKey(raw.skill_key);
       const reason = parseSkillResolutionFailureReason(raw.reason, error);
       return {
         type,
         ...(skillKey ? { skillKey } : {}),
         ...(reason ? { reason } : {}),
-        reference: String(raw.reference ?? ""),
+        reference,
         error,
       };
     }
 
     // Interaction (comms)
     case "interaction_complete":
-      return { type, interactionId: String(raw.interaction_id ?? ""), result: String(raw.result ?? "") };
+      return { type, interactionId: requireStringField(raw, "interaction_id"), result: requireStringField(raw, "result") };
     case "interaction_failed":
-      return { type, interactionId: String(raw.interaction_id ?? ""), error: String(raw.error ?? "") };
+      return { type, interactionId: requireStringField(raw, "interaction_id"), error: requireStringField(raw, "error") };
 
     // Stream management
     case "stream_truncated":
-      return { type, reason: String(raw.reason ?? "") };
+      return { type, reason: requireStringField(raw, "reason") };
     case "tool_config_changed": {
-      const payloadRaw = typeof raw.payload === "object" && raw.payload !== null
-        ? (raw.payload as Record<string, unknown>)
-        : undefined;
-      const appliedAtTurnRaw = payloadRaw?.applied_at_turn;
+      if (!isPlainRecord(raw.payload)) throw new Error("payload must be object");
+      const payloadRaw = raw.payload;
+      const appliedAtTurnRaw = payloadRaw.applied_at_turn;
       const appliedAtTurn = typeof appliedAtTurnRaw === "number" && Number.isFinite(appliedAtTurnRaw)
         ? appliedAtTurnRaw
         : undefined;
-      const operation = parseToolConfigChangeOperation(payloadRaw?.operation);
-      const target = parseWireString(payloadRaw?.target);
-      const status = parseWireString(payloadRaw?.status);
       const statusInfo = parseToolConfigChangeStatus(payloadRaw?.status_info);
-      const persisted = parseWireBoolean(payloadRaw?.persisted);
       return {
         type,
         payload: {
-          ...(operation != null ? { operation } : {}),
-          ...(target != null ? { target } : {}),
-          ...(status != null ? { status } : {}),
           ...(statusInfo != null ? { status_info: statusInfo } : {}),
-          ...(persisted != null ? { persisted } : {}),
+          operation: requireOneOf(requireStringField(payloadRaw, "operation"), "operation", ["add", "remove", "reload"] as const),
+          target: requireStringField(payloadRaw, "target"),
+          status: requireStringField(payloadRaw, "status"),
+          persisted: requireBooleanField(payloadRaw, "persisted"),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },
       };
@@ -881,5 +893,12 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     // Unknown — forward-compat
     default:
       return { type, ...raw } as UnknownEvent;
+  }
+  } catch (error) {
+    return malformedEvent(
+      raw,
+      type,
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }

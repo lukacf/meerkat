@@ -8,18 +8,6 @@ import { fileURLToPath } from "node:url";
 import { MeerkatRuntime, Session, isKnownEvent, KNOWN_AGENT_EVENT_TYPES } from "@rkat/web";
 import * as rawWasm from "@rkat/web/wasm/meerkat_web_runtime.js";
 
-function encodeExpectedRuntimeRef(identity, generation) {
-  // Mirror the SDK's `encodeAgentRuntimeRef` so fixtures can assert the
-  // deterministic opaque `AgentRuntimeRef` handle without reaching into
-  // the SDK's internal helper.
-  const payload = JSON.stringify({ i: identity, g: generation });
-  return Buffer.from(payload, "utf-8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-}
-
 const WEB_PACKAGE_JSON_URL = new URL("../package.json", import.meta.url);
 const { version: CURRENT_WASM_VERSION } = JSON.parse(
   await readFile(WEB_PACKAGE_JSON_URL, "utf8"),
@@ -608,12 +596,10 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     assert.equal(receipt.agent_runtime_id, undefined);
 
     const snapshot = await mob.memberStatus("worker-1");
-    // memberStatus is a diagnostic snapshot; `agent_runtime_id` is
-    // surfaced as an opaque `AgentRuntimeRef` token (compare-for-equality
-    // only; dogma round 4, row 31).
-    const expectedRuntimeRef = encodeExpectedRuntimeRef("worker-1", 1);
-    assert.equal(snapshot.agent_runtime_id, expectedRuntimeRef);
-    assert.equal(snapshot.fence_token, 1);
+    assert.ok(snapshot.member_ref);
+    assert.equal(snapshot.agent_runtime_id, undefined);
+    assert.equal(snapshot.fence_token, undefined);
+    assert.equal(snapshot.incarnation_ref, undefined);
 
     const appended = await mob.appendSystemContext("worker-1", {
       text: "Remember [BRIDGE-CTX].",

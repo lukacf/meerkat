@@ -397,11 +397,6 @@ export interface MobPeerConnectivitySnapshot {
 export interface MobMemberSnapshot {
   status: string;
   member_ref: MobMemberRef;
-  /**
-   * Opaque incarnation handle. Compare for equality to detect incarnation
-   * rotation; internals are not parseable.
-   */
-  incarnation_ref?: string;
   output_preview?: string;
   error?: string;
   tokens_used: number;
@@ -424,11 +419,6 @@ export interface MobHelperResult {
 export interface EventEnvelope {
   agent_identity?: string;
   member_ref?: MobMemberRef;
-  /**
-   * Opaque incarnation handle. Compare for equality to detect incarnation
-   * rotation; internals are not parseable.
-   */
-  incarnation_ref?: string;
   cursor?: string | number;
   event: AgentEvent | { type: string; [key: string]: unknown };
 }
@@ -448,7 +438,6 @@ export type MemberEventItem = EventEnvelope | SubscriptionLaggedEvent;
 /** Attributed mob-wide event from mob subscriptions. */
 export interface AttributedEvent {
   source: string;
-  source_incarnation_ref?: string;
   role: string;
   envelope: EventEnvelope;
 }

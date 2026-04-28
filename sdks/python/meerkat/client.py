@@ -1060,7 +1060,15 @@ class MeerkatClient:
         return result.get("mobs", [])
 
     async def mob_status(self, mob_id: str) -> dict[str, Any]:
-        return await self._request("mob/status", {"mob_id": mob_id})
+        result = await self._request("mob/status", {"mob_id": mob_id})
+        raw_status = result.get("status")
+        if isinstance(raw_status, str) and raw_status:
+            status = raw_status
+        elif isinstance(raw_status, dict) and raw_status:
+            status = next(iter(raw_status))
+        else:
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mob/status response: missing status")
+        return {"mob_id": str(result.get("mob_id", mob_id)), "status": status}
 
     async def list_mob_members(self, mob_id: str) -> list[MobMember]:
         result = await self._request("mob/members", {"mob_id": mob_id})
@@ -1388,7 +1396,11 @@ class MeerkatClient:
             {"mob_id": mob_id, "agent_identity": agent_identity},
         )
         return {
-            "status": str(result.get("status", "unknown")),
+            "status": self._require_string_field(
+                result,
+                "status",
+                "Invalid mob/member_status response",
+            ),
             **(
                 {"output_preview": str(result["output_preview"])}
                 if result.get("output_preview") is not None
@@ -1399,8 +1411,16 @@ class MeerkatClient:
                 if result.get("error") is not None
                 else {}
             ),
-            "tokens_used": int(result.get("tokens_used", 0)),
-            "is_final": bool(result.get("is_final", False)),
+            "tokens_used": self._require_number_field(
+                result,
+                "tokens_used",
+                "Invalid mob/member_status response",
+            ),
+            "is_final": self._require_bool_field(
+                result,
+                "is_final",
+                "Invalid mob/member_status response",
+            ),
             **(
                 {"realtime_attachment_status": str(result["realtime_attachment_status"])}
                 if result.get("realtime_attachment_status") is not None
@@ -1449,8 +1469,16 @@ class MeerkatClient:
                 continue
             normalized.append(
                 {
-                    "agent_identity": str(entry.get("agent_identity", "")),
-                    "status": str(entry.get("status", "unknown")),
+                    "agent_identity": self._require_string_field(
+                        entry,
+                        "agent_identity",
+                        "Invalid mob/wait_kickoff response",
+                    ),
+                    "status": self._require_string_field(
+                        entry,
+                        "status",
+                        "Invalid mob/wait_kickoff response",
+                    ),
                     **(
                         {"output_preview": str(entry["output_preview"])}
                         if entry.get("output_preview") is not None
@@ -1461,8 +1489,16 @@ class MeerkatClient:
                         if entry.get("error") is not None
                         else {}
                     ),
-                    "tokens_used": int(entry.get("tokens_used", 0)),
-                    "is_final": bool(entry.get("is_final", False)),
+                    "tokens_used": self._require_number_field(
+                        entry,
+                        "tokens_used",
+                        "Invalid mob/wait_kickoff response",
+                    ),
+                    "is_final": self._require_bool_field(
+                        entry,
+                        "is_final",
+                        "Invalid mob/wait_kickoff response",
+                    ),
                     **(
                         {"peer_connectivity": entry["peer_connectivity"]}
                         if isinstance(entry.get("peer_connectivity"), dict)
@@ -1499,8 +1535,16 @@ class MeerkatClient:
                 continue
             normalized.append(
                 {
-                    "agent_identity": str(entry.get("agent_identity", "")),
-                    "status": str(entry.get("status", "unknown")),
+                    "agent_identity": self._require_string_field(
+                        entry,
+                        "agent_identity",
+                        "Invalid mob/wait_ready response",
+                    ),
+                    "status": self._require_string_field(
+                        entry,
+                        "status",
+                        "Invalid mob/wait_ready response",
+                    ),
                     **(
                         {"output_preview": str(entry["output_preview"])}
                         if entry.get("output_preview") is not None
@@ -1511,8 +1555,16 @@ class MeerkatClient:
                         if entry.get("error") is not None
                         else {}
                     ),
-                    "tokens_used": int(entry.get("tokens_used", 0)),
-                    "is_final": bool(entry.get("is_final", False)),
+                    "tokens_used": self._require_number_field(
+                        entry,
+                        "tokens_used",
+                        "Invalid mob/wait_ready response",
+                    ),
+                    "is_final": self._require_bool_field(
+                        entry,
+                        "is_final",
+                        "Invalid mob/wait_ready response",
+                    ),
                     **(
                         {"peer_connectivity": entry["peer_connectivity"]}
                         if isinstance(entry.get("peer_connectivity"), dict)
@@ -1853,11 +1905,6 @@ class MeerkatClient:
         envelope = raw.get("envelope", {})
         return AttributedEvent(
             source=str(raw.get("source", "")),
-            source_fence_token=(
-                int(raw["source_fence_token"])
-                if raw.get("source_fence_token") is not None
-                else None
-            ),
             role=str(raw.get("role", "")),
             envelope=MeerkatClient._parse_agent_event_envelope(
                 envelope if isinstance(envelope, dict) else {}
@@ -2473,6 +2520,41 @@ class MeerkatClient:
         return str(raw)
 
     @staticmethod
+    def _require_dict(raw: Any, field: str, context: str) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
+        return raw
+
+    @staticmethod
+    def _require_string_field(raw: dict[str, Any], field: str, context: str) -> str:
+        value = raw.get(field)
+        if not isinstance(value, str) or not value:
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: missing {field}")
+        return value
+
+    @staticmethod
+    def _require_number_field(
+        raw: dict[str, Any],
+        field: str,
+        context: str,
+        display_field: str | None = None,
+    ) -> int | float:
+        value = raw.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: {display_field or field} must be number",
+            )
+        return value
+
+    @staticmethod
+    def _require_bool_field(raw: dict[str, Any], field: str, context: str) -> bool:
+        value = raw.get(field)
+        if not isinstance(value, bool):
+            raise MeerkatError("INVALID_RESPONSE", f"{context}: {field} must be boolean")
+        return value
+
+    @staticmethod
     def _parse_skill_diagnostics(raw: Any) -> SkillRuntimeDiagnostics | None:
         if not isinstance(raw, dict):
             return None
@@ -2526,12 +2608,41 @@ class MeerkatClient:
 
     @staticmethod
     def _parse_run_result(data: dict[str, Any]) -> RunResult:
-        usage_data = data.get("usage", {})
+        context = "Invalid run result"
+        usage_data = MeerkatClient._require_dict(data.get("usage"), "usage", context)
         usage = Usage(
-            input_tokens=usage_data.get("input_tokens", 0),
-            output_tokens=usage_data.get("output_tokens", 0),
-            cache_creation_tokens=usage_data.get("cache_creation_tokens"),
-            cache_read_tokens=usage_data.get("cache_read_tokens"),
+            input_tokens=MeerkatClient._require_number_field(
+                usage_data,
+                "input_tokens",
+                context,
+                "usage.input_tokens",
+            ),
+            output_tokens=MeerkatClient._require_number_field(
+                usage_data,
+                "output_tokens",
+                context,
+                "usage.output_tokens",
+            ),
+            cache_creation_tokens=(
+                MeerkatClient._require_number_field(
+                    usage_data,
+                    "cache_creation_tokens",
+                    context,
+                    "usage.cache_creation_tokens",
+                )
+                if usage_data.get("cache_creation_tokens") is not None
+                else None
+            ),
+            cache_read_tokens=(
+                MeerkatClient._require_number_field(
+                    usage_data,
+                    "cache_read_tokens",
+                    context,
+                    "usage.cache_read_tokens",
+                )
+                if usage_data.get("cache_read_tokens") is not None
+                else None
+            ),
         )
         raw_warnings = data.get("schema_warnings")
         schema_warnings: list[SchemaWarning] | None = None
@@ -2547,8 +2658,8 @@ class MeerkatClient:
         return RunResult(
             session_id=data.get("session_id", ""),
             text=data.get("text", ""),
-            turns=data.get("turns", 0),
-            tool_calls=data.get("tool_calls", 0),
+            turns=MeerkatClient._require_number_field(data, "turns", context),
+            tool_calls=MeerkatClient._require_number_field(data, "tool_calls", context),
             usage=usage,
             session_ref=data.get("session_ref"),
             structured_output=data.get("structured_output"),

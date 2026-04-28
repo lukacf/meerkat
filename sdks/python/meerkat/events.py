@@ -6,6 +6,9 @@ autocompletion on event fields.
 
 Missing semantic fields remain absent so partially delivered streaming payloads
 do not become authoritative SDK state.
+Malformed known wire payloads are preserved as ``UnknownEvent`` instances with
+``type="malformed_event"`` instead of being coerced into typed semantic events
+with fabricated defaults.
 
 Example::
 
@@ -160,7 +163,7 @@ class ToolExecutionCompleted(Event):
     name: str = ""
     result: str = ""
     is_error: bool | None = None
-    duration_ms: int = 0
+    duration_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,12 +512,28 @@ _EVENT_MAP: dict[str, type[Event]] = {
 }
 
 
+def _malformed(raw: dict[str, Any], _error: str) -> UnknownEvent:
+    return UnknownEvent(type="malformed_event", data=raw)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _parse_usage(raw: dict[str, Any] | None) -> Usage:
-    if not raw:
-        return _USAGE_DEFAULTS
+    if not isinstance(raw, dict):
+        raise ValueError("missing usage")
+    if not _is_number(raw.get("input_tokens")):
+        raise ValueError("usage.input_tokens must be number")
+    if not _is_number(raw.get("output_tokens")):
+        raise ValueError("usage.output_tokens must be number")
+    if raw.get("cache_creation_tokens") is not None and not _is_number(raw.get("cache_creation_tokens")):
+        raise ValueError("usage.cache_creation_tokens must be number")
+    if raw.get("cache_read_tokens") is not None and not _is_number(raw.get("cache_read_tokens")):
+        raise ValueError("usage.cache_read_tokens must be number")
     return Usage(
-        input_tokens=raw.get("input_tokens", 0),
-        output_tokens=raw.get("output_tokens", 0),
+        input_tokens=raw["input_tokens"],
+        output_tokens=raw["output_tokens"],
         cache_creation_tokens=raw.get("cache_creation_tokens"),
         cache_read_tokens=raw.get("cache_read_tokens"),
     )
@@ -642,6 +661,150 @@ def _parse_skill_resolution_failure_reason(
     )
 
 
+def _require_str(raw: dict[str, Any], field_name: str) -> str:
+    value = raw.get(field_name)
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be string")
+    return value
+
+
+def _require_number(raw: dict[str, Any], field_name: str) -> int | float:
+    value = raw.get(field_name)
+    if not _is_number(value):
+        raise ValueError(f"{field_name} must be number")
+    return value
+
+
+def _require_bool(raw: dict[str, Any], field_name: str) -> bool:
+    value = raw.get(field_name)
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be boolean")
+    return value
+
+
+_STRING_FIELDS = {
+    "session_id",
+    "result",
+    "error_class",
+    "error",
+    "delta",
+    "content",
+    "id",
+    "name",
+    "stop_reason",
+    "reason",
+    "budget_type",
+    "hook_id",
+    "point",
+    "reason_code",
+    "message",
+    "reference",
+    "interaction_id",
+}
+
+_NUMBER_FIELDS = {
+    "turn_number",
+    "duration_ms",
+    "timeout_ms",
+    "input_tokens",
+    "estimated_history_tokens",
+    "message_count",
+    "summary_tokens",
+    "messages_before",
+    "messages_after",
+    "used",
+    "limit",
+    "percent",
+    "attempt",
+    "max_attempts",
+    "delay_ms",
+    "injection_bytes",
+}
+
+_BOOL_FIELDS = {"is_error"}
+
+
+def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
+    required: dict[str, tuple[str, ...]] = {
+        "run_started": ("session_id", "prompt"),
+        "run_completed": ("session_id", "result", "usage"),
+        "run_failed": ("session_id", "error_class", "error"),
+        "turn_started": ("turn_number",),
+        "text_delta": ("delta",),
+        "text_complete": ("content",),
+        "tool_call_requested": ("id", "name"),
+        "tool_result_received": ("id", "name", "is_error"),
+        "turn_completed": ("stop_reason", "usage"),
+        "tool_execution_started": ("id", "name"),
+        "tool_execution_completed": ("id", "name", "result"),
+        "tool_execution_timed_out": ("id", "name", "timeout_ms"),
+        "compaction_started": ("input_tokens", "estimated_history_tokens", "message_count"),
+        "compaction_completed": ("summary_tokens", "messages_before", "messages_after"),
+        "compaction_failed": ("error",),
+        "budget_warning": ("budget_type", "used", "limit", "percent"),
+        "retrying": ("attempt", "max_attempts", "error", "delay_ms"),
+        "hook_started": ("hook_id", "point"),
+        "hook_completed": ("hook_id", "point", "duration_ms"),
+        "hook_failed": ("hook_id", "point", "error"),
+        "hook_denied": ("hook_id", "point", "reason_code", "message"),
+        "hook_rewrite_applied": ("hook_id", "point", "patch"),
+        "hook_patch_published": ("hook_id", "point", "envelope"),
+        "skills_resolved": ("skills", "injection_bytes"),
+        "skill_resolution_failed": ("reference", "error"),
+        "interaction_complete": ("interaction_id", "result"),
+        "interaction_failed": ("interaction_id", "error"),
+        "stream_truncated": ("reason",),
+    }
+    if event_type == "tool_config_changed":
+        payload = raw.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be object")
+        operation = payload.get("operation")
+        if operation not in {"add", "remove", "reload"}:
+            raise ValueError("payload.operation must be add, remove, or reload")
+        _require_str(payload, "target")
+        _require_str(payload, "status")
+        _require_bool(payload, "persisted")
+        return
+    if event_type == "turn_completed":
+        stop_reason = raw.get("stop_reason")
+        if stop_reason not in {
+            "end_turn",
+            "tool_use",
+            "max_tokens",
+            "stop_sequence",
+            "content_filter",
+            "cancelled",
+        }:
+            raise ValueError("stop_reason must be known")
+    if event_type == "budget_warning" and raw.get("budget_type") not in {
+        "tokens",
+        "time",
+        "tool_calls",
+    }:
+        raise ValueError("budget_type must be known")
+
+    for field_name in required.get(event_type, ()):
+        if field_name == "usage":
+            _parse_usage(raw.get("usage"))
+        elif field_name == "prompt":
+            if "prompt" not in raw:
+                raise ValueError("prompt is required")
+        elif field_name == "skills":
+            skills = raw.get("skills")
+            if not isinstance(skills, list) or not all(isinstance(skill, str) for skill in skills):
+                raise ValueError("skills must be string list")
+        elif field_name in {"patch", "envelope"}:
+            if not isinstance(raw.get(field_name), dict):
+                raise ValueError(f"{field_name} must be object")
+        elif field_name in _STRING_FIELDS:
+            _require_str(raw, field_name)
+        elif field_name in _NUMBER_FIELDS:
+            _require_number(raw, field_name)
+        elif field_name in _BOOL_FIELDS:
+            _require_bool(raw, field_name)
+
+
 def parse_event(raw: dict[str, Any]) -> Event:
     """Parse a raw event dict (from the wire) into a typed :class:`Event`.
 
@@ -651,9 +814,21 @@ def parse_event(raw: dict[str, Any]) -> Event:
     if "event" in raw and ("scope_id" in raw or "scope_path" in raw):
         inner_raw = raw.get("event")
         inner = parse_event(inner_raw) if isinstance(inner_raw, dict) else UnknownEvent()
+        scope_path = raw.get("scope_path", [])
+        if isinstance(scope_path, list):
+            scope_path = [
+                {
+                    key: value
+                    for key, value in frame.items()
+                    if key not in {"agent_runtime_id", "fence_token", "generation"}
+                }
+                if isinstance(frame, dict)
+                else frame
+                for frame in scope_path
+            ]
         return ScopedEvent(
             scope_id=str(raw.get("scope_id", "")),
-            scope_path=list(raw.get("scope_path", [])),
+            scope_path=list(scope_path) if isinstance(scope_path, list) else [],
             event=inner,
         )
 
@@ -662,37 +837,44 @@ def parse_event(raw: dict[str, Any]) -> Event:
     if cls is None:
         return UnknownEvent(type=event_type, data=raw)
 
-    # Build kwargs, injecting parsed Usage where needed
-    kwargs: dict[str, Any] = {}
-    for f in cls.__dataclass_fields__:
-        if f == "usage":
-            kwargs["usage"] = _parse_usage(raw.get("usage"))
-        elif f == "stop_reason" and cls is TurnCompleted:
-            kwargs["stop_reason"] = _parse_stop_reason(raw.get("stop_reason"))
-        elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
-            kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
-        elif f == "skill_key" and cls is SkillResolutionFailed:
-            kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
-        elif f == "reason" and cls is SkillResolutionFailed:
-            kwargs["reason"] = _parse_skill_resolution_failure_reason(
-                raw.get("reason"),
-                str(raw.get("error", "")),
-            )
-        elif f == "payload" and cls is ToolConfigChanged:
-            payload_raw = raw.get("payload", {})
-            if isinstance(payload_raw, dict):
+    try:
+        _validate_known_event(event_type, raw)
+        # Build kwargs, injecting parsed Usage where needed
+        kwargs: dict[str, Any] = {}
+        for f in cls.__dataclass_fields__:
+            if f == "usage":
+                kwargs["usage"] = _parse_usage(raw.get("usage"))
+            elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
+                kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
+            elif f == "duration_ms" and cls is ToolExecutionCompleted:
+                kwargs["duration_ms"] = _parse_optional_int(raw.get("duration_ms"))
+            elif f == "skill_key" and cls is SkillResolutionFailed:
+                kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
+            elif f == "reason" and cls is SkillResolutionFailed:
+                kwargs["reason"] = _parse_skill_resolution_failure_reason(
+                    raw.get("reason"),
+                    raw["error"],
+                )
+            elif f == "payload" and cls is ToolConfigChanged:
+                payload_raw = raw["payload"]
+                assert isinstance(payload_raw, dict)
+                applied_at_turn_raw = payload_raw.get("applied_at_turn")
                 kwargs["payload"] = ToolConfigChangedPayload(
-                    operation=_parse_tool_config_operation(payload_raw.get("operation")),
-                    target=_parse_optional_str(payload_raw.get("target")),
-                    status=_parse_optional_str(payload_raw.get("status")),
+                    operation=payload_raw["operation"],
+                    target=payload_raw["target"],
+                    status=payload_raw["status"],
                     status_info=_parse_tool_config_change_status(
                         payload_raw.get("status_info")
                     ),
-                    persisted=_parse_optional_bool(payload_raw.get("persisted")),
-                    applied_at_turn=_parse_optional_int(payload_raw.get("applied_at_turn")),
+                    persisted=payload_raw["persisted"],
+                    applied_at_turn=(
+                        applied_at_turn_raw
+                        if isinstance(applied_at_turn_raw, int)
+                        else None
+                    ),
                 )
-            else:
-                kwargs["payload"] = ToolConfigChangedPayload()
-        elif f in raw:
-            kwargs[f] = raw[f]
-    return cls(**kwargs)
+            elif f in raw:
+                kwargs[f] = raw[f]
+        return cls(**kwargs)
+    except (AssertionError, KeyError, TypeError, ValueError):
+        return _malformed(raw, "malformed known event")

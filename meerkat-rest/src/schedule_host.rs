@@ -281,6 +281,12 @@ impl RestScheduleTargetAdapter {
     }
 }
 
+fn scheduled_materialization_preload_skills(
+    create: &SessionMaterializationSpec,
+) -> Option<Vec<meerkat_core::skills::SkillKey>> {
+    (!create.preload_skills.is_empty()).then(|| create.preload_skills.clone())
+}
+
 #[async_trait]
 impl SurfaceScheduleSessionHost for RestScheduleTargetAdapter {
     async fn probe_session_target(

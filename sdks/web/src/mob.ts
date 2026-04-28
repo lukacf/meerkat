@@ -73,29 +73,6 @@ function encodeMemberRef(mobId: string, agentIdentity: string): string {
   return encodeBase64UrlJson({ m: mobId, a: agentIdentity });
 }
 
-function encodeIncarnationRef(raw: unknown): string {
-  if (raw == null) {
-    return '';
-  }
-  if (typeof raw !== 'object') {
-    throw new Error(
-      `Invalid incarnation wire shape: expected object, got ${typeof raw}`,
-    );
-  }
-  const record = raw as Record<string, unknown>;
-  const identity = record.identity;
-  const generation = record.generation;
-  if (
-    typeof identity !== 'string' ||
-    identity.length === 0 ||
-    typeof generation !== 'number' ||
-    !Number.isFinite(generation)
-  ) {
-    throw new Error('Invalid incarnation wire shape: missing identity/generation');
-  }
-  return encodeBase64UrlJson({ i: identity, g: generation });
-}
-
 function normalizeEventEnvelope(raw: unknown, mobId: string): MemberEventItem {
   if (!raw || typeof raw !== 'object') {
     return raw as MemberEventItem;
@@ -108,13 +85,9 @@ function normalizeEventEnvelope(raw: unknown, mobId: string): MemberEventItem {
     typeof record.agent_identity === 'string' && record.agent_identity.length > 0
       ? record.agent_identity
       : undefined;
-  const incarnationRef = record.agent_runtime_id
-    ? encodeIncarnationRef(record.agent_runtime_id)
-    : undefined;
   return {
     agent_identity: agentIdentity,
     member_ref: agentIdentity ? encodeMemberRef(mobId, agentIdentity) : undefined,
-    incarnation_ref: incarnationRef || undefined,
     cursor:
       typeof record.cursor === 'string' || typeof record.cursor === 'number'
         ? record.cursor
@@ -137,8 +110,6 @@ function normalizeAttributedEvent(raw: unknown, mobId: string): AttributedEventI
   const envelope = normalizeEventEnvelope(record.envelope, mobId);
   return {
     source: typeof record.source === 'string' ? record.source : '',
-    source_incarnation_ref:
-      envelope && 'incarnation_ref' in envelope ? envelope.incarnation_ref : undefined,
     role: typeof record.role === 'string' ? record.role : '',
     envelope: envelope && 'event' in envelope ? envelope : { event: { type: 'unknown' } },
   };
@@ -396,13 +367,9 @@ export class Mob {
   async memberStatus(agentIdentity: string): Promise<MobMemberSnapshot> {
     const json = await this.bindings.mob_member_status(this.mobId, agentIdentity);
     const snapshot = JSON.parse(json) as Record<string, unknown>;
-    const incarnationRef = snapshot.agent_runtime_id
-      ? encodeIncarnationRef(snapshot.agent_runtime_id)
-      : undefined;
     return {
       status: typeof snapshot.status === 'string' ? snapshot.status : 'unknown',
       member_ref: encodeMemberRef(this.mobId, agentIdentity),
-      incarnation_ref: incarnationRef || undefined,
       output_preview:
         typeof snapshot.output_preview === 'string' ? snapshot.output_preview : undefined,
       error: typeof snapshot.error === 'string' ? snapshot.error : undefined,

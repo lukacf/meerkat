@@ -299,9 +299,9 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
         let scope_frame = StreamScopeFrame::MobMember {
             flow_run_id: run_id.to_string(),
             agent_identity: entry.agent_identity.to_string(),
-            agent_runtime_id: Some(entry.agent_runtime_id.to_string()),
-            fence_token: Some(entry.fence_token.get()),
-            generation: Some(entry.agent_runtime_id.generation.get()),
+            agent_runtime_id: None,
+            fence_token: None,
+            generation: None,
         };
         let bridge_handle = match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {

@@ -1326,6 +1326,12 @@ fn merge_runtime_system_context_state(
         }
     }
 
+    for applied in &current_state.applied {
+        if !starting_state.applied.contains(applied) && !agent_state.applied.contains(applied) {
+            agent_state.applied.push(applied.clone());
+        }
+    }
+
     for (key, seen) in &current_state.seen {
         if !starting_state.seen.contains_key(key) {
             agent_state.seen.insert(key.clone(), seen.clone());
@@ -2575,6 +2581,7 @@ capabilities = [{capability_values}]
 
         let starting_state = SessionSystemContextState {
             pending: vec![initial_pending.clone()],
+            applied: Vec::new(),
             seen: std::collections::BTreeMap::from([(
                 "ctx-initial".to_string(),
                 SeenSystemContextKey {
@@ -2586,6 +2593,7 @@ capabilities = [{capability_values}]
         };
         let agent_state = SessionSystemContextState {
             pending: Vec::new(),
+            applied: vec![initial_pending.clone()],
             seen: std::collections::BTreeMap::from([(
                 "ctx-initial".to_string(),
                 SeenSystemContextKey {
@@ -2597,6 +2605,7 @@ capabilities = [{capability_values}]
         };
         let current_registry_state = SessionSystemContextState {
             pending: vec![initial_pending, concurrent_pending.clone()],
+            applied: Vec::new(),
             seen: std::collections::BTreeMap::from([
                 (
                     "ctx-initial".to_string(),

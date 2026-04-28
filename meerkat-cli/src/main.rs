@@ -10865,7 +10865,7 @@ mod tests {
         descriptor.source_name = "canonical-source".to_string();
 
         let source_identity = SourceIdentityRecord {
-            source_uuid: source_uuid.clone(),
+            source_uuid,
             display_name: "canonical-source".to_string(),
             transport_kind: SourceTransportKind::Git,
             fingerprint: "repo-canonical-source".to_string(),

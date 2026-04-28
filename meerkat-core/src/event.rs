@@ -1133,11 +1133,14 @@ pub enum StreamScopeFrame {
     MobMember {
         flow_run_id: String,
         agent_identity: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "schema", schemars(skip))]
+        #[serde(default, skip_serializing)]
         agent_runtime_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "schema", schemars(skip))]
+        #[serde(default, skip_serializing)]
         fence_token: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "schema", schemars(skip))]
+        #[serde(default, skip_serializing)]
         generation: Option<u64>,
     },
 }
@@ -1440,15 +1443,16 @@ mod tests {
         }))
         .unwrap();
 
-        match event {
-            AgentEvent::ToolConfigChanged { payload } => {
-                assert_eq!(
-                    payload.status,
-                    "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
-                );
-                assert_eq!(payload.status_info, None);
-            }
-            other => panic!("expected tool_config_changed, got {other:?}"),
+        assert!(
+            matches!(event, AgentEvent::ToolConfigChanged { .. }),
+            "expected tool_config_changed, got {event:?}"
+        );
+        if let AgentEvent::ToolConfigChanged { payload } = event {
+            assert_eq!(
+                payload.status,
+                "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
+            );
+            assert_eq!(payload.status_info, None);
         }
     }
 
@@ -1602,7 +1606,7 @@ mod tests {
                 assert_eq!(status, "failed");
                 assert_eq!(terminal_status, Some(BackgroundJobTerminalStatus::Failed));
             }
-            other => panic!("unexpected event: {other:?}"),
+            other => unreachable!("unexpected event: {other:?}"),
         }
 
         let legacy_json = serde_json::json!({
@@ -1627,7 +1631,7 @@ mod tests {
                 assert_eq!(terminal_status, None);
                 assert_eq!(detail, "exit_code: 1");
             }
-            other => panic!("unexpected event: {other:?}"),
+            other => unreachable!("unexpected event: {other:?}"),
         }
     }
 
@@ -1754,7 +1758,7 @@ mod tests {
         let reason = SkillResolutionFailureReason::from_skill_error(&error);
         let event = AgentEvent::SkillResolutionFailed {
             skill_key: Some(key.clone()),
-            reason: reason.clone(),
+            reason,
             reference: key.to_string(),
             error: error.to_string(),
         };
@@ -1783,7 +1787,7 @@ mod tests {
                 skill_key,
                 reason,
                 reference,
-                error,
+                error: error_message,
             } => {
                 assert_eq!(skill_key, Some(key.clone()));
                 assert_eq!(
@@ -1791,9 +1795,9 @@ mod tests {
                     SkillResolutionFailureReason::NotFound { key: key.clone() }
                 );
                 assert_eq!(reference, key.to_string());
-                assert_eq!(error, error.to_string());
+                assert_eq!(error_message, error.to_string());
             }
-            other => panic!("unexpected event: {other:?}"),
+            other => unreachable!("unexpected event: {other:?}"),
         }
     }
 
@@ -1823,7 +1827,7 @@ mod tests {
                 assert_eq!(reference, "legacy/ref");
                 assert_eq!(error, "missing");
             }
-            other => panic!("unexpected event: {other:?}"),
+            other => unreachable!("unexpected event: {other:?}"),
         }
     }
 
@@ -1848,7 +1852,7 @@ mod tests {
                 );
                 assert_eq!(reason.to_string(), "future reason details");
             }
-            other => panic!("unexpected event: {other:?}"),
+            other => unreachable!("unexpected event: {other:?}"),
         }
     }
 
@@ -2100,6 +2104,21 @@ mod tests {
         assert_eq!(event.scope_id, "mob:writer");
 
         let json = serde_json::to_value(&event).unwrap();
+        let frame = &json["scope_path"][0];
+        assert_eq!(frame["flow_run_id"], "run_123");
+        assert_eq!(frame["agent_identity"], "writer");
+        assert!(
+            frame.get("agent_runtime_id").is_none(),
+            "scoped stream frames must not serialize runtime incarnation ids"
+        );
+        assert!(
+            frame.get("fence_token").is_none(),
+            "scoped stream frames must not serialize fence tokens"
+        );
+        assert!(
+            frame.get("generation").is_none(),
+            "scoped stream frames must not serialize runtime generations"
+        );
         let roundtrip: ScopedAgentEvent = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip.scope_id, "mob:writer");
         assert!(matches!(

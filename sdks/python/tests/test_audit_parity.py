@@ -208,7 +208,15 @@ async def test_create_session_with_extended_create_fields():
     client = MeerkatClient()
     client._process = MagicMock()
     client._dispatcher = MagicMock()
-    client._request = AsyncMock(return_value={"session_id": "s1", "text": "hello"})
+    client._request = AsyncMock(
+        return_value={
+            "session_id": "s1",
+            "text": "hello",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+    )
 
     await client.create_session(
         "hi",

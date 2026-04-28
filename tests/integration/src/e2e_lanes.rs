@@ -4866,6 +4866,18 @@ mod tests {
     }
 
     #[test]
+    fn smoke_filter_rejects_invalid_scenario_ids() {
+        let non_smoke = smoke_test_filter_for_selection(&E2eSelection::Scenario(15)).unwrap_err();
+        assert!(non_smoke.contains("not the e2e-smoke lane"), "{non_smoke}");
+
+        let unknown = smoke_test_filter_for_selection(&E2eSelection::Scenario(9999)).unwrap_err();
+        assert!(
+            unknown.contains("unknown catalog scenario id 9999"),
+            "{unknown}"
+        );
+    }
+
+    #[test]
     fn smoke_lane_plan_uses_existing_catalog_entries() {
         let plan = plan_for_selection(&E2eSelection::Lane(Lane::Smoke)).unwrap();
         assert_eq!(plan.specs.len(), 44);

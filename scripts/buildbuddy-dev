@@ -137,27 +137,27 @@ workspace_build_targets() {
 
 e2e_smoke_test_filter() {
   local selection_count=0
-  local filter=""
+  local selection_args=()
   if [[ -n "${TEST:-}" ]]; then
     selection_count=$((selection_count + 1))
-    filter="${TEST}"
+    selection_args=(--test "${TEST}")
   fi
   if [[ -n "${SCENARIO:-}" ]]; then
     selection_count=$((selection_count + 1))
-    filter="e2e_smoke_s${SCENARIO}_"
+    selection_args=(--scenario "${SCENARIO}")
   fi
   if [[ -n "${SUITE:-}" ]]; then
     selection_count=$((selection_count + 1))
-    filter="e2e_smoke_${SUITE//-/_}"
-    if [[ "${SUITE}" == "mob-flow-runtime" ]]; then
-      filter="${filter}_suite"
-    fi
+    selection_args=(--suite "${SUITE}")
   fi
   if [[ "${selection_count}" -gt 1 ]]; then
     echo "error: provide only one of TEST, SCENARIO, or SUITE" >&2
     exit 2
   fi
-  [[ -n "${filter}" ]] && printf '%s\n' "${filter}"
+  if [[ "${selection_count}" -eq 1 ]]; then
+    "${workspace_root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- \
+      smoke-test-filter "${selection_args[@]}"
+  fi
 }
 
 case "${lane}" in

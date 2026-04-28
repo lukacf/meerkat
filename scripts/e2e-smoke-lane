@@ -27,17 +27,14 @@ cd "${root}"
 
 selection_count=0
 selection_args=()
-filter=""
 
 if [[ -n "${TEST:-}" ]]; then
   selection_count=$((selection_count + 1))
   selection_args=(--test "${TEST}")
-  filter="${TEST}"
 fi
 if [[ -n "${SCENARIO:-}" ]]; then
   selection_count=$((selection_count + 1))
   selection_args=(--scenario "${SCENARIO}")
-  filter="e2e_smoke_s${SCENARIO}_"
 fi
 if [[ -n "${SUITE:-}" ]]; then
   selection_count=$((selection_count + 1))
@@ -53,6 +50,11 @@ if [[ "${selection_count}" -eq 0 ]]; then
   selection_args=(--lane smoke)
 fi
 
+filter=""
+if [[ "${selection_count}" -eq 1 ]]; then
+  filter="$("${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- smoke-test-filter "${selection_args[@]}")"
+fi
+
 mode="${MEERKAT_E2E_EXECUTION_MODE:-cargo}"
 case "${mode}" in
   prebuilt|PREBUILT|Prebuilt|1|true|TRUE)
@@ -66,10 +68,6 @@ case "${mode}" in
     exit 2
     ;;
 esac
-
-if [[ -z "${filter}" && "${selection_count}" -eq 1 ]]; then
-  filter="$("${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- smoke-test-filter "${selection_args[@]}")"
-fi
 
 test_args=(
   test

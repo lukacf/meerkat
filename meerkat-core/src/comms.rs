@@ -12,6 +12,14 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use uuid::Uuid;
 
+/// Comms request intent used for all supervisor bridge commands.
+///
+/// This is auth-exempt at peer ingress so a supervisor can complete the
+/// bootstrap handshake before the private trust edge exists. Keep the literal
+/// under core ingress authority; transport crates should compare through typed
+/// core policy rather than owning a local string exemption.
+pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
+
 /// Canonical runtime identity for a peer.
 ///
 /// `PeerId` is the routing key: the router and trust store key by `PeerId`,

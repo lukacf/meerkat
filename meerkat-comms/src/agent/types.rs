@@ -351,57 +351,32 @@ impl CommsMessage {
                     Some(b) if !b.is_empty() => meerkat_core::types::text_content(b),
                     _ => body.clone(),
                 };
-                format!("[COMMS MESSAGE from {}]\n{}", self.from_peer, text)
+                meerkat_core::format_peer_message_projection(&self.from_peer, &text)
             }
             CommsContent::Request {
                 request_id,
                 intent,
                 params,
-            } => {
-                let params_str =
-                    if params.is_null() || params == &JsonValue::Object(Default::default()) {
-                        String::new()
-                    } else {
-                        format!(
-                            "\nParams: {}",
-                            serde_json::to_string_pretty(params).unwrap_or_default()
-                        )
-                    };
-                format!(
-                    "[COMMS REQUEST from {} (id: {})]\n\
-                     Intent: {}{}\n\
-                     \n\
-                     This is a correlated peer request. Reply with send_response using \
-                     to=\"{}\", in_reply_to=\"{}\", status=\"completed\" or \"failed\", and result=<JSON payload>. \
-                     Do not answer this request with send_message.",
-                    self.from_peer, request_id, intent, params_str, self.from_peer, request_id
-                )
-            }
+            } => meerkat_core::format_peer_request_projection(
+                &self.from_peer,
+                request_id,
+                intent.as_str(),
+                params,
+            ),
             CommsContent::Response {
                 in_reply_to,
                 status,
                 result,
-            } => {
-                let status_str = match status {
-                    CommsStatus::Accepted => "accepted",
-                    CommsStatus::Completed => "completed",
-                    CommsStatus::Failed => "failed",
-                };
-                let result_str =
-                    if result.is_null() || result == &JsonValue::Object(Default::default()) {
-                        String::new()
-                    } else {
-                        format!(
-                            "\nResult: {}",
-                            serde_json::to_string_pretty(result).unwrap_or_default()
-                        )
-                    };
-                format!(
-                    "[COMMS RESPONSE from {} (to request: {})]\n\
-                     Status: {}{}",
-                    self.from_peer, in_reply_to, status_str, result_str
-                )
-            }
+            } => meerkat_core::format_peer_response_projection(
+                &self.from_peer,
+                in_reply_to,
+                match status {
+                    CommsStatus::Accepted => meerkat_core::ResponseStatus::Accepted,
+                    CommsStatus::Completed => meerkat_core::ResponseStatus::Completed,
+                    CommsStatus::Failed => meerkat_core::ResponseStatus::Failed,
+                },
+                result,
+            ),
         }
     }
 }

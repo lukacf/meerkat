@@ -7,21 +7,6 @@
 //! mechanics (trust set, queue order, dequeue emission) live directly on
 //! `ClassifiedInboxQueue` in `inbox.rs`.
 
-/// The raw kind tag from the wire envelope, before classification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RawPeerKind {
-    Request,
-    PeerLifecycleAdded,
-    PeerLifecycleRetired,
-    PeerLifecycleUnwired,
-    ResponseTerminal,
-    ResponseProgress,
-    PlainEvent,
-    SilentRequest,
-    Ack,
-    Message,
-}
-
 /// Shape of the content payload (used for downstream rendering decisions).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContentShape {

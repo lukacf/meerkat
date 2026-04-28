@@ -3788,6 +3788,7 @@ mod tests {
                         render_metadata: None,
                     },
                     class: crate::interaction::PeerInputClass::ActionableMessage,
+                    auth: Some(crate::interaction::PeerIngressAuthDecision::Required),
                     lifecycle_peer: None,
                 })
                 .collect()

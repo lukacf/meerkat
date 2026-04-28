@@ -294,6 +294,7 @@ mod tests {
                 render_metadata: None,
             },
             class: PeerInputClass::Response,
+            auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
             lifecycle_peer: None,
         }
     }

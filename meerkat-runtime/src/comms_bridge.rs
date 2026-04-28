@@ -300,6 +300,7 @@ mod tests {
     fn plain_event_to_external_event_input() {
         let classified = PeerInputCandidate {
             class: PeerInputClass::PlainEvent,
+            auth: None,
             lifecycle_peer: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),
@@ -334,6 +335,7 @@ mod tests {
     fn peer_named_event_prefix_stays_peer_without_plain_event_class() {
         let classified = PeerInputCandidate {
             class: PeerInputClass::ActionableMessage,
+            auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
             lifecycle_peer: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),
@@ -469,6 +471,7 @@ mod tests {
         ];
         let classified = PeerInputCandidate {
             class: PeerInputClass::PlainEvent,
+            auth: None,
             lifecycle_peer: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),
@@ -507,6 +510,7 @@ mod tests {
         };
         let classified = PeerInputCandidate {
             class: PeerInputClass::PlainEvent,
+            auth: None,
             lifecycle_peer: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),

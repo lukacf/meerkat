@@ -19,8 +19,8 @@ use crate::peer_types::PeerIngressState;
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem, MessageKind};
 use meerkat_core::{
-    InteractionId, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,
-    PeerInputClass,
+    InteractionId, PeerIngressAuthDecision, PeerIngressEntrySnapshot, PeerIngressKind,
+    PeerIngressMachinePolicy, PeerIngressQueueSnapshot, PeerInputClass,
 };
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
@@ -94,7 +94,7 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) raw_item_id: String,
     pub(crate) item: InboxItem,
     pub(crate) class: PeerInputClass,
-    pub(crate) auth_exempt: bool,
+    pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
@@ -170,7 +170,7 @@ impl ClassifiedInboxQueue {
     ///
     /// Auth-exempt items (bridge bootstrap / idempotency-ack) bypass the
     /// peer-trust gate unconditionally so bootstrapping can complete
-    /// before trust edges exist. The `auth_exempt` argument flows from
+    /// before trust edges exist. The typed auth decision flows from
     /// the prepared item so this single admission seam can distinguish
     /// "admit as trusted" from "admit as exempt" — no parallel outer
     /// branch, no classification-time bool that can drift.
@@ -195,7 +195,7 @@ impl ClassifiedInboxQueue {
         // the authoritative trust read against the require_peer_auth
         // policy. The prepared classification snapshot is NOT consulted
         // here — only the admission-time read is authoritative.
-        let admitted = prepared.auth_exempt || trusted || !self.auth_required;
+        let admitted = prepared.auth.is_exempt() || trusted || !self.auth_required;
         let had_queued_work = !self.entries.is_empty();
 
         if admitted {
@@ -226,7 +226,7 @@ impl ClassifiedInboxQueue {
     /// drive the peer-ingress phase. Auth-exempt entries (bridge bootstrap
     /// / idempotency-ack envelopes) bypass the phase machinery entirely.
     fn note_peer_dequeue(&mut self, entry: &ClassifiedInboxEntry) {
-        if entry.auth_exempt {
+        if entry.auth.is_exempt() {
             return;
         }
         let InboxItem::External { .. } = &entry.item else {
@@ -285,7 +285,9 @@ impl ClassifiedInboxQueue {
             .filter(|entry| {
                 matches!(
                     entry.class,
-                    PeerInputClass::PeerLifecycleAdded | PeerInputClass::PeerLifecycleRetired
+                    PeerInputClass::PeerLifecycleAdded
+                        | PeerInputClass::PeerLifecycleRetired
+                        | PeerInputClass::PeerLifecycleUnwired
                 )
             })
             .count();
@@ -536,7 +538,7 @@ impl InboxSender {
         // flip trust state before admission runs. This is the critical
         // T0→T1 window that the pre-C-H3 code would have leaked.
         pause();
-        let kind = result.ingress_kind();
+        let kind = result.kind;
         let decision = {
             let mut queue = classified_queue.lock();
             queue.admit_peer_receive(&result)
@@ -548,7 +550,7 @@ impl InboxSender {
             raw_item_id: result.raw_item_id,
             item: result.item,
             class: result.class,
-            auth_exempt: result.auth_exempt,
+            auth: result.auth,
             kind,
             from_peer: result.from_peer,
             lifecycle_peer: result.lifecycle_peer,
@@ -582,12 +584,15 @@ impl InboxSender {
             return self.send_classified(InboxItem::External { envelope });
         }
 
-        let auth_exempt = is_auth_exempt_ingress(&envelope.kind);
-        if require_peer_auth && !auth_exempt && !trusted_peers.read().is_trusted(&envelope.from) {
+        let auth = ingress_auth_decision(&envelope.kind);
+        if require_peer_auth
+            && !auth.is_exempt()
+            && !trusted_peers.read().is_trusted(&envelope.from)
+        {
             tracing::warn!(
                 peer_id = %envelope.from.to_peer_id(),
                 auth_required = require_peer_auth,
-                auth_exempt,
+                auth_exempt = auth.is_exempt(),
                 reason = ?DropReason::UntrustedSender,
                 "raw inbox dropped external peer ingress at admission"
             );
@@ -686,7 +691,7 @@ impl InboxSender {
                 return self.record_drop(DropReason::ClassificationRejected);
             }
         };
-        let kind = result.ingress_kind();
+        let kind = result.kind;
         // C-H3 — the admission decision (trust re-check, auth-exempt
         // bypass, and phase update) happens inside a single queue-lock
         // scope so classification's T0 trust snapshot cannot admit an
@@ -718,7 +723,7 @@ impl InboxSender {
             raw_item_id: result.raw_item_id,
             item: result.item,
             class: result.class,
-            auth_exempt: result.auth_exempt,
+            auth: result.auth,
             kind,
             from_peer: result.from_peer,
             lifecycle_peer: result.lifecycle_peer,
@@ -775,11 +780,15 @@ impl Drop for Inbox {
     }
 }
 
-fn is_auth_exempt_ingress(kind: &MessageKind) -> bool {
-    matches!(
-        kind,
-        MessageKind::Request { intent, .. } if intent == "supervisor.bridge"
-    )
+fn ingress_auth_decision(kind: &MessageKind) -> PeerIngressAuthDecision {
+    match kind {
+        MessageKind::Request { intent, .. } => {
+            PeerIngressMachinePolicy::default()
+                .classify_request_intent(intent)
+                .auth
+        }
+        _ => PeerIngressAuthDecision::Required,
+    }
 }
 
 fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
@@ -794,6 +803,10 @@ fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
         from_peer: entry.from_peer.clone(),
         lifecycle_peer: entry.lifecycle_peer.clone(),
         request_id: entry.request_id.clone(),
+        auth: match &entry.item {
+            InboxItem::External { .. } => Some(entry.auth),
+            InboxItem::PlainEvent { .. } => None,
+        },
         trusted_snapshot: entry.trusted_snapshot,
     }
 }
@@ -1045,7 +1058,7 @@ mod tests {
         Arc::new(IngressClassificationContext {
             require_peer_auth: require_auth,
             trusted_peers: Arc::new(parking_lot::RwLock::new(trusted)),
-            silent_intents: Arc::new(std::collections::HashSet::new()),
+            ingress_policy: Arc::new(PeerIngressMachinePolicy::default()),
         })
     }
 
@@ -1291,6 +1304,11 @@ mod tests {
         assert_eq!(snapshot.queued_entries.len(), 2);
         assert_eq!(snapshot.queued_entries[0].kind, PeerIngressKind::Message);
         assert_eq!(snapshot.queued_entries[1].kind, PeerIngressKind::PlainEvent);
+        assert_eq!(
+            snapshot.queued_entries[0].auth,
+            Some(PeerIngressAuthDecision::Required)
+        );
+        assert_eq!(snapshot.queued_entries[1].auth, None);
         assert_eq!(snapshot.queued_entries[0].trusted_snapshot, Some(true));
         assert_eq!(snapshot.queued_entries[1].trusted_snapshot, None);
         assert!(
@@ -1437,7 +1455,7 @@ mod tests {
             from: sender.public_key(),
             to: receiver.public_key(),
             kind: MessageKind::Request {
-                intent: "supervisor.bridge".to_string(),
+                intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
                 handling_mode: None,
             },
@@ -1456,7 +1474,8 @@ mod tests {
                 assert_eq!(envelope.id, envelope_id);
                 assert!(matches!(
                     envelope.kind,
-                    MessageKind::Request { ref intent, .. } if intent == "supervisor.bridge"
+                    MessageKind::Request { ref intent, .. }
+                        if intent == meerkat_core::SUPERVISOR_BRIDGE_INTENT
                 ));
             }
             _ => panic!("expected External ingress item"),

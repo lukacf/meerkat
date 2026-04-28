@@ -18,6 +18,7 @@ use meerkat_comms::runtime::comms_runtime::CommsRuntime;
 use meerkat_comms::types::{Envelope, InboxItem, MessageKind};
 use meerkat_comms::{AdmissionOutcome, DropReason};
 use meerkat_core::comms::{PeerAddress, PeerName, PeerTransport, TrustedPeerDescriptor};
+use meerkat_core::{PeerIngressAuthDecision, PeerIngressAuthExemption, SUPERVISOR_BRIDGE_INTENT};
 use uuid::Uuid;
 
 fn descriptor_for(name: &str, pubkey: &meerkat_comms::identity::PubKey) -> TrustedPeerDescriptor {
@@ -288,7 +289,7 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
         from: sender.public_key(),
         to: receiver.public_key(),
         kind: MessageKind::Request {
-            intent: "supervisor.bridge".to_string(),
+            intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
             params: serde_json::json!({}),
             handling_mode: None,
         },
@@ -305,5 +306,16 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
         outcome,
         AdmissionOutcome::Admitted,
         "supervisor.bridge ingress is auth-exempt and must admit even without a trust edge"
+    );
+
+    let candidates =
+        meerkat_core::agent::CommsRuntime::drain_peer_input_candidates(&receiver).await;
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].auth,
+        Some(PeerIngressAuthDecision::Exempt(
+            PeerIngressAuthExemption::SupervisorBridge
+        )),
+        "runtime drain must expose the typed machine auth decision"
     );
 }

@@ -916,6 +916,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 render_metadata: None,
                             },
                             class: entry.class,
+                            auth: Some(entry.auth),
                             lifecycle_peer: entry.lifecycle_peer,
                         })
                     }
@@ -939,6 +940,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             render_metadata,
                         },
                         class: entry.class,
+                        auth: None,
                         lifecycle_peer: entry.lifecycle_peer,
                     }),
                 }
@@ -1121,8 +1123,8 @@ pub struct CommsRuntime {
     subscriber_registry: crate::event_injector::SubscriberRegistry,
     interaction_stream_registry: InteractionStreamRegistry,
     peer_directory_reachability: Arc<Mutex<PeerDirectoryReachabilityAuthority>>,
-    #[allow(dead_code)] // Kept alive — shared with IngressClassificationContext via Arc
-    silent_intents: Arc<HashSet<String>>,
+    #[allow(dead_code)] // Kept for runtime inspection symmetry with IngressClassificationContext.
+    ingress_policy: Arc<meerkat_core::PeerIngressMachinePolicy>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
     /// Set during construction when classified inbox is used.
     actionable_notify: Option<Arc<tokio::sync::Notify>>,
@@ -1154,6 +1156,14 @@ pub struct CommsRuntime {
 }
 
 impl CommsRuntime {
+    fn ingress_policy_from_silent_intents(
+        silent_intents: &Arc<HashSet<String>>,
+    ) -> Arc<meerkat_core::PeerIngressMachinePolicy> {
+        Arc::new(meerkat_core::PeerIngressMachinePolicy::from_silent_intents(
+            silent_intents.iter().cloned(),
+        ))
+    }
+
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
         let mut digest = Sha256::new();
         digest.update(b"meerkat.supervisor-bridge.bootstrap-token.v1");
@@ -1186,12 +1196,13 @@ impl CommsRuntime {
         // Single source of truth for trust state — shared by the Router,
         // IngressClassificationContext, and callers of trusted_peers_shared().
         let trusted_peers = Arc::new(parking_lot::RwLock::new(trusted_peers));
+        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
 
         // Build classified inbox using the same trusted_peers Arc
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: config.require_peer_auth,
             trusted_peers: trusted_peers.clone(),
-            silent_intents: silent_intents.clone(),
+            ingress_policy: ingress_policy.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
@@ -1225,7 +1236,7 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            silent_intents,
+            ingress_policy,
             actionable_notify,
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
@@ -1270,11 +1281,12 @@ impl CommsRuntime {
         let public_key = keypair.public_key();
         // Single source of truth — same Arc shared by Router, classification, and callers.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
 
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            silent_intents: silent_intents.clone(),
+            ingress_policy: ingress_policy.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
@@ -1332,7 +1344,7 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            silent_intents,
+            ingress_policy,
             actionable_notify,
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),
@@ -1398,11 +1410,12 @@ impl CommsRuntime {
             .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
         let public_key = keypair.public_key();
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
 
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            silent_intents: silent_intents.clone(),
+            ingress_policy: ingress_policy.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
@@ -1451,7 +1464,7 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            silent_intents,
+            ingress_policy,
             actionable_notify,
             blob_store: None,
             peer_interaction_handle: parking_lot::RwLock::new(None),

@@ -2063,6 +2063,7 @@ mod tests {
                 .map(|interaction| PeerInputCandidate {
                     interaction,
                     class: PeerInputClass::ActionableRequest,
+                    auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
                     lifecycle_peer: None,
                 })
                 .collect()

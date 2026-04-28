@@ -1902,6 +1902,7 @@ mod tests {
                 render_metadata: None,
             },
             class,
+            auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
             lifecycle_peer: Some("peer-1".to_string()),
         }
     }
@@ -2922,6 +2923,9 @@ mod tests {
                 render_metadata: None,
             },
             class: PeerInputClass::ActionableRequest,
+            auth: Some(meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
+            )),
             lifecycle_peer: None,
         }
     }

@@ -1529,6 +1529,7 @@ mod tests {
         let from_comms = peer_input_candidate_to_runtime_input(
             &PeerInputCandidate {
                 class: PeerInputClass::PlainEvent,
+                auth: None,
                 lifecycle_peer: None,
                 interaction: InboxInteraction {
                     id: meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4()),

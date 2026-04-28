@@ -106,7 +106,7 @@ pub use checkpoint::SessionCheckpointer;
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, PeerRoute,
-    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    SUPERVISOR_BRIDGE_INTENT, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,
@@ -184,9 +184,12 @@ pub use image_content::{
 pub use image_generation::*;
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
-    PeerIngressAuthorityPhase, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressQueueSnapshot,
-    PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus, TerminalDisposition,
-    TerminalityClass, classify_response_terminality,
+    PeerIngressAuthDecision, PeerIngressAuthExemption, PeerIngressAuthorityPhase,
+    PeerIngressClassification, PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressMachinePolicy,
+    PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus,
+    TerminalDisposition, TerminalityClass, classify_response_terminality,
+    format_peer_ack_projection, format_peer_message_projection, format_peer_request_projection,
+    format_peer_response_projection, peer_lifecycle_subject,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,

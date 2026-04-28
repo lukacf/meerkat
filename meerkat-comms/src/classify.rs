@@ -2,18 +2,15 @@
 //!
 //! Runs synchronously in the sending task using receiver-owned trust/auth state.
 
-use crate::agent::types::{CommsMessage, MessageIntent};
 use crate::inproc::InprocRegistry;
-use crate::peer_types::{ContentShape as PeerContentShape, RawPeerKind};
+use crate::peer_types::ContentShape as PeerContentShape;
 use crate::trust::TrustedPeers;
 use crate::types::{InboxItem, MessageKind};
-use meerkat_core::comms::PeerLifecycleKind;
-use meerkat_core::{PeerIngressKind, PeerInputClass};
-use std::collections::HashSet;
+use meerkat_core::{
+    PeerIngressAuthDecision, PeerIngressKind, PeerIngressMachinePolicy, PeerInputClass,
+};
 use std::sync::Arc;
 use uuid::Uuid;
-
-const AUTH_EXEMPT_REQUEST_INTENTS: &[&str] = &["supervisor.bridge"];
 
 /// Receiver-owned context for synchronous ingress classification.
 ///
@@ -22,7 +19,7 @@ const AUTH_EXEMPT_REQUEST_INTENTS: &[&str] = &["supervisor.bridge"];
 pub(crate) struct IngressClassificationContext {
     pub(crate) require_peer_auth: bool,
     pub(crate) trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
-    pub(crate) silent_intents: Arc<HashSet<String>>,
+    pub(crate) ingress_policy: Arc<PeerIngressMachinePolicy>,
 }
 
 /// Result of classifying an inbox item.
@@ -32,6 +29,7 @@ pub(crate) struct IngressClassificationContext {
 #[cfg(test)]
 pub(crate) struct ClassificationResult {
     pub(crate) class: PeerInputClass,
+    pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) from_peer: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
 }
@@ -43,9 +41,9 @@ pub(crate) struct ClassificationResult {
 pub(crate) struct PreparedIngressItem {
     pub(crate) item: InboxItem,
     pub(crate) raw_item_id: String,
-    pub(crate) raw_kind: RawPeerKind,
+    pub(crate) kind: PeerIngressKind,
     pub(crate) class: PeerInputClass,
-    pub(crate) auth_exempt: bool,
+    pub(crate) auth: PeerIngressAuthDecision,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) trusted_sender: bool,
     pub(crate) from_peer: Option<String>,
@@ -72,28 +70,6 @@ fn content_shape_for_text_and_blocks(
     }
 }
 
-fn ack_projection(from_peer: &str, in_reply_to: Uuid) -> String {
-    format!("[COMMS ACK from {from_peer} (to request: {in_reply_to})]")
-}
-
-impl PreparedIngressItem {
-    pub(crate) fn ingress_kind(&self) -> PeerIngressKind {
-        match &self.raw_kind {
-            RawPeerKind::Message => PeerIngressKind::Message,
-            RawPeerKind::Request
-            | RawPeerKind::PeerLifecycleAdded
-            | RawPeerKind::PeerLifecycleRetired
-            | RawPeerKind::PeerLifecycleUnwired
-            | RawPeerKind::SilentRequest => PeerIngressKind::Request,
-            RawPeerKind::ResponseTerminal | RawPeerKind::ResponseProgress => {
-                PeerIngressKind::Response
-            }
-            RawPeerKind::Ack => PeerIngressKind::Ack,
-            RawPeerKind::PlainEvent => PeerIngressKind::PlainEvent,
-        }
-    }
-}
-
 impl IngressClassificationContext {
     /// Prepare an inbox item for classified ingress.
     ///
@@ -112,156 +88,68 @@ impl IngressClassificationContext {
                         .unwrap_or_else(|| envelope.from.to_pubkey_string())
                 });
 
-                let (raw_kind, class, lifecycle_peer, request_id, auth_exempt) = match &envelope
-                    .kind
-                {
-                    MessageKind::Message { .. } => (
-                        RawPeerKind::Message,
-                        PeerInputClass::ActionableMessage,
-                        None,
-                        None,
-                        false,
-                    ),
+                let (classification, lifecycle_peer, request_id) = match &envelope.kind {
+                    MessageKind::Message { .. } => {
+                        (self.ingress_policy.classify_message(), None, None)
+                    }
                     MessageKind::Request { intent, params, .. } => {
-                        let typed_intent = MessageIntent::from(intent.as_str());
-                        let auth_exempt = AUTH_EXEMPT_REQUEST_INTENTS
-                            .iter()
-                            .any(|candidate| *candidate == intent);
-                        match typed_intent {
-                            MessageIntent::PeerAdded => {
-                                let peer = params
-                                    .get("peer")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or(from_name.as_str())
-                                    .to_string();
-                                (
-                                    RawPeerKind::PeerLifecycleAdded,
-                                    PeerInputClass::PeerLifecycleAdded,
-                                    Some(peer),
-                                    Some(envelope.id.to_string()),
-                                    auth_exempt,
-                                )
-                            }
-                            MessageIntent::PeerRetired => {
-                                let peer = params
-                                    .get("peer")
-                                    .and_then(|v| v.as_str())
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or(from_name.as_str())
-                                    .to_string();
-                                (
-                                    RawPeerKind::PeerLifecycleRetired,
-                                    PeerInputClass::PeerLifecycleRetired,
-                                    Some(peer),
-                                    Some(envelope.id.to_string()),
-                                    auth_exempt,
-                                )
-                            }
-                            _ if self.silent_intents.contains(intent.as_str()) => (
-                                RawPeerKind::SilentRequest,
-                                PeerInputClass::SilentRequest,
-                                None,
-                                Some(envelope.id.to_string()),
-                                auth_exempt,
-                            ),
-                            _ => (
-                                RawPeerKind::Request,
-                                PeerInputClass::ActionableRequest,
-                                None,
-                                Some(envelope.id.to_string()),
-                                auth_exempt,
-                            ),
-                        }
+                        let classification = self.ingress_policy.classify_request_intent(intent);
+                        let lifecycle_peer = classification.lifecycle_kind.map(|_| {
+                            meerkat_core::peer_lifecycle_subject(params, from_name.as_str())
+                        });
+                        (
+                            classification,
+                            lifecycle_peer,
+                            Some(envelope.id.to_string()),
+                        )
                     }
                     MessageKind::Lifecycle { kind, params } => {
-                        let peer = params
-                            .get("peer")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or(from_name.as_str())
-                            .to_string();
-                        match kind {
-                            PeerLifecycleKind::PeerAdded => (
-                                RawPeerKind::PeerLifecycleAdded,
-                                PeerInputClass::PeerLifecycleAdded,
-                                Some(peer),
-                                None,
-                                false,
-                            ),
-                            PeerLifecycleKind::PeerRetired => (
-                                RawPeerKind::PeerLifecycleRetired,
-                                PeerInputClass::PeerLifecycleRetired,
-                                Some(peer),
-                                None,
-                                false,
-                            ),
-                            PeerLifecycleKind::PeerUnwired => (
-                                RawPeerKind::PeerLifecycleUnwired,
-                                PeerInputClass::PeerLifecycleUnwired,
-                                Some(peer),
-                                None,
-                                false,
-                            ),
-                        }
+                        let classification = self.ingress_policy.classify_lifecycle(*kind);
+                        let peer = meerkat_core::peer_lifecycle_subject(params, from_name.as_str());
+                        (classification, Some(peer), None)
                     }
                     MessageKind::Response {
                         in_reply_to,
                         status,
                         ..
-                    } => {
-                        // Single source of truth for response terminality:
-                        // meerkat-core's `classify_response_terminality`.
-                        // No raw `ResponseStatus` matching here — that's
-                        // how "terminal" drifts from one call site to
-                        // another.
-                        let core_status: meerkat_core::interaction::ResponseStatus =
-                            (*status).into();
-                        let raw_kind =
-                            match meerkat_core::interaction::classify_response_terminality(
-                                core_status,
-                            ) {
-                                meerkat_core::interaction::TerminalityClass::Progress => {
-                                    RawPeerKind::ResponseProgress
-                                }
-                                meerkat_core::interaction::TerminalityClass::Terminal {
-                                    ..
-                                } => RawPeerKind::ResponseTerminal,
-                                other => {
-                                    tracing::warn!(
-                                        class = ?other,
-                                        "unknown terminality class; routing response as progress (non-terminal)"
-                                    );
-                                    RawPeerKind::ResponseProgress
-                                }
-                            };
-                        (
-                            raw_kind,
-                            PeerInputClass::Response,
-                            None,
-                            Some(in_reply_to.to_string()),
-                            false,
-                        )
-                    }
-                    MessageKind::Ack { in_reply_to } => (
-                        RawPeerKind::Ack,
-                        PeerInputClass::Ack,
+                    } => (
+                        self.ingress_policy.classify_response((*status).into()),
                         None,
                         Some(in_reply_to.to_string()),
-                        false,
+                    ),
+                    MessageKind::Ack { in_reply_to } => (
+                        self.ingress_policy.classify_ack(),
+                        None,
+                        Some(in_reply_to.to_string()),
                     ),
                 };
 
                 let text_projection = match &envelope.kind {
                     MessageKind::Message { body, .. } => {
-                        format!("[COMMS MESSAGE from {from_name}]\n{body}")
+                        meerkat_core::format_peer_message_projection(&from_name, body)
                     }
                     MessageKind::Lifecycle { .. } => String::new(),
-                    MessageKind::Ack { in_reply_to } => ack_projection(&from_name, *in_reply_to),
-                    _ => {
-                        CommsMessage::from_external_with_resolved_peer(&envelope, from_name.clone())
-                            .map(|message| message.to_user_message_text())
-                            .unwrap_or_default()
+                    MessageKind::Request { intent, params, .. } => {
+                        meerkat_core::format_peer_request_projection(
+                            &from_name,
+                            envelope.id,
+                            intent,
+                            params,
+                        )
+                    }
+                    MessageKind::Response {
+                        in_reply_to,
+                        status,
+                        result,
+                        ..
+                    } => meerkat_core::format_peer_response_projection(
+                        &from_name,
+                        *in_reply_to,
+                        (*status).into(),
+                        result,
+                    ),
+                    MessageKind::Ack { in_reply_to } => {
+                        meerkat_core::format_peer_ack_projection(&from_name, *in_reply_to)
                     }
                 };
 
@@ -277,9 +165,9 @@ impl IngressClassificationContext {
 
                 Some(PreparedIngressItem {
                     raw_item_id: envelope.id.to_string(),
-                    raw_kind,
-                    class,
-                    auth_exempt,
+                    kind: classification.kind,
+                    class: classification.class,
+                    auth: classification.auth,
                     trusted_sender,
                     from_peer: Some(from_name),
                     lifecycle_peer,
@@ -303,11 +191,12 @@ impl IngressClassificationContext {
                     Some(&body),
                 );
                 let content_shape = content_shape_for_text_and_blocks(&body, blocks.as_deref());
+                let classification = self.ingress_policy.classify_plain_event();
                 Some(PreparedIngressItem {
                     raw_item_id: interaction_id.to_string(),
-                    raw_kind: RawPeerKind::PlainEvent,
-                    class: PeerInputClass::PlainEvent,
-                    auth_exempt: false,
+                    kind: classification.kind,
+                    class: classification.class,
+                    auth: classification.auth,
                     trusted_sender: true,
                     from_peer: None,
                     lifecycle_peer: None,
@@ -335,12 +224,13 @@ impl IngressClassificationContext {
             let drop_untrusted_external = matches!(prepared.item, InboxItem::External { .. })
                 && self.require_peer_auth
                 && !prepared.trusted_sender
-                && !prepared.auth_exempt;
+                && !prepared.auth.is_exempt();
             if drop_untrusted_external {
                 return None;
             }
             Some(ClassificationResult {
                 class: prepared.class,
+                auth: prepared.auth,
                 from_peer: prepared.from_peer,
                 lifecycle_peer: prepared.lifecycle_peer,
             })
@@ -369,7 +259,9 @@ mod tests {
         IngressClassificationContext {
             require_peer_auth,
             trusted_peers: Arc::new(parking_lot::RwLock::new(trusted_peers)),
-            silent_intents: Arc::new(silent_intents.into_iter().map(String::from).collect()),
+            ingress_policy: Arc::new(PeerIngressMachinePolicy::from_silent_intents(
+                silent_intents,
+            )),
         }
     }
 
@@ -573,7 +465,7 @@ mod tests {
         let envelope = make_envelope(
             &sender,
             MessageKind::Request {
-                intent: "supervisor.bridge".to_string(),
+                intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({
                     "command": "bind_member",
                     "supervisor": {
@@ -594,6 +486,12 @@ mod tests {
             .classify(&item)
             .expect("bind_member should remain admissible");
         assert_eq!(result.class, PeerInputClass::ActionableRequest);
+        assert_eq!(
+            result.auth,
+            meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge
+            )
+        );
         assert_eq!(
             result.from_peer,
             Some(sender.public_key().to_pubkey_string())
@@ -686,7 +584,7 @@ mod tests {
             .expect("plain event should prepare");
 
         assert_eq!(prepared.class, PeerInputClass::PlainEvent);
-        assert_eq!(prepared.raw_kind, RawPeerKind::PlainEvent);
+        assert_eq!(prepared.kind, PeerIngressKind::PlainEvent);
         assert!(
             Uuid::parse_str(&prepared.raw_item_id).is_ok(),
             "plain events should receive a stable generated ingress id"
@@ -705,19 +603,5 @@ mod tests {
             }
             other => panic!("expected normalized plain event, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn message_intent_peer_added_roundtrip() {
-        let intent = MessageIntent::from("mob.peer_added");
-        assert_eq!(intent, MessageIntent::PeerAdded);
-        assert_eq!(intent.as_str(), "mob.peer_added");
-    }
-
-    #[test]
-    fn message_intent_peer_retired_roundtrip() {
-        let intent = MessageIntent::from("mob.peer_retired");
-        assert_eq!(intent, MessageIntent::PeerRetired);
-        assert_eq!(intent.as_str(), "mob.peer_retired");
     }
 }

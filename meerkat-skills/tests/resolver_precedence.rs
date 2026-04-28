@@ -23,8 +23,13 @@
 //! See `docs/wave-c-prep/test-coverage-audit.md` §6 #14.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use meerkat_core::skills::{SkillFilter, SkillSource, SourceUuid};
-use meerkat_core::skills_config::{SkillRepoTransport, SkillRepositoryConfig, SkillsConfig};
+use meerkat_core::skills::{
+    SkillFilter, SkillKey, SkillKeyRemap, SkillName, SkillSource, SourceIdentityLineage,
+    SourceIdentityLineageEvent, SourceUuid,
+};
+use meerkat_core::skills_config::{
+    SkillRepoTransport, SkillRepositoryConfig, SkillsConfig, SkillsIdentityConfig,
+};
 use meerkat_skills::resolve_repositories_with_roots;
 use std::fs;
 use std::path::Path;
@@ -34,6 +39,10 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn write_skill(root: &Path, skill: &str) {
+    write_skill_with_body(root, skill, &format!("Body for {skill}."));
+}
+
+fn write_skill_with_body(root: &Path, skill: &str, body: &str) {
     let dir = root.join(skill);
     fs::create_dir_all(&dir).unwrap();
     fs::write(
@@ -43,7 +52,7 @@ fn write_skill(root: &Path, skill: &str) {
              name: {skill}\n\
              description: {skill}\n\
              ---\n\
-             Body for {skill}.\n"
+             {body}\n"
         ),
     )
     .unwrap();
@@ -239,6 +248,57 @@ async fn absolute_path_ignores_roots() {
         "absolute path must ignore context_root; got {names:?} (decoy at \
          {:?})",
         decoy.path(),
+    );
+}
+
+#[tokio::test]
+async fn resolved_composite_load_applies_source_identity_remap_directly() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_skill_with_body(&tmp.path().join("legacy"), "alpha", "legacy body");
+    write_skill_with_body(&tmp.path().join("canonical"), "alpha", "canonical body");
+
+    let legacy_source = source_uuid("dc256086-0d2f-4f61-a307-320d4148107f");
+    let canonical_source = source_uuid("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb");
+    let skill_name = SkillName::parse("alpha").unwrap();
+    let legacy_key = SkillKey::new(legacy_source.clone(), skill_name.clone());
+    let canonical_key = SkillKey::new(canonical_source.clone(), skill_name);
+    let cfg = SkillsConfig {
+        repositories: vec![
+            fs_repo("legacy", &legacy_source.to_string(), "legacy"),
+            fs_repo("canonical", &canonical_source.to_string(), "canonical"),
+        ],
+        identity: SkillsIdentityConfig {
+            lineage: vec![SourceIdentityLineage {
+                event_id: "legacy-to-canonical".to_string(),
+                recorded_at_unix_secs: 1,
+                required_from_skills: Vec::new(),
+                event: SourceIdentityLineageEvent::RenameOrRelocate {
+                    from: legacy_source,
+                    to: canonical_source,
+                },
+            }],
+            remaps: vec![SkillKeyRemap {
+                from: legacy_key.clone(),
+                to: canonical_key.clone(),
+                reason: Some("test remap".to_string()),
+            }],
+            aliases: Vec::new(),
+        },
+        ..Default::default()
+    };
+
+    let composite = resolve_repositories_with_roots(&cfg, Some(tmp.path()), None, None)
+        .await
+        .unwrap()
+        .expect("resolver returns Some");
+    let doc = composite.load(&legacy_key).await.unwrap();
+
+    assert_eq!(doc.descriptor.key, canonical_key);
+    assert_eq!(doc.descriptor.source_name, "canonical");
+    assert!(
+        doc.body.contains("canonical body"),
+        "remapped direct load must use canonical source body; got {:?}",
+        doc.body
     );
 }
 

@@ -183,6 +183,92 @@ async fn session_create_response_has_all_wire_fields() {
     handle.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn deferred_session_with_inline_external_tools_materializes_on_turn_start() {
+    let (mut writer, mut reader, handle) = spawn_test_server();
+
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    });
+    send_request(&mut writer, &init_req).await;
+    let init_resp = read_response(&mut reader).await;
+    assert!(
+        init_resp["error"].is_null(),
+        "initialize failed: {init_resp}"
+    );
+
+    let create_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "session/create",
+        "params": {
+            "prompt": "hello",
+            "initial_turn": "deferred",
+            "enable_shell": true,
+            "enable_builtins": true,
+            "keep_alive": false,
+            "external_tools": [
+                {
+                    "name": "linear_graphql",
+                    "description": "Execute GraphQL",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" },
+                            "variables": { "type": "object" }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }
+                }
+            ]
+        }
+    });
+    send_request(&mut writer, &create_req).await;
+    let create_resp = read_response(&mut reader).await;
+    assert!(
+        create_resp["error"].is_null(),
+        "deferred session/create with inline external_tools failed: {create_resp}"
+    );
+    let session_id = create_resp["result"]["session_id"]
+        .as_str()
+        .expect("deferred session/create should return a session_id")
+        .to_string();
+
+    let turn_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "turn/start",
+        "params": {
+            "session_id": &session_id,
+            "prompt": "continue"
+        }
+    });
+    send_request(&mut writer, &turn_req).await;
+    let turn_resp = read_response(&mut reader).await;
+    assert!(
+        turn_resp["error"].is_null(),
+        "turn/start must materialize the deferred session_id returned by session/create: {turn_resp}"
+    );
+    assert_eq!(
+        turn_resp["result"]["session_id"].as_str(),
+        Some(session_id.as_str())
+    );
+    let text = turn_resp["result"]["text"]
+        .as_str()
+        .expect("turn/start result should include text");
+    assert!(
+        text.contains("Hello from mock"),
+        "expected mock model text from materialized first turn, got: {text}"
+    );
+
+    drop(writer);
+    handle.await.unwrap().unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // 2. session_read_response_has_all_wire_fields
 // ---------------------------------------------------------------------------

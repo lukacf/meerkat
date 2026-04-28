@@ -769,6 +769,115 @@ from the `realm/get` / `GET /realm/:id` endpoints."""
 
 
 @dataclass
+class WireBindingIdentity:
+    """Identifies a binding inside a realm on the wire. Shared by every
+auth REST response that returns a `{realm_id, binding_id, connection_ref}`
+trio. Built from a typed [`meerkat_core::ConnectionRef`] so the three
+fields always agree; the `realm_id`/`binding_id` strings carry the
+slug form for wire consumers that key by string."""
+    binding_id: str
+    connection_ref: dict[str, Any]
+    realm_id: str
+
+
+@dataclass
+class WireAuthProfileCreated:
+    """`POST /auth/profiles` (create) success body."""
+    auth_method: str
+    binding_id: str
+    connection_ref: dict[str, Any]
+    profile_id: str
+    provider: str
+    realm_id: str
+    stored: bool
+
+
+@dataclass
+class WireAuthProfileDetail:
+    """`GET /auth/profiles/:binding_id` success body."""
+    auth_profile: dict[str, Any]
+    binding_id: str
+    connection_ref: dict[str, Any]
+    profile_id: str
+
+
+@dataclass
+class WireAuthProfileCleared:
+    """`DELETE /auth/profiles/:binding_id` / `POST /auth/logout` success body."""
+    binding_id: str
+    cleared: bool
+    connection_ref: dict[str, Any]
+    profile_id: str
+    realm_id: str
+
+
+@dataclass
+class WireLoginStart:
+    """`POST /auth/login/start` success body."""
+    authorize_url: str
+    provider: str
+    redirect_uri: str
+    state: str
+
+
+@dataclass
+class WireLoginReady:
+    """`POST /auth/login/complete` / ready leg of device-code success body.
+
+The optional `state` field distinguishes the flat `POST
+/auth/login/complete` response (no `state` set) from the device-code
+ready leg (`state = "ready"`) which is part of the pending/slow_down/
+access_denied/expired/ready tagged protocol."""
+    binding_id: str
+    connection_ref: dict[str, Any]
+    has_refresh_token: bool
+    profile_id: str
+    provider: str
+    realm_id: str
+    scopes: list[str]
+    expires_at: Optional[str] = None
+    state: Optional[str] = None
+
+
+@dataclass
+class WireDeviceStart:
+    """`POST /auth/login/device/start` success body."""
+    device_code: str
+    expires_in: int
+    interval: int
+    provider: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: Optional[str] = None
+
+
+@dataclass
+class WireRealmSummary:
+    """Realm summary entry returned by `GET /realms`."""
+    auth_profile_count: int
+    backend_count: int
+    binding_count: int
+    realm_id: str
+    default_binding: Optional[str] = None
+
+
+@dataclass
+class WireRealmList:
+    """`GET /realms` success body."""
+    realms: list[dict[str, Any]]
+
+
+@dataclass
+class WireAuthProfilesList:
+    """`GET /auth/profiles` success body — realm-scoped lists of backend,
+auth, and binding profiles."""
+    auth_profiles: list[dict[str, Any]]
+    backend_profiles: list[dict[str, Any]]
+    bindings: list[dict[str, Any]]
+    realm_id: str
+
+
+@dataclass
 class WireAuthStatus:
     """Wire projection of the auth-profile status. Returned from
 `auth.status.get` / `GET /auth/status/:id`."""
@@ -779,6 +888,25 @@ class WireAuthStatus:
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
     last_error: Optional[dict[str, Any]] = None
+    last_refresh_at: Optional[str] = None
+
+
+@dataclass
+class WireAuthStatusDetail:
+    """`GET /auth/status/:binding_id` success body. Richer than
+[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /
+`connection_ref` / `has_refresh_token` so the caller can key by
+binding directly."""
+    auth_method: str
+    binding_id: str
+    connection_ref: dict[str, Any]
+    has_refresh_token: bool
+    profile_id: str
+    provider: str
+    realm_id: str
+    state: str
+    account_id: Optional[str] = None
+    expires_at: Optional[str] = None
     last_refresh_at: Optional[str] = None
 
 

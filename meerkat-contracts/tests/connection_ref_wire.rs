@@ -14,8 +14,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_contracts::wire::{
-    WireAuthError, WireAuthProfile, WireAuthStatus, WireBackendProfile, WireConnectionRef,
-    WireProviderBinding, WireRealmConnectionSet,
+    WireAuthError, WireAuthProfile, WireAuthStatus, WireAuthStatusDetail, WireBackendProfile,
+    WireBindingIdentity, WireConnectionRef, WireProviderBinding, WireRealmConnectionSet,
 };
 
 fn sample_connection_ref() -> meerkat_core::ConnectionRef {
@@ -179,6 +179,34 @@ fn auth_status_wire_with_error_roundtrips() {
     assert_eq!(back, status);
 }
 
+#[test]
+fn auth_status_detail_wire_flattens_binding_identity() {
+    let connection_ref = sample_connection_ref();
+    let status = WireAuthStatusDetail {
+        identity: WireBindingIdentity::from(&connection_ref),
+        profile_id: "prod_env_key".to_string(),
+        provider: "openai".to_string(),
+        auth_method: "api_key".to_string(),
+        state: "valid".to_string(),
+        expires_at: None,
+        last_refresh_at: Some("2026-04-28T00:00:00Z".to_string()),
+        account_id: Some("acct_42".to_string()),
+        has_refresh_token: true,
+    };
+    let value = serde_json::to_value(&status).unwrap();
+    assert_eq!(value["realm_id"], "dev");
+    assert_eq!(value["binding_id"], "default_openai");
+    assert_eq!(value["connection_ref"]["realm"], "dev");
+    assert_eq!(value["profile_id"], "prod_env_key");
+    assert_eq!(value["has_refresh_token"], true);
+    let back: WireAuthStatusDetail = serde_json::from_value(value).unwrap();
+    assert_eq!(back.identity.realm_id, status.identity.realm_id);
+    assert_eq!(back.identity.binding_id, status.identity.binding_id);
+    assert_eq!(back.identity.connection_ref, status.identity.connection_ref);
+    assert_eq!(back.profile_id, status.profile_id);
+    assert_eq!(back.has_refresh_token, status.has_refresh_token);
+}
+
 #[cfg(feature = "schema")]
 mod schema_emission {
     use super::*;
@@ -218,5 +246,16 @@ mod schema_emission {
         let props = s.pointer("/properties").expect("schema has properties");
         assert!(props.get("state").is_some());
         assert!(props.get("last_error").is_some());
+    }
+
+    #[test]
+    fn auth_status_detail_schema_has_binding_identity_fields() {
+        let s = schema_json::<WireAuthStatusDetail>();
+        let props = s.pointer("/properties").expect("schema has properties");
+        assert!(props.get("realm_id").is_some());
+        assert!(props.get("binding_id").is_some());
+        assert!(props.get("connection_ref").is_some());
+        assert!(props.get("profile_id").is_some());
+        assert!(props.get("has_refresh_token").is_some());
     }
 }

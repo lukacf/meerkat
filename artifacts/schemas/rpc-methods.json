@@ -108,31 +108,38 @@
     },
     {
       "description": "List configured auth profiles",
-      "name": "auth/profile/list"
+      "name": "auth/profile/list",
+      "result_type": "WireAuthProfilesList"
     },
     {
       "description": "Get one auth profile by id",
-      "name": "auth/profile/get"
+      "name": "auth/profile/get",
+      "result_type": "WireAuthProfileDetail"
     },
     {
       "description": "Create an auth profile",
-      "name": "auth/profile/create"
+      "name": "auth/profile/create",
+      "result_type": "WireAuthProfileCreated"
     },
     {
       "description": "Delete an auth profile",
-      "name": "auth/profile/delete"
+      "name": "auth/profile/delete",
+      "result_type": "WireAuthProfileCleared"
     },
     {
       "description": "Begin an OAuth login; returns authorize URL, state, PKCE verifier",
-      "name": "auth/login/start"
+      "name": "auth/login/start",
+      "result_type": "WireLoginStart"
     },
     {
       "description": "Finish an OAuth login by exchanging an authorization code",
-      "name": "auth/login/complete"
+      "name": "auth/login/complete",
+      "result_type": "WireLoginReady"
     },
     {
       "description": "Begin a device-code OAuth login; returns user-code + verification URL",
-      "name": "auth/login/device_start"
+      "name": "auth/login/device_start",
+      "result_type": "WireDeviceStart"
     },
     {
       "description": "Single-poll completion for a device-code OAuth login; returns pending / slow_down / access_denied / expired / ready",
@@ -144,19 +151,23 @@
     },
     {
       "description": "Get auth status for a profile",
-      "name": "auth/status/get"
+      "name": "auth/status/get",
+      "result_type": "WireAuthStatusDetail"
     },
     {
       "description": "Revoke + remove persisted credentials",
-      "name": "auth/logout"
+      "name": "auth/logout",
+      "result_type": "WireAuthProfileCleared"
     },
     {
       "description": "List realms with binding summaries",
-      "name": "realm/list"
+      "name": "realm/list",
+      "result_type": "WireRealmList"
     },
     {
       "description": "Get one realm's full connection set",
-      "name": "realm/get"
+      "name": "realm/get",
+      "result_type": "WireRealmConnectionSet"
     },
     {
       "description": "Fetch raw blob payload metadata and bytes by blob id",

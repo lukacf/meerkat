@@ -12,7 +12,8 @@ use serde_json::value::RawValue;
 
 use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
-    WireAuthProfile, WireBackendProfile, WireProviderBinding, WireRealmConnectionSet,
+    WireAuthProfile, WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity,
+    WireProviderBinding, WireRealmConnectionSet,
 };
 use meerkat_core::{
     ConnectionRef, ConnectionTargetError, CredentialSourceSpec, Provider, RealmConnectionSet,
@@ -1064,19 +1065,24 @@ pub async fn handle_auth_status_get(
     };
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "realm_id": connection_ref.realm.as_str(),
-            "binding_id": connection_ref.binding.as_str(),
-            "connection_ref": &connection_ref,
-            "profile_id": &auth_profile.id,
-            "provider": auth_profile.provider.as_str(),
-            "auth_method": &auth_profile.auth_method,
-            "state": state_label,
-            "expires_at": stored.as_ref().and_then(|t| t.expires_at.map(|e| e.to_rfc3339())),
-            "last_refresh_at": stored.as_ref().and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
-            "account_id": stored.as_ref().and_then(|t| t.account_id.clone()),
-            "has_refresh_token": stored.as_ref().map(|t| t.refresh_token.is_some()).unwrap_or(false),
-        }),
+        WireAuthStatusDetail {
+            identity: WireBindingIdentity::from(&connection_ref),
+            profile_id: auth_profile.id,
+            provider: auth_profile.provider.as_str().to_string(),
+            auth_method: auth_profile.auth_method,
+            state: state_label.to_string(),
+            expires_at: stored
+                .as_ref()
+                .and_then(|t| t.expires_at.map(|e| e.to_rfc3339())),
+            last_refresh_at: stored
+                .as_ref()
+                .and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
+            account_id: stored.as_ref().and_then(|t| t.account_id.clone()),
+            has_refresh_token: stored
+                .as_ref()
+                .map(|t| t.refresh_token.is_some())
+                .unwrap_or(false),
+        },
     )
 }
 

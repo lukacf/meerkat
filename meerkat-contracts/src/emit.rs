@@ -124,7 +124,18 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireAuthProfile": schema_for!(crate::wire::WireAuthProfile),
         "WireProviderBinding": schema_for!(crate::wire::WireProviderBinding),
         "WireRealmConnectionSet": schema_for!(crate::wire::WireRealmConnectionSet),
+        "WireBindingIdentity": schema_for!(crate::wire::WireBindingIdentity),
+        "WireAuthProfileCreated": schema_for!(crate::wire::WireAuthProfileCreated),
+        "WireAuthProfileDetail": schema_for!(crate::wire::WireAuthProfileDetail),
+        "WireAuthProfileCleared": schema_for!(crate::wire::WireAuthProfileCleared),
+        "WireLoginStart": schema_for!(crate::wire::WireLoginStart),
+        "WireLoginReady": schema_for!(crate::wire::WireLoginReady),
+        "WireDeviceStart": schema_for!(crate::wire::WireDeviceStart),
+        "WireRealmSummary": schema_for!(crate::wire::WireRealmSummary),
+        "WireRealmList": schema_for!(crate::wire::WireRealmList),
+        "WireAuthProfilesList": schema_for!(crate::wire::WireAuthProfilesList),
         "WireAuthStatus": schema_for!(crate::wire::WireAuthStatus),
+        "WireAuthStatusDetail": schema_for!(crate::wire::WireAuthStatusDetail),
         "WireAuthError": schema_for!(crate::wire::WireAuthError),
         "CommsCommandRequest": schema_for!(crate::wire::CommsCommandRequest),
     });
@@ -279,4 +290,74 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     write_pretty_json(output_dir.join("rest-openapi.json"), &rest_openapi)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn temp_output_dir(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "meerkat-contracts-{test_name}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create schema output dir");
+        dir
+    }
+
+    #[test]
+    fn emitted_schemas_catalog_auth_status_detail() {
+        let output_dir = temp_output_dir("auth-status-detail");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        assert!(
+            wire_types.get("WireAuthStatus").is_some(),
+            "legacy auth status schema must remain emitted"
+        );
+        let detail = wire_types
+            .get("WireAuthStatusDetail")
+            .expect("detailed auth status schema must be emitted");
+        let detail_props = detail
+            .pointer("/properties")
+            .expect("detail schema has properties");
+        for field in [
+            "realm_id",
+            "binding_id",
+            "connection_ref",
+            "profile_id",
+            "has_refresh_token",
+        ] {
+            assert!(
+                detail_props.get(field).is_some(),
+                "WireAuthStatusDetail schema missing {field}"
+            );
+        }
+
+        let rpc_methods: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rpc-methods.json")).unwrap())
+                .unwrap();
+        let auth_status = rpc_methods["methods"]
+            .as_array()
+            .expect("methods array")
+            .iter()
+            .find(|method| method["name"] == "auth/status/get")
+            .expect("auth/status/get catalog entry");
+        assert_eq!(
+            auth_status["result_type"], "WireAuthStatusDetail",
+            "auth/status/get should catalog its concrete detailed response"
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
 }

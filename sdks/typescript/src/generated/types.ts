@@ -884,6 +884,85 @@ export interface WireRealmConnectionSet {
   realm_id: string;
 }
 
+export interface WireBindingIdentity {
+  binding_id: string;
+  connection_ref: Record<string, unknown>;
+  realm_id: string;
+}
+
+export interface WireAuthProfileCreated {
+  auth_method: string;
+  binding_id: string;
+  connection_ref: Record<string, unknown>;
+  profile_id: string;
+  provider: string;
+  realm_id: string;
+  stored: boolean;
+}
+
+export interface WireAuthProfileDetail {
+  auth_profile: Record<string, unknown>;
+  binding_id: string;
+  connection_ref: Record<string, unknown>;
+  profile_id: string;
+}
+
+export interface WireAuthProfileCleared {
+  binding_id: string;
+  cleared: boolean;
+  connection_ref: Record<string, unknown>;
+  profile_id: string;
+  realm_id: string;
+}
+
+export interface WireLoginStart {
+  authorize_url: string;
+  provider: string;
+  redirect_uri: string;
+  state: string;
+}
+
+export interface WireLoginReady {
+  binding_id: string;
+  connection_ref: Record<string, unknown>;
+  expires_at?: string;
+  has_refresh_token: boolean;
+  profile_id: string;
+  provider: string;
+  realm_id: string;
+  scopes: string[];
+  state?: string;
+}
+
+export interface WireDeviceStart {
+  device_code: string;
+  expires_in: number;
+  interval: number;
+  provider: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+}
+
+export interface WireRealmSummary {
+  auth_profile_count: number;
+  backend_count: number;
+  binding_count: number;
+  default_binding?: string;
+  realm_id: string;
+}
+
+export interface WireRealmList {
+  realms: Record<string, unknown>[];
+}
+
+export interface WireAuthProfilesList {
+  auth_profiles: Record<string, unknown>[];
+  backend_profiles: Record<string, unknown>[];
+  bindings: Record<string, unknown>[];
+  realm_id: string;
+}
+
 export interface WireAuthStatus {
   account_id?: string;
   auth_method: string;
@@ -892,6 +971,20 @@ export interface WireAuthStatus {
   last_refresh_at?: string;
   profile_id: string;
   provider: string;
+  state: string;
+}
+
+export interface WireAuthStatusDetail {
+  account_id?: string;
+  auth_method: string;
+  binding_id: string;
+  connection_ref: Record<string, unknown>;
+  expires_at?: string;
+  has_refresh_token: boolean;
+  last_refresh_at?: string;
+  profile_id: string;
+  provider: string;
+  realm_id: string;
   state: string;
 }
 

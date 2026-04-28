@@ -185,21 +185,40 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "ModelsCatalogResponse",
         ),
         // Auth-profile management (Phase 4c — always available).
-        RpcMethodDescriptor::basic("auth/profile/list", "List configured auth profiles"),
-        RpcMethodDescriptor::basic("auth/profile/get", "Get one auth profile by id"),
-        RpcMethodDescriptor::basic("auth/profile/create", "Create an auth profile"),
-        RpcMethodDescriptor::basic("auth/profile/delete", "Delete an auth profile"),
-        RpcMethodDescriptor::basic(
+        RpcMethodDescriptor::result_only(
+            "auth/profile/list",
+            "List configured auth profiles",
+            "WireAuthProfilesList",
+        ),
+        RpcMethodDescriptor::result_only(
+            "auth/profile/get",
+            "Get one auth profile by id",
+            "WireAuthProfileDetail",
+        ),
+        RpcMethodDescriptor::result_only(
+            "auth/profile/create",
+            "Create an auth profile",
+            "WireAuthProfileCreated",
+        ),
+        RpcMethodDescriptor::result_only(
+            "auth/profile/delete",
+            "Delete an auth profile",
+            "WireAuthProfileCleared",
+        ),
+        RpcMethodDescriptor::result_only(
             "auth/login/start",
             "Begin an OAuth login; returns authorize URL, state, PKCE verifier",
+            "WireLoginStart",
         ),
-        RpcMethodDescriptor::basic(
+        RpcMethodDescriptor::result_only(
             "auth/login/complete",
             "Finish an OAuth login by exchanging an authorization code",
+            "WireLoginReady",
         ),
-        RpcMethodDescriptor::basic(
+        RpcMethodDescriptor::result_only(
             "auth/login/device_start",
             "Begin a device-code OAuth login; returns user-code + verification URL",
+            "WireDeviceStart",
         ),
         RpcMethodDescriptor::basic(
             "auth/login/device_complete",
@@ -209,10 +228,26 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "auth/login/provision_api_key",
             "Console-OAuth → API key provisioning (Anthropic oauth_to_api_key): POST access_token to create_api_key endpoint, persist returned api_key",
         ),
-        RpcMethodDescriptor::basic("auth/status/get", "Get auth status for a profile"),
-        RpcMethodDescriptor::basic("auth/logout", "Revoke + remove persisted credentials"),
-        RpcMethodDescriptor::basic("realm/list", "List realms with binding summaries"),
-        RpcMethodDescriptor::basic("realm/get", "Get one realm's full connection set"),
+        RpcMethodDescriptor::result_only(
+            "auth/status/get",
+            "Get auth status for a profile",
+            "WireAuthStatusDetail",
+        ),
+        RpcMethodDescriptor::result_only(
+            "auth/logout",
+            "Revoke + remove persisted credentials",
+            "WireAuthProfileCleared",
+        ),
+        RpcMethodDescriptor::result_only(
+            "realm/list",
+            "List realms with binding summaries",
+            "WireRealmList",
+        ),
+        RpcMethodDescriptor::result_only(
+            "realm/get",
+            "Get one realm's full connection set",
+            "WireRealmConnectionSet",
+        ),
     ];
 
     if options.blob_enabled {
@@ -613,6 +648,7 @@ pub fn rpc_notification_names(options: RpcMethodCatalogOptions) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
 
@@ -707,6 +743,34 @@ mod tests {
                     "{name} must advertise its required params type"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn auth_response_methods_advertise_concrete_result_types() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_result_type) in [
+            ("auth/profile/list", "WireAuthProfilesList"),
+            ("auth/profile/get", "WireAuthProfileDetail"),
+            ("auth/profile/create", "WireAuthProfileCreated"),
+            ("auth/profile/delete", "WireAuthProfileCleared"),
+            ("auth/login/start", "WireLoginStart"),
+            ("auth/login/complete", "WireLoginReady"),
+            ("auth/login/device_start", "WireDeviceStart"),
+            ("auth/status/get", "WireAuthStatusDetail"),
+            ("auth/logout", "WireAuthProfileCleared"),
+            ("realm/list", "WireRealmList"),
+            ("realm/get", "WireRealmConnectionSet"),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(
+                descriptor.result_type,
+                Some(expected_result_type),
+                "{name} must advertise its concrete result type"
+            );
         }
     }
 }

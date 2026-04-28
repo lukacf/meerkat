@@ -301,8 +301,7 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        let trusted_peer = descriptor_to_trusted_peer(peer)?;
-        self.register_trusted_peer(trusted_peer).await
+        self.register_trusted_peer_descriptor(peer).await
     }
 
     async fn remove_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
@@ -310,8 +309,7 @@ impl CoreCommsRuntime for CommsRuntime {
     }
 
     async fn add_private_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
-        let trusted_peer = descriptor_to_trusted_peer(peer)?;
-        self.register_private_trusted_peer(trusted_peer).await
+        self.register_private_trusted_peer_descriptor(peer).await
     }
 
     async fn remove_private_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
@@ -988,7 +986,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     }
                 };
                 Some(TrustedPeerDescriptor {
-                    peer_id: peer_id_from_pubkey(&peer.pubkey),
+                    peer_id: self.router.peer_id_for_pubkey(&peer.pubkey),
                     name,
                     address: parse_peer_address(&peer.addr),
                     pubkey: *peer.pubkey.as_bytes(),
@@ -1704,6 +1702,16 @@ impl CommsRuntime {
         Ok(())
     }
 
+    async fn register_trusted_peer_descriptor(
+        &self,
+        descriptor: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
+        let peer_id = descriptor.peer_id;
+        let peer = descriptor_to_trusted_peer(descriptor)?;
+        self.router.add_trusted_peer_with_peer_id(peer_id, peer);
+        Ok(())
+    }
+
     /// Canonical runtime trust-removal seam using a canonical [`PeerId`]
     /// string.
     pub async fn unregister_trusted_peer(&self, peer_id: &str) -> Result<bool, SendError> {
@@ -1728,6 +1736,17 @@ impl CommsRuntime {
         let pubkey = peer.pubkey;
         self.router.add_trusted_peer(peer);
         self.router.mark_private(pubkey);
+        Ok(())
+    }
+
+    async fn register_private_trusted_peer_descriptor(
+        &self,
+        descriptor: TrustedPeerDescriptor,
+    ) -> Result<(), SendError> {
+        let peer_id = descriptor.peer_id;
+        let peer = descriptor_to_trusted_peer(descriptor)?;
+        self.router.add_trusted_peer_with_peer_id(peer_id, peer);
+        self.router.mark_private_peer_id(peer_id);
         Ok(())
     }
 
@@ -1839,7 +1858,8 @@ impl CommsRuntime {
                 }
                 trusted_names.insert(peer.name.clone());
                 trusted_pubkeys.insert(peer.pubkey);
-                if private_peer_ids.contains(&peer_id_from_pubkey(&peer.pubkey)) {
+                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
+                if private_peer_ids.contains(&peer_id) {
                     continue;
                 }
                 let source = if inproc_by_name
@@ -1863,7 +1883,7 @@ impl CommsRuntime {
                 };
                 on_peer(ResolvedPeer {
                     name,
-                    peer_id: peer_id_from_pubkey(&peer.pubkey),
+                    peer_id,
                     address: parse_peer_address(&peer.addr),
                     source,
                     meta: peer.meta.clone(),
@@ -2487,7 +2507,7 @@ mod tests {
     use meerkat_core::{
         BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
-            InputSource, InputStreamMode, PeerDirectorySource, PeerName, PeerReachability,
+            InputSource, InputStreamMode, PeerDirectorySource, PeerId, PeerName, PeerReachability,
             PeerReachabilityReason, PeerRoute, StreamError, StreamScope, TrustedPeerDescriptor,
         },
         interaction::InteractionId,
@@ -4945,6 +4965,83 @@ mod tests {
         assert!(
             matches!(result, Err(SendError::PeerNotFound(_))),
             "send to removed peer should fail with PeerNotFound, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_trusted_peer_preserves_descriptor_peer_id_for_zero_pubkey() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("rm-zero-pubkey-{suffix}")).unwrap();
+        let peer_id = PeerId::new();
+        let peer_name = format!("legacy-peer-{suffix}");
+        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            peer_name.clone(),
+            peer_id,
+            format!("inproc://{peer_name}"),
+        )
+        .expect("valid zero-pubkey descriptor");
+
+        CoreCommsRuntime::add_trusted_peer(&runtime, spec)
+            .await
+            .expect("add zero-pubkey trusted peer");
+
+        let peers = CoreCommsRuntime::peers(&runtime).await;
+        let entry = peers
+            .iter()
+            .find(|entry| entry.name.as_str() == peer_name)
+            .expect("zero-pubkey peer should be listed");
+        assert_eq!(
+            entry.peer_id, peer_id,
+            "directory must preserve descriptor PeerId rather than derive from zero pubkey"
+        );
+
+        let removed = CoreCommsRuntime::remove_trusted_peer(&runtime, &peer_id.to_string())
+            .await
+            .expect("remove zero-pubkey peer by PeerId");
+        assert!(
+            removed,
+            "zero-pubkey peer should remove by descriptor PeerId"
+        );
+        assert!(
+            CoreCommsRuntime::peers(&runtime)
+                .await
+                .iter()
+                .all(|entry| entry.name.as_str() != peer_name),
+            "zero-pubkey peer should not remain listed after removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_private_trusted_peer_preserves_descriptor_peer_id_for_zero_pubkey() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = CommsRuntime::inproc_only(&format!("rm-private-zero-{suffix}")).unwrap();
+        let peer_id = PeerId::new();
+        let peer_name = format!("private-legacy-peer-{suffix}");
+        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            peer_name.clone(),
+            peer_id,
+            format!("inproc://{peer_name}"),
+        )
+        .expect("valid zero-pubkey descriptor");
+
+        CoreCommsRuntime::add_private_trusted_peer(&runtime, spec)
+            .await
+            .expect("add private zero-pubkey trusted peer");
+
+        assert!(
+            CoreCommsRuntime::peers(&runtime)
+                .await
+                .iter()
+                .all(|entry| entry.name.as_str() != peer_name),
+            "private zero-pubkey peer should be hidden from public directory"
+        );
+
+        let removed = CoreCommsRuntime::remove_private_trusted_peer(&runtime, &peer_id.to_string())
+            .await
+            .expect("remove private zero-pubkey peer by PeerId");
+        assert!(
+            removed,
+            "private zero-pubkey peer should remove by descriptor PeerId"
         );
     }
 

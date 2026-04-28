@@ -335,6 +335,17 @@
         ],
         "type": "object"
       },
+      "BackgroundJobTerminalStatus": {
+        "enum": [
+          "completed",
+          "failed",
+          "aborted",
+          "cancelled",
+          "retired",
+          "terminated"
+        ],
+        "type": "string"
+      },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
@@ -2013,6 +2024,16 @@
           "status": {
             "type": "string"
           },
+          "terminal_status": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BackgroundJobTerminalStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "type": {
             "const": "background_job_completed",
             "type": "string"
@@ -3194,6 +3215,16 @@
               "status": {
                 "type": "string"
               },
+              "terminal_status": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/BackgroundJobTerminalStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": {
                 "const": "background_job_completed",
                 "type": "string"
@@ -3209,6 +3240,17 @@
             "type": "object"
           }
         ]
+      },
+      "BackgroundJobTerminalStatus": {
+        "enum": [
+          "completed",
+          "failed",
+          "aborted",
+          "cancelled",
+          "retired",
+          "terminated"
+        ],
+        "type": "string"
       },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",

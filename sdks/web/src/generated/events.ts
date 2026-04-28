@@ -62,6 +62,8 @@ export type AgentErrorReport = {
   reason?: AgentErrorReason | null;
 };
 
+export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "cancelled" | "retired" | "terminated";
+
 export type BlobId = string;
 
 export type BudgetType = "tokens" | "time" | "tool_calls";
@@ -448,6 +450,7 @@ export interface BackgroundJobCompletedEvent {
   display_name: string;
   job_id: string;
   status: string;
+  terminal_status?: BackgroundJobTerminalStatus | null;
   type: "background_job_completed";
 }
 

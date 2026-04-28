@@ -270,6 +270,17 @@ pub trait SessionAgentBuilder: Send + Sync {
     #[cfg(target_arch = "wasm32")]
     type Agent: SessionAgent + 'static;
 
+    /// Resolve whether the selected model accepts inline video user content.
+    ///
+    /// Implementations with a richer configured model registry can override
+    /// this; the default uses the built-in model capability catalog.
+    fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
+        meerkat_core::model_profile::inline_video_support_for(
+            identity.provider.as_str(),
+            &identity.model,
+        )
+    }
+
     /// Build an agent for a new session.
     async fn build_agent(
         &self,
@@ -547,6 +558,30 @@ pub trait SessionAgent: Send {
     }
 }
 
+fn validate_prompt_video_input_against_capability(
+    prompt: &ContentInput,
+    identity: &SessionLlmIdentity,
+    supports_inline_video: bool,
+) -> Result<(), SessionError> {
+    let blocks = match prompt {
+        ContentInput::Text(_) => return Ok(()),
+        ContentInput::Blocks(blocks) => blocks,
+    };
+
+    meerkat_core::validate_inline_video_blocks(blocks)
+        .map_err(|err| SessionError::Agent(AgentError::ConfigError(err)))?;
+
+    if meerkat_core::has_video(blocks) && !supports_inline_video {
+        return Err(SessionError::Agent(AgentError::ConfigError(format!(
+            "inline video input is not supported by model '{}' on provider '{}'",
+            identity.model,
+            identity.provider.as_str()
+        ))));
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // EphemeralSessionService
 // ---------------------------------------------------------------------------
@@ -640,30 +675,22 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
-    fn provider_supports_inline_video(identity: &SessionLlmIdentity) -> bool {
-        identity.provider == meerkat_core::Provider::Gemini
+    fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> bool {
+        self.builder
+            .model_supports_inline_video(identity)
+            .unwrap_or(false)
     }
 
     fn validate_prompt_video_input(
+        &self,
         prompt: &ContentInput,
         identity: &SessionLlmIdentity,
     ) -> Result<(), SessionError> {
-        let blocks = match prompt {
-            ContentInput::Text(_) => return Ok(()),
-            ContentInput::Blocks(blocks) => blocks,
-        };
-
-        meerkat_core::validate_inline_video_blocks(blocks)
-            .map_err(|err| SessionError::Agent(AgentError::ConfigError(err)))?;
-
-        if meerkat_core::has_video(blocks) && !Self::provider_supports_inline_video(identity) {
-            return Err(SessionError::Agent(AgentError::ConfigError(format!(
-                "inline video input requires a Gemini model; current provider is '{}'",
-                identity.provider.as_str()
-            ))));
-        }
-
-        Ok(())
+        validate_prompt_video_input_against_capability(
+            prompt,
+            identity,
+            self.model_supports_inline_video(identity),
+        )
     }
 
     fn validate_tool_result_video(results: &[ToolResult]) -> Result<(), SessionError> {
@@ -1423,7 +1450,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
         let llm_identity = Self::llm_identity_from_create_request(&req);
-        Self::validate_prompt_video_input(&prompt, &llm_identity)?;
+        self.validate_prompt_video_input(&prompt, &llm_identity)?;
         let labels = req.labels.clone().unwrap_or_default();
         let resumed_session = req
             .build
@@ -1667,7 +1694,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 .get(id)
                 .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
             let identity = handle.llm_identity_rx.borrow().clone();
-            Self::validate_prompt_video_input(&prompt, &identity)?;
+            self.validate_prompt_video_input(&prompt, &identity)?;
 
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.
@@ -2848,6 +2875,69 @@ async fn session_task<A: SessionAgent>(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod inline_video_admission_tests {
+    use super::*;
+    use meerkat_core::Provider;
+    use meerkat_core::types::{ContentBlock, VideoData};
+
+    fn identity(provider: Provider, model: &str) -> SessionLlmIdentity {
+        SessionLlmIdentity {
+            model: model.to_string(),
+            provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        }
+    }
+
+    fn inline_video_prompt() -> ContentInput {
+        ContentInput::Blocks(vec![
+            ContentBlock::Text {
+                text: "describe this".to_string(),
+            },
+            ContentBlock::Video {
+                media_type: "video/mp4".to_string(),
+                duration_ms: 1_000,
+                data: VideoData::Inline {
+                    data: "AAAA".to_string(),
+                },
+            },
+        ])
+    }
+
+    #[test]
+    fn provider_gemini_capability_false_rejects_inline_video() {
+        let result = validate_prompt_video_input_against_capability(
+            &inline_video_prompt(),
+            &identity(Provider::Gemini, "gemini-3-flash-preview"),
+            false,
+        );
+
+        let message = match result {
+            Err(SessionError::Agent(AgentError::ConfigError(message))) => Some(message),
+            _ => None,
+        };
+
+        assert!(
+            message
+                .as_deref()
+                .is_some_and(|message| message.contains("not supported by model"))
+        );
+    }
+
+    #[test]
+    fn provider_not_gemini_capability_true_accepts_inline_video() {
+        let result = validate_prompt_video_input_against_capability(
+            &inline_video_prompt(),
+            &identity(Provider::OpenAI, "openai-video-capable-test-model"),
+            true,
+        );
+
+        assert!(result.is_ok());
     }
 }
 

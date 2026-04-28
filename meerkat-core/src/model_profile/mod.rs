@@ -102,6 +102,13 @@ pub fn profile_for(provider: &str, model: &str) -> Option<ModelProfile> {
     capabilities_for(provider, model).map(project_to_profile)
 }
 
+/// Look up whether a model accepts inline video by provider string and model ID.
+///
+/// Returns `None` when the provider/model pair has no capability row.
+pub fn inline_video_support_for(provider: &str, model: &str) -> Option<bool> {
+    capabilities_for(provider, model).map(|caps| caps.inline_video)
+}
+
 /// Project a capability record into the [`ModelProfile`] surface.
 pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
     ModelProfile {
@@ -202,6 +209,32 @@ mod tests {
             profile.inline_video,
             "Gemini models must support inline video"
         );
+    }
+
+    #[test]
+    fn all_gemini_profiles_preserve_inline_video_support() {
+        for entry in catalog::catalog()
+            .iter()
+            .filter(|entry| entry.provider == "gemini")
+        {
+            assert!(
+                profile_for(entry.provider, entry.id)
+                    .as_ref()
+                    .is_some_and(|profile| profile.inline_video),
+                "Gemini model '{}' must support inline video",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn inline_video_support_for_reads_capability_truth() {
+        assert_eq!(
+            inline_video_support_for("gemini", "gemini-3-flash-preview"),
+            Some(true)
+        );
+        assert_eq!(inline_video_support_for("openai", "gpt-5.4"), Some(false));
+        assert_eq!(inline_video_support_for("gemini", "gemini-4-future"), None);
     }
 
     #[test]

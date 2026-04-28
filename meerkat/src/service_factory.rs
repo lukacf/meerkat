@@ -499,6 +499,23 @@ impl FactoryAgentBuilder {
 impl SessionAgentBuilder for FactoryAgentBuilder {
     type Agent = FactoryAgent;
 
+    fn model_supports_inline_video(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<bool> {
+        self.config_snapshot
+            .model_registry()
+            .ok()
+            .and_then(|registry| registry.profile_for(&identity.model))
+            .map(|profile| profile.inline_video)
+            .or_else(|| {
+                meerkat_core::model_profile::inline_video_support_for(
+                    identity.provider.as_str(),
+                    &identity.model,
+                )
+            })
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,

@@ -289,15 +289,33 @@ async def test_python_auth_helpers_send_binding_scoped_params():
         "auth/status/get",
         {"realm_id": "prod", "binding_id": "claude-console"},
     )
+    await client.auth_status("prod", "claude-console", "primary")
+    client._request.assert_called_with(
+        "auth/status/get",
+        {
+            "realm_id": "prod",
+            "binding_id": "claude-console",
+            "profile_id": "primary",
+        },
+    )
 
     await client.auth_logout("prod", "claude-console")
     client._request.assert_called_with(
         "auth/logout",
         {"realm_id": "prod", "binding_id": "claude-console"},
     )
+    await client.auth_logout("prod", "claude-console", "primary")
+    client._request.assert_called_with(
+        "auth/logout",
+        {
+            "realm_id": "prod",
+            "binding_id": "claude-console",
+            "profile_id": "primary",
+        },
+    )
 
 
-def test_typescript_auth_status_logout_helpers_send_binding_scoped_params():
+def test_typescript_auth_status_logout_helpers_send_profile_scoped_params():
     import pathlib
 
     client_ts = pathlib.Path(__file__).parents[2] / "typescript" / "src" / "client.ts"
@@ -308,7 +326,22 @@ def test_typescript_auth_status_logout_helpers_send_binding_scoped_params():
         body = source[start:end]
         assert "bindingId" in body
         assert "binding_id" in body
-        assert "profile_id" not in body
+        assert "profileId?: string" in body
+        assert "params.profile_id = profileId" in body
+
+
+def test_web_auth_status_logout_helpers_send_profile_scoped_params():
+    import pathlib
+
+    auth_ts = pathlib.Path(__file__).parents[2] / "web" / "src" / "auth.ts"
+    source = auth_ts.read_text()
+    for method_name in ["status", "logout"]:
+        start = source.index(f"async {method_name}(")
+        end = source.index("\n  }\n", start)
+        body = source[start:end]
+        assert "binding_id" in body
+        assert "profile_id?: string" in body
+        assert "params.profile_id = profile_id" in body
 
 
 @pytest.mark.asyncio

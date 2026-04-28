@@ -244,13 +244,22 @@ export class Auth {
   }
 
   /** `auth/status/get` — current status for a binding's stored credentials. */
-  async status(realm_id: string, binding_id: string): Promise<AuthStatus> {
+  async status(
+    realm_id: string,
+    binding_id: string,
+    profile_id?: string,
+  ): Promise<AuthStatus> {
+    const params: { realm_id: string; binding_id: string; profile_id?: string } = {
+      realm_id,
+      binding_id,
+    };
+    if (profile_id) params.profile_id = profile_id;
     return this.transport.request<
-      { realm_id: string; binding_id: string },
+      typeof params,
       AuthStatus
     >(
       'auth/status/get',
-      { realm_id, binding_id },
+      params,
     );
   }
 
@@ -258,13 +267,19 @@ export class Auth {
   async logout(
     realm_id: string,
     binding_id: string,
+    profile_id?: string,
   ): Promise<AuthCredentialsCleared> {
+    const params: { realm_id: string; binding_id: string; profile_id?: string } = {
+      realm_id,
+      binding_id,
+    };
+    if (profile_id) params.profile_id = profile_id;
     return this.transport.request<
-      { realm_id: string; binding_id: string },
+      typeof params,
       AuthCredentialsCleared
     >(
       'auth/logout',
-      { realm_id, binding_id },
+      params,
     );
   }
 }

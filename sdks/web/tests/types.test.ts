@@ -92,6 +92,16 @@ const authLogin: Promise<AuthLoginReady> = auth.loginComplete({
 });
 const authStatus: Promise<AuthStatus> = auth.status('default', 'openai');
 const authLogout: Promise<AuthCredentialsCleared> = auth.logout('default', 'openai');
+const authStatusWithProfile: Promise<AuthStatus> = auth.status(
+  'default',
+  'openai',
+  'openai_apikey',
+);
+const authLogoutWithProfile: Promise<AuthCredentialsCleared> = auth.logout(
+  'default',
+  'openai',
+  'openai_apikey',
+);
 const authBinding: AuthBindingIdentity = {
   realm_id: 'default',
   binding_id: 'openai',
@@ -276,6 +286,8 @@ void authDelete;
 void authLogin;
 void authStatus;
 void authLogout;
+void authStatusWithProfile;
+void authLogoutWithProfile;
 void authBinding;
 void sessionState;
 void appendSystemContextOptions;

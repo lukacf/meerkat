@@ -231,6 +231,17 @@ impl DynamicLease {
         }
     }
 
+    /// Construct a dynamic lease whose freshness is projected from the
+    /// underlying authorizer. This is for authorizer-backed flows such as
+    /// Google ADC and Azure AD where the token is fetched lazily per request.
+    pub fn from_authorizer(
+        authorizer: Arc<dyn HttpAuthorizer>,
+        metadata: AuthMetadata,
+        source_label: impl Into<String>,
+    ) -> Self {
+        Self::new(authorizer, metadata, None, source_label)
+    }
+
     pub fn authorizer(&self) -> &Arc<dyn HttpAuthorizer> {
         &self.authorizer
     }
@@ -246,7 +257,7 @@ impl AuthLease for DynamicLease {
         &self.metadata
     }
     fn expires_at(&self) -> Option<DateTime<Utc>> {
-        self.expires_at
+        self.expires_at.or_else(|| self.authorizer.expires_at())
     }
     fn source_label(&self) -> &str {
         &self.source_label
@@ -309,5 +320,41 @@ mod tests {
             .await
             .expect_err("dynamic refresh must not report success without work");
         assert!(matches!(err, AuthError::RefreshFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn dynamic_lease_projects_authorizer_freshness() {
+        #[derive(Debug)]
+        struct ExpiringAuthorizer {
+            expires_at: DateTime<Utc>,
+        }
+
+        #[async_trait::async_trait]
+        impl HttpAuthorizer for ExpiringAuthorizer {
+            async fn authorize(
+                &self,
+                _req: &mut meerkat_core::auth::HttpAuthorizationRequest<'_>,
+            ) -> Result<(), AuthError> {
+                Ok(())
+            }
+
+            fn label(&self) -> &'static str {
+                "expiring-authorizer"
+            }
+
+            fn expires_at(&self) -> Option<DateTime<Utc>> {
+                Some(self.expires_at)
+            }
+        }
+
+        let expires_at =
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 4, 28, 12, 0, 0).unwrap();
+        let lease: Arc<dyn AuthLease> = Arc::new(DynamicLease::from_authorizer(
+            Arc::new(ExpiringAuthorizer { expires_at }),
+            AuthMetadata::default(),
+            "dynamic:expiring",
+        ));
+
+        assert_eq!(lease.expires_at(), Some(expires_at));
     }
 }

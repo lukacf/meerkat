@@ -12,18 +12,20 @@
 #![cfg(all(not(target_arch = "wasm32"), feature = "azure-ad"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::extract::{Form, State};
 use axum::response::Json;
 use axum::routing::post;
+use chrono::Utc;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 
 use meerkat_auth_core::authorizers::{AzureAdAuthorizer, AzureClientCredentials};
-use meerkat_core::{HttpAuthorizationRequest, HttpAuthorizer};
+use meerkat_core::handles::{AuthLeaseHandle, AuthLeaseSnapshot, DslTransitionError, LeaseKey};
+use meerkat_core::{BindingId, HttpAuthorizationRequest, HttpAuthorizer, ProfileId, RealmId};
 
 #[derive(Deserialize, Clone)]
 struct TokenForm {
@@ -58,6 +60,65 @@ struct MockServer {
     base_url: String,
     counter: Arc<AtomicUsize>,
     captured: Arc<std::sync::Mutex<Vec<TokenForm>>>,
+}
+
+#[derive(Default)]
+struct RecordingAuthLeaseHandle {
+    acquired: Mutex<Vec<(LeaseKey, u64)>>,
+}
+
+impl AuthLeaseHandle for RecordingAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> Result<(), DslTransitionError> {
+        self.acquired
+            .lock()
+            .unwrap()
+            .push((lease_key.clone(), expires_at));
+        Ok(())
+    }
+
+    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn complete_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+        _new_expires_at: u64,
+        _now: u64,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn refresh_failed(
+        &self,
+        _lease_key: &LeaseKey,
+        _permanent: bool,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+        }
+    }
 }
 
 async fn start_mock(token_value: &str, expires_in: u64) -> MockServer {
@@ -116,6 +177,10 @@ async fn authorize_adds_bearer_header_from_token_endpoint() {
         .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
         .unwrap();
     assert_eq!(auth.1, "Bearer azure-access-token-xyz");
+    assert!(
+        authorizer.expires_at().is_some(),
+        "Azure AD token expiry must be observable through HttpAuthorizer"
+    );
 
     let captured = mock.captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
@@ -151,6 +216,73 @@ async fn token_is_cached_between_authorize_calls() {
         1,
         "expected 1 token fetch, got {}",
         mock.counter.load(Ordering::SeqCst),
+    );
+}
+
+#[tokio::test]
+async fn short_lived_token_expiry_is_observable_and_refetched() {
+    let mock = start_mock("short-lived-token", 30).await;
+    let authorizer = AzureAdAuthorizer::new(
+        "https://cognitiveservices.azure.com/.default",
+        creds(&mock.base_url),
+    )
+    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
+
+    for _ in 0..2 {
+        let mut headers = Vec::new();
+        let mut req = HttpAuthorizationRequest {
+            method: "POST",
+            url: "https://example.foundry.azure.com/v1/messages",
+            headers: &mut headers,
+        };
+        authorizer.authorize(&mut req).await.unwrap();
+    }
+
+    let expires_at = authorizer
+        .expires_at()
+        .expect("short-lived token expiry should be projected");
+    assert!(
+        expires_at > Utc::now(),
+        "cached expiry should carry the token endpoint's expires_in"
+    );
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "token inside the canonical refresh window must be refetched"
+    );
+}
+
+#[tokio::test]
+async fn authorize_publishes_token_expiry_to_auth_lease_handle() {
+    let mock = start_mock("lease-tracked-token", 3600).await;
+    let handle = Arc::new(RecordingAuthLeaseHandle::default());
+    let lease_key = LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("azure_foundry").unwrap(),
+        Some(ProfileId::parse("foundry_azure_ad").unwrap()),
+    );
+    let lease_handle: Arc<dyn AuthLeaseHandle> = handle.clone();
+    let authorizer = AzureAdAuthorizer::new(
+        "https://cognitiveservices.azure.com/.default",
+        creds(&mock.base_url),
+    )
+    .with_auth_lease_observer(lease_handle, lease_key.clone())
+    .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://example.foundry.azure.com/v1/messages",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+
+    let acquired = handle.acquired.lock().unwrap();
+    assert_eq!(acquired.len(), 1);
+    assert_eq!(acquired[0].0, lease_key);
+    assert!(
+        acquired[0].1 > Utc::now().timestamp().max(0) as u64,
+        "published auth-machine expiry must reflect the fetched token"
     );
 }
 

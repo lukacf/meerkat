@@ -121,6 +121,13 @@ pub struct HttpAuthorizationRequest<'a> {
 pub trait HttpAuthorizer: Send + Sync {
     async fn authorize(&self, req: &mut HttpAuthorizationRequest<'_>) -> Result<(), AuthError>;
     fn label(&self) -> &str;
+
+    /// Non-secret freshness projection for authorizers that cache expiring
+    /// token material internally. Implementations that never observe an
+    /// expiring credential should keep the default `None`.
+    fn expires_at(&self) -> Option<DateTime<Utc>> {
+        None
+    }
 }
 
 /// Trait contract for a resolved credential lease. `meerkat-core` declares

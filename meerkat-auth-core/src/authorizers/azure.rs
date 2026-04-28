@@ -23,10 +23,11 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use thiserror::Error;
 
+use super::LeaseFreshnessObserver;
+use meerkat_core::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 const DEFAULT_AUTHORITY: &str = "https://login.microsoftonline.com";
-const REFRESH_WINDOW_SECS: i64 = 60;
 
 #[derive(Clone, Debug)]
 pub struct AzureClientCredentials {
@@ -102,6 +103,7 @@ pub struct AzureAdAuthorizer {
     cache: Arc<Mutex<Option<CachedToken>>>,
     label: String,
     token_url_override: Option<String>,
+    lease_observer: Option<LeaseFreshnessObserver>,
 }
 
 impl AzureAdAuthorizer {
@@ -115,6 +117,7 @@ impl AzureAdAuthorizer {
             cache: Arc::new(Mutex::new(None)),
             label,
             token_url_override: None,
+            lease_observer: None,
         }
     }
 
@@ -122,6 +125,15 @@ impl AzureAdAuthorizer {
     /// mock server. Production code should not call this.
     pub fn with_token_url_override(mut self, url: impl Into<String>) -> Self {
         self.token_url_override = Some(url.into());
+        self
+    }
+
+    pub fn with_auth_lease_observer(
+        mut self,
+        handle: Arc<dyn AuthLeaseHandle>,
+        lease_key: LeaseKey,
+    ) -> Self {
+        self.lease_observer = Some(LeaseFreshnessObserver::new(handle, lease_key));
         self
     }
 
@@ -173,12 +185,23 @@ impl AzureAdAuthorizer {
         })
     }
 
+    fn cached_expires_at(&self) -> Option<DateTime<Utc>> {
+        self.cache.lock().as_ref().map(|token| token.expires_at)
+    }
+
+    fn publish_expires_at(&self, expires_at: DateTime<Utc>) {
+        if let Some(observer) = &self.lease_observer {
+            observer.observe_expires_at(&self.label, expires_at);
+        }
+    }
+
     async fn get_token(&self) -> Result<String, AuthError> {
         // Check cache without taking the refresh path.
         {
             let guard = self.cache.lock();
             if let Some(t) = guard.as_ref()
-                && t.expires_at - Utc::now() > Duration::seconds(REFRESH_WINDOW_SECS)
+                && t.expires_at - Utc::now()
+                    > Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64)
             {
                 return Ok(t.access_token.clone());
             }
@@ -186,7 +209,9 @@ impl AzureAdAuthorizer {
         // Miss — fetch a fresh token.
         let new_token = self.fetch_token().await?;
         let access = new_token.access_token.clone();
+        let expires_at = new_token.expires_at;
         *self.cache.lock() = Some(new_token);
+        self.publish_expires_at(expires_at);
         Ok(access)
     }
 }
@@ -202,5 +227,9 @@ impl HttpAuthorizer for AzureAdAuthorizer {
 
     fn label(&self) -> &str {
         &self.label
+    }
+
+    fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.cached_expires_at()
     }
 }

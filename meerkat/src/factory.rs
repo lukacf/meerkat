@@ -2178,6 +2178,11 @@ impl AgentFactory {
                             env = env.with_refresh_coordinator(coord);
                         }
                     }
+                    if let RuntimeBuildMode::SessionOwned(bindings) =
+                        &build_config.runtime_build_mode
+                    {
+                        env = env.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
+                    }
                     for (handle, resolver) in &self.external_auth_resolvers {
                         env = env.with_external_resolver(handle.clone(), resolver.clone());
                     }
@@ -2294,6 +2299,9 @@ impl AgentFactory {
                     if let Some(coord) = self.refresh_coord.clone() {
                         env = env.with_refresh_coordinator(coord);
                     }
+                }
+                if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode {
+                    env = env.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));
                 }
                 for (handle, resolver) in &self.external_auth_resolvers {
                     env = env.with_external_resolver(handle.clone(), resolver.clone());

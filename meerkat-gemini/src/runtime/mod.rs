@@ -148,12 +148,20 @@ impl ProviderRuntime for GoogleProviderRuntime {
             GoogleAuthMethod::Adc => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
                 {
-                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(
+                    let mut authorizer =
                         meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
                             meerkat_auth_core::authorizers::GoogleAuthChain::Default,
                             env.env_lookup.clone(),
-                        ),
-                    );
+                        );
+                    if let Some(handle) = env.auth_lease_handle.clone() {
+                        authorizer = authorizer.with_auth_lease_observer(
+                            handle,
+                            meerkat_core::handles::LeaseKey::from_connection_ref(
+                                &binding.connection_ref,
+                            ),
+                        );
+                    }
+                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(authorizer);
                     let metadata = finalize_auth_metadata(
                         binding,
                         AuthMetadata {
@@ -167,10 +175,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             ..Default::default()
                         },
                     )?;
-                    Arc::new(DynamicLease::new(
+                    Arc::new(DynamicLease::from_authorizer(
                         authorizer,
                         metadata,
-                        None,
                         source_label.clone(),
                     ))
                 }
@@ -184,12 +191,20 @@ impl ProviderRuntime for GoogleProviderRuntime {
             GoogleAuthMethod::ComputeAdc => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
                 {
-                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(
+                    let mut authorizer =
                         meerkat_auth_core::authorizers::GoogleAuthAuthorizer::with_env_lookup(
                             meerkat_auth_core::authorizers::GoogleAuthChain::ComputeOnly,
                             env.env_lookup.clone(),
-                        ),
-                    );
+                        );
+                    if let Some(handle) = env.auth_lease_handle.clone() {
+                        authorizer = authorizer.with_auth_lease_observer(
+                            handle,
+                            meerkat_core::handles::LeaseKey::from_connection_ref(
+                                &binding.connection_ref,
+                            ),
+                        );
+                    }
+                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(authorizer);
                     let metadata = finalize_auth_metadata(
                         binding,
                         AuthMetadata {
@@ -203,10 +218,9 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             ..Default::default()
                         },
                     )?;
-                    Arc::new(DynamicLease::new(
+                    Arc::new(DynamicLease::from_authorizer(
                         authorizer,
                         metadata,
-                        None,
                         source_label.clone(),
                     ))
                 }

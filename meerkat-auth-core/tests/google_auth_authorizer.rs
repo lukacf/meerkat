@@ -24,6 +24,7 @@ use axum::Router;
 use axum::extract::{Form, State};
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
+use chrono::Utc;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 
@@ -51,6 +52,7 @@ struct MockState {
     counter: Arc<AtomicUsize>,
     captured: Arc<Mutex<Vec<OAuthForm>>>,
     token_value: String,
+    expires_in: u64,
 }
 
 async fn token_endpoint(
@@ -62,7 +64,7 @@ async fn token_endpoint(
     Json(serde_json::json!({
         "access_token": state.token_value,
         "token_type": "Bearer",
-        "expires_in": 3600,
+        "expires_in": state.expires_in,
     }))
 }
 
@@ -78,7 +80,7 @@ async fn metadata_endpoint(
     Ok(Json(serde_json::json!({
         "access_token": state.token_value,
         "token_type": "Bearer",
-        "expires_in": 3600,
+        "expires_in": state.expires_in,
     })))
 }
 
@@ -89,12 +91,17 @@ struct MockServer {
 }
 
 async fn start_mock(token_value: &str) -> MockServer {
+    start_mock_with_expiry(token_value, 3600).await
+}
+
+async fn start_mock_with_expiry(token_value: &str, expires_in: u64) -> MockServer {
     let counter = Arc::new(AtomicUsize::new(0));
     let captured = Arc::new(Mutex::new(Vec::new()));
     let state = MockState {
         counter: counter.clone(),
         captured: captured.clone(),
         token_value: token_value.into(),
+        expires_in,
     };
     let app = Router::new()
         .route("/token", post(token_endpoint))
@@ -180,6 +187,10 @@ async fn service_account_path_signs_jwt_and_gets_token() {
         .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
         .unwrap();
     assert_eq!(auth.1, "Bearer sa-access-token");
+    assert!(
+        authorizer.expires_at().is_some(),
+        "service-account token expiry must be observable through HttpAuthorizer"
+    );
     assert_eq!(mock.counter.load(Ordering::SeqCst), 1);
     let captured = mock.captured.lock().unwrap();
     assert_eq!(
@@ -324,6 +335,49 @@ async fn token_is_cached_between_calls() {
         mock.counter.load(Ordering::SeqCst),
         1,
         "expected single fetch with caching"
+    );
+}
+
+#[tokio::test]
+async fn short_lived_token_expiry_is_observable_and_refetched() {
+    let mock = start_mock_with_expiry("short-lived-sa-token", 30).await;
+    let tempdir = tempfile::tempdir().unwrap();
+    let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
+    let env_lookup = {
+        let sa_path = sa_path.clone();
+        Arc::new(move |k: &str| {
+            if k == "GOOGLE_APPLICATION_CREDENTIALS" {
+                Some(sa_path.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
+    };
+    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+        .with_home_dir(tempdir.path())
+        .with_token_url_override(format!("{}/token", mock.base_url));
+
+    for _ in 0..2 {
+        let mut headers = Vec::new();
+        let mut req = HttpAuthorizationRequest {
+            method: "POST",
+            url: "https://x.googleapis.com/",
+            headers: &mut headers,
+        };
+        authorizer.authorize(&mut req).await.unwrap();
+    }
+
+    let expires_at = authorizer
+        .expires_at()
+        .expect("short-lived token expiry should be projected");
+    assert!(
+        expires_at > Utc::now(),
+        "cached expiry should carry the token endpoint's expires_in"
+    );
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "token inside the canonical refresh window must be refetched"
     );
 }
 

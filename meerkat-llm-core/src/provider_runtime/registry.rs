@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 
 use meerkat_core::{
     AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope, connection::ConnectionRef,
+    handles::AuthLeaseHandle,
 };
 
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
@@ -47,6 +48,7 @@ pub struct ResolverEnvironment {
     pub env_lookup: EnvLookup,
     pub external_resolvers: BTreeMap<String, Arc<dyn ExternalAuthResolverHandle>>,
     pub now: NowFn,
+    pub auth_lease_handle: Option<Arc<dyn AuthLeaseHandle>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub token_store: Option<Arc<dyn meerkat_core::auth::TokenStore>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -61,6 +63,7 @@ impl ResolverEnvironment {
             env_lookup: Arc::new(|_| None),
             external_resolvers: BTreeMap::new(),
             now: Arc::new(Utc::now),
+            auth_lease_handle: None,
             #[cfg(not(target_arch = "wasm32"))]
             token_store: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -75,6 +78,7 @@ impl ResolverEnvironment {
             env_lookup: Arc::new(|key| std::env::var(key).ok()),
             external_resolvers: BTreeMap::new(),
             now: Arc::new(Utc::now),
+            auth_lease_handle: None,
             #[cfg(not(target_arch = "wasm32"))]
             token_store: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -107,6 +111,14 @@ impl ResolverEnvironment {
         resolver: Arc<dyn ExternalAuthResolverHandle>,
     ) -> Self {
         self.external_resolvers.insert(handle.into(), resolver);
+        self
+    }
+
+    /// Attach the session-owned auth lease handle so dynamic cloud
+    /// authorizers can publish observed token freshness into AuthMachine
+    /// truth after a lazy token exchange.
+    pub fn with_auth_lease_handle(mut self, handle: Arc<dyn AuthLeaseHandle>) -> Self {
+        self.auth_lease_handle = Some(handle);
         self
     }
 

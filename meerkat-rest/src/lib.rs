@@ -2222,40 +2222,35 @@ async fn list_skills(
         .await
         .map_err(|e| ApiError::Internal(format!("skill list failed: {e}")))?;
 
-    let wire: Vec<meerkat_contracts::SkillEntry> = entries
-        .iter()
-        .map(|e| meerkat_contracts::SkillEntry {
-            key: e.descriptor.key.clone(),
-            name: e.descriptor.name.clone(),
-            description: e.descriptor.description.clone(),
-            scope: e.descriptor.scope.to_string(),
-            source: skill_source_provenance(
-                e.descriptor.key.source_uuid.clone(),
-                e.descriptor.source_name.clone(),
-            ),
-            is_active: e.is_active,
-            shadowed_by: e.shadowed_by_source_uuid.clone().map(|source_uuid| {
-                skill_source_provenance(source_uuid, e.shadowed_by.clone().unwrap_or_default())
-            }),
-        })
-        .collect();
+    let wire: Vec<meerkat_contracts::SkillEntry> =
+        entries.iter().map(skill_entry).collect::<Result<_, _>>()?;
     Ok(Json(meerkat_contracts::SkillListResponse { skills: wire }))
 }
 
 fn skill_source_provenance(
-    source_uuid: meerkat_core::skills::SourceUuid,
-    display_name: impl Into<String>,
+    identity: meerkat_core::skills::SourceIdentityRecord,
 ) -> meerkat_contracts::SkillSourceProvenance {
-    let display_name = display_name.into();
-    meerkat_contracts::SkillSourceProvenance {
-        identity: meerkat_core::skills::SourceIdentityRecord {
-            source_uuid,
-            display_name: display_name.clone(),
-            transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
-            fingerprint: format!("rest:{display_name}"),
-            status: meerkat_core::skills::SourceIdentityStatus::Active,
-        },
-    }
+    meerkat_contracts::SkillSourceProvenance { identity }
+}
+
+fn skill_entry(
+    e: &meerkat_core::skills::SkillIntrospectionEntry,
+) -> Result<meerkat_contracts::SkillEntry, ApiError> {
+    let source_identity = e.source_identity.clone().ok_or_else(|| {
+        ApiError::Internal(format!(
+            "skill {} missing typed source identity",
+            e.descriptor.key
+        ))
+    })?;
+    Ok(meerkat_contracts::SkillEntry {
+        key: e.descriptor.key.clone(),
+        name: e.descriptor.name.clone(),
+        description: e.descriptor.description.clone(),
+        scope: e.descriptor.scope.to_string(),
+        source: skill_source_provenance(source_identity),
+        is_active: e.is_active,
+        shadowed_by: e.shadowed_by_identity.clone().map(skill_source_provenance),
+    })
 }
 
 /// Get runtime capabilities with status resolved against config.
@@ -6193,6 +6188,58 @@ mod tests {
         assert_eq!(payload["details"]["resumable"], true);
         assert!(payload["details"]["session_id"].is_string());
         assert!(payload["details"]["session_ref"].is_string());
+    }
+
+    #[test]
+    fn test_skill_entry_uses_canonical_source_identity_records() {
+        use meerkat_core::skills::{
+            SkillDescriptor, SkillIntrospectionEntry, SkillKey, SkillName, SkillScope,
+            SourceIdentityRecord, SourceIdentityStatus, SourceTransportKind, SourceUuid,
+        };
+
+        let source_uuid =
+            SourceUuid::parse("33333333-3333-4333-8333-333333333333").expect("source uuid");
+        let shadow_uuid =
+            SourceUuid::parse("44444444-4444-4444-8444-444444444444").expect("shadow uuid");
+        let key = SkillKey::new(
+            source_uuid.clone(),
+            SkillName::parse("demo-skill").expect("skill name"),
+        );
+        let mut descriptor = SkillDescriptor::new(key, "Demo Skill", "Demo description");
+        descriptor.scope = SkillScope::Project;
+        descriptor.source_name = "canonical-source".to_string();
+
+        let source_identity = SourceIdentityRecord {
+            source_uuid: source_uuid.clone(),
+            display_name: "canonical-source".to_string(),
+            transport_kind: SourceTransportKind::Git,
+            fingerprint: "repo-canonical-source".to_string(),
+            status: SourceIdentityStatus::Retired,
+        };
+        let shadow_identity = SourceIdentityRecord {
+            source_uuid: shadow_uuid.clone(),
+            display_name: "shadow-source".to_string(),
+            transport_kind: SourceTransportKind::Http,
+            fingerprint: "repo-shadow-source".to_string(),
+            status: SourceIdentityStatus::Disabled,
+        };
+
+        let entry = SkillIntrospectionEntry {
+            descriptor,
+            source_identity: Some(source_identity.clone()),
+            shadowed_by: Some("shadow-source".to_string()),
+            shadowed_by_identity: Some(shadow_identity.clone()),
+            shadowed_by_source_uuid: Some(shadow_uuid),
+            is_active: false,
+        };
+
+        let wire = skill_entry(&entry).expect("skill entry");
+
+        assert_eq!(wire.source.identity, source_identity);
+        assert_eq!(
+            wire.shadowed_by.expect("shadowed by").identity,
+            shadow_identity
+        );
     }
 
     #[test]

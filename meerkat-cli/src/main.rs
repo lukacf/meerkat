@@ -7529,6 +7529,48 @@ async fn repo_matches_selector(
     Ok(false)
 }
 
+#[cfg(feature = "skills")]
+fn skill_source_provenance(
+    identity: meerkat_core::skills::SourceIdentityRecord,
+) -> meerkat_contracts::SkillSourceProvenance {
+    meerkat_contracts::SkillSourceProvenance { identity }
+}
+
+#[cfg(feature = "skills")]
+fn skill_source_provenance_for_key(
+    registry: &meerkat_core::skills::SourceIdentityRegistry,
+    key: &meerkat_core::skills::SkillKey,
+) -> anyhow::Result<meerkat_contracts::SkillSourceProvenance> {
+    let resolved = registry
+        .resolve(key)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve skill source identity for {key}: {e}"))?;
+    Ok(skill_source_provenance(resolved.source.clone()))
+}
+
+#[cfg(feature = "skills")]
+fn skill_entry(
+    entry: &meerkat_core::skills::SkillIntrospectionEntry,
+) -> anyhow::Result<meerkat_contracts::SkillEntry> {
+    let source_identity = entry.source_identity.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "skill {} missing typed source identity",
+            entry.descriptor.key
+        )
+    })?;
+    Ok(meerkat_contracts::SkillEntry {
+        key: entry.descriptor.key.clone(),
+        name: entry.descriptor.name.clone(),
+        description: entry.descriptor.description.clone(),
+        scope: entry.descriptor.scope.to_string(),
+        source: skill_source_provenance(source_identity),
+        is_active: entry.is_active,
+        shadowed_by: entry
+            .shadowed_by_identity
+            .clone()
+            .map(skill_source_provenance),
+    })
+}
+
 /// Handle Skills subcommands
 #[cfg(feature = "skills")]
 async fn handle_skills_command(
@@ -7537,42 +7579,7 @@ async fn handle_skills_command(
 ) -> anyhow::Result<()> {
     // Wave-c C-12: the canonical runtime identity for a skill is
     // `SkillKey { source_uuid, skill_name }` (C-1 / C-4 upstream retype).
-    use meerkat_core::skills::{
-        SkillFilter, SkillIntrospectionEntry, SkillKey, SkillName, SourceUuid,
-    };
-
-    fn skill_source_provenance(
-        source_uuid: SourceUuid,
-        display_name: impl Into<String>,
-    ) -> meerkat_contracts::SkillSourceProvenance {
-        let display_name = display_name.into();
-        meerkat_contracts::SkillSourceProvenance {
-            identity: meerkat_core::skills::SourceIdentityRecord {
-                source_uuid,
-                display_name: display_name.clone(),
-                transport_kind: meerkat_core::skills::SourceTransportKind::Embedded,
-                fingerprint: format!("cli:{display_name}"),
-                status: meerkat_core::skills::SourceIdentityStatus::Active,
-            },
-        }
-    }
-
-    fn skill_entry(entry: &SkillIntrospectionEntry) -> meerkat_contracts::SkillEntry {
-        meerkat_contracts::SkillEntry {
-            key: entry.descriptor.key.clone(),
-            name: entry.descriptor.name.clone(),
-            description: entry.descriptor.description.clone(),
-            scope: entry.descriptor.scope.to_string(),
-            source: skill_source_provenance(
-                entry.descriptor.key.source_uuid.clone(),
-                entry.descriptor.source_name.clone(),
-            ),
-            is_active: entry.is_active,
-            shadowed_by: entry.shadowed_by_source_uuid.clone().map(|source_uuid| {
-                skill_source_provenance(source_uuid, entry.shadowed_by.clone().unwrap_or_default())
-            }),
-        }
-    }
+    use meerkat_core::skills::{SkillFilter, SkillKey, SkillName, SourceUuid};
 
     // Load config from the active realm (not global defaults)
     let (config, realm_root) = load_config(scope).await?;
@@ -7686,8 +7693,10 @@ async fn handle_skills_command(
                 .map_err(|e| anyhow::anyhow!("Failed to list skills: {e}"))?;
 
             if json {
-                let wire: Vec<meerkat_contracts::SkillEntry> =
-                    entries.iter().map(skill_entry).collect();
+                let wire = entries
+                    .iter()
+                    .map(skill_entry)
+                    .collect::<anyhow::Result<Vec<_>>>()?;
                 println!("{}", serde_json::to_string_pretty(&wire)?);
             } else {
                 // Fixed-width table: NAME, SOURCE_UUID, SCOPE, STATUS
@@ -7732,15 +7741,18 @@ async fn handle_skills_command(
                 .map_err(|e| anyhow::anyhow!("Failed to inspect skill: {e}"))?;
 
             if json {
+                let registry = config
+                    .skills
+                    .build_source_identity_registry()
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to build skill source identity registry: {e}")
+                    })?;
                 let wire = meerkat_contracts::SkillInspectResponse {
                     key: doc.descriptor.key.clone(),
                     name: doc.descriptor.name.clone(),
                     description: doc.descriptor.description.clone(),
                     scope: doc.descriptor.scope.to_string(),
-                    source: skill_source_provenance(
-                        doc.descriptor.key.source_uuid.clone(),
-                        doc.descriptor.source_name.clone(),
-                    ),
+                    source: skill_source_provenance_for_key(&registry, &doc.descriptor.key)?,
                     body: doc.body,
                 };
                 println!("{}", serde_json::to_string_pretty(&wire)?);
@@ -10804,6 +10816,59 @@ mod tests {
         if let Some((runtime_path, config_path)) = filesystem_paths {
             assert_eq!(runtime_path, config_path);
         }
+    }
+
+    #[cfg(feature = "skills")]
+    #[test]
+    fn test_skill_entry_uses_canonical_source_identity_records() {
+        use meerkat_core::skills::{
+            SkillDescriptor, SkillIntrospectionEntry, SkillKey, SkillName, SkillScope,
+            SourceIdentityRecord, SourceIdentityStatus, SourceTransportKind, SourceUuid,
+        };
+
+        let source_uuid =
+            SourceUuid::parse("11111111-1111-4111-8111-111111111111").expect("source uuid");
+        let shadow_uuid =
+            SourceUuid::parse("22222222-2222-4222-8222-222222222222").expect("shadow uuid");
+        let key = SkillKey::new(
+            source_uuid.clone(),
+            SkillName::parse("demo-skill").expect("skill name"),
+        );
+        let mut descriptor = SkillDescriptor::new(key, "Demo Skill", "Demo description");
+        descriptor.scope = SkillScope::Project;
+        descriptor.source_name = "canonical-source".to_string();
+
+        let source_identity = SourceIdentityRecord {
+            source_uuid: source_uuid.clone(),
+            display_name: "canonical-source".to_string(),
+            transport_kind: SourceTransportKind::Git,
+            fingerprint: "repo-canonical-source".to_string(),
+            status: SourceIdentityStatus::Retired,
+        };
+        let shadow_identity = SourceIdentityRecord {
+            source_uuid: shadow_uuid.clone(),
+            display_name: "shadow-source".to_string(),
+            transport_kind: SourceTransportKind::Http,
+            fingerprint: "repo-shadow-source".to_string(),
+            status: SourceIdentityStatus::Disabled,
+        };
+
+        let entry = SkillIntrospectionEntry {
+            descriptor,
+            source_identity: Some(source_identity.clone()),
+            shadowed_by: Some("shadow-source".to_string()),
+            shadowed_by_identity: Some(shadow_identity.clone()),
+            shadowed_by_source_uuid: Some(shadow_uuid),
+            is_active: false,
+        };
+
+        let wire = skill_entry(&entry).expect("skill entry");
+
+        assert_eq!(wire.source.identity, source_identity);
+        assert_eq!(
+            wire.shadowed_by.expect("shadowed by").identity,
+            shadow_identity
+        );
     }
 
     #[test]

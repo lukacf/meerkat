@@ -1105,6 +1105,14 @@ impl AgentFactory {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
         let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
+        if !config.realm.contains_key(selected_realm.as_str()) {
+            return Self::resolve_realm_binding_for_provider(
+                config,
+                provider,
+                None,
+                Some(selected_realm.as_str()),
+            );
+        }
         let target = meerkat_core::resolve_realm_binding_target_for_provider(
             config,
             provider,
@@ -3746,19 +3754,39 @@ mod tests {
     }
 
     #[test]
-    fn selected_realm_without_provider_config_rejects_env_default_image_binding() {
+    fn unconfigured_storage_realm_can_still_synthesize_env_default_image_binding() {
         let config = Config::default();
+        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some("workspace_derived"),
+        )
+        .expect("workspace storage realm without credential config may use env_default");
+
+        assert_eq!(realm.realm_id, "env_default");
+        assert_eq!(binding_id, "default");
+        assert_eq!(connection_ref.realm.as_str(), "env_default");
+        assert_eq!(connection_ref.binding.as_str(), "default");
+    }
+
+    #[test]
+    fn configured_selected_realm_without_provider_config_rejects_env_default_image_binding() {
+        let mut config = Config::default();
+        config
+            .realm
+            .insert("default".to_string(), RealmConfigSection::default());
+
         let err = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some("default"),
         )
-        .expect_err("selected image lookup must not synthesize env_default");
+        .expect_err("configured selected image lookup must not synthesize env_default");
 
         assert!(
             err.contains("provider 'openai'")
                 && err.contains("selected realm 'default'")
-                && err.contains("not found in config.realm"),
+                && err.contains("has no default binding"),
             "unexpected error: {err}"
         );
     }
@@ -3893,11 +3921,12 @@ mod tests {
         build.provider = Some(Provider::OpenAI);
         build.realm_id = Some("default".to_string());
         build.override_builtins = ToolCategoryOverride::Disable;
+        let mut config = Config::default();
+        config
+            .realm
+            .insert("default".to_string(), RealmConfigSection::default());
 
-        factory
-            .build_agent(build, &Config::default())
-            .await
-            .unwrap();
+        factory.build_agent(build, &config).await.unwrap();
 
         assert_eq!(
             image_executor_builds.load(std::sync::atomic::Ordering::SeqCst),

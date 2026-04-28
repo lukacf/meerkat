@@ -1664,13 +1664,29 @@ export class MeerkatClient {
   }
 
   private static parseAgentEventEnvelope(raw: Record<string, unknown>): AgentEventEnvelope {
+    const eventId = MeerkatClient.parseOptionalString(raw.event_id ?? raw.eventId);
+    const sourceId = MeerkatClient.parseOptionalString(raw.source_id ?? raw.sourceId);
+    const seq = MeerkatClient.parseOptionalNumber(raw.seq);
+    const timestampMs = MeerkatClient.parseOptionalNumber(raw.timestamp_ms ?? raw.timestampMs);
+    const payloadRaw = raw.payload;
+    const payload = payloadRaw && typeof payloadRaw === "object"
+      ? parseCoreEvent(payloadRaw as Record<string, unknown>)
+      : undefined;
     return {
-      eventId: String(raw.event_id ?? raw.eventId ?? ""),
-      sourceId: String(raw.source_id ?? raw.sourceId ?? ""),
-      seq: Number(raw.seq ?? 0),
-      timestampMs: Number(raw.timestamp_ms ?? raw.timestampMs ?? 0),
-      payload: parseCoreEvent((raw.payload ?? {}) as Record<string, unknown>),
+      ...(eventId != null ? { eventId } : {}),
+      ...(sourceId != null ? { sourceId } : {}),
+      ...(seq != null ? { seq } : {}),
+      ...(timestampMs != null ? { timestampMs } : {}),
+      ...(payload ? { payload } : {}),
     };
+  }
+
+  private static parseOptionalString(raw: unknown): string | undefined {
+    return typeof raw === "string" ? raw : undefined;
+  }
+
+  private static parseOptionalNumber(raw: unknown): number | undefined {
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
   }
 
   private static parseAttributedMobEvent(raw: Record<string, unknown>): AttributedMobEvent {

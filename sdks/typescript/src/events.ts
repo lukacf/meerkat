@@ -3,8 +3,8 @@
  *
  * Events form a discriminated union on the `type` field (snake_case to match
  * the wire protocol).  All other fields use idiomatic camelCase.
- * Missing fields are defaulted during parsing so partial streaming payloads
- * can still be represented as typed events.
+ * Missing semantic fields remain absent during parsing so partial streaming
+ * payloads do not become authoritative SDK state.
  *
  * @example
  * ```ts
@@ -174,12 +174,12 @@ export interface ToolResultReceivedEvent {
   readonly type: "tool_result_received";
   readonly id: string;
   readonly name: string;
-  readonly isError: boolean;
+  readonly isError?: boolean;
 }
 
 export interface TurnCompletedEvent {
   readonly type: "turn_completed";
-  readonly stopReason: StopReason;
+  readonly stopReason?: StopReason;
   readonly usage: Usage;
 }
 
@@ -198,7 +198,7 @@ export interface ToolExecutionCompletedEvent {
   readonly id: string;
   readonly name: string;
   readonly result: string;
-  readonly isError: boolean;
+  readonly isError?: boolean;
   readonly durationMs: number;
 }
 
@@ -345,7 +345,7 @@ export type SkillResolutionFailureReason =
 export interface SkillResolutionFailedEvent {
   readonly type: "skill_resolution_failed";
   readonly skillKey?: SkillKey;
-  readonly reason: SkillResolutionFailureReason;
+  readonly reason?: SkillResolutionFailureReason;
   /** Legacy display mirror. Prefer `skillKey` when present. */
   readonly reference: string;
   /** Legacy display mirror. Prefer `reason` for structured handling. */
@@ -380,10 +380,10 @@ export interface StreamTruncatedEvent {
 export type ToolConfigChangeOperation = "add" | "remove" | "reload";
 
 export interface ToolConfigChangedPayload {
-  readonly operation: ToolConfigChangeOperation;
-  readonly target: string;
-  readonly status: string;
-  readonly persisted: boolean;
+  readonly operation?: ToolConfigChangeOperation;
+  readonly target?: string;
+  readonly status?: string;
+  readonly persisted?: boolean;
   readonly applied_at_turn?: number;
 }
 
@@ -510,16 +510,55 @@ function emptySkillKey(): SkillKey {
   return { sourceUuid: "", skillName: "" };
 }
 
+const STOP_REASONS = new Set<StopReason>([
+  "end_turn",
+  "tool_use",
+  "max_tokens",
+  "stop_sequence",
+  "content_filter",
+  "cancelled",
+]);
+
+function parseStopReason(raw: unknown): StopReason | undefined {
+  return typeof raw === "string" && STOP_REASONS.has(raw as StopReason)
+    ? (raw as StopReason)
+    : undefined;
+}
+
+const TOOL_CONFIG_CHANGE_OPERATIONS = new Set<ToolConfigChangeOperation>([
+  "add",
+  "remove",
+  "reload",
+]);
+
+function parseToolConfigChangeOperation(raw: unknown): ToolConfigChangeOperation | undefined {
+  return typeof raw === "string" && TOOL_CONFIG_CHANGE_OPERATIONS.has(raw as ToolConfigChangeOperation)
+    ? (raw as ToolConfigChangeOperation)
+    : undefined;
+}
+
+function parseWireString(raw: unknown): string | undefined {
+  return typeof raw === "string" ? raw : undefined;
+}
+
+function parseWireBoolean(raw: unknown): boolean | undefined {
+  return typeof raw === "boolean" ? raw : undefined;
+}
+
 function parseSkillResolutionFailureReason(
   raw: unknown,
   fallbackMessage: string,
-): SkillResolutionFailureReason {
+): SkillResolutionFailureReason | undefined {
   if (raw == null || typeof raw !== "object") {
-    return { reasonType: "unknown", message: fallbackMessage };
+    return undefined;
   }
 
   const value = raw as Record<string, unknown>;
-  const reasonType = String(value.reason_type ?? value.reasonType ?? "unknown");
+  const reasonTypeRaw = value.reason_type ?? value.reasonType;
+  if (typeof reasonTypeRaw !== "string") {
+    return undefined;
+  }
+  const reasonType = reasonTypeRaw;
   switch (reasonType) {
     case "not_found":
       return { reasonType, key: parseSkillKey(value.key) ?? emptySkillKey() };
@@ -652,16 +691,38 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
       return { type, content: String(raw.content ?? "") };
     case "tool_call_requested":
       return { type, id: String(raw.id ?? ""), name: String(raw.name ?? ""), args: raw.args };
-    case "tool_result_received":
-      return { type, id: String(raw.id ?? ""), name: String(raw.name ?? ""), isError: Boolean(raw.is_error) };
-    case "turn_completed":
-      return { type, stopReason: String(raw.stop_reason ?? "end_turn") as StopReason, usage: parseUsage(raw.usage as Record<string, unknown>) };
+    case "tool_result_received": {
+      const isError = parseWireBoolean(raw.is_error);
+      return {
+        type,
+        id: String(raw.id ?? ""),
+        name: String(raw.name ?? ""),
+        ...(isError != null ? { isError } : {}),
+      };
+    }
+    case "turn_completed": {
+      const stopReason = parseStopReason(raw.stop_reason);
+      return {
+        type,
+        ...(stopReason != null ? { stopReason } : {}),
+        usage: parseUsage(raw.usage as Record<string, unknown>),
+      };
+    }
 
     // Tool execution
     case "tool_execution_started":
       return { type, id: String(raw.id ?? ""), name: String(raw.name ?? "") };
-    case "tool_execution_completed":
-      return { type, id: String(raw.id ?? ""), name: String(raw.name ?? ""), result: String(raw.result ?? ""), isError: Boolean(raw.is_error), durationMs: Number(raw.duration_ms ?? 0) };
+    case "tool_execution_completed": {
+      const isError = parseWireBoolean(raw.is_error);
+      return {
+        type,
+        id: String(raw.id ?? ""),
+        name: String(raw.name ?? ""),
+        result: String(raw.result ?? ""),
+        ...(isError != null ? { isError } : {}),
+        durationMs: Number(raw.duration_ms ?? 0),
+      };
+    }
     case "tool_execution_timed_out":
       return { type, id: String(raw.id ?? ""), name: String(raw.name ?? ""), timeoutMs: Number(raw.timeout_ms ?? 0) };
 
@@ -701,10 +762,11 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "skill_resolution_failed": {
       const error = String(raw.error ?? "");
       const skillKey = parseSkillKey(raw.skill_key);
+      const reason = parseSkillResolutionFailureReason(raw.reason, error);
       return {
         type,
         ...(skillKey ? { skillKey } : {}),
-        reason: parseSkillResolutionFailureReason(raw.reason, error),
+        ...(reason ? { reason } : {}),
         reference: String(raw.reference ?? ""),
         error,
       };
@@ -722,18 +784,22 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "tool_config_changed": {
       const payloadRaw = typeof raw.payload === "object" && raw.payload !== null
         ? (raw.payload as Record<string, unknown>)
-        : {};
-      const appliedAtTurnRaw = payloadRaw.applied_at_turn;
+        : undefined;
+      const appliedAtTurnRaw = payloadRaw?.applied_at_turn;
       const appliedAtTurn = typeof appliedAtTurnRaw === "number" && Number.isFinite(appliedAtTurnRaw)
         ? appliedAtTurnRaw
         : undefined;
+      const operation = parseToolConfigChangeOperation(payloadRaw?.operation);
+      const target = parseWireString(payloadRaw?.target);
+      const status = parseWireString(payloadRaw?.status);
+      const persisted = parseWireBoolean(payloadRaw?.persisted);
       return {
         type,
         payload: {
-          operation: String(payloadRaw.operation ?? "reload") as ToolConfigChangeOperation,
-          target: String(payloadRaw.target ?? ""),
-          status: String(payloadRaw.status ?? ""),
-          persisted: typeof payloadRaw.persisted === "boolean" ? payloadRaw.persisted : false,
+          ...(operation != null ? { operation } : {}),
+          ...(target != null ? { target } : {}),
+          ...(status != null ? { status } : {}),
+          ...(persisted != null ? { persisted } : {}),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },
       };

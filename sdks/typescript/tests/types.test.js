@@ -152,6 +152,25 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should not default missing or malformed turn_completed stop_reason", () => {
+    const missing = parseEvent({ type: "turn_completed" });
+    const invalidString = parseEvent({ type: "turn_completed", stop_reason: "not_real" });
+    const nonString = parseEvent({ type: "turn_completed", stop_reason: 0 });
+
+    assert.equal(missing.type, "turn_completed");
+    assert.equal(invalidString.type, "turn_completed");
+    assert.equal(nonString.type, "turn_completed");
+    if (
+      missing.type === "turn_completed" &&
+      invalidString.type === "turn_completed" &&
+      nonString.type === "turn_completed"
+    ) {
+      assert.equal(missing.stopReason, undefined);
+      assert.equal(invalidString.stopReason, undefined);
+      assert.equal(nonString.stopReason, undefined);
+    }
+  });
+
   it("should parse run_completed", () => {
     const event = parseEvent({
       type: "run_completed",
@@ -196,6 +215,29 @@ describe("Typed Events", () => {
       assert.equal(event.name, "search");
       assert.equal(event.durationMs, 42);
       assert.equal(event.isError, false);
+    }
+  });
+
+  it("should not coerce missing or malformed tool is_error", () => {
+    const missing = parseEvent({
+      type: "tool_execution_completed",
+      id: "t1",
+      name: "search",
+      result: "found it",
+    });
+    const malformed = parseEvent({
+      type: "tool_execution_completed",
+      id: "t1",
+      name: "search",
+      result: "found it",
+      is_error: "false",
+    });
+
+    assert.equal(missing.type, "tool_execution_completed");
+    assert.equal(malformed.type, "tool_execution_completed");
+    if (missing.type === "tool_execution_completed" && malformed.type === "tool_execution_completed") {
+      assert.equal(missing.isError, undefined);
+      assert.equal(malformed.isError, undefined);
     }
   });
 
@@ -285,12 +327,23 @@ describe("Typed Events", () => {
     assert.equal(event.type, "skill_resolution_failed");
     if (event.type === "skill_resolution_failed") {
       assert.equal(event.skillKey, undefined);
-      assert.deepEqual(event.reason, {
-        reasonType: "unknown",
-        message: "missing",
-      });
+      assert.equal(event.reason, undefined);
       assert.equal(event.reference, "legacy/ref");
       assert.equal(event.error, "missing");
+    }
+  });
+
+  it("should not fabricate skill resolution reasons from malformed semantics", () => {
+    const event = parseEvent({
+      type: "skill_resolution_failed",
+      reason: { reason_type: 0, message: "bad" },
+      reference: "legacy/ref",
+      error: "missing",
+    });
+
+    assert.equal(event.type, "skill_resolution_failed");
+    if (event.type === "skill_resolution_failed") {
+      assert.equal(event.reason, undefined);
     }
   });
 
@@ -519,10 +572,10 @@ describe("Typed Events", () => {
     });
     assert.equal(event.type, "tool_config_changed");
     if (event.type === "tool_config_changed") {
-      assert.equal(event.payload.operation, "reload");
-      assert.equal(event.payload.target, "");
-      assert.equal(event.payload.status, "");
-      assert.equal(event.payload.persisted, false);
+      assert.equal(event.payload.operation, undefined);
+      assert.equal(event.payload.target, undefined);
+      assert.equal(event.payload.status, undefined);
+      assert.equal(event.payload.persisted, undefined);
       assert.equal(event.payload.applied_at_turn, undefined);
     }
   });
@@ -544,7 +597,7 @@ describe("Typed Events", () => {
     }
   });
 
-  it("should treat non-boolean persisted in tool_config_changed as false", () => {
+  it("should not coerce non-boolean persisted in tool_config_changed", () => {
     const event = parseEvent({
       type: "tool_config_changed",
       payload: {
@@ -556,8 +609,42 @@ describe("Typed Events", () => {
     });
     assert.equal(event.type, "tool_config_changed");
     if (event.type === "tool_config_changed") {
-      assert.equal(event.payload.persisted, false);
+      assert.equal(event.payload.persisted, undefined);
     }
+  });
+
+  it("should not default malformed tool_config_changed operation/status semantics", () => {
+    const event = parseEvent({
+      type: "tool_config_changed",
+      payload: {
+        operation: "bogus",
+        target: 0,
+        status: 0,
+        persisted: "false",
+      },
+    });
+
+    assert.equal(event.type, "tool_config_changed");
+    if (event.type === "tool_config_changed") {
+      assert.equal(event.payload.operation, undefined);
+      assert.equal(event.payload.target, undefined);
+      assert.equal(event.payload.status, undefined);
+      assert.equal(event.payload.persisted, undefined);
+    }
+  });
+
+  it("should not fabricate standalone event envelope metadata or payload", () => {
+    const envelope = MeerkatClient.parseAgentEventEnvelope({
+      event_id: 3,
+      seq: "0",
+      timestamp_ms: "0",
+      payload: "not-an-object",
+    });
+
+    assert.equal(envelope.eventId, undefined);
+    assert.equal(envelope.seq, undefined);
+    assert.equal(envelope.timestampMs, undefined);
+    assert.equal(envelope.payload, undefined);
   });
 });
 

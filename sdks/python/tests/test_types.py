@@ -630,10 +630,10 @@ def test_parse_tool_config_changed_with_malformed_payload():
     }
     event = parse_event(raw)
     assert isinstance(event, ToolConfigChanged)
-    assert event.payload.operation == ""
-    assert event.payload.target == ""
-    assert event.payload.status == ""
-    assert event.payload.persisted is False
+    assert event.payload.operation is None
+    assert event.payload.target is None
+    assert event.payload.status is None
+    assert event.payload.persisted is None
     assert event.payload.applied_at_turn is None
 
 
@@ -665,7 +665,25 @@ def test_parse_tool_config_changed_with_non_boolean_persisted():
     }
     event = parse_event(raw)
     assert isinstance(event, ToolConfigChanged)
-    assert event.payload.persisted is False
+    assert event.payload.persisted is None
+
+
+def test_parse_tool_config_changed_with_malformed_operation_status_semantics():
+    raw = {
+        "type": "tool_config_changed",
+        "payload": {
+            "operation": "bogus",
+            "target": 0,
+            "status": 0,
+            "persisted": "false",
+        },
+    }
+    event = parse_event(raw)
+    assert isinstance(event, ToolConfigChanged)
+    assert event.payload.operation is None
+    assert event.payload.target is None
+    assert event.payload.status is None
+    assert event.payload.persisted is None
 
 
 def test_parse_turn_completed_with_usage():
@@ -680,6 +698,19 @@ def test_parse_turn_completed_with_usage():
     assert event.usage.input_tokens == 50
     assert event.usage.output_tokens == 20
     assert event.usage.cache_creation_tokens is None
+
+
+def test_parse_turn_completed_does_not_default_missing_or_malformed_stop_reason():
+    missing = parse_event({"type": "turn_completed"})
+    invalid_string = parse_event({"type": "turn_completed", "stop_reason": "not_real"})
+    non_string = parse_event({"type": "turn_completed", "stop_reason": 0})
+
+    assert isinstance(missing, TurnCompleted)
+    assert isinstance(invalid_string, TurnCompleted)
+    assert isinstance(non_string, TurnCompleted)
+    assert missing.stop_reason is None
+    assert invalid_string.stop_reason is None
+    assert non_string.stop_reason is None
 
 
 def test_parse_run_completed():
@@ -709,6 +740,27 @@ def test_parse_tool_execution_completed():
     assert isinstance(event, ToolExecutionCompleted)
     assert event.name == "search"
     assert event.duration_ms == 42
+    assert event.is_error is False
+
+
+def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_error():
+    missing = parse_event({
+        "type": "tool_execution_completed",
+        "id": "t1",
+        "name": "search",
+        "result": "found it",
+    })
+    malformed = parse_event({
+        "type": "tool_execution_completed",
+        "id": "t1",
+        "name": "search",
+        "result": "found it",
+        "is_error": "false",
+    })
+    assert isinstance(missing, ToolExecutionCompleted)
+    assert isinstance(malformed, ToolExecutionCompleted)
+    assert missing.is_error is None
+    assert malformed.is_error is None
 
 
 def test_parse_unknown_event_type():
@@ -781,10 +833,21 @@ def test_parse_legacy_skill_resolution_failed_payload():
     event = parse_event(raw)
     assert isinstance(event, SkillResolutionFailed)
     assert event.skill_key is None
-    assert event.reason.reason_type == "unknown"
-    assert event.reason.message == "missing"
+    assert event.reason is None
     assert event.reference == "legacy/ref"
     assert event.error == "missing"
+
+
+def test_parse_skill_resolution_failed_does_not_fabricate_malformed_reason():
+    raw = {
+        "type": "skill_resolution_failed",
+        "reason": {"reason_type": 0, "message": "bad"},
+        "reference": "legacy/ref",
+        "error": "missing",
+    }
+    event = parse_event(raw)
+    assert isinstance(event, SkillResolutionFailed)
+    assert event.reason is None
 
 
 def test_parse_inline_video_content_block():

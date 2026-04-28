@@ -611,11 +611,11 @@ export interface SessionOptions {
 
 /** Explicit standalone session-event envelope. */
 export interface AgentEventEnvelope {
-  readonly eventId: string;
-  readonly sourceId: string;
-  readonly seq: number;
-  readonly timestampMs: number;
-  readonly payload: import("./events.js").AgentEvent;
+  readonly eventId?: string;
+  readonly sourceId?: string;
+  readonly seq?: number;
+  readonly timestampMs?: number;
+  readonly payload?: import("./events.js").AgentEvent;
 }
 
 /** Mob-wide attributed event emitted by member/mob observation streams. */

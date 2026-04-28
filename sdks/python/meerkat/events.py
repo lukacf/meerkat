@@ -4,8 +4,8 @@ Every event emitted by the agent loop is represented as a frozen dataclass,
 enabling ``match``/``case`` pattern matching (Python 3.10+) and IDE
 autocompletion on event fields.
 
-Most fields intentionally default to empty/zero values so partially delivered
-streaming payloads can still be parsed into typed events.
+Missing semantic fields remain absent so partially delivered streaming payloads
+do not become authoritative SDK state.
 
 Example::
 
@@ -129,14 +129,14 @@ class ToolResultReceived(Event):
 
     id: str = ""
     name: str = ""
-    is_error: bool = False
+    is_error: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TurnCompleted(Event):
     """An LLM turn finished."""
 
-    stop_reason: str = ""
+    stop_reason: str | None = None
     usage: Usage = field(default_factory=Usage)
 
 
@@ -159,7 +159,7 @@ class ToolExecutionCompleted(Event):
     id: str = ""
     name: str = ""
     result: str = ""
-    is_error: bool = False
+    is_error: bool | None = None
     duration_ms: int = 0
 
 
@@ -304,7 +304,7 @@ class SkillsResolved(Event):
 class SkillResolutionFailureReason:
     """Structured reason a skill reference could not be resolved."""
 
-    reason_type: str = "unknown"
+    reason_type: str | None = None
     key: SkillKey | None = None
     capability: str | None = None
     message: str = ""
@@ -330,7 +330,7 @@ class SkillResolutionFailed(Event):
     """A skill reference could not be resolved."""
 
     skill_key: SkillKey | None = None
-    reason: SkillResolutionFailureReason = field(default_factory=SkillResolutionFailureReason)
+    reason: SkillResolutionFailureReason | None = None
     reference: str = ""
     error: str = ""
 
@@ -370,10 +370,10 @@ class StreamTruncated(Event):
 class ToolConfigChangedPayload:
     """Payload for tool configuration change notifications."""
 
-    operation: str = ""
-    target: str = ""
-    status: str = ""
-    persisted: bool = False
+    operation: str | None = None
+    target: str | None = None
+    status: str | None = None
+    persisted: bool | None = None
     applied_at_turn: int | None = None
 
 
@@ -418,6 +418,17 @@ class UnknownEvent(Event):
 # ---------------------------------------------------------------------------
 
 _USAGE_DEFAULTS = Usage()
+
+_STOP_REASONS = frozenset({
+    "end_turn",
+    "tool_use",
+    "max_tokens",
+    "stop_sequence",
+    "content_filter",
+    "cancelled",
+})
+
+_TOOL_CONFIG_OPERATIONS = frozenset({"add", "remove", "reload"})
 
 _EVENT_MAP: dict[str, type[Event]] = {
     "run_started": RunStarted,
@@ -475,14 +486,36 @@ def _parse_skill_key(raw: Any) -> SkillKey | None:
     )
 
 
+def _parse_optional_str(raw: Any) -> str | None:
+    return raw if isinstance(raw, str) else None
+
+
+def _parse_optional_bool(raw: Any) -> bool | None:
+    return raw if isinstance(raw, bool) else None
+
+
+def _parse_optional_int(raw: Any) -> int | None:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
+def _parse_stop_reason(raw: Any) -> str | None:
+    return raw if isinstance(raw, str) and raw in _STOP_REASONS else None
+
+
+def _parse_tool_config_operation(raw: Any) -> str | None:
+    return raw if isinstance(raw, str) and raw in _TOOL_CONFIG_OPERATIONS else None
+
+
 def _parse_skill_resolution_failure_reason(
     raw: Any,
     fallback_message: str,
-) -> SkillResolutionFailureReason:
+) -> SkillResolutionFailureReason | None:
     if not isinstance(raw, dict):
-        return SkillResolutionFailureReason(message=fallback_message)
+        return None
 
-    reason_type = str(raw.get("reason_type", raw.get("reasonType", "unknown")))
+    reason_type = raw.get("reason_type", raw.get("reasonType"))
+    if not isinstance(reason_type, str):
+        return None
     known_reason_types = {
         "not_found",
         "capability_unavailable",
@@ -552,6 +585,10 @@ def parse_event(raw: dict[str, Any]) -> Event:
     for f in cls.__dataclass_fields__:
         if f == "usage":
             kwargs["usage"] = _parse_usage(raw.get("usage"))
+        elif f == "stop_reason" and cls is TurnCompleted:
+            kwargs["stop_reason"] = _parse_stop_reason(raw.get("stop_reason"))
+        elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
+            kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
         elif f == "skill_key" and cls is SkillResolutionFailed:
             kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
         elif f == "reason" and cls is SkillResolutionFailed:
@@ -562,19 +599,12 @@ def parse_event(raw: dict[str, Any]) -> Event:
         elif f == "payload" and cls is ToolConfigChanged:
             payload_raw = raw.get("payload", {})
             if isinstance(payload_raw, dict):
-                applied_at_turn_raw = payload_raw.get("applied_at_turn")
-                applied_at_turn: int | None
-                if isinstance(applied_at_turn_raw, int):
-                    applied_at_turn = applied_at_turn_raw
-                else:
-                    applied_at_turn = None
-                persisted_raw = payload_raw.get("persisted", False)
                 kwargs["payload"] = ToolConfigChangedPayload(
-                    operation=str(payload_raw.get("operation", "")),
-                    target=str(payload_raw.get("target", "")),
-                    status=str(payload_raw.get("status", "")),
-                    persisted=persisted_raw if isinstance(persisted_raw, bool) else False,
-                    applied_at_turn=applied_at_turn,
+                    operation=_parse_tool_config_operation(payload_raw.get("operation")),
+                    target=_parse_optional_str(payload_raw.get("target")),
+                    status=_parse_optional_str(payload_raw.get("status")),
+                    persisted=_parse_optional_bool(payload_raw.get("persisted")),
+                    applied_at_turn=_parse_optional_int(payload_raw.get("applied_at_turn")),
                 )
             else:
                 kwargs["payload"] = ToolConfigChangedPayload()

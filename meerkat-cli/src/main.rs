@@ -433,6 +433,14 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
     }
 }
 
+fn apply_yolo_tooling_override(tooling: &mut meerkat_core::SessionTooling) {
+    let yolo = resolve_tool_preset(ToolPreset::Safe, true);
+    tooling.builtins = meerkat_core::ToolCategoryOverride::from_effective(yolo.builtins);
+    tooling.shell = meerkat_core::ToolCategoryOverride::from_effective(yolo.shell);
+    tooling.memory = meerkat_core::ToolCategoryOverride::from_effective(yolo.memory);
+    tooling.mob = meerkat_core::ToolCategoryOverride::from_effective(yolo.mob);
+}
+
 fn resolve_stream_enabled(
     stream: bool,
     no_stream: bool,
@@ -2188,10 +2196,9 @@ async fn handle_run_command(
             || app_context.is_some()
             || keep_alive
             || !matches!(tools, ToolPreset::Safe)
-            || yolo
         {
             return Err(anyhow::anyhow!(
-                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --label, --app-context, --keep-alive, --tools, and --yolo are not supported there yet"
+                "`rkat run --resume` only supports turn-level overrides; create-only options like --model, --provider, --max-tokens, --schema, --label, --app-context, --keep-alive, and --tools are not supported there yet"
             ));
         }
         return resume_session(
@@ -2213,6 +2220,7 @@ async fn handle_run_command(
             scope,
             verbose,
             wait_for_mcp,
+            yolo,
         )
         .await;
     }
@@ -5739,6 +5747,7 @@ async fn resume_session(
     scope: &RuntimeScope,
     verbose: bool,
     wait_for_mcp: bool,
+    yolo: bool,
 ) -> anyhow::Result<()> {
     if matches!(resolve_stdin_mode(stdin), StdinMode::Blob | StdinMode::Auto) {
         prompt = prepend_stdin_blob_context(prompt);
@@ -5762,6 +5771,7 @@ async fn resume_session(
         None,
         verbose,
         wait_for_mcp,
+        yolo,
     )
     .await
 }
@@ -5786,6 +5796,7 @@ async fn resume_session_with_llm_override(
     llm_override: Option<Arc<dyn meerkat_client::LlmClient>>,
     verbose: bool,
     wait_for_mcp: bool,
+    yolo: bool,
 ) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
@@ -5808,6 +5819,7 @@ async fn resume_session_with_llm_override(
             llm_override,
             verbose,
             wait_for_mcp,
+            yolo,
         );
         anyhow::bail!("resume requires rkat built with session-store support");
     }
@@ -5862,10 +5874,13 @@ async fn resume_session_with_llm_override(
             .map_err(|e| anyhow::anyhow!("Failed to load session: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))?;
         let stored_metadata = session.session_metadata();
-        let tooling = stored_metadata
+        let mut tooling = stored_metadata
             .as_ref()
             .map(|meta| meta.tooling.clone())
             .unwrap_or_default();
+        if yolo {
+            apply_yolo_tooling_override(&mut tooling);
+        }
         let keep_alive_requested = stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive);
         let keep_alive = resolve_keep_alive(keep_alive_requested)?;
         let comms_name = stored_metadata
@@ -10120,6 +10135,77 @@ mod tests {
         assert!(yolo.mob);
         #[cfg(not(feature = "mob"))]
         assert!(!yolo.mob);
+    }
+
+    #[test]
+    fn test_apply_yolo_tooling_override_promotes_resume_tooling_to_full() {
+        let mut tooling = meerkat_core::SessionTooling {
+            builtins: meerkat_core::ToolCategoryOverride::Disable,
+            shell: meerkat_core::ToolCategoryOverride::Disable,
+            comms: meerkat_core::ToolCategoryOverride::Enable,
+            mob: meerkat_core::ToolCategoryOverride::Disable,
+            memory: meerkat_core::ToolCategoryOverride::Disable,
+            active_skills: None,
+        };
+
+        apply_yolo_tooling_override(&mut tooling);
+
+        assert_eq!(tooling.builtins, meerkat_core::ToolCategoryOverride::Enable);
+        assert_eq!(tooling.shell, meerkat_core::ToolCategoryOverride::Enable);
+        assert_eq!(tooling.memory, meerkat_core::ToolCategoryOverride::Enable);
+        #[cfg(feature = "mob")]
+        assert_eq!(tooling.mob, meerkat_core::ToolCategoryOverride::Enable);
+        #[cfg(not(feature = "mob"))]
+        assert_eq!(tooling.mob, meerkat_core::ToolCategoryOverride::Disable);
+        assert_eq!(tooling.comms, meerkat_core::ToolCategoryOverride::Enable);
+    }
+
+    #[tokio::test]
+    async fn test_run_resume_yolo_reaches_resume_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state_root = temp.path().join("state");
+        let scope = test_scope(state_root, "resume-yolo");
+
+        let err = handle_run_command(
+            "Continue.".to_string(),
+            Some("last".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "text".to_string(),
+            false,
+            false,
+            true,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            ToolPreset::Safe,
+            true,
+            false,
+            false,
+            false,
+            StdinMode::Off,
+            LineFormat::Text,
+            None,
+            &scope,
+        )
+        .await
+        .expect_err("empty test realm should not have a resumable session");
+
+        let message = err.to_string();
+        assert!(
+            !message.contains("create-only") && !message.contains("--yolo"),
+            "`--yolo` should be allowed through run --resume; got: {message}"
+        );
     }
 
     #[test]

@@ -172,6 +172,8 @@ pub struct AppState {
     /// AgentFactory so both read and write paths (login, resolve,
     /// logout) see the same credentials.
     pub token_store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
+    /// Process-local AuthMachine lifecycle registry for auth endpoints.
+    pub auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     /// Provider-runtime registry shared with the AgentFactory's auth
     /// resolution path.
     pub provider_registry: Arc<meerkat_providers::ProviderRuntimeRegistry>,
@@ -313,6 +315,8 @@ impl AppState {
                 Ok(store) => store,
                 Err(_) => Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
             };
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let mut factory = AgentFactory::new(store_path.clone())
             .with_token_store(Arc::clone(&token_store))
             .session_store(session_store.clone())
@@ -401,6 +405,7 @@ impl AppState {
                 std::time::Duration::from_secs(5),
             )),
             token_store,
+            auth_lease,
             provider_registry,
         })
     }

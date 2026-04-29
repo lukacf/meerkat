@@ -1595,7 +1595,10 @@ impl AgentFactory {
         // through the same realm binding. The caller keeps precedence —
         // if build_config already carries a connection_ref, leave it.
         if build_config.connection_ref.is_none() {
-            build_config.connection_ref = metadata.connection_ref.clone();
+            build_config.connection_ref = metadata
+                .connection_ref
+                .clone()
+                .filter(|connection_ref| !connection_ref.is_env_default());
         }
         if !mask.override_builtins {
             build_config.override_builtins = metadata.tooling.builtins;
@@ -2169,7 +2172,17 @@ impl AgentFactory {
                             build_config.realm_id.as_deref(),
                         )
                         .map_err(BuildAgentError::ConnectionResolution)?;
-                    build_config.connection_ref = Some(resolved_connection_ref.clone());
+                    if resolved_connection_ref.is_env_default()
+                        && build_config
+                            .connection_ref
+                            .as_ref()
+                            .map(ConnectionRef::is_env_default)
+                            .unwrap_or(true)
+                    {
+                        build_config.connection_ref = None;
+                    } else {
+                        build_config.connection_ref = Some(resolved_connection_ref.clone());
+                    }
 
                     // Provider-runtime registry needs the OAuth-backed
                     // TokenStore attached so persisted tokens (written by
@@ -3566,31 +3579,25 @@ mod tests {
     }
 
     #[test]
-    fn persisted_env_default_connection_ref_rehydrates_without_config_realm() {
+    fn explicit_env_default_connection_ref_is_not_rehydrated_as_durable_identity() {
         let config = Config::default();
         let connection_ref = ConnectionRef {
             realm: RealmId::parse("env_default").expect("valid realm"),
             binding: BindingId::parse("default").expect("valid binding"),
             profile: None,
         };
-        let (realm, binding_id, resolved_ref) = AgentFactory::resolve_realm_binding_for_provider(
+        let err = AgentFactory::resolve_realm_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some(&connection_ref),
             None,
         )
-        .expect("persisted env_default ref should rehydrate");
+        .expect_err("env_default is a synthetic fallback, not a durable identity");
 
-        assert_eq!(realm.realm_id, "env_default");
-        assert_eq!(binding_id, "default");
-        assert_eq!(resolved_ref, connection_ref);
-        let (_binding, backend, auth) = realm.lookup_binding("default").unwrap();
-        assert_eq!(backend.provider, Provider::OpenAI);
-        assert!(matches!(
-            &auth.source,
-            CredentialSourceSpec::Env { env, fallback }
-                if env == "OPENAI_API_KEY" && fallback.is_empty()
-        ));
+        assert!(
+            err.contains("env_default"),
+            "error should name the rejected synthetic realm: {err}"
+        );
     }
 
     #[test]

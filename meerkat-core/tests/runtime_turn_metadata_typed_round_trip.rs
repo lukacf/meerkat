@@ -51,12 +51,14 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 ..Default::default()
             })),
         }),
+        clear_provider_params: false,
         connection_ref: Some(ConnectionRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("default_anthropic")
                 .expect("valid binding"),
             profile: None,
         }),
+        clear_connection_ref: false,
         keep_alive: Some(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
             policy: KeepAliveMode::Pinned,
@@ -119,6 +121,27 @@ fn empty_metadata_round_trips_without_allocating_fields() {
     assert!(meta.is_empty());
     let json = serde_json::to_value(&meta).expect("serialize");
     assert_eq!(json, serde_json::json!({}), "empty metadata must emit {{}}");
+    let parsed: RuntimeTurnMetadata = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(meta, parsed);
+}
+
+#[test]
+fn clear_flags_round_trip_and_are_not_empty() {
+    let meta = RuntimeTurnMetadata {
+        clear_provider_params: true,
+        clear_connection_ref: true,
+        ..Default::default()
+    };
+    assert!(!meta.is_empty());
+
+    let json = serde_json::to_value(&meta).expect("serialize");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "clear_provider_params": true,
+            "clear_connection_ref": true,
+        })
+    );
     let parsed: RuntimeTurnMetadata = serde_json::from_value(json).expect("deserialize");
     assert_eq!(meta, parsed);
 }
@@ -210,6 +233,67 @@ fn merge_scalar_conflict_refuses_connection_ref() {
             binding: meerkat_core::connection::BindingId::parse("b").expect("valid binding"),
             profile: None,
         }),
+        ..Default::default()
+    };
+    let err = left.merge(right).expect_err("conflict expected");
+    assert_eq!(err.field, "connection_ref");
+}
+
+#[test]
+fn merge_refuses_provider_params_set_and_clear() {
+    let mut left = RuntimeTurnMetadata {
+        provider_params: Some(ProviderParamsOverride {
+            temperature: Some(0.2),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let right = RuntimeTurnMetadata {
+        clear_provider_params: true,
+        ..Default::default()
+    };
+    let err = left.merge(right).expect_err("conflict expected");
+    assert_eq!(err.field, "provider_params");
+
+    let mut left = RuntimeTurnMetadata {
+        clear_provider_params: true,
+        ..Default::default()
+    };
+    let right = RuntimeTurnMetadata {
+        provider_params: Some(ProviderParamsOverride {
+            top_p: Some(0.9),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let err = left.merge(right).expect_err("conflict expected");
+    assert_eq!(err.field, "provider_params");
+}
+
+#[test]
+fn merge_refuses_connection_ref_set_and_clear() {
+    let connection_ref = ConnectionRef {
+        realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
+        binding: meerkat_core::connection::BindingId::parse("default").expect("valid binding"),
+        profile: None,
+    };
+    let mut left = RuntimeTurnMetadata {
+        connection_ref: Some(connection_ref.clone()),
+        ..Default::default()
+    };
+    let right = RuntimeTurnMetadata {
+        clear_connection_ref: true,
+        ..Default::default()
+    };
+    let err = left.merge(right).expect_err("conflict expected");
+    assert_eq!(err.field, "connection_ref");
+
+    let mut left = RuntimeTurnMetadata {
+        clear_connection_ref: true,
+        ..Default::default()
+    };
+    let right = RuntimeTurnMetadata {
+        connection_ref: Some(connection_ref),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");

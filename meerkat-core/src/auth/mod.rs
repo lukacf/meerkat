@@ -7,6 +7,7 @@
 
 pub mod error;
 pub mod lease;
+pub mod lifecycle;
 pub mod metadata;
 pub mod principal;
 pub mod status;
@@ -16,6 +17,10 @@ pub use error::{AuthError, AuthErrorKind};
 pub use lease::{
     AuthConstraints, AuthLease, AuthRefreshReason, HttpAuthorizationRequest, HttpAuthorizer,
     ResolvedAuthEnvelope, ResolvedAuthKind,
+};
+pub use lifecycle::{
+    lease_snapshot_expires_at_datetime, persisted_token_expires_at_epoch_secs,
+    publish_token_lifecycle_acquired, publish_token_lifecycle_released,
 };
 pub use metadata::{
     AnthropicAuthMetadata, AnthropicRouteHints, AuthMetadata, AuthMetadataDefaults, AuthRouteHints,

@@ -289,6 +289,8 @@ pub use auth::{
     AuthRouteHints, AuthStatus, AuthStatusPhase, GoogleAuthMetadata, GoogleRouteHints,
     HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints,
     ProviderAuthMetadata, ResolvedAuthEnvelope, ResolvedAuthKind,
+    lease_snapshot_expires_at_datetime, persisted_token_expires_at_epoch_secs,
+    publish_token_lifecycle_acquired, publish_token_lifecycle_released,
 };
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,

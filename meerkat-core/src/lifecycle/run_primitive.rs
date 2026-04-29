@@ -927,9 +927,17 @@ pub struct RuntimeTurnMetadata {
     /// Override provider-specific parameters for this turn (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<ProviderParamsOverride>,
+    /// Explicitly clear durable provider params. Omitted `provider_params`
+    /// means inherit the current session value.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_provider_params: bool,
     /// Explicit connection reference this turn must resolve against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_ref: Option<ConnectionRef>,
+    /// Explicitly clear durable connection_ref. Omitted `connection_ref`
+    /// means inherit the current session value.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_connection_ref: bool,
     /// Keep-alive policy for materialized resources for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<KeepAlivePolicy>,
@@ -957,7 +965,9 @@ impl RuntimeTurnMetadata {
             && self.model.is_none()
             && self.provider.is_none()
             && self.provider_params.is_none()
+            && !self.clear_provider_params
             && self.connection_ref.is_none()
+            && !self.clear_connection_ref
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
             && self.execution_kind.is_none()
@@ -981,16 +991,32 @@ impl RuntimeTurnMetadata {
         )?;
         merge_scalar(&mut self.model, other.model, "model")?;
         merge_scalar(&mut self.provider, other.provider, "provider")?;
+        reject_set_clear_conflict(
+            self.provider_params.is_some(),
+            self.clear_provider_params,
+            other.provider_params.is_some(),
+            other.clear_provider_params,
+            "provider_params",
+        )?;
         merge_scalar(
             &mut self.provider_params,
             other.provider_params,
             "provider_params",
+        )?;
+        self.clear_provider_params |= other.clear_provider_params;
+        reject_set_clear_conflict(
+            self.connection_ref.is_some(),
+            self.clear_connection_ref,
+            other.connection_ref.is_some(),
+            other.clear_connection_ref,
+            "connection_ref",
         )?;
         merge_scalar(
             &mut self.connection_ref,
             other.connection_ref,
             "connection_ref",
         )?;
+        self.clear_connection_ref |= other.clear_connection_ref;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
         merge_scalar(
             &mut self.render_metadata,
@@ -1016,6 +1042,26 @@ impl RuntimeTurnMetadata {
         }
         Ok(())
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn reject_set_clear_conflict(
+    lhs_set: bool,
+    lhs_clear: bool,
+    rhs_set: bool,
+    rhs_clear: bool,
+    field: &'static str,
+) -> Result<(), TurnMetadataMergeConflict> {
+    if (lhs_set && rhs_clear) || (lhs_clear && rhs_set) {
+        return Err(TurnMetadataMergeConflict {
+            field,
+            reason: "one input sets the field while another clears it",
+        });
+    }
+    Ok(())
 }
 
 fn merge_scalar<T: PartialEq>(

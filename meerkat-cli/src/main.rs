@@ -2936,9 +2936,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?
                 {
                     Some(tokens) => {
-                        let state_phase =
-                            AuthStatusPhase::from_persisted_tokens(Utc::now(), Some(&tokens));
-                        println!("state:       {}", state_phase.as_public_str());
+                        println!("state:       {}", AuthStatusPhase::Unknown.as_public_str());
                         println!("auth_mode:   {:?}", tokens.auth_mode);
                         println!(
                             "has_secret:  {}",
@@ -6733,9 +6731,11 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     model: None,
                     provider: None,
                     provider_params: None,
+                    clear_provider_params: false,
                     render_metadata: dispatch.render_metadata.clone(),
                     execution_kind: None,
                     connection_ref: None,
+                    clear_connection_ref: false,
                 },
             ),
         );

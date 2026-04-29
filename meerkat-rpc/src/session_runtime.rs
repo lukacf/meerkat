@@ -363,6 +363,16 @@ impl SessionRuntimeLlmReconfigureHost {
                 reason: "provider override requires model on an existing session".to_string(),
             });
         }
+        if request.clear_provider_params && request.provider_params.is_some() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "clear_provider_params cannot be combined with provider_params".to_string(),
+            });
+        }
+        if request.clear_connection_ref && request.connection_ref.is_some() {
+            return Err(RuntimeDriverError::ValidationFailed {
+                reason: "clear_connection_ref cannot be combined with connection_ref".to_string(),
+            });
+        }
 
         let registry = self.model_registry().await?;
         let model = request
@@ -380,10 +390,14 @@ impl SessionRuntimeLlmReconfigureHost {
         } else {
             current.provider
         };
-        let provider_params = request
-            .provider_params
-            .clone()
-            .or_else(|| current.provider_params.clone());
+        let provider_params = if request.clear_provider_params {
+            None
+        } else {
+            request
+                .provider_params
+                .clone()
+                .or_else(|| current.provider_params.clone())
+        };
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
             if request.model.is_none() {
                 current.self_hosted_server_id.clone().or_else(|| {
@@ -411,14 +425,14 @@ impl SessionRuntimeLlmReconfigureHost {
             None
         };
 
-        // Dogma §10 inherit/set: `None` on the request preserves the
-        // session's existing binding, `Some(...)` sets a new one
-        // explicitly for this hot-swap. Prevents cross-realm credential
-        // bleed in multi-tenant swaps.
-        let connection_ref = request
-            .connection_ref
-            .clone()
-            .or_else(|| current.connection_ref.clone());
+        let connection_ref = if request.clear_connection_ref {
+            None
+        } else {
+            request
+                .connection_ref
+                .clone()
+                .or_else(|| current.connection_ref.clone())
+        };
 
         Ok(SessionLlmIdentity {
             model,
@@ -657,6 +671,7 @@ pub struct SessionRuntime {
     backend: Option<String>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
     runtime_adapter: Arc<MeerkatMachine>,
+    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
     /// connects (each connection has its own transport sink).
@@ -782,9 +797,11 @@ impl SessionRuntime {
                 .and_then(|ov| ov.provider.as_ref())
                 .map(|provider| meerkat_core::Provider::from_name(provider)),
             provider_params: None,
+            clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
             render_metadata: None,
             execution_kind: None,
             connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
+            clear_connection_ref: overrides.is_some_and(|ov| ov.clear_connection_ref),
         };
         (!metadata.is_empty()).then_some(metadata)
     }
@@ -800,7 +817,9 @@ impl SessionRuntime {
                 .provider
                 .map(|provider| provider.as_str().to_string()),
             provider_params: None,
+            clear_provider_params: metadata.clear_provider_params,
             connection_ref: metadata.connection_ref.clone(),
+            clear_connection_ref: metadata.clear_connection_ref,
             ..Default::default()
         };
         (!overrides.is_empty()).then_some(overrides)
@@ -846,6 +865,8 @@ impl SessionRuntime {
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -880,6 +901,7 @@ impl SessionRuntime {
             backend: None,
             config_runtime,
             runtime_adapter,
+            auth_lease,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
@@ -920,6 +942,8 @@ impl SessionRuntime {
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -954,6 +978,7 @@ impl SessionRuntime {
             backend: None,
             config_runtime,
             runtime_adapter,
+            auth_lease,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
@@ -1053,6 +1078,10 @@ impl SessionRuntime {
     /// credentials).
     pub fn token_store(&self) -> Option<Arc<dyn meerkat_providers::auth_store::TokenStore>> {
         self.factory.token_store.clone()
+    }
+
+    pub fn auth_lease_handle(&self) -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
+        Arc::clone(&self.auth_lease)
     }
 
     /// Override the shared default LLM client used by this runtime.
@@ -1335,6 +1364,21 @@ impl SessionRuntime {
                 data: None,
             });
         }
+        if ov.clear_provider_params && ov.provider_params.is_some() {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "clear_provider_params cannot be combined with provider_params"
+                    .to_string(),
+                data: None,
+            });
+        }
+        if ov.clear_connection_ref && ov.connection_ref.is_some() {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "clear_connection_ref cannot be combined with connection_ref".to_string(),
+                data: None,
+            });
+        }
 
         let registry = self.model_registry().await?;
         let model = ov.model.clone().unwrap_or_else(|| current.model.clone());
@@ -1349,10 +1393,13 @@ impl SessionRuntime {
         } else {
             current.provider
         };
-        let provider_params = ov
-            .provider_params
-            .clone()
-            .or_else(|| current.provider_params.clone());
+        let provider_params = if ov.clear_provider_params {
+            None
+        } else {
+            ov.provider_params
+                .clone()
+                .or_else(|| current.provider_params.clone())
+        };
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
             if ov.model.is_none() {
                 current.self_hosted_server_id.clone().or_else(|| {
@@ -1382,14 +1429,13 @@ impl SessionRuntime {
             None
         };
 
-        // Dogma §10 inherit/set: `None` on the override preserves the
-        // session's existing binding, `Some(...)` sets a new one
-        // explicitly for this turn. Prevents cross-realm credential
-        // bleed when the override is the only changed field.
-        let connection_ref = ov
-            .connection_ref
-            .clone()
-            .or_else(|| current.connection_ref.clone());
+        let connection_ref = if ov.clear_connection_ref {
+            None
+        } else {
+            ov.connection_ref
+                .clone()
+                .or_else(|| current.connection_ref.clone())
+        };
 
         Ok(SessionLlmIdentity {
             model,
@@ -1609,7 +1655,9 @@ impl SessionRuntime {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
             provider_params: ov.provider_params.clone(),
+            clear_provider_params: ov.clear_provider_params,
             connection_ref: ov.connection_ref.clone(),
+            clear_connection_ref: ov.clear_connection_ref,
         };
 
         if !self.runtime_adapter.contains_session(session_id).await
@@ -2377,7 +2425,9 @@ impl SessionRuntime {
                 && (ov.model.is_some()
                     || ov.provider.is_some()
                     || ov.provider_params.is_some()
-                    || ov.connection_ref.is_some())
+                    || ov.clear_provider_params
+                    || ov.connection_ref.is_some()
+                    || ov.clear_connection_ref)
             {
                 self.hot_swap_llm_client(session_id, ov).await?;
             }
@@ -3141,7 +3191,12 @@ impl SessionRuntime {
 
         // Hot-swap LLM client if model/provider/provider_params changed.
         if let Some(ref ov) = overrides
-            && (ov.model.is_some() || ov.provider.is_some() || ov.provider_params.is_some())
+            && (ov.model.is_some()
+                || ov.provider.is_some()
+                || ov.provider_params.is_some()
+                || ov.clear_provider_params
+                || ov.connection_ref.is_some()
+                || ov.clear_connection_ref)
         {
             self.hot_swap_llm_client(session_id, ov).await?;
         }
@@ -6095,6 +6150,115 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn turn_clear_provider_params_removes_current_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: Some(serde_json::json!({ "temperature": 0.7 })),
+            connection_ref: None,
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            clear_provider_params: true,
+            ..Default::default()
+        };
+
+        let resolved = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect("clear override should resolve");
+
+        assert!(resolved.provider_params.is_none());
+    }
+
+    #[tokio::test]
+    async fn turn_clear_connection_ref_removes_current_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: Some(meerkat_core::ConnectionRef {
+                realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
+                binding: meerkat_core::BindingId::parse("anthropic_default")
+                    .expect("valid binding"),
+                profile: None,
+            }),
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            clear_connection_ref: true,
+            ..Default::default()
+        };
+
+        let resolved = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect("clear override should resolve");
+
+        assert!(resolved.connection_ref.is_none());
+    }
+
+    #[tokio::test]
+    async fn turn_rejects_set_and_clear_connection_ref_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            connection_ref: Some(meerkat_core::ConnectionRef {
+                realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
+                binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
+                profile: None,
+            }),
+            clear_connection_ref: true,
+            ..Default::default()
+        };
+
+        let err = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect_err("set+clear must be rejected");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(err.message.contains("clear_connection_ref"));
+    }
+
+    #[tokio::test]
+    async fn turn_rejects_set_and_clear_provider_params_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
+            clear_provider_params: true,
+            ..Default::default()
+        };
+
+        let err = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect_err("set+clear must be rejected");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(err.message.contains("clear_provider_params"));
+    }
+
     #[cfg(feature = "mcp")]
     fn collect_tool_config_events(
         event_rx: &mut mpsc::Receiver<EventEnvelope<AgentEvent>>,
@@ -7471,7 +7635,9 @@ mod tests {
             "system_prompt": "You are helpful",
             "output_schema": {"type": "object"},
             "structured_output_retries": 3,
-            "provider_params": {"thinking": true}
+            "provider_params": {"thinking": true},
+            "clear_provider_params": false,
+            "clear_connection_ref": true
         });
         let params: StartTurnParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.session_id, "test-id");
@@ -7484,6 +7650,8 @@ mod tests {
         assert!(params.output_schema.is_some());
         assert_eq!(params.structured_output_retries, Some(3));
         assert!(params.provider_params.is_some());
+        assert!(!params.clear_provider_params);
+        assert!(params.clear_connection_ref);
     }
 
     // -----------------------------------------------------------------------

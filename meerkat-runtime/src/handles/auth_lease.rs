@@ -57,8 +57,9 @@ fn emit_audit(
 /// Runtime-backed [`AuthLeaseHandle`] impl.
 ///
 /// Holds a mutex-guarded registry of per-binding [`auth_dsl::AuthMachineAuthority`]
-/// instances. Lookup-or-insert happens on first `acquire_lease`; all
-/// other operations require the binding to already exist.
+/// instances. Lookup-or-insert happens on first `acquire_lease`; release is
+/// also allowed before acquire so token-clear surfaces remain idempotent after
+/// process restart.
 pub struct RuntimeAuthLeaseHandle {
     machines: Arc<Mutex<HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>>>,
 }
@@ -244,12 +245,15 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         // Drive the DSL transition, then drop the machine from the
         // registry: a released lease has no observable state and
         // keeping the spent AuthMachine around is shell-side bookkeeping
-        // that dogma §14 forbids (local state, no canonical role).
+        // that dogma §14 forbids (local state, no canonical role). Release
+        // is idempotent for logout/clear surfaces: clearing stale token
+        // material after process restart must not fail just because no
+        // in-memory AuthMachine has observed that binding yet.
         self.apply(
             lease_key,
             auth_dsl::AuthMachineInput::Release,
             "AuthLeaseHandle::release_lease",
-            false,
+            true,
         )?;
         let mut guard = self
             .machines
@@ -359,6 +363,31 @@ mod tests {
         let h = RuntimeAuthLeaseHandle::new();
         let err = h.mark_expiring(&lease("dev", "ghost")).unwrap_err();
         assert_eq!(err.context, "AuthLeaseHandle::mark_expiring");
+    }
+
+    #[test]
+    fn release_before_acquire_is_idempotent() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "ghost");
+
+        h.release_lease(&key).unwrap();
+
+        let snap = h.snapshot(&key);
+        assert!(snap.phase.is_none());
+        assert!(snap.expires_at.is_none());
+    }
+
+    #[test]
+    fn repeated_acquire_updates_existing_lease() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "default");
+
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+        h.acquire_lease(&key, 1_900_000_000).unwrap();
+
+        let snap = h.snapshot(&key);
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snap.expires_at, Some(1_900_000_000));
     }
 
     #[test]

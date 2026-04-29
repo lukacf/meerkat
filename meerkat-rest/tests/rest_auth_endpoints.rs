@@ -123,6 +123,7 @@ fn build_app() -> axum::Router {
         #[cfg(feature = "mcp")]
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+        auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
         provider_registry,
         realtime_rpc_tcp_addr: None,
     };

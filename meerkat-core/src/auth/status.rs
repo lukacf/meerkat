@@ -4,8 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::error::AuthErrorKind;
-use super::token_store::PersistedTokens;
-use crate::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase};
+use crate::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, AuthLeaseSnapshot};
 use crate::provider::Provider;
 
 /// Public auth status phase shared by REST, RPC, CLI, and generated SDK wire
@@ -46,25 +45,41 @@ impl AuthStatusPhase {
         }
     }
 
-    pub fn from_persisted_tokens(now: DateTime<Utc>, tokens: Option<&PersistedTokens>) -> Self {
-        match tokens {
-            Some(tokens) => Self::from_expires_at(now, tokens.expires_at),
-            None => Self::Unknown,
+    pub fn from_lease_snapshot(now: DateTime<Utc>, snapshot: &AuthLeaseSnapshot) -> Self {
+        match snapshot.phase {
+            Some(AuthLeasePhase::Valid) => Self::from_lease_expires_at(now, snapshot.expires_at),
+            Some(AuthLeasePhase::Expiring | AuthLeasePhase::Refreshing) => {
+                match snapshot.expires_at {
+                    Some(expires_at) if epoch_secs_expired(now, expires_at) => Self::Expired,
+                    _ => Self::Expiring,
+                }
+            }
+            Some(AuthLeasePhase::ReauthRequired) => Self::ReauthRequired,
+            Some(AuthLeasePhase::Released) | None => Self::Unknown,
         }
     }
 
-    pub fn from_expires_at(now: DateTime<Utc>, expires_at: Option<DateTime<Utc>>) -> Self {
+    pub fn from_lease_expires_at(now: DateTime<Utc>, expires_at: Option<u64>) -> Self {
         match expires_at {
-            Some(expires_at) if expires_at <= now => Self::Expired,
+            Some(expires_at) if epoch_secs_expired(now, expires_at) => Self::Expired,
             Some(expires_at)
-                if expires_at - now
-                    < chrono::Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64) =>
+                if epoch_secs_until(now, expires_at)
+                    < AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64 =>
             {
                 Self::Expiring
             }
             Some(_) | None => Self::Valid,
         }
     }
+}
+
+fn epoch_secs_expired(now: DateTime<Utc>, expires_at: u64) -> bool {
+    epoch_secs_until(now, expires_at) <= 0
+}
+
+fn epoch_secs_until(now: DateTime<Utc>, expires_at: u64) -> i64 {
+    let expires_at = i64::try_from(expires_at).unwrap_or(i64::MAX);
+    expires_at.saturating_sub(now.timestamp())
 }
 
 /// Status snapshot of a resolved (or unresolved) auth profile.
@@ -107,20 +122,6 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
 
-    fn tokens_with_expiry(expires_at: Option<DateTime<Utc>>) -> PersistedTokens {
-        PersistedTokens {
-            auth_mode: crate::auth::PersistedAuthMode::ApiKey,
-            primary_secret: Some("secret".into()),
-            refresh_token: None,
-            id_token: None,
-            expires_at,
-            last_refresh: None,
-            scopes: Vec::new(),
-            account_id: None,
-            metadata: serde_json::Value::Null,
-        }
-    }
-
     #[test]
     fn auth_status_roundtrip() {
         let status = AuthStatus {
@@ -155,23 +156,33 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_phase_maps_persisted_token_expiry_to_public_values() {
+    fn auth_status_phase_maps_lease_snapshot_expiry_to_public_values() {
         let now = Utc.with_ymd_and_hms(2026, 4, 28, 12, 0, 0).unwrap();
 
-        let valid = tokens_with_expiry(Some(now + Duration::minutes(10)));
+        let valid = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
+        };
         assert_eq!(
-            AuthStatusPhase::from_persisted_tokens(now, Some(&valid)).as_public_str(),
+            AuthStatusPhase::from_lease_snapshot(now, &valid).as_public_str(),
             "valid"
         );
 
-        let expired = tokens_with_expiry(Some(now - Duration::seconds(1)));
+        let expired = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some((now - Duration::seconds(1)).timestamp() as u64),
+        };
         assert_eq!(
-            AuthStatusPhase::from_persisted_tokens(now, Some(&expired)).as_public_str(),
+            AuthStatusPhase::from_lease_snapshot(now, &expired).as_public_str(),
             "expired"
         );
 
+        let stale_token_without_machine = AuthLeaseSnapshot {
+            phase: None,
+            expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
+        };
         assert_eq!(
-            AuthStatusPhase::from_persisted_tokens(now, None).as_public_str(),
+            AuthStatusPhase::from_lease_snapshot(now, &stale_token_without_machine).as_public_str(),
             "unknown"
         );
     }
@@ -185,6 +196,10 @@ mod tests {
         assert_eq!(
             AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::Expiring)).as_public_str(),
             "expiring"
+        );
+        assert_eq!(
+            AuthStatusPhase::from_lease_phase(Some(AuthLeasePhase::ReauthRequired)).as_public_str(),
+            "reauth_required"
         );
         assert_eq!(
             AuthStatusPhase::from_lease_phase(None).as_public_str(),

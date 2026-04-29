@@ -11422,7 +11422,9 @@ async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reco
             model: Some("gpt-5.2".to_string()),
             provider: Some("openai".to_string()),
             provider_params: None,
+            clear_provider_params: false,
             connection_ref: None,
+            clear_connection_ref: false,
         },
     )
     .await
@@ -11484,7 +11486,9 @@ async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_recon
             model: Some("gpt-5.2".to_string()),
             provider: Some("openai".to_string()),
             provider_params: None,
+            clear_provider_params: false,
             connection_ref: None,
+            clear_connection_ref: false,
         },
     )
     .await
@@ -11710,7 +11714,9 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await
@@ -11802,7 +11808,9 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: Some(serde_json::json!({ "reasoning_effort": "high" })),
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await
@@ -11940,7 +11948,9 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await
@@ -12053,7 +12063,9 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await
@@ -12243,7 +12255,9 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await
@@ -12398,7 +12412,9 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
                         model: Some("gpt-realtime".to_string()),
                         provider: Some("openai".to_string()),
                         provider_params: None,
+                        clear_provider_params: false,
                         connection_ref: None,
+                        clear_connection_ref: false,
                     },
                 )
                 .await
@@ -12540,7 +12556,9 @@ async fn reconfigure_live_topology_failure_before_detach_restores_prior_binding(
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await
@@ -12678,7 +12696,9 @@ async fn reconfigure_live_topology_failure_after_detach_discards_and_requires_re
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await
@@ -15175,7 +15195,9 @@ async fn execute_runtime_parity_probe(
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
+                clear_provider_params: false,
                 connection_ref: None,
+                clear_connection_ref: false,
             },
         )
         .await

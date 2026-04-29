@@ -766,8 +766,12 @@ pub struct WireRuntimeTurnMetadata {
     pub provider: Option<meerkat_core::Provider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<WireProviderParamsOverride>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_provider_params: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_ref: Option<crate::wire::connection::WireConnectionRef>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_connection_ref: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<WireKeepAlivePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -820,7 +824,9 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
             model: value.model.map(|m| m.as_str().to_string()),
             provider: value.provider,
             provider_params: value.provider_params.map(Into::into),
+            clear_provider_params: value.clear_provider_params,
             connection_ref: value.connection_ref.map(Into::into),
+            clear_connection_ref: value.clear_connection_ref,
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
@@ -841,10 +847,16 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             model: value.model.map(ModelId::new),
             provider: value.provider,
             provider_params: value.provider_params.map(Into::into),
+            clear_provider_params: value.clear_provider_params,
             connection_ref: value.connection_ref.map(Into::into),
+            clear_connection_ref: value.clear_connection_ref,
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

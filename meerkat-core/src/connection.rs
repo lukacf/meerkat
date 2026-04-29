@@ -112,6 +112,14 @@ pub struct ConnectionRef {
     pub profile: Option<ProfileId>,
 }
 
+impl ConnectionRef {
+    pub fn is_env_default(&self) -> bool {
+        self.realm.as_str() == "env_default"
+            && self.binding.as_str() == "default"
+            && self.profile.is_none()
+    }
+}
+
 /// Backend profile: where requests go and which backend contract applies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -390,14 +398,8 @@ pub fn resolve_connection_ref_or_default_for_provider(
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
     if let Some(connection_ref) = connection_ref {
         let realm_id = connection_ref.realm.as_str();
-        if realm_id == "env_default" && connection_ref.binding.as_str() == "default" {
-            let realm = RealmConnectionSet::synthesize_env_default(provider);
-            return materialize_connection_target(
-                realm,
-                provider,
-                connection_ref.binding.clone(),
-                connection_ref.profile.clone(),
-            );
+        if connection_ref.is_env_default() {
+            return Err(ConnectionTargetError::UnknownRealm(realm_id.to_string()));
         }
         let section = config
             .realm

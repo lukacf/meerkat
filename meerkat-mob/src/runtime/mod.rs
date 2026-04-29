@@ -124,9 +124,9 @@ pub(crate) use handle::{CanonicalOpsOwnerContext, MemberSpawnReceipt};
 pub use handle::{
     ExternalMemberBindingMode, ExternalMemberForwardingHookRef, ExternalMemberForwardingHooks,
     ExternalMemberForwardingStatus, ExternalMemberObservationSnapshot, ExternalMemberOwnerRef,
-    ExternalMemberReachability, ExternalMemberRebindStatus, HelperOptions, HelperResult,
-    MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError, MobDestroyReport,
-    MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
+    ExternalMemberReachability, ExternalMemberRebindStatus, ExternalPeerBindingSpec, HelperOptions,
+    HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError,
+    MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
     MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
     MobRespawnError, MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec,
     SpawnResult, SupervisorRotationReport, WorkDeliveryReceipt,

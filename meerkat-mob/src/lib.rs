@@ -123,16 +123,17 @@ pub use runtime::bridge_protocol::{
 };
 #[cfg(feature = "runtime-adapter")]
 pub use runtime::local_bridge::LocalMobRuntimeBridge;
+pub use runtime::{
+    ExternalPeerBindingSpec, HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle,
+    MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
+    MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
+    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
+    MobSessionService, MobState, MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport,
+    SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec, SupervisorRotationReport,
+    WorkDeliveryReceipt,
+};
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};
-pub use runtime::{
-    HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
-    MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle,
-    MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle, MobMemberSnapshot,
-    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobState,
-    MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnPolicy,
-    SpawnResult, SpawnSpec, SupervisorRotationReport, WorkDeliveryReceipt,
-};
 pub use runtime_mode::MobRuntimeMode;
 pub use snapshot::ParentToolScopeSnapshot;
 pub use spec::SpecValidator;

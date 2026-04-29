@@ -1199,6 +1199,7 @@ impl FlowEngine {
         context: &'static str,
     ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
         let command = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
+        let authority_input = command.authority_input(run_id);
         for attempt in 0..5u32 {
             let run = self.run_snapshot(run_id).await?;
             if run.status != MobRunStatus::Pending {
@@ -1213,12 +1214,13 @@ impl FlowEngine {
             )?;
             let transitioned = self
                 .run_store
-                .cas_run_snapshot(
+                .cas_run_snapshot_with_authority(
                     run_id,
                     MobRunStatus::Pending,
                     &run.flow_state,
                     MobRunStatus::Running,
                     &outcome.next_state,
+                    vec![authority_input.clone()],
                 )
                 .await?;
             if transitioned {
@@ -1241,6 +1243,7 @@ impl FlowEngine {
         authority: MobMachineFlowAuthorityToken,
         context: &'static str,
     ) -> Result<Vec<flow_run::Effect>, MobError> {
+        let authority_input = command.authority_input(run_id);
         for attempt in 0..5u32 {
             let run = self.run_snapshot(run_id).await?;
             let outcome = apply_mob_machine_flow_run_command(
@@ -1252,7 +1255,12 @@ impl FlowEngine {
             )?;
             let transitioned = self
                 .run_store
-                .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
+                .cas_flow_state_with_authority(
+                    run_id,
+                    &run.flow_state,
+                    &outcome.next_state,
+                    vec![authority_input.clone()],
+                )
                 .await?;
             if transitioned {
                 return Ok(outcome.effects);
@@ -1631,6 +1639,7 @@ impl FlowEngine {
         authority: MobMachineFlowAuthorityToken,
     ) -> Result<TerminalizationOutcome, MobError> {
         let next_status = target.status();
+        let authority_input = input.authority_input(&run_id);
         self.verify_terminal_run_steps(&run_id).await?;
         for attempt in 0..5u32 {
             let run = self.run_snapshot(&run_id).await?;
@@ -1652,12 +1661,13 @@ impl FlowEngine {
             .next_state;
             let transitioned = self
                 .run_store
-                .cas_run_snapshot(
+                .cas_run_snapshot_with_authority(
                     &run_id,
                     run.status.clone(),
                     &run.flow_state,
                     next_status.clone(),
                     &next_state,
+                    vec![authority_input.clone()],
                 )
                 .await?;
             if transitioned {

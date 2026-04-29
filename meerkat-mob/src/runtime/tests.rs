@@ -1975,6 +1975,249 @@ impl MobRunStore for RecordingRunStore {
             )
             .await
     }
+
+    async fn cas_flow_state_with_authority(
+        &self,
+        run_id: &RunId,
+        expected: &crate::run::flow_run::State,
+        next: &crate::run::flow_run::State,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_flow_state_with_authority(run_id, expected, next, authority_inputs)
+            .await
+    }
+
+    async fn cas_run_snapshot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &crate::run::flow_run::State,
+        next_status: MobRunStatus,
+        next_flow_state: &crate::run::flow_run::State,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.snapshot_cas_history.write().await.push((
+            run_id.clone(),
+            expected_status.clone(),
+            next_status.clone(),
+        ));
+        self.inner
+            .cas_run_snapshot_with_authority(
+                run_id,
+                expected_status,
+                expected_flow_state,
+                next_status,
+                next_flow_state,
+                authority_inputs,
+            )
+            .await
+    }
+
+    async fn cas_frame_state_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &crate::ids::FrameId,
+        expected: Option<&crate::run::FrameSnapshot>,
+        next: crate::run::FrameSnapshot,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_frame_state_with_authority(run_id, frame_id, expected, next, authority_inputs)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_node_slot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_grant_node_slot_with_authority(
+                run_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                authority_inputs,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_step_and_record_output_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+        loop_context: Option<(&crate::ids::LoopId, u64)>,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_complete_step_and_record_output_with_authority(
+                run_id,
+                frame_id,
+                expected_frame,
+                next_frame,
+                step_output_key,
+                step_output,
+                loop_context,
+                authority_inputs,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_start_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        initial_loop: crate::run::LoopSnapshot,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_start_loop_with_authority(
+                run_id,
+                loop_instance_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                initial_loop,
+                authority_inputs,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_loop_request_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_loop_request_body_frame_with_authority(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                expected_run_state,
+                next_run_state,
+                authority_inputs,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_body_frame_start_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        initial_frame: crate::run::FrameSnapshot,
+        ledger_entry: crate::run::LoopIterationLedgerEntry,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_grant_body_frame_start_with_authority(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                initial_frame,
+                ledger_entry,
+                expected_run_state,
+                next_run_state,
+                authority_inputs,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_complete_body_frame_with_authority(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                authority_inputs,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &crate::ids::LoopInstanceId,
+        expected_loop: &crate::run::LoopSnapshot,
+        next_loop: crate::run::LoopSnapshot,
+        frame_id: &crate::ids::FrameId,
+        expected_frame: &crate::run::FrameSnapshot,
+        next_frame: crate::run::FrameSnapshot,
+        expected_run_state: &crate::run::flow_run::State,
+        next_run_state: crate::run::flow_run::State,
+        authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        self.inner
+            .cas_complete_loop_with_authority(
+                run_id,
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                authority_inputs,
+            )
+            .await
+    }
 }
 
 struct FaultInjectedRuntimeMetadataStore {
@@ -15722,6 +15965,494 @@ fn test_flow_frame_scheduler_start_run_routes_through_actor_authority() {
     }
 }
 
+fn serialized_flow_authority_inputs(run: &MobRun) -> Vec<serde_json::Value> {
+    let run_json = serde_json::to_value(run).expect("serialize MobRun");
+    run_json
+        .get("flow_authority_inputs")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| panic!("MobRun must persist flow_authority_inputs with projections"))
+}
+
+fn flow_authority_log_text(run: &MobRun) -> String {
+    serde_json::to_string(&serialized_flow_authority_inputs(run))
+        .expect("serialize flow authority log")
+}
+
+fn assert_flow_authority_log_contains(run: &MobRun, needle: &str) {
+    let log = flow_authority_log_text(run);
+    assert!(
+        log.contains(needle),
+        "flow authority log should contain {needle}; log={log}"
+    );
+}
+
+fn apply_authority_input_for_test(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    input: crate::machines::mob_machine::MobMachineInput,
+) {
+    let transition = crate::machines::mob_machine::MobMachineMutator::apply(authority, input)
+        .expect("test authority input should be accepted");
+    if transition.from_phase != transition.to_phase {
+        authority.state.lifecycle_phase = transition.to_phase;
+    }
+}
+
+fn authority_backed_root_frame_run(
+    include_loop_seed: bool,
+) -> (MobRun, crate::ids::FrameId, crate::ids::LoopInstanceId) {
+    use crate::ids::{FlowNodeId, LoopId, RunId};
+
+    let definition = sample_definition_with_single_step_flow(500, 8);
+    let config = crate::run::FlowRunConfig::from_definition(FlowId::from("demo"), &definition)
+        .expect("flow config");
+    let run_id = RunId::new();
+    let create_run = MobRun::create_run_seed_input(&run_id, &config).expect("create run seed");
+
+    let loop_node_id = FlowNodeId::from("loop-node");
+    let dependency_node_id = FlowNodeId::from("blocked-on");
+    let loop_id = LoopId::from("retry");
+    let frame_id = crate::ids::FrameId::from(format!("{run_id}-root").as_str());
+    let create_frame = crate::machines::mob_machine::MobMachineInput::CreateFrameSeed {
+        run_id: crate::machines::mob_machine::RunId::from(run_id.to_string()),
+        frame_id: crate::machines::mob_machine::FrameId::from(frame_id.as_str()),
+        frame_scope: crate::machines::mob_machine::FrameScope::Root,
+        loop_instance_id: None,
+        iteration: 0,
+        tracked_nodes: [crate::machines::mob_machine::FlowNodeId::from(
+            loop_node_id.as_str(),
+        )]
+        .into_iter()
+        .collect(),
+        ordered_nodes: vec![crate::machines::mob_machine::FlowNodeId::from(
+            loop_node_id.as_str(),
+        )],
+        node_kind: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::FlowNodeKind::Loop,
+        )]
+        .into_iter()
+        .collect(),
+        node_dependencies: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            vec![crate::machines::mob_machine::FlowNodeId::from(
+                dependency_node_id.as_str(),
+            )],
+        )]
+        .into_iter()
+        .collect(),
+        node_dependency_modes: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::DependencyMode::All,
+        )]
+        .into_iter()
+        .collect(),
+        node_branches: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            None,
+        )]
+        .into_iter()
+        .collect(),
+        node_step_ids: BTreeMap::new(),
+        node_loop_ids: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::LoopId::from(loop_id.as_str()),
+        )]
+        .into_iter()
+        .collect(),
+        node_status: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::NodeRunStatus::Pending,
+        )]
+        .into_iter()
+        .collect(),
+        ready_queue: Vec::new(),
+    };
+    let loop_instance_id =
+        crate::ids::LoopInstanceId::from(format!("{frame_id}::{loop_node_id}").as_str());
+    let create_loop = MobRun::create_loop_seed_input_for_start(
+        &loop_instance_id,
+        &frame_id,
+        &loop_node_id,
+        &loop_id,
+        1,
+        3,
+    );
+
+    let mut authority = crate::machines::mob_machine::MobMachineAuthority::new();
+    apply_authority_input_for_test(&mut authority, create_run.clone());
+    apply_authority_input_for_test(&mut authority, create_frame.clone());
+    if include_loop_seed {
+        apply_authority_input_for_test(&mut authority, create_loop.clone());
+    }
+
+    let mut run = MobRun::pending_with_run_id(
+        run_id.clone(),
+        definition.id.clone(),
+        FlowId::from("demo"),
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+            .expect("project flow state"),
+        serde_json::json!({}),
+    );
+    let mut inputs = vec![create_run, create_frame];
+    if include_loop_seed {
+        inputs.push(create_loop);
+    }
+    run.append_flow_authority_inputs(inputs)
+        .expect("append authority inputs");
+    run.frames.insert(
+        frame_id.clone(),
+        crate::run::FrameSnapshot {
+            kernel_state: crate::run::project_flow_frame_authority_state_from_machine(
+                &authority.state,
+                &frame_id,
+            )
+            .expect("project frame state"),
+        },
+    );
+
+    (run, frame_id, loop_instance_id)
+}
+
+fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
+    use crate::ids::RunId;
+    use crate::run::{
+        MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, apply_mob_machine_flow_run_command,
+        flow_run,
+    };
+
+    let flow_id = FlowId::from("demo");
+    let config = crate::run::FlowRunConfig::from_definition(flow_id.clone(), definition)
+        .expect("flow config");
+    let run_id = RunId::new();
+    let run_flow = MobRun::run_flow_input(&run_id, &config).expect("run flow input");
+    let mut authority = crate::machines::mob_machine::MobMachineAuthority::new();
+    apply_authority_input_for_test(&mut authority, run_flow.clone());
+
+    let mut run = MobRun::pending_with_run_id(
+        run_id.clone(),
+        definition.id.clone(),
+        flow_id,
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+            .expect("project admitted flow state"),
+        serde_json::json!({}),
+    );
+    run.append_flow_authority_inputs(vec![run_flow])
+        .expect("append RunFlow authority input");
+
+    let start = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
+    let start_input = start.authority_input(&run_id);
+    apply_authority_input_for_test(&mut authority, start_input.clone());
+    let authority_token =
+        MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&start_input)
+            .expect("start authority token");
+    let outcome = apply_mob_machine_flow_run_command(
+        &run.flow_state,
+        &authority.state,
+        &run_id,
+        start,
+        authority_token,
+    )
+    .expect("project started flow state");
+    run.status = MobRunStatus::Running;
+    run.flow_state = outcome.next_state;
+    run.append_flow_authority_inputs(vec![start_input])
+        .expect("append StartRun authority input");
+    run
+}
+
+#[tokio::test]
+async fn test_flow_frame_store_plan_persists_authority_input_with_projection() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::{FlowNodeId, FrameId};
+    use crate::runtime::flow_frame_engine::{FlowFrameKernel, FlowFrameMutator};
+
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        crate::run::flow_run::initial_state(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create run");
+
+    let (handle, _) = create_test_mob_with_run_store(sample_definition(), store.clone()).await;
+    seed_test_run_in_mob_machine(&handle, &run_id).await;
+
+    let node_id = FlowNodeId::from("start-node");
+    let mut nodes = IndexMap::new();
+    nodes.insert(
+        node_id,
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    let root_spec = FrameSpec { nodes };
+    let frame_id = FrameId::from(format!("{run_id}-root").as_str());
+    let frame_kernel = FlowFrameKernel::new(store.clone(), handle);
+
+    frame_kernel
+        .start_frame(&run_id, &frame_id, &root_spec)
+        .await
+        .expect("start root frame");
+    frame_kernel
+        .admit_next_ready_node_with_retry(&run_id, &frame_id, 5)
+        .await
+        .expect("admit next ready node")
+        .expect("admission effects");
+
+    let persisted = store
+        .get_run(&run_id)
+        .await
+        .expect("get run")
+        .expect("run exists");
+    let authority_inputs = serialized_flow_authority_inputs(&persisted);
+    assert!(
+        authority_inputs.len() >= 2,
+        "frame seed and admit projection commits must both record authority inputs"
+    );
+    assert_flow_authority_log_contains(&persisted, "CreateFrameSeed");
+    assert_flow_authority_log_contains(&persisted, "AuthorizeFlowFrameReducerCommand");
+    assert_flow_authority_log_contains(&persisted, "AdmitNextReadyNode");
+}
+
+#[tokio::test]
+async fn test_flow_run_start_and_completion_persist_authority_inputs_with_projection() {
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        crate::run::flow_run::initial_state(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create run");
+
+    let (handle, _) = create_test_mob_with_run_store(sample_definition(), store.clone()).await;
+    seed_test_run_in_mob_machine(&handle, &run_id).await;
+
+    let effects = handle
+        .commit_flow_run_command(
+            &run_id,
+            crate::run::MobMachineFlowRunCommand::StartRun(
+                crate::run::flow_run::inputs::StartRun {},
+            ),
+            "test_start_run_authority_log",
+        )
+        .await
+        .expect("start run command")
+        .expect("start run should transition");
+    assert!(!effects.is_empty(), "start run should emit effects");
+
+    let started = store
+        .get_run(&run_id)
+        .await
+        .expect("get started run")
+        .expect("started run exists");
+    assert_eq!(started.status, MobRunStatus::Running);
+    assert_flow_authority_log_contains(&started, "StartRun");
+
+    let terminal = handle
+        .commit_flow_terminalization(
+            run_id.clone(),
+            FlowId::from("test-flow"),
+            super::terminalization::TerminalizationTarget::Completed,
+            crate::run::MobMachineFlowRunCommand::TerminalizeCompleted(
+                crate::run::flow_run::inputs::TerminalizeCompleted {},
+            ),
+            "test_completed_run_authority_log",
+        )
+        .await
+        .expect("terminalize completed");
+    assert_eq!(
+        terminal,
+        super::terminalization::TerminalizationOutcome::Transitioned
+    );
+
+    let completed = store
+        .get_run(&run_id)
+        .await
+        .expect("get completed run")
+        .expect("completed run exists");
+    assert_eq!(completed.status, MobRunStatus::Completed);
+    assert_flow_authority_log_contains(&completed, "TerminalizeCompleted");
+}
+
+#[tokio::test]
+async fn test_recovery_rejects_flow_authority_log_projection_divergence() {
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let mut run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        crate::run::flow_run::initial_state(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    let seed_input = crate::machines::mob_machine::MobMachineInput::CreateRunSeed {
+        run_id: crate::machines::mob_machine::RunId::from(run_id.to_string()),
+        step_ids: Default::default(),
+        ordered_steps: Vec::new(),
+        step_has_conditions: Default::default(),
+        step_dependencies: Default::default(),
+        step_dependency_modes: Default::default(),
+        step_branches: Default::default(),
+        step_collection_policies: Default::default(),
+        step_quorum_thresholds: Default::default(),
+        escalation_threshold: 0,
+        max_step_retries: 0,
+        max_active_nodes: 0,
+        max_active_frames: 0,
+        max_frame_depth: 0,
+    };
+    run.append_flow_authority_inputs(vec![seed_input.clone()])
+        .expect("append seed authority input");
+    store.create_run(run).await.expect("create run");
+
+    let (handle, _) = create_test_mob_with_run_store(sample_definition(), store.clone()).await;
+    handle
+        .project_machine_input(seed_input)
+        .await
+        .expect("seed run in MobMachine");
+    handle
+        .commit_flow_run_command(
+            &run_id,
+            crate::run::MobMachineFlowRunCommand::StartRun(
+                crate::run::flow_run::inputs::StartRun {},
+            ),
+            "test_start_run_recovery_authority_log",
+        )
+        .await
+        .expect("start run command")
+        .expect("start run should transition");
+
+    let mut persisted = store
+        .get_run(&run_id)
+        .await
+        .expect("get run")
+        .expect("run exists");
+    crate::runtime::recovery::reconcile_run_state(&mut persisted)
+        .expect("fresh persisted run should validate");
+
+    persisted.flow_state.phase = crate::run::flow_run::Phase::Pending;
+    let error = crate::runtime::recovery::reconcile_run_state(&mut persisted)
+        .expect_err("tampered projection must not validate against authority log");
+    assert!(
+        matches!(
+            error,
+            crate::runtime::recovery::RestoreIncompatible::FlowAuthorityProjectionMismatch { .. }
+        ),
+        "unexpected recovery error: {error}"
+    );
+}
+
+#[test]
+fn test_recovery_rejects_authority_created_frame_missing_from_projection() {
+    let (mut run, frame_id, _) = authority_backed_root_frame_run(false);
+    run.frames.remove(&frame_id);
+
+    let error = crate::runtime::recovery::reconcile_run_state(&mut run)
+        .expect_err("authority-created frame missing from persisted projections must fail");
+    assert!(
+        matches!(
+            error,
+            crate::runtime::recovery::RestoreIncompatible::FlowAuthorityProjectionMismatch { .. }
+        ),
+        "unexpected recovery error: {error}"
+    );
+}
+
+#[test]
+fn test_recovery_rejects_authority_created_loop_missing_from_projection() {
+    let (mut run, _, loop_instance_id) = authority_backed_root_frame_run(true);
+    assert!(
+        !run.loops.contains_key(&loop_instance_id),
+        "test fixture intentionally omits the authority-created loop projection"
+    );
+
+    let error = crate::runtime::recovery::reconcile_run_state(&mut run)
+        .expect_err("authority-created loop missing from persisted projections must fail");
+    assert!(
+        matches!(
+            error,
+            crate::runtime::recovery::RestoreIncompatible::FlowAuthorityProjectionMismatch { .. }
+        ),
+        "unexpected recovery error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_converges_untracked_active_flow_runs() {
+    let definition = sample_definition_with_single_step_flow(60_000, 8);
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runs = storage.runs.clone();
+    let specs = storage.specs.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.shutdown().await.expect("shutdown actor");
+
+    let active = running_authority_backed_run(&definition);
+    let run_id = active.run_id.clone();
+    runs.create_run(active)
+        .await
+        .expect("persist active run as crash residue");
+
+    let resumed = MobBuilder::for_resume(MobStorage::custom_with_runtime_metadata(
+        events,
+        runs.clone(),
+        specs,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume mob");
+
+    let terminal = wait_for_run_terminal(&resumed, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Canceled,
+        "resume must converge persisted active runs that have no actor trackers"
+    );
+    let machine_state = resumed
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "recovered active flow must not leave MobMachine active_run_count blocking stop"
+    );
+    resumed
+        .stop()
+        .await
+        .expect("stop should not be blocked by an untracked recovered flow");
+}
+
+#[test]
+fn test_resume_path_replays_persisted_flow_authority_inputs() {
+    let builder = include_str!("builder.rs");
+    assert!(
+        builder.contains("seed_mob_authority_sync_from_flow_runs"),
+        "resume must seed MobMachine flow authority from persisted run authority inputs"
+    );
+
+    let recovery = include_str!("recovery.rs");
+    assert!(
+        recovery.contains("validate_flow_authority_projection"),
+        "recovery must validate projection snapshots against the persisted MobMachine authority input log"
+    );
+}
+
 #[test]
 fn test_actor_owned_terminalization_paths_do_not_reenter_actor_mailbox() {
     let source = include_str!("actor.rs");
@@ -15815,6 +16546,14 @@ async fn test_stale_flow_frame_store_plan_loses_cas_before_authority_prepare() {
         advanced_frame, initial_frame,
         "admission should advance the persisted frame before replaying stale plan"
     );
+    let authority_log_len_before_stale_replay = serialized_flow_authority_inputs(
+        &store
+            .get_run(&run_id)
+            .await
+            .expect("get run before stale replay")
+            .expect("run exists before stale replay"),
+    )
+    .len();
 
     let stale_admit = crate::run::MobMachineFlowFrameCommand::AdmitNextReadyNode(
         crate::run::flow_frame::inputs::AdmitNextReadyNode {
@@ -15851,6 +16590,18 @@ async fn test_stale_flow_frame_store_plan_loses_cas_before_authority_prepare() {
     assert_eq!(
         after_replay, advanced_frame,
         "losing stale plan must not mutate the persisted frame"
+    );
+    let authority_log_len_after_stale_replay = serialized_flow_authority_inputs(
+        &store
+            .get_run(&run_id)
+            .await
+            .expect("get run after stale replay")
+            .expect("run exists after stale replay"),
+    )
+    .len();
+    assert_eq!(
+        authority_log_len_after_stale_replay, authority_log_len_before_stale_replay,
+        "losing stale plan must not persist a MobMachine authority input"
     );
 }
 

@@ -21,6 +21,7 @@ use crate::event::{MemberRef, MobEvent, NewMobEvent};
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
+use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
@@ -305,6 +306,13 @@ pub trait MobRunStore: Send + Sync {
         expected: &flow_run::State,
         next: &flow_run::State,
     ) -> Result<bool, MobStoreError>;
+    async fn cas_flow_state_with_authority(
+        &self,
+        run_id: &RunId,
+        expected: &flow_run::State,
+        next: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError>;
     async fn cas_run_snapshot(
         &self,
         run_id: &RunId,
@@ -312,6 +320,15 @@ pub trait MobRunStore: Send + Sync {
         expected_flow_state: &flow_run::State,
         next_status: MobRunStatus,
         next_flow_state: &flow_run::State,
+    ) -> Result<bool, MobStoreError>;
+    async fn cas_run_snapshot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &flow_run::State,
+        next_status: MobRunStatus,
+        next_flow_state: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<bool, MobStoreError>;
     async fn append_step_entry(
         &self,
@@ -370,6 +387,14 @@ pub trait MobRunStore: Send + Sync {
         expected: Option<&FrameSnapshot>,
         next: FrameSnapshot,
     ) -> Result<bool, MobStoreError>;
+    async fn cas_frame_state_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected: Option<&FrameSnapshot>,
+        next: FrameSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 2: grant node slot — atomically update run flow state + frame state.
     ///
@@ -384,6 +409,17 @@ pub trait MobRunStore: Send + Sync {
         frame_id: &FrameId,
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
+    ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_node_slot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 3: complete step — update frame state and record step output.
@@ -406,6 +442,18 @@ pub trait MobRunStore: Send + Sync {
         step_output: serde_json::Value,
         loop_context: Option<(&LoopId, u64)>,
     ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_step_and_record_output_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+        loop_context: Option<(&LoopId, u64)>,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 4: start loop — register loop + update run state + parent frame.
     ///
@@ -424,6 +472,19 @@ pub trait MobRunStore: Send + Sync {
         next_frame: FrameSnapshot,
         initial_loop: LoopSnapshot,
     ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_start_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        initial_loop: LoopSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 5: register pending body frame — loop transition + run state update.
     ///
@@ -438,6 +499,17 @@ pub trait MobRunStore: Send + Sync {
         next_loop: LoopSnapshot,
         expected_run_state: &flow_run::State,
         next_run_state: flow_run::State,
+    ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_loop_request_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 6: body frame start — loop transition + register new frame + run state update.
@@ -458,6 +530,20 @@ pub trait MobRunStore: Send + Sync {
         expected_run_state: &flow_run::State,
         next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_body_frame_start_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        initial_frame: FrameSnapshot,
+        ledger_entry: LoopIterationLedgerEntry,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 7: body frame completion — terminalize frame + loop state update + run state.
     ///
@@ -477,6 +563,20 @@ pub trait MobRunStore: Send + Sync {
         expected_run_state: &flow_run::State,
         next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError>;
 
     /// CAS wrapper 8: loop completion — loop state + run state + parent frame update.
     ///
@@ -495,6 +595,20 @@ pub trait MobRunStore: Send + Sync {
         next_frame: FrameSnapshot,
         expected_run_state: &flow_run::State,
         next_run_state: flow_run::State,
+    ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<bool, MobStoreError>;
 }
 

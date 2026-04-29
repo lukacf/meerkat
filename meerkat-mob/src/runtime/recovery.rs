@@ -17,6 +17,8 @@ pub enum RestoreIncompatible {
     FrameInvariantViolation { frame_id: FrameId },
     #[error("run projection mismatch: {field}")]
     ProjectionMismatch { field: &'static str },
+    #[error("flow authority projection mismatch: {reason}")]
+    FlowAuthorityProjectionMismatch { reason: String },
 }
 
 /// Validate run scheduler state against frame/loop snapshots.
@@ -47,6 +49,12 @@ pub fn reconcile_run_state(run: &mut MobRun) -> Result<(), RestoreIncompatible> 
     validate_pending_body_frame_loops(run)?;
 
     validate_active_counts(run)?;
+
+    run.validate_flow_authority_projection().map_err(|error| {
+        RestoreIncompatible::FlowAuthorityProjectionMismatch {
+            reason: error.to_string(),
+        }
+    })?;
 
     Ok(())
 }
@@ -217,6 +225,7 @@ mod tests {
             schema_version: 4,
             root_step_outputs: indexmap::IndexMap::new(),
             loop_iteration_outputs: std::collections::BTreeMap::new(),
+            flow_authority_inputs: Vec::new(),
         }
     }
 

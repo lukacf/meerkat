@@ -10,6 +10,7 @@ use crate::event::{MobEvent, NewMobEvent};
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
+use crate::machines::mob_machine as mob_dsl;
 use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
@@ -26,6 +27,14 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
+
+fn append_flow_authority_inputs(
+    run: &mut MobRun,
+    authority_inputs: Vec<mob_dsl::MobMachineInput>,
+) -> Result<(), MobStoreError> {
+    run.append_flow_authority_inputs(authority_inputs)
+        .map_err(|error| MobStoreError::Internal(error.to_string()))
+}
 
 /// In-memory event store for tests and ephemeral mobs.
 #[derive(Debug)]
@@ -346,6 +355,25 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(true)
     }
 
+    async fn cas_flow_state_with_authority(
+        &self,
+        run_id: &RunId,
+        expected: &flow_run::State,
+        next: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let Some(run) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if &run.flow_state != expected {
+            return Ok(false);
+        }
+        run.flow_state = next.clone();
+        append_flow_authority_inputs(run, authority_inputs)?;
+        Ok(true)
+    }
+
     async fn cas_run_snapshot(
         &self,
         run_id: &RunId,
@@ -370,6 +398,35 @@ impl MobRunStore for InMemoryMobRunStore {
         if terminal && run.completed_at.is_none() {
             run.completed_at = Some(Utc::now());
         }
+        Ok(true)
+    }
+
+    async fn cas_run_snapshot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &flow_run::State,
+        next_status: MobRunStatus,
+        next_flow_state: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let Some(run) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if run.status != expected_status
+            || run.status.is_terminal()
+            || &run.flow_state != expected_flow_state
+        {
+            return Ok(false);
+        }
+        let terminal = next_status.is_terminal();
+        run.status = next_status;
+        run.flow_state = next_flow_state.clone();
+        if terminal && run.completed_at.is_none() {
+            run.completed_at = Some(Utc::now());
+        }
+        append_flow_authority_inputs(run, authority_inputs)?;
         Ok(true)
     }
 
@@ -494,6 +551,34 @@ impl MobRunStore for InMemoryMobRunStore {
         }
     }
 
+    async fn cas_frame_state_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected: Option<&FrameSnapshot>,
+        next: FrameSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        let current = run.frames.get(frame_id);
+        match (expected, current) {
+            (None, None) => {
+                run.frames.insert(frame_id.clone(), next);
+                append_flow_authority_inputs(run, authority_inputs)?;
+                Ok(true)
+            }
+            (Some(exp), Some(cur)) if exp == cur => {
+                run.frames.insert(frame_id.clone(), next);
+                append_flow_authority_inputs(run, authority_inputs)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
@@ -517,6 +602,33 @@ impl MobRunStore for InMemoryMobRunStore {
         // Apply all updates
         run.flow_state = next_run_state;
         run.frames.insert(frame_id.clone(), next_frame);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_node_slot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.frames.insert(frame_id.clone(), next_frame);
+        append_flow_authority_inputs(run, authority_inputs)?;
         Ok(true)
     }
 
@@ -568,6 +680,56 @@ impl MobRunStore for InMemoryMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_step_and_record_output_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+        loop_context: Option<(&LoopId, u64)>,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        run.frames.insert(frame_id.clone(), next_frame);
+        match loop_context {
+            None => {
+                run.root_step_outputs.insert(
+                    crate::ids::StepId::from(step_output_key.as_str()),
+                    step_output,
+                );
+            }
+            Some((loop_id, iteration)) => {
+                let iteration_index = usize::try_from(iteration).map_err(|_| {
+                    MobStoreError::Internal(format!(
+                        "loop iteration index {iteration} exceeds usize::MAX on this target"
+                    ))
+                })?;
+                let vec = run
+                    .loop_iteration_outputs
+                    .entry(loop_id.clone())
+                    .or_default();
+                while vec.len() <= iteration_index {
+                    vec.push(IndexMap::new());
+                }
+                vec[iteration_index].insert(
+                    crate::ids::StepId::from(step_output_key.as_str()),
+                    step_output,
+                );
+            }
+        }
+        append_flow_authority_inputs(run, authority_inputs)?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn cas_start_loop(
         &self,
         run_id: &RunId,
@@ -599,6 +761,39 @@ impl MobRunStore for InMemoryMobRunStore {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_start_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        initial_loop: LoopSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        if run.loops.contains_key(loop_instance_id) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.frames.insert(frame_id.clone(), next_frame);
+        run.loops.insert(loop_instance_id.clone(), initial_loop);
+        append_flow_authority_inputs(run, authority_inputs)?;
+        Ok(true)
+    }
+
     async fn cas_loop_request_body_frame(
         &self,
         run_id: &RunId,
@@ -620,6 +815,33 @@ impl MobRunStore for InMemoryMobRunStore {
         }
         run.flow_state = next_run_state;
         run.loops.insert(loop_instance_id.clone(), next_loop);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_loop_request_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        append_flow_authority_inputs(run, authority_inputs)?;
         Ok(true)
     }
 
@@ -664,6 +886,47 @@ impl MobRunStore for InMemoryMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_body_frame_start_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        initial_frame: FrameSnapshot,
+        ledger_entry: LoopIterationLedgerEntry,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        if run.frames.contains_key(frame_id) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        run.frames.insert(frame_id.clone(), initial_frame);
+        if !run.loop_iteration_ledger.iter().any(|existing| {
+            existing.loop_instance_id == ledger_entry.loop_instance_id
+                && existing.iteration == ledger_entry.iteration
+                && existing.frame_id == ledger_entry.frame_id
+        }) {
+            run.loop_iteration_ledger.push(ledger_entry);
+        }
+        append_flow_authority_inputs(run, authority_inputs)?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_body_frame(
         &self,
         run_id: &RunId,
@@ -696,6 +959,40 @@ impl MobRunStore for InMemoryMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        run.frames.insert(frame_id.clone(), next_frame);
+        append_flow_authority_inputs(run, authority_inputs)?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_loop(
         &self,
         run_id: &RunId,
@@ -724,6 +1021,40 @@ impl MobRunStore for InMemoryMobRunStore {
         run.flow_state = next_run_state;
         run.loops.insert(loop_instance_id.clone(), next_loop);
         run.frames.insert(frame_id.clone(), next_frame);
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let mut runs = self.runs.write().await;
+        let run = runs
+            .get_mut(run_id)
+            .ok_or_else(|| MobStoreError::NotFound(format!("run not found: {run_id}")))?;
+        if &run.flow_state != expected_run_state {
+            return Ok(false);
+        }
+        if run.loops.get(loop_instance_id) != Some(expected_loop) {
+            return Ok(false);
+        }
+        if run.frames.get(frame_id) != Some(expected_frame) {
+            return Ok(false);
+        }
+        run.flow_state = next_run_state;
+        run.loops.insert(loop_instance_id.clone(), next_loop);
+        run.frames.insert(frame_id.clone(), next_frame);
+        append_flow_authority_inputs(run, authority_inputs)?;
         Ok(true)
     }
 }
@@ -962,6 +1293,7 @@ mod tests {
             schema_version: 4,
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
+            flow_authority_inputs: Vec::new(),
         }
     }
 

@@ -448,6 +448,244 @@ mod tests {
                 )
                 .await
         }
+
+        async fn cas_flow_state_with_authority(
+            &self,
+            run_id: &RunId,
+            expected: &crate::run::flow_run::State,
+            next: &crate::run::flow_run::State,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_flow_state_with_authority(run_id, expected, next, authority_inputs)
+                .await
+        }
+
+        async fn cas_run_snapshot_with_authority(
+            &self,
+            run_id: &RunId,
+            expected_status: MobRunStatus,
+            expected_flow_state: &crate::run::flow_run::State,
+            next_status: MobRunStatus,
+            next_flow_state: &crate::run::flow_run::State,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_run_snapshot_with_authority(
+                    run_id,
+                    expected_status,
+                    expected_flow_state,
+                    next_status,
+                    next_flow_state,
+                    authority_inputs,
+                )
+                .await
+        }
+
+        async fn cas_frame_state_with_authority(
+            &self,
+            run_id: &RunId,
+            frame_id: &crate::ids::FrameId,
+            expected: Option<&crate::run::FrameSnapshot>,
+            next: crate::run::FrameSnapshot,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_frame_state_with_authority(run_id, frame_id, expected, next, authority_inputs)
+                .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_grant_node_slot_with_authority(
+            &self,
+            run_id: &RunId,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_grant_node_slot_with_authority(
+                    run_id,
+                    expected_run_state,
+                    next_run_state,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    authority_inputs,
+                )
+                .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_complete_step_and_record_output_with_authority(
+            &self,
+            run_id: &RunId,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            step_output_key: String,
+            step_output: serde_json::Value,
+            loop_context: Option<(&crate::ids::LoopId, u64)>,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_complete_step_and_record_output_with_authority(
+                    run_id,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    step_output_key,
+                    step_output,
+                    loop_context,
+                    authority_inputs,
+                )
+                .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_start_loop_with_authority(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            initial_loop: crate::run::LoopSnapshot,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_start_loop_with_authority(
+                    run_id,
+                    loop_instance_id,
+                    expected_run_state,
+                    next_run_state,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    initial_loop,
+                    authority_inputs,
+                )
+                .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_loop_request_body_frame_with_authority(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_loop_request_body_frame_with_authority(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    expected_run_state,
+                    next_run_state,
+                    authority_inputs,
+                )
+                .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_grant_body_frame_start_with_authority(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            initial_frame: crate::run::FrameSnapshot,
+            ledger_entry: crate::run::LoopIterationLedgerEntry,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_grant_body_frame_start_with_authority(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    initial_frame,
+                    ledger_entry,
+                    expected_run_state,
+                    next_run_state,
+                    authority_inputs,
+                )
+                .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_complete_body_frame_with_authority(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_complete_body_frame_with_authority(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    expected_run_state,
+                    next_run_state,
+                    authority_inputs,
+                )
+                .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn cas_complete_loop_with_authority(
+            &self,
+            run_id: &RunId,
+            loop_instance_id: &crate::ids::LoopInstanceId,
+            expected_loop: &crate::run::LoopSnapshot,
+            next_loop: crate::run::LoopSnapshot,
+            frame_id: &crate::ids::FrameId,
+            expected_frame: &crate::run::FrameSnapshot,
+            next_frame: crate::run::FrameSnapshot,
+            expected_run_state: &crate::run::flow_run::State,
+            next_run_state: crate::run::flow_run::State,
+            authority_inputs: Vec<crate::machines::mob_machine::MobMachineInput>,
+        ) -> Result<bool, MobStoreError> {
+            self.inner
+                .cas_complete_loop_with_authority(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop,
+                    frame_id,
+                    expected_frame,
+                    next_frame,
+                    expected_run_state,
+                    next_run_state,
+                    authority_inputs,
+                )
+                .await
+        }
     }
 
     #[derive(Default)]
@@ -553,6 +791,7 @@ mod tests {
             schema_version: 4,
             root_step_outputs: indexmap::IndexMap::new(),
             loop_iteration_outputs: std::collections::BTreeMap::new(),
+            flow_authority_inputs: Vec::new(),
         }
     }
 

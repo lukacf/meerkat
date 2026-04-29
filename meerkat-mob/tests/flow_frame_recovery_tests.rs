@@ -31,6 +31,7 @@ fn minimal_run_with_schema_v2() -> MobRun {
         schema_version: 4,
         root_step_outputs: IndexMap::new(),
         loop_iteration_outputs: BTreeMap::new(),
+        flow_authority_inputs: Vec::new(),
     }
 }
 

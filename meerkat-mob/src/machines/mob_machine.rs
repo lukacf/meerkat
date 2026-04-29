@@ -419,7 +419,19 @@ pub enum TaskStatus {
 }
 
 /// Dependency satisfaction mode for a step or frame node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DependencyMode {
     #[default]
     All,
@@ -427,7 +439,19 @@ pub enum DependencyMode {
 }
 
 /// Collection policy for a step's fan-out execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum CollectionPolicyKind {
     #[default]
     All,
@@ -436,7 +460,19 @@ pub enum CollectionPolicyKind {
 }
 
 /// Canonical flow-run lifecycle state once run-local semantics are absorbed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum FlowRunStatus {
     #[default]
     Absent,
@@ -448,7 +484,19 @@ pub enum FlowRunStatus {
 }
 
 /// Canonical frame lifecycle state once frame-local semantics are absorbed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum FrameStatus {
     #[default]
     Running,
@@ -458,7 +506,19 @@ pub enum FrameStatus {
 }
 
 /// Canonical loop lifecycle state once loop-local semantics are absorbed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LoopStatus {
     #[default]
     Running,
@@ -469,7 +529,19 @@ pub enum LoopStatus {
 }
 
 /// Canonical step execution status once run-local semantics are absorbed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum StepRunStatus {
     #[default]
     Dispatched,
@@ -480,7 +552,19 @@ pub enum StepRunStatus {
 }
 
 /// Root-vs-body frame scope for a frame snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum FrameScope {
     #[default]
     Root,
@@ -488,7 +572,19 @@ pub enum FrameScope {
 }
 
 /// Flow node kind inside a frame DAG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum FlowNodeKind {
     #[default]
     Step,
@@ -496,7 +592,19 @@ pub enum FlowNodeKind {
 }
 
 /// Per-node execution status within a frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum NodeRunStatus {
     Pending,
     #[default]
@@ -509,7 +617,19 @@ pub enum NodeRunStatus {
 }
 
 /// Loop-body/evaluate lifecycle stage for an active repeat-until node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum LoopIterationStage {
     #[default]
     AwaitingBodyFrame,

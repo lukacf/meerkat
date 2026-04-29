@@ -80,6 +80,7 @@ pub fn flow_projection_kernel_audit() -> &'static [FlowProjectionKernelAudit] {
 #[must_use]
 pub fn canonical_flow_authority_input_manifest() -> indexmap::IndexSet<&'static str> {
     [
+        MobMachineCatalogInput::RunFlow,
         MobMachineCatalogInput::CreateRunSeed,
         MobMachineCatalogInput::AuthorizeFlowRunReducerCommand,
         MobMachineCatalogInput::CreateFrameSeed,
@@ -632,6 +633,622 @@ impl MobMachineLoopIterationCommand {
         match self {
             Self::BodyFrameStarted(payload) => Some(&payload.frame_id),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowRunReducerCommandRecord {
+    CreateRun,
+    StartRun,
+    DispatchStep,
+    CompleteStep,
+    RecordStepOutput,
+    ConditionPassed,
+    ConditionRejected,
+    FailStep,
+    SkipStep,
+    ProjectFrameStepStatus,
+    CancelStep,
+    RegisterTargets,
+    RecordTargetSuccess,
+    RecordTargetTerminalFailure,
+    RecordTargetCanceled,
+    RecordTargetFailure,
+    RegisterReadyFrame,
+    PumpNodeScheduler,
+    RegisterPendingBodyFrame,
+    PumpFrameScheduler,
+    NodeExecutionReleased,
+    FrameTerminated,
+    TerminalizeCompleted,
+    TerminalizeFailed,
+    TerminalizeCanceled,
+}
+
+impl From<mob_dsl::FlowRunReducerCommandKind> for FlowRunReducerCommandRecord {
+    fn from(kind: mob_dsl::FlowRunReducerCommandKind) -> Self {
+        match kind {
+            mob_dsl::FlowRunReducerCommandKind::CreateRun => Self::CreateRun,
+            mob_dsl::FlowRunReducerCommandKind::StartRun => Self::StartRun,
+            mob_dsl::FlowRunReducerCommandKind::DispatchStep => Self::DispatchStep,
+            mob_dsl::FlowRunReducerCommandKind::CompleteStep => Self::CompleteStep,
+            mob_dsl::FlowRunReducerCommandKind::RecordStepOutput => Self::RecordStepOutput,
+            mob_dsl::FlowRunReducerCommandKind::ConditionPassed => Self::ConditionPassed,
+            mob_dsl::FlowRunReducerCommandKind::ConditionRejected => Self::ConditionRejected,
+            mob_dsl::FlowRunReducerCommandKind::FailStep => Self::FailStep,
+            mob_dsl::FlowRunReducerCommandKind::SkipStep => Self::SkipStep,
+            mob_dsl::FlowRunReducerCommandKind::ProjectFrameStepStatus => {
+                Self::ProjectFrameStepStatus
+            }
+            mob_dsl::FlowRunReducerCommandKind::CancelStep => Self::CancelStep,
+            mob_dsl::FlowRunReducerCommandKind::RegisterTargets => Self::RegisterTargets,
+            mob_dsl::FlowRunReducerCommandKind::RecordTargetSuccess => Self::RecordTargetSuccess,
+            mob_dsl::FlowRunReducerCommandKind::RecordTargetTerminalFailure => {
+                Self::RecordTargetTerminalFailure
+            }
+            mob_dsl::FlowRunReducerCommandKind::RecordTargetCanceled => Self::RecordTargetCanceled,
+            mob_dsl::FlowRunReducerCommandKind::RecordTargetFailure => Self::RecordTargetFailure,
+            mob_dsl::FlowRunReducerCommandKind::RegisterReadyFrame => Self::RegisterReadyFrame,
+            mob_dsl::FlowRunReducerCommandKind::PumpNodeScheduler => Self::PumpNodeScheduler,
+            mob_dsl::FlowRunReducerCommandKind::RegisterPendingBodyFrame => {
+                Self::RegisterPendingBodyFrame
+            }
+            mob_dsl::FlowRunReducerCommandKind::PumpFrameScheduler => Self::PumpFrameScheduler,
+            mob_dsl::FlowRunReducerCommandKind::NodeExecutionReleased => {
+                Self::NodeExecutionReleased
+            }
+            mob_dsl::FlowRunReducerCommandKind::FrameTerminated => Self::FrameTerminated,
+            mob_dsl::FlowRunReducerCommandKind::TerminalizeCompleted => Self::TerminalizeCompleted,
+            mob_dsl::FlowRunReducerCommandKind::TerminalizeFailed => Self::TerminalizeFailed,
+            mob_dsl::FlowRunReducerCommandKind::TerminalizeCanceled => Self::TerminalizeCanceled,
+        }
+    }
+}
+
+impl From<FlowRunReducerCommandRecord> for mob_dsl::FlowRunReducerCommandKind {
+    fn from(kind: FlowRunReducerCommandRecord) -> Self {
+        match kind {
+            FlowRunReducerCommandRecord::CreateRun => Self::CreateRun,
+            FlowRunReducerCommandRecord::StartRun => Self::StartRun,
+            FlowRunReducerCommandRecord::DispatchStep => Self::DispatchStep,
+            FlowRunReducerCommandRecord::CompleteStep => Self::CompleteStep,
+            FlowRunReducerCommandRecord::RecordStepOutput => Self::RecordStepOutput,
+            FlowRunReducerCommandRecord::ConditionPassed => Self::ConditionPassed,
+            FlowRunReducerCommandRecord::ConditionRejected => Self::ConditionRejected,
+            FlowRunReducerCommandRecord::FailStep => Self::FailStep,
+            FlowRunReducerCommandRecord::SkipStep => Self::SkipStep,
+            FlowRunReducerCommandRecord::ProjectFrameStepStatus => Self::ProjectFrameStepStatus,
+            FlowRunReducerCommandRecord::CancelStep => Self::CancelStep,
+            FlowRunReducerCommandRecord::RegisterTargets => Self::RegisterTargets,
+            FlowRunReducerCommandRecord::RecordTargetSuccess => Self::RecordTargetSuccess,
+            FlowRunReducerCommandRecord::RecordTargetTerminalFailure => {
+                Self::RecordTargetTerminalFailure
+            }
+            FlowRunReducerCommandRecord::RecordTargetCanceled => Self::RecordTargetCanceled,
+            FlowRunReducerCommandRecord::RecordTargetFailure => Self::RecordTargetFailure,
+            FlowRunReducerCommandRecord::RegisterReadyFrame => Self::RegisterReadyFrame,
+            FlowRunReducerCommandRecord::PumpNodeScheduler => Self::PumpNodeScheduler,
+            FlowRunReducerCommandRecord::RegisterPendingBodyFrame => Self::RegisterPendingBodyFrame,
+            FlowRunReducerCommandRecord::PumpFrameScheduler => Self::PumpFrameScheduler,
+            FlowRunReducerCommandRecord::NodeExecutionReleased => Self::NodeExecutionReleased,
+            FlowRunReducerCommandRecord::FrameTerminated => Self::FrameTerminated,
+            FlowRunReducerCommandRecord::TerminalizeCompleted => Self::TerminalizeCompleted,
+            FlowRunReducerCommandRecord::TerminalizeFailed => Self::TerminalizeFailed,
+            FlowRunReducerCommandRecord::TerminalizeCanceled => Self::TerminalizeCanceled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowFrameReducerCommandRecord {
+    StartRootFrame,
+    StartBodyFrame,
+    AdmitNextReadyNode,
+    CompleteNode,
+    RecordNodeOutput,
+    FailNode,
+    SkipNode,
+    CancelNode,
+    SealFrame,
+}
+
+impl From<mob_dsl::FlowFrameReducerCommandKind> for FlowFrameReducerCommandRecord {
+    fn from(kind: mob_dsl::FlowFrameReducerCommandKind) -> Self {
+        match kind {
+            mob_dsl::FlowFrameReducerCommandKind::StartRootFrame => Self::StartRootFrame,
+            mob_dsl::FlowFrameReducerCommandKind::StartBodyFrame => Self::StartBodyFrame,
+            mob_dsl::FlowFrameReducerCommandKind::AdmitNextReadyNode => Self::AdmitNextReadyNode,
+            mob_dsl::FlowFrameReducerCommandKind::CompleteNode => Self::CompleteNode,
+            mob_dsl::FlowFrameReducerCommandKind::RecordNodeOutput => Self::RecordNodeOutput,
+            mob_dsl::FlowFrameReducerCommandKind::FailNode => Self::FailNode,
+            mob_dsl::FlowFrameReducerCommandKind::SkipNode => Self::SkipNode,
+            mob_dsl::FlowFrameReducerCommandKind::CancelNode => Self::CancelNode,
+            mob_dsl::FlowFrameReducerCommandKind::SealFrame => Self::SealFrame,
+        }
+    }
+}
+
+impl From<FlowFrameReducerCommandRecord> for mob_dsl::FlowFrameReducerCommandKind {
+    fn from(kind: FlowFrameReducerCommandRecord) -> Self {
+        match kind {
+            FlowFrameReducerCommandRecord::StartRootFrame => Self::StartRootFrame,
+            FlowFrameReducerCommandRecord::StartBodyFrame => Self::StartBodyFrame,
+            FlowFrameReducerCommandRecord::AdmitNextReadyNode => Self::AdmitNextReadyNode,
+            FlowFrameReducerCommandRecord::CompleteNode => Self::CompleteNode,
+            FlowFrameReducerCommandRecord::RecordNodeOutput => Self::RecordNodeOutput,
+            FlowFrameReducerCommandRecord::FailNode => Self::FailNode,
+            FlowFrameReducerCommandRecord::SkipNode => Self::SkipNode,
+            FlowFrameReducerCommandRecord::CancelNode => Self::CancelNode,
+            FlowFrameReducerCommandRecord::SealFrame => Self::SealFrame,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoopIterationReducerCommandRecord {
+    StartLoop,
+    BodyFrameStarted,
+    BodyFrameCompleted,
+    BodyFrameFailed,
+    BodyFrameCanceled,
+    UntilConditionMet,
+    UntilConditionFailed,
+    CancelLoop,
+}
+
+impl From<mob_dsl::LoopIterationReducerCommandKind> for LoopIterationReducerCommandRecord {
+    fn from(kind: mob_dsl::LoopIterationReducerCommandKind) -> Self {
+        match kind {
+            mob_dsl::LoopIterationReducerCommandKind::StartLoop => Self::StartLoop,
+            mob_dsl::LoopIterationReducerCommandKind::BodyFrameStarted => Self::BodyFrameStarted,
+            mob_dsl::LoopIterationReducerCommandKind::BodyFrameCompleted => {
+                Self::BodyFrameCompleted
+            }
+            mob_dsl::LoopIterationReducerCommandKind::BodyFrameFailed => Self::BodyFrameFailed,
+            mob_dsl::LoopIterationReducerCommandKind::BodyFrameCanceled => Self::BodyFrameCanceled,
+            mob_dsl::LoopIterationReducerCommandKind::UntilConditionMet => Self::UntilConditionMet,
+            mob_dsl::LoopIterationReducerCommandKind::UntilConditionFailed => {
+                Self::UntilConditionFailed
+            }
+            mob_dsl::LoopIterationReducerCommandKind::CancelLoop => Self::CancelLoop,
+        }
+    }
+}
+
+impl From<LoopIterationReducerCommandRecord> for mob_dsl::LoopIterationReducerCommandKind {
+    fn from(kind: LoopIterationReducerCommandRecord) -> Self {
+        match kind {
+            LoopIterationReducerCommandRecord::StartLoop => Self::StartLoop,
+            LoopIterationReducerCommandRecord::BodyFrameStarted => Self::BodyFrameStarted,
+            LoopIterationReducerCommandRecord::BodyFrameCompleted => Self::BodyFrameCompleted,
+            LoopIterationReducerCommandRecord::BodyFrameFailed => Self::BodyFrameFailed,
+            LoopIterationReducerCommandRecord::BodyFrameCanceled => Self::BodyFrameCanceled,
+            LoopIterationReducerCommandRecord::UntilConditionMet => Self::UntilConditionMet,
+            LoopIterationReducerCommandRecord::UntilConditionFailed => Self::UntilConditionFailed,
+            LoopIterationReducerCommandRecord::CancelLoop => Self::CancelLoop,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowRunSeedAuthorityRecord {
+    pub run_id: mob_dsl::RunId,
+    pub step_ids: BTreeSet<mob_dsl::StepId>,
+    pub ordered_steps: Vec<mob_dsl::StepId>,
+    pub step_has_conditions: BTreeMap<mob_dsl::StepId, bool>,
+    pub step_dependencies: BTreeMap<mob_dsl::StepId, Vec<mob_dsl::StepId>>,
+    pub step_dependency_modes: BTreeMap<mob_dsl::StepId, mob_dsl::DependencyMode>,
+    pub step_branches: BTreeMap<mob_dsl::StepId, Option<mob_dsl::BranchId>>,
+    pub step_collection_policies: BTreeMap<mob_dsl::StepId, mob_dsl::CollectionPolicyKind>,
+    pub step_quorum_thresholds: BTreeMap<mob_dsl::StepId, u32>,
+    pub escalation_threshold: u32,
+    pub max_step_retries: u32,
+    pub max_active_nodes: u64,
+    pub max_active_frames: u64,
+    pub max_frame_depth: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowFrameSeedAuthorityRecord {
+    pub run_id: mob_dsl::RunId,
+    pub frame_id: mob_dsl::FrameId,
+    pub frame_scope: mob_dsl::FrameScope,
+    pub loop_instance_id: Option<mob_dsl::LoopInstanceId>,
+    pub iteration: u32,
+    pub tracked_nodes: BTreeSet<mob_dsl::FlowNodeId>,
+    pub ordered_nodes: Vec<mob_dsl::FlowNodeId>,
+    pub node_kind: BTreeMap<mob_dsl::FlowNodeId, mob_dsl::FlowNodeKind>,
+    pub node_dependencies: BTreeMap<mob_dsl::FlowNodeId, Vec<mob_dsl::FlowNodeId>>,
+    pub node_dependency_modes: BTreeMap<mob_dsl::FlowNodeId, mob_dsl::DependencyMode>,
+    pub node_branches: BTreeMap<mob_dsl::FlowNodeId, Option<mob_dsl::BranchId>>,
+    pub node_step_ids: BTreeMap<mob_dsl::FlowNodeId, mob_dsl::StepId>,
+    pub node_loop_ids: BTreeMap<mob_dsl::FlowNodeId, mob_dsl::LoopId>,
+    pub node_status: BTreeMap<mob_dsl::FlowNodeId, mob_dsl::NodeRunStatus>,
+    pub ready_queue: Vec<mob_dsl::FlowNodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "input", content = "payload")]
+pub enum FlowAuthorityInputRecord {
+    RunFlow(FlowRunSeedAuthorityRecord),
+    CreateRunSeed(FlowRunSeedAuthorityRecord),
+    AuthorizeFlowRunReducerCommand {
+        run_id: mob_dsl::RunId,
+        command: FlowRunReducerCommandRecord,
+        step_id: Option<mob_dsl::StepId>,
+        run_step_key: Option<mob_dsl::RunStepKey>,
+        step_status: Option<mob_dsl::StepRunStatus>,
+        target_count: Option<u64>,
+        frame_id: Option<mob_dsl::FrameId>,
+        node_id: Option<mob_dsl::FlowNodeId>,
+        loop_instance_id: Option<mob_dsl::LoopInstanceId>,
+        retry_key: Option<String>,
+    },
+    CreateFrameSeed(FlowFrameSeedAuthorityRecord),
+    AuthorizeFlowFrameReducerCommand {
+        frame_id: mob_dsl::FrameId,
+        command: FlowFrameReducerCommandRecord,
+        node_id: Option<mob_dsl::FlowNodeId>,
+        frame_node_key: Option<mob_dsl::FrameNodeKey>,
+        node_status: Option<mob_dsl::NodeRunStatus>,
+        terminal_status: Option<mob_dsl::FrameStatus>,
+    },
+    CreateLoopSeed {
+        loop_instance_id: mob_dsl::LoopInstanceId,
+        parent_frame_id: mob_dsl::FrameId,
+        parent_node_id: mob_dsl::FlowNodeId,
+        loop_id: mob_dsl::LoopId,
+        depth: u32,
+        max_iterations: u64,
+    },
+    RecordLoopBodyFrameCompleted {
+        loop_instance_id: mob_dsl::LoopInstanceId,
+        iteration: u64,
+    },
+    RecordLoopUntilConditionMet {
+        loop_instance_id: mob_dsl::LoopInstanceId,
+        iteration: u64,
+    },
+    RecordLoopUntilConditionFailed {
+        loop_instance_id: mob_dsl::LoopInstanceId,
+        iteration: u64,
+    },
+    AuthorizeLoopIterationReducerCommand {
+        loop_instance_id: mob_dsl::LoopInstanceId,
+        command: LoopIterationReducerCommandRecord,
+        body_frame_id: Option<mob_dsl::FrameId>,
+        body_frame_iteration: Option<u64>,
+    },
+}
+
+impl FlowAuthorityInputRecord {
+    pub(crate) fn from_machine_input(input: mob_dsl::MobMachineInput) -> Result<Self, MobError> {
+        Ok(match input {
+            mob_dsl::MobMachineInput::RunFlow {
+                run_id,
+                step_ids,
+                ordered_steps,
+                step_has_conditions,
+                step_dependencies,
+                step_dependency_modes,
+                step_branches,
+                step_collection_policies,
+                step_quorum_thresholds,
+                escalation_threshold,
+                max_step_retries,
+                max_active_nodes,
+                max_active_frames,
+                max_frame_depth,
+            } => Self::RunFlow(FlowRunSeedAuthorityRecord {
+                run_id,
+                step_ids,
+                ordered_steps,
+                step_has_conditions,
+                step_dependencies,
+                step_dependency_modes,
+                step_branches,
+                step_collection_policies,
+                step_quorum_thresholds,
+                escalation_threshold,
+                max_step_retries,
+                max_active_nodes,
+                max_active_frames,
+                max_frame_depth,
+            }),
+            mob_dsl::MobMachineInput::CreateRunSeed {
+                run_id,
+                step_ids,
+                ordered_steps,
+                step_has_conditions,
+                step_dependencies,
+                step_dependency_modes,
+                step_branches,
+                step_collection_policies,
+                step_quorum_thresholds,
+                escalation_threshold,
+                max_step_retries,
+                max_active_nodes,
+                max_active_frames,
+                max_frame_depth,
+            } => Self::CreateRunSeed(FlowRunSeedAuthorityRecord {
+                run_id,
+                step_ids,
+                ordered_steps,
+                step_has_conditions,
+                step_dependencies,
+                step_dependency_modes,
+                step_branches,
+                step_collection_policies,
+                step_quorum_thresholds,
+                escalation_threshold,
+                max_step_retries,
+                max_active_nodes,
+                max_active_frames,
+                max_frame_depth,
+            }),
+            mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
+                run_id,
+                command,
+                step_id,
+                run_step_key,
+                step_status,
+                target_count,
+                frame_id,
+                node_id,
+                loop_instance_id,
+                retry_key,
+            } => Self::AuthorizeFlowRunReducerCommand {
+                run_id,
+                command: command.into(),
+                step_id,
+                run_step_key,
+                step_status,
+                target_count,
+                frame_id,
+                node_id,
+                loop_instance_id,
+                retry_key,
+            },
+            mob_dsl::MobMachineInput::CreateFrameSeed {
+                run_id,
+                frame_id,
+                frame_scope,
+                loop_instance_id,
+                iteration,
+                tracked_nodes,
+                ordered_nodes,
+                node_kind,
+                node_dependencies,
+                node_dependency_modes,
+                node_branches,
+                node_step_ids,
+                node_loop_ids,
+                node_status,
+                ready_queue,
+            } => Self::CreateFrameSeed(FlowFrameSeedAuthorityRecord {
+                run_id,
+                frame_id,
+                frame_scope,
+                loop_instance_id,
+                iteration,
+                tracked_nodes,
+                ordered_nodes,
+                node_kind,
+                node_dependencies,
+                node_dependency_modes,
+                node_branches,
+                node_step_ids,
+                node_loop_ids,
+                node_status,
+                ready_queue,
+            }),
+            mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand {
+                frame_id,
+                command,
+                node_id,
+                frame_node_key,
+                node_status,
+                terminal_status,
+            } => Self::AuthorizeFlowFrameReducerCommand {
+                frame_id,
+                command: command.into(),
+                node_id,
+                frame_node_key,
+                node_status,
+                terminal_status,
+            },
+            mob_dsl::MobMachineInput::CreateLoopSeed {
+                loop_instance_id,
+                parent_frame_id,
+                parent_node_id,
+                loop_id,
+                depth,
+                max_iterations,
+            } => Self::CreateLoopSeed {
+                loop_instance_id,
+                parent_frame_id,
+                parent_node_id,
+                loop_id,
+                depth,
+                max_iterations,
+            },
+            mob_dsl::MobMachineInput::RecordLoopBodyFrameCompleted {
+                loop_instance_id,
+                iteration,
+            } => Self::RecordLoopBodyFrameCompleted {
+                loop_instance_id,
+                iteration,
+            },
+            mob_dsl::MobMachineInput::RecordLoopUntilConditionMet {
+                loop_instance_id,
+                iteration,
+            } => Self::RecordLoopUntilConditionMet {
+                loop_instance_id,
+                iteration,
+            },
+            mob_dsl::MobMachineInput::RecordLoopUntilConditionFailed {
+                loop_instance_id,
+                iteration,
+            } => Self::RecordLoopUntilConditionFailed {
+                loop_instance_id,
+                iteration,
+            },
+            mob_dsl::MobMachineInput::AuthorizeLoopIterationReducerCommand {
+                loop_instance_id,
+                command,
+                body_frame_id,
+                body_frame_iteration,
+            } => Self::AuthorizeLoopIterationReducerCommand {
+                loop_instance_id,
+                command: command.into(),
+                body_frame_id,
+                body_frame_iteration,
+            },
+            other => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine input {other:?} is not a flow authority input"
+                )));
+            }
+        })
+    }
+
+    pub(crate) fn to_machine_input(&self) -> mob_dsl::MobMachineInput {
+        match self.clone() {
+            Self::RunFlow(record) => mob_dsl::MobMachineInput::RunFlow {
+                run_id: record.run_id,
+                step_ids: record.step_ids,
+                ordered_steps: record.ordered_steps,
+                step_has_conditions: record.step_has_conditions,
+                step_dependencies: record.step_dependencies,
+                step_dependency_modes: record.step_dependency_modes,
+                step_branches: record.step_branches,
+                step_collection_policies: record.step_collection_policies,
+                step_quorum_thresholds: record.step_quorum_thresholds,
+                escalation_threshold: record.escalation_threshold,
+                max_step_retries: record.max_step_retries,
+                max_active_nodes: record.max_active_nodes,
+                max_active_frames: record.max_active_frames,
+                max_frame_depth: record.max_frame_depth,
+            },
+            Self::CreateRunSeed(record) => mob_dsl::MobMachineInput::CreateRunSeed {
+                run_id: record.run_id,
+                step_ids: record.step_ids,
+                ordered_steps: record.ordered_steps,
+                step_has_conditions: record.step_has_conditions,
+                step_dependencies: record.step_dependencies,
+                step_dependency_modes: record.step_dependency_modes,
+                step_branches: record.step_branches,
+                step_collection_policies: record.step_collection_policies,
+                step_quorum_thresholds: record.step_quorum_thresholds,
+                escalation_threshold: record.escalation_threshold,
+                max_step_retries: record.max_step_retries,
+                max_active_nodes: record.max_active_nodes,
+                max_active_frames: record.max_active_frames,
+                max_frame_depth: record.max_frame_depth,
+            },
+            Self::AuthorizeFlowRunReducerCommand {
+                run_id,
+                command,
+                step_id,
+                run_step_key,
+                step_status,
+                target_count,
+                frame_id,
+                node_id,
+                loop_instance_id,
+                retry_key,
+            } => mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
+                run_id,
+                command: command.into(),
+                step_id,
+                run_step_key,
+                step_status,
+                target_count,
+                frame_id,
+                node_id,
+                loop_instance_id,
+                retry_key,
+            },
+            Self::CreateFrameSeed(record) => mob_dsl::MobMachineInput::CreateFrameSeed {
+                run_id: record.run_id,
+                frame_id: record.frame_id,
+                frame_scope: record.frame_scope,
+                loop_instance_id: record.loop_instance_id,
+                iteration: record.iteration,
+                tracked_nodes: record.tracked_nodes,
+                ordered_nodes: record.ordered_nodes,
+                node_kind: record.node_kind,
+                node_dependencies: record.node_dependencies,
+                node_dependency_modes: record.node_dependency_modes,
+                node_branches: record.node_branches,
+                node_step_ids: record.node_step_ids,
+                node_loop_ids: record.node_loop_ids,
+                node_status: record.node_status,
+                ready_queue: record.ready_queue,
+            },
+            Self::AuthorizeFlowFrameReducerCommand {
+                frame_id,
+                command,
+                node_id,
+                frame_node_key,
+                node_status,
+                terminal_status,
+            } => mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand {
+                frame_id,
+                command: command.into(),
+                node_id,
+                frame_node_key,
+                node_status,
+                terminal_status,
+            },
+            Self::CreateLoopSeed {
+                loop_instance_id,
+                parent_frame_id,
+                parent_node_id,
+                loop_id,
+                depth,
+                max_iterations,
+            } => mob_dsl::MobMachineInput::CreateLoopSeed {
+                loop_instance_id,
+                parent_frame_id,
+                parent_node_id,
+                loop_id,
+                depth,
+                max_iterations,
+            },
+            Self::RecordLoopBodyFrameCompleted {
+                loop_instance_id,
+                iteration,
+            } => mob_dsl::MobMachineInput::RecordLoopBodyFrameCompleted {
+                loop_instance_id,
+                iteration,
+            },
+            Self::RecordLoopUntilConditionMet {
+                loop_instance_id,
+                iteration,
+            } => mob_dsl::MobMachineInput::RecordLoopUntilConditionMet {
+                loop_instance_id,
+                iteration,
+            },
+            Self::RecordLoopUntilConditionFailed {
+                loop_instance_id,
+                iteration,
+            } => mob_dsl::MobMachineInput::RecordLoopUntilConditionFailed {
+                loop_instance_id,
+                iteration,
+            },
+            Self::AuthorizeLoopIterationReducerCommand {
+                loop_instance_id,
+                command,
+                body_frame_id,
+                body_frame_iteration,
+            } => mob_dsl::MobMachineInput::AuthorizeLoopIterationReducerCommand {
+                loop_instance_id,
+                command: command.into(),
+                body_frame_id,
+                body_frame_iteration,
+            },
         }
     }
 }
@@ -2826,6 +3443,10 @@ pub struct MobRun {
     /// in stable key order without depending on insertion order.
     #[serde(default)]
     pub loop_iteration_outputs: BTreeMap<LoopId, Vec<IndexMap<StepId, serde_json::Value>>>,
+    /// Accepted MobMachine flow-authority inputs persisted in the same atomic
+    /// store operation as the derived run/frame/loop projection they authorize.
+    #[serde(default)]
+    pub flow_authority_inputs: Vec<FlowAuthorityInputRecord>,
 }
 
 impl MobRun {
@@ -2997,10 +3618,138 @@ impl MobRun {
             frames: BTreeMap::new(),
             loops: BTreeMap::new(),
             loop_iteration_ledger: Vec::new(),
-            schema_version: 5,
+            schema_version: 6,
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
+            flow_authority_inputs: Vec::new(),
         }
+    }
+
+    pub(crate) fn append_flow_authority_inputs(
+        &mut self,
+        inputs: impl IntoIterator<Item = mob_dsl::MobMachineInput>,
+    ) -> Result<(), MobError> {
+        let records = inputs
+            .into_iter()
+            .map(FlowAuthorityInputRecord::from_machine_input)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.flow_authority_inputs.extend(records);
+        Ok(())
+    }
+
+    pub(crate) fn replay_flow_authority_inputs_into(
+        authority: &mut mob_dsl::MobMachineAuthority,
+        inputs: &[FlowAuthorityInputRecord],
+        context: &str,
+    ) -> Result<(), MobError> {
+        for record in inputs {
+            let input = record.to_machine_input();
+            let input_debug = format!("{input:?}");
+            let transition = mob_dsl::MobMachineMutator::apply(authority, input).map_err(
+                |error| {
+                    MobError::Internal(format!(
+                        "MobMachine flow authority replay ({context}) rejected {input_debug}: {error}"
+                    ))
+                },
+            )?;
+            if transition.from_phase != transition.to_phase {
+                authority.state.lifecycle_phase = transition.to_phase;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_flow_authority_projection(&self) -> Result<(), MobError> {
+        if self.flow_authority_inputs.is_empty() {
+            return Ok(());
+        }
+
+        let mut authority = mob_dsl::MobMachineAuthority::new();
+        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
+        Self::replay_flow_authority_inputs_into(
+            &mut authority,
+            &self.flow_authority_inputs,
+            "recovery_validate_run_projection",
+        )?;
+
+        let projected_flow_state =
+            project_flow_run_state_from_machine(&authority.state, &self.run_id)?;
+        if projected_flow_state != self.flow_state {
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': flow_state diverged",
+                self.run_id
+            )));
+        }
+
+        let projected_status = mob_run_status_from_flow_phase(projected_flow_state.phase);
+        if projected_status != self.status {
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': status {:?} != {:?}",
+                self.run_id, self.status, projected_status
+            )));
+        }
+
+        let run_key = mob_dsl::RunId::from(self.run_id.to_string());
+        let projected_frame_ids = authority
+            .state
+            .frame_run
+            .iter()
+            .filter(|(_, frame_run_id)| *frame_run_id == &run_key)
+            .map(|(frame_id, _)| project_frame_id(frame_id))
+            .collect::<BTreeSet<_>>();
+        let persisted_frame_ids = self.frames.keys().cloned().collect::<BTreeSet<_>>();
+        if projected_frame_ids != persisted_frame_ids {
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': frame keyset diverged",
+                self.run_id
+            )));
+        }
+
+        for (frame_id, snapshot) in &self.frames {
+            let projected =
+                project_flow_frame_authority_state_from_machine(&authority.state, frame_id)?;
+            if projected != snapshot.kernel_state {
+                return Err(MobError::Internal(format!(
+                    "flow authority log projection mismatch for run '{}': frame '{}' diverged",
+                    self.run_id, frame_id
+                )));
+            }
+        }
+
+        let projected_loop_ids = authority
+            .state
+            .loop_phase
+            .keys()
+            .filter(|loop_instance_id| {
+                authority
+                    .state
+                    .loop_parent_frame
+                    .get(*loop_instance_id)
+                    .and_then(|frame_id| authority.state.frame_run.get(frame_id))
+                    == Some(&run_key)
+            })
+            .map(project_loop_instance_id)
+            .collect::<BTreeSet<_>>();
+        let persisted_loop_ids = self.loops.keys().cloned().collect::<BTreeSet<_>>();
+        if projected_loop_ids != persisted_loop_ids {
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': loop keyset diverged",
+                self.run_id
+            )));
+        }
+
+        for (loop_instance_id, snapshot) in &self.loops {
+            let projected =
+                project_loop_iteration_state_from_machine(&authority.state, loop_instance_id)?;
+            if projected != snapshot.kernel_state {
+                return Err(MobError::Internal(format!(
+                    "flow authority log projection mismatch for run '{}': loop '{}' diverged",
+                    self.run_id, loop_instance_id
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     #[cfg(test)]
@@ -3372,6 +4121,16 @@ impl MobRun {
         mob_dsl::MobMachineMutator::apply(&mut authority, seed_input)
             .map_err(|error| MobError::Internal(format!("test CreateRunSeed rejected: {error}")))?;
         Self::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+    }
+}
+
+fn mob_run_status_from_flow_phase(phase: flow_run::Phase) -> MobRunStatus {
+    match phase {
+        flow_run::Phase::Absent | flow_run::Phase::Pending => MobRunStatus::Pending,
+        flow_run::Phase::Running => MobRunStatus::Running,
+        flow_run::Phase::Completed => MobRunStatus::Completed,
+        flow_run::Phase::Failed => MobRunStatus::Failed,
+        flow_run::Phase::Canceled => MobRunStatus::Canceled,
     }
 }
 
@@ -4147,6 +4906,7 @@ mod tests {
             schema_version: 4,
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
+            flow_authority_inputs: Vec::new(),
         };
 
         let encoded = serde_json::to_string(&run).unwrap();

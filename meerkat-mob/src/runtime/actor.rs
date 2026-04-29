@@ -8981,13 +8981,14 @@ impl MobActor {
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;
         debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));
         let prepared_run_flow = self
-            .prepare_dsl_input(run_flow, "run_flow")
+            .prepare_dsl_input(run_flow.clone(), "run_flow")
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
         self.create_pending_run(
             run_id.clone(),
             &config,
             &prepared_run_flow.authority.state,
             activation_params.clone(),
+            vec![run_flow],
         )
         .await
         .inspect_err(|error| {
@@ -9141,16 +9142,18 @@ impl MobActor {
         config: &FlowRunConfig,
         machine_state: &mob_dsl::MobMachineState,
         activation_params: serde_json::Value,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<RunId, MobError> {
         let flow_state =
             MobRun::flow_state_for_config_with_authority(&run_id, config, machine_state)?;
-        let run = MobRun::pending_with_run_id(
+        let mut run = MobRun::pending_with_run_id(
             run_id.clone(),
             self.definition.id.clone(),
             config.flow_id.clone(),
             flow_state,
             activation_params,
         );
+        run.append_flow_authority_inputs(authority_inputs)?;
         self.run_store.create_run(run).await?;
         Ok(run_id)
     }
@@ -9392,6 +9395,7 @@ impl MobActor {
         }
         let prepared =
             self.prepare_dsl_inputs(plan.machine_inputs(), "flow_frame_loop_store_plan")?;
+        let authority_inputs = plan.machine_inputs().to_vec();
         let won = match &plan {
             FlowFrameLoopStorePlan::InsertFrame {
                 frame_id,
@@ -9399,7 +9403,13 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_frame_state(run_id, frame_id, None, initial_frame.clone())
+                .cas_frame_state_with_authority(
+                    run_id,
+                    frame_id,
+                    None,
+                    initial_frame.clone(),
+                    authority_inputs,
+                )
                 .await
                 .map_err(MobError::from)?,
             FlowFrameLoopStorePlan::FrameState {
@@ -9409,7 +9419,13 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
+                .cas_frame_state_with_authority(
+                    run_id,
+                    frame_id,
+                    Some(expected_frame),
+                    next_frame.clone(),
+                    authority_inputs,
+                )
                 .await
                 .map_err(MobError::from)?,
             FlowFrameLoopStorePlan::CompleteStepAndRecordOutput {
@@ -9422,7 +9438,7 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_complete_step_and_record_output(
+                .cas_complete_step_and_record_output_with_authority(
                     run_id,
                     frame_id,
                     expected_frame,
@@ -9432,6 +9448,7 @@ impl MobActor {
                     loop_context
                         .as_ref()
                         .map(|(loop_id, iteration)| (loop_id, *iteration)),
+                    authority_inputs,
                 )
                 .await
                 .map_err(MobError::from)?,
@@ -9444,13 +9461,14 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_grant_node_slot(
+                .cas_grant_node_slot_with_authority(
                     run_id,
                     expected_run_state,
                     next_run_state.clone(),
                     frame_id,
                     expected_frame,
                     next_frame.clone(),
+                    authority_inputs,
                 )
                 .await
                 .map_err(MobError::from)?,
@@ -9465,7 +9483,7 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_start_loop(
+                .cas_start_loop_with_authority(
                     run_id,
                     loop_instance_id,
                     expected_run_state,
@@ -9474,6 +9492,7 @@ impl MobActor {
                     expected_frame,
                     next_frame.clone(),
                     initial_loop.clone(),
+                    authority_inputs,
                 )
                 .await
                 .map_err(MobError::from)?,
@@ -9489,7 +9508,7 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_grant_body_frame_start(
+                .cas_grant_body_frame_start_with_authority(
                     run_id,
                     loop_instance_id,
                     expected_loop,
@@ -9499,6 +9518,7 @@ impl MobActor {
                     ledger_entry.clone(),
                     expected_run_state,
                     next_run_state.clone(),
+                    authority_inputs,
                 )
                 .await
                 .map_err(MobError::from)?,
@@ -9508,7 +9528,12 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_flow_state(run_id, expected_run_state, next_run_state)
+                .cas_flow_state_with_authority(
+                    run_id,
+                    expected_run_state,
+                    next_run_state,
+                    authority_inputs,
+                )
                 .await
                 .map_err(MobError::from)?,
             FlowFrameLoopStorePlan::SealFrame {
@@ -9518,7 +9543,13 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
+                .cas_frame_state_with_authority(
+                    run_id,
+                    frame_id,
+                    Some(expected_frame),
+                    next_frame.clone(),
+                    authority_inputs,
+                )
                 .await
                 .map_err(MobError::from)?,
             FlowFrameLoopStorePlan::CompleteBodyFrame {
@@ -9533,7 +9564,7 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_complete_body_frame(
+                .cas_complete_body_frame_with_authority(
                     run_id,
                     loop_instance_id,
                     expected_loop,
@@ -9543,6 +9574,7 @@ impl MobActor {
                     next_frame.clone(),
                     expected_run_state,
                     next_run_state.clone(),
+                    authority_inputs,
                 )
                 .await
                 .map_err(MobError::from)?,
@@ -9555,13 +9587,14 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_loop_request_body_frame(
+                .cas_loop_request_body_frame_with_authority(
                     run_id,
                     loop_instance_id,
                     expected_loop,
                     next_loop.clone(),
                     expected_run_state,
                     next_run_state.clone(),
+                    authority_inputs,
                 )
                 .await
                 .map_err(MobError::from)?,
@@ -9577,7 +9610,7 @@ impl MobActor {
                 ..
             } => self
                 .run_store
-                .cas_complete_loop(
+                .cas_complete_loop_with_authority(
                     run_id,
                     loop_instance_id,
                     expected_loop,
@@ -9587,6 +9620,7 @@ impl MobActor {
                     next_frame.clone(),
                     expected_run_state,
                     next_run_state.clone(),
+                    authority_inputs,
                 )
                 .await
                 .map_err(MobError::from)?,

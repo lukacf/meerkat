@@ -14,6 +14,7 @@ use crate::event::{MobEvent, NewMobEvent, decode_stored_mob_event, encode_stored
 use crate::ids::{
     AgentIdentity, FlowId, FrameId, Generation, LoopId, LoopInstanceId, MobId, RunId, StepId,
 };
+use crate::machines::mob_machine as mob_dsl;
 use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
@@ -940,11 +941,57 @@ pub struct SqliteMobRunStore {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum MissingRunCasBehavior {
+    ReturnFalse,
+    NotFound,
+}
+
 impl std::fmt::Debug for SqliteMobRunStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SqliteMobRunStore")
             .field("path", &self.path)
             .finish()
+    }
+}
+
+impl SqliteMobRunStore {
+    async fn update_run_with_authority_if<F>(
+        &self,
+        run_id: &RunId,
+        missing_behavior: MissingRunCasBehavior,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+        update: F,
+    ) -> Result<bool, MobStoreError>
+    where
+        F: FnOnce(&mut MobRun) -> Result<bool, MobStoreError> + Send + 'static,
+    {
+        let path = self.path.clone();
+        let key = run_id.to_string();
+        let run_id = run_id.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let bytes = load_run_bytes(&tx, &key)?;
+            let Some(bytes) = bytes else {
+                return match missing_behavior {
+                    MissingRunCasBehavior::ReturnFalse => Ok(false),
+                    MissingRunCasBehavior::NotFound => {
+                        Err(MobStoreError::NotFound(format!("run not found: {run_id}")))
+                    }
+                };
+            };
+            let mut run: MobRun = decode_json(&bytes)?;
+            if !update(&mut run)? {
+                return Ok(false);
+            }
+            run.append_flow_authority_inputs(authority_inputs)
+                .map_err(|error| MobStoreError::Internal(error.to_string()))?;
+            write_run_json(&tx, &key, &run)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
     }
 }
 
@@ -1117,6 +1164,30 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    async fn cas_flow_state_with_authority(
+        &self,
+        run_id: &RunId,
+        expected: &flow_run::State,
+        next: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let expected = expected.clone();
+        let next = next.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::ReturnFalse,
+            authority_inputs,
+            move |run| {
+                if run.flow_state != expected {
+                    return Ok(false);
+                }
+                run.flow_state = next;
+                Ok(true)
+            },
+        )
+        .await
+    }
+
     async fn cas_run_snapshot(
         &self,
         run_id: &RunId,
@@ -1165,6 +1236,40 @@ impl MobRunStore for SqliteMobRunStore {
             tx.commit().map_err(se)?;
             Ok(true)
         })
+        .await
+    }
+
+    async fn cas_run_snapshot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_status: MobRunStatus,
+        expected_flow_state: &flow_run::State,
+        next_status: MobRunStatus,
+        next_flow_state: &flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let expected_flow_state = expected_flow_state.clone();
+        let next_flow_state = next_flow_state.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::ReturnFalse,
+            authority_inputs,
+            move |run| {
+                if run.status != expected_status
+                    || run.status.is_terminal()
+                    || run.flow_state != expected_flow_state
+                {
+                    return Ok(false);
+                }
+                let terminal = next_status.is_terminal();
+                run.status = next_status;
+                run.flow_state = next_flow_state;
+                if terminal && run.completed_at.is_none() {
+                    run.completed_at = Some(Utc::now());
+                }
+                Ok(true)
+            },
+        )
         .await
     }
 
@@ -1400,6 +1505,37 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    async fn cas_frame_state_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected: Option<&FrameSnapshot>,
+        next: FrameSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let frame_id = frame_id.clone();
+        let expected = expected.cloned();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                let current = run.frames.get(&frame_id);
+                let matches = match (expected.as_ref(), current) {
+                    (None, None) => true,
+                    (Some(exp), Some(cur)) => exp == cur,
+                    _ => false,
+                };
+                if !matches {
+                    return Ok(false);
+                }
+                run.frames.insert(frame_id, next);
+                Ok(true)
+            },
+        )
+        .await
+    }
+
     async fn cas_grant_node_slot(
         &self,
         run_id: &RunId,
@@ -1435,6 +1571,39 @@ impl MobRunStore for SqliteMobRunStore {
             tx.commit().map_err(se)?;
             Ok(true)
         })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_node_slot_with_authority(
+        &self,
+        run_id: &RunId,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let expected_run_state = expected_run_state.clone();
+        let frame_id = frame_id.clone();
+        let expected_frame = expected_frame.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                if run.flow_state != expected_run_state {
+                    return Ok(false);
+                }
+                if run.frames.get(&frame_id) != Some(&expected_frame) {
+                    return Ok(false);
+                }
+                run.flow_state = next_run_state;
+                run.frames.insert(frame_id, next_frame);
+                Ok(true)
+            },
+        )
         .await
     }
 
@@ -1494,6 +1663,55 @@ impl MobRunStore for SqliteMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_step_and_record_output_with_authority(
+        &self,
+        run_id: &RunId,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        step_output_key: String,
+        step_output: serde_json::Value,
+        loop_context: Option<(&LoopId, u64)>,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let frame_id = frame_id.clone();
+        let expected_frame = expected_frame.clone();
+        let loop_context = loop_context.map(|(loop_id, iteration)| (loop_id.clone(), iteration));
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                if run.frames.get(&frame_id) != Some(&expected_frame) {
+                    return Ok(false);
+                }
+                run.frames.insert(frame_id, next_frame);
+                match loop_context {
+                    None => {
+                        run.root_step_outputs
+                            .insert(StepId::from(step_output_key.as_str()), step_output);
+                    }
+                    Some((loop_id, iteration)) => {
+                        let iteration_index = usize::try_from(iteration).map_err(|_| {
+                            MobStoreError::Internal(format!(
+                                "loop iteration index {iteration} exceeds usize::MAX on this target"
+                            ))
+                        })?;
+                        let outputs = run.loop_iteration_outputs.entry(loop_id).or_default();
+                        while outputs.len() <= iteration_index {
+                            outputs.push(indexmap::IndexMap::new());
+                        }
+                        outputs[iteration_index]
+                            .insert(StepId::from(step_output_key.as_str()), step_output);
+                    }
+                }
+                Ok(true)
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn cas_start_loop(
         &self,
         run_id: &RunId,
@@ -1539,6 +1757,46 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_start_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        initial_loop: LoopSnapshot,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let loop_instance_id = loop_instance_id.clone();
+        let expected_run_state = expected_run_state.clone();
+        let frame_id = frame_id.clone();
+        let expected_frame = expected_frame.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                if run.flow_state != expected_run_state {
+                    return Ok(false);
+                }
+                if run.frames.get(&frame_id) != Some(&expected_frame) {
+                    return Ok(false);
+                }
+                if run.loops.contains_key(&loop_instance_id) {
+                    return Ok(false);
+                }
+                run.flow_state = next_run_state;
+                run.frames.insert(frame_id, next_frame);
+                run.loops.insert(loop_instance_id, initial_loop);
+                Ok(true)
+            },
+        )
+        .await
+    }
+
     async fn cas_loop_request_body_frame(
         &self,
         run_id: &RunId,
@@ -1574,6 +1832,39 @@ impl MobRunStore for SqliteMobRunStore {
             tx.commit().map_err(se)?;
             Ok(true)
         })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_loop_request_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let loop_instance_id = loop_instance_id.clone();
+        let expected_loop = expected_loop.clone();
+        let expected_run_state = expected_run_state.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                if run.flow_state != expected_run_state {
+                    return Ok(false);
+                }
+                if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
+                    return Ok(false);
+                }
+                run.flow_state = next_run_state;
+                run.loops.insert(loop_instance_id, next_loop);
+                Ok(true)
+            },
+        )
         .await
     }
 
@@ -1626,6 +1917,48 @@ impl MobRunStore for SqliteMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn cas_grant_body_frame_start_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        initial_frame: FrameSnapshot,
+        ledger_entry: LoopIterationLedgerEntry,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let loop_instance_id = loop_instance_id.clone();
+        let expected_loop = expected_loop.clone();
+        let frame_id = frame_id.clone();
+        let expected_run_state = expected_run_state.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                if run.flow_state != expected_run_state {
+                    return Ok(false);
+                }
+                if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
+                    return Ok(false);
+                }
+                if run.frames.contains_key(&frame_id) {
+                    return Ok(false);
+                }
+                run.flow_state = next_run_state;
+                run.loops.insert(loop_instance_id, next_loop);
+                run.frames.insert(frame_id, initial_frame);
+                append_loop_iteration_ledger_if_absent(run, ledger_entry);
+                Ok(true)
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_body_frame(
         &self,
         run_id: &RunId,
@@ -1674,6 +2007,48 @@ impl MobRunStore for SqliteMobRunStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_body_frame_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let loop_instance_id = loop_instance_id.clone();
+        let expected_loop = expected_loop.clone();
+        let frame_id = frame_id.clone();
+        let expected_frame = expected_frame.clone();
+        let expected_run_state = expected_run_state.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                if run.flow_state != expected_run_state {
+                    return Ok(false);
+                }
+                if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
+                    return Ok(false);
+                }
+                if run.frames.get(&frame_id) != Some(&expected_frame) {
+                    return Ok(false);
+                }
+                run.flow_state = next_run_state;
+                run.loops.insert(loop_instance_id, next_loop);
+                run.frames.insert(frame_id, next_frame);
+                Ok(true)
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn cas_complete_loop(
         &self,
         run_id: &RunId,
@@ -1718,6 +2093,48 @@ impl MobRunStore for SqliteMobRunStore {
             tx.commit().map_err(se)?;
             Ok(true)
         })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn cas_complete_loop_with_authority(
+        &self,
+        run_id: &RunId,
+        loop_instance_id: &LoopInstanceId,
+        expected_loop: &LoopSnapshot,
+        next_loop: LoopSnapshot,
+        frame_id: &FrameId,
+        expected_frame: &FrameSnapshot,
+        next_frame: FrameSnapshot,
+        expected_run_state: &flow_run::State,
+        next_run_state: flow_run::State,
+        authority_inputs: Vec<mob_dsl::MobMachineInput>,
+    ) -> Result<bool, MobStoreError> {
+        let loop_instance_id = loop_instance_id.clone();
+        let expected_loop = expected_loop.clone();
+        let frame_id = frame_id.clone();
+        let expected_frame = expected_frame.clone();
+        let expected_run_state = expected_run_state.clone();
+        self.update_run_with_authority_if(
+            run_id,
+            MissingRunCasBehavior::NotFound,
+            authority_inputs,
+            move |run| {
+                if run.flow_state != expected_run_state {
+                    return Ok(false);
+                }
+                if run.loops.get(&loop_instance_id) != Some(&expected_loop) {
+                    return Ok(false);
+                }
+                if run.frames.get(&frame_id) != Some(&expected_frame) {
+                    return Ok(false);
+                }
+                run.flow_state = next_run_state;
+                run.loops.insert(loop_instance_id, next_loop);
+                run.frames.insert(frame_id, next_frame);
+                Ok(true)
+            },
+        )
         .await
     }
 }
@@ -2272,6 +2689,7 @@ mod tests {
             schema_version: 4,
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: std::collections::BTreeMap::new(),
+            flow_authority_inputs: Vec::new(),
         }
     }
 

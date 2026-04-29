@@ -1274,7 +1274,14 @@
             "type": "string"
           },
           "status_info": {
-            "$ref": "#/$defs/ToolConfigChangeStatus"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolConfigChangeStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "target": {
             "type": "string"
@@ -1284,7 +1291,6 @@
           "operation",
           "target",
           "status",
-          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -4353,7 +4359,14 @@
             "type": "string"
           },
           "status_info": {
-            "$ref": "#/$defs/ToolConfigChangeStatus"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolConfigChangeStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "target": {
             "type": "string"
@@ -4363,7 +4376,6 @@
           "operation",
           "target",
           "status",
-          "status_info",
           "persisted"
         ],
         "type": "object"

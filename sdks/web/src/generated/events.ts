@@ -248,7 +248,7 @@ export type ToolConfigChangedPayload = {
   operation: ToolConfigChangeOperation;
   persisted: boolean;
   status: string;
-  status_info: ToolConfigChangeStatus;
+  status_info?: ToolConfigChangeStatus | null;
   target: string;
 };
 

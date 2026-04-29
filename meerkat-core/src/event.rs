@@ -787,7 +787,8 @@ impl schemars::JsonSchema for ToolConfigChangedPayload {
             operation: ToolConfigChangeOperation,
             target: String,
             status: String,
-            status_info: ToolConfigChangeStatus,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            status_info: Option<ToolConfigChangeStatus>,
             persisted: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             applied_at_turn: Option<u32>,
@@ -1636,6 +1637,60 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn tool_config_changed_payload_prefers_typed_status_over_legacy_mirror() {
+        let event: AgentEvent = serde_json::from_value(serde_json::json!({
+            "type": "tool_config_changed",
+            "payload": {
+                "operation": "reload",
+                "target": "tool_scope",
+                "status": "legacy stale status",
+                "status_info": {
+                    "kind": "boundary_applied",
+                    "base_changed": true,
+                    "visible_changed": false,
+                    "revision": 9
+                },
+                "persisted": false,
+                "domain": "tool_scope"
+            }
+        }))
+        .unwrap();
+
+        if let AgentEvent::ToolConfigChanged { payload } = event {
+            assert_eq!(
+                payload.status_info(),
+                &ToolConfigChangeStatus::boundary_applied(true, false, 9)
+            );
+            assert_eq!(
+                payload.status_text(),
+                "boundary_applied(base_changed=true,visible_changed=false,revision=9)"
+            );
+        } else {
+            panic!("expected tool_config_changed event");
+        }
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn tool_config_changed_payload_schema_allows_legacy_status_only_replays() {
+        let schema = serde_json::to_value(schemars::schema_for!(ToolConfigChangedPayload)).unwrap();
+        let required = schema["required"].as_array().expect("required array");
+
+        assert!(
+            required.iter().any(|field| field == "status"),
+            "legacy status mirror remains required while it is emitted publicly"
+        );
+        assert!(
+            !required.iter().any(|field| field == "status_info"),
+            "legacy status-only event replays must remain schema-compatible"
+        );
+        assert!(
+            schema["properties"]["status_info"].is_object(),
+            "typed status_info remains part of the schema when present"
+        );
     }
 
     #[test]

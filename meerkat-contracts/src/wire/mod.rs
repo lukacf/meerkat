@@ -155,6 +155,11 @@ pub use supervisor_bridge::{
     BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
     BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
     BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
+    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
+    SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION,
+    SUPERVISOR_BRIDGE_INTENT, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+    SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS, supervisor_bridge_current_protocol_version,
+    supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
+    supervisor_bridge_supported_protocol_versions,
 };
 pub use usage::WireUsage;

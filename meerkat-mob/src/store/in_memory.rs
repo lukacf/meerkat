@@ -903,6 +903,10 @@ mod tests {
     use futures::future::join_all;
     use std::collections::BTreeMap;
 
+    fn default_bridge_protocol_version() -> u32 {
+        meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_default_protocol_version()
+    }
+
     fn sample_definition() -> MobDefinition {
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -1133,7 +1137,7 @@ mod tests {
     async fn test_runtime_metadata_store_roundtrips_supervisor_and_overlay_records() {
         let store = InMemoryMobRuntimeMetadataStore::new();
         let mob_id = MobId::from("mob-runtime");
-        let supervisor = SupervisorAuthorityRecord::generate(1);
+        let supervisor = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
         store
             .put_supervisor_authority(&mob_id, &supervisor)
             .await
@@ -1196,8 +1200,8 @@ mod tests {
     async fn test_runtime_metadata_store_put_supervisor_if_absent_preserves_existing_record() {
         let store = InMemoryMobRuntimeMetadataStore::new();
         let mob_id = MobId::from("mob-runtime");
-        let first = SupervisorAuthorityRecord::generate(1);
-        let second = SupervisorAuthorityRecord::generate(1);
+        let first = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let second = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
 
         assert!(
             store

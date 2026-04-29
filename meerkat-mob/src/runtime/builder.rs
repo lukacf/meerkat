@@ -713,19 +713,34 @@ impl MobBuilder {
         runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
         mob_id: MobId,
     ) -> Result<(), MobError> {
-        const MOB_RUNTIME_BRIDGE_PROTOCOL_VERSION: u32 = 1;
-
-        if runtime_metadata
-            .load_supervisor_authority(&mob_id)
-            .await?
-            .is_none()
-        {
-            let record = crate::store::SupervisorAuthorityRecord::generate(
-                MOB_RUNTIME_BRIDGE_PROTOCOL_VERSION,
-            );
-            runtime_metadata
-                .put_supervisor_authority_if_absent(&mob_id, &record)
-                .await?;
+        let default_protocol_version =
+            super::bridge_protocol::supervisor_bridge_default_protocol_version();
+        match runtime_metadata.load_supervisor_authority(&mob_id).await? {
+            None => {
+                let record =
+                    crate::store::SupervisorAuthorityRecord::generate(default_protocol_version);
+                runtime_metadata
+                    .put_supervisor_authority_if_absent(&mob_id, &record)
+                    .await?;
+            }
+            Some(record)
+                if super::bridge_protocol::supervisor_bridge_protocol_version_supported(
+                    record.protocol_version,
+                ) => {}
+            Some(mut record) if record.protocol_version < default_protocol_version => {
+                record.protocol_version = default_protocol_version;
+                runtime_metadata
+                    .put_supervisor_authority(&mob_id, &record)
+                    .await?;
+            }
+            Some(record) => {
+                return Err(MobError::WiringError(format!(
+                    "unsupported supervisor bridge protocol version {} (supported {:?}; default {})",
+                    record.protocol_version,
+                    super::bridge_protocol::supervisor_bridge_supported_protocol_versions(),
+                    default_protocol_version
+                )));
+            }
         }
 
         Ok(())

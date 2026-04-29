@@ -18,15 +18,18 @@ use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, PeerInpu
 use meerkat_core::lifecycle::RunControlCommand;
 use meerkat_core::types::SessionId;
 
-#[cfg(test)]
-use meerkat_contracts::wire::supervisor_bridge::SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM;
 use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryOutcome,
     BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
     BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
     BridgePeerConnectivity, BridgePeerSpec, BridgeRejectionCause, BridgeReply,
     BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
-    SUPERVISOR_BRIDGE_PROTOCOL_VERSION, canonicalize_bridge_address,
+    canonicalize_bridge_address, supervisor_bridge_default_protocol_version,
+    supervisor_bridge_protocol_version_supported, supervisor_bridge_supported_protocol_versions,
+};
+#[cfg(test)]
+use meerkat_contracts::wire::supervisor_bridge::{
+    SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
 };
 
 use crate::comms_bridge::classified_interaction_to_runtime_input;
@@ -376,6 +379,14 @@ fn bridge_peer_pubkey_sender(peer: &BridgePeerSpec) -> Option<String> {
     Some(format!("ed25519:{}", BASE64.encode(peer.pubkey)))
 }
 
+fn unsupported_bridge_protocol_version_message(context: &str, protocol_version: u32) -> String {
+    format!(
+        "{context}: unsupported bridge protocol version {protocol_version} (supported {:?}; default {})",
+        supervisor_bridge_supported_protocol_versions(),
+        supervisor_bridge_default_protocol_version()
+    )
+}
+
 /// Require the caller to be the currently authorized supervisor for the
 /// session. Shared validation gate for all post-bind bridge commands
 /// (`AuthorizeSupervisor` / `RevokeSupervisor` / `DeliverMemberInput` /
@@ -388,12 +399,12 @@ fn require_authorized_supervisor(
     payload: &BridgeSupervisorPayload,
     current: &SupervisorBinding,
 ) -> Result<(), (BridgeRejectionCause, String)> {
-    if payload.protocol_version != SUPERVISOR_BRIDGE_PROTOCOL_VERSION {
+    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
         return Err((
             BridgeRejectionCause::UnsupportedProtocolVersion,
-            format!(
-                "unsupported bridge protocol version {} (expected {})",
-                payload.protocol_version, SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+            unsupported_bridge_protocol_version_message(
+                "supervisor bridge request",
+                payload.protocol_version,
             ),
         ));
     }
@@ -456,6 +467,7 @@ fn bridge_capabilities() -> BridgeCapabilities {
         destroy_member: true,
         wire_member: true,
         unwire_member: true,
+        ..BridgeCapabilities::default()
     }
 }
 
@@ -540,12 +552,12 @@ fn validate_bind_request(
     sender: &str,
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
 ) -> Result<(TrustedPeerDescriptor, String), (BridgeRejectionCause, String)> {
-    if payload.protocol_version != SUPERVISOR_BRIDGE_PROTOCOL_VERSION {
+    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
         return Err((
             BridgeRejectionCause::UnsupportedProtocolVersion,
-            format!(
-                "unsupported bridge protocol version {} (expected {})",
-                payload.protocol_version, SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+            unsupported_bridge_protocol_version_message(
+                "bind member failed",
+                payload.protocol_version,
             ),
         ));
     }
@@ -699,12 +711,12 @@ fn validate_bind_request_against_state(
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
     current: &SupervisorBinding,
 ) -> Result<BindMemberGate, (BridgeRejectionCause, String)> {
-    if payload.protocol_version != SUPERVISOR_BRIDGE_PROTOCOL_VERSION {
+    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
         return Err((
             BridgeRejectionCause::UnsupportedProtocolVersion,
-            format!(
-                "unsupported bridge protocol version {} (expected {})",
-                payload.protocol_version, SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+            unsupported_bridge_protocol_version_message(
+                "bind member failed",
+                payload.protocol_version,
             ),
         ));
     }
@@ -750,12 +762,12 @@ fn validate_authorize_supervisor_request(
     payload: &BridgeSupervisorPayload,
     current: &SupervisorBinding,
 ) -> Result<AuthorizeSupervisorGate, (BridgeRejectionCause, String)> {
-    if payload.protocol_version != SUPERVISOR_BRIDGE_PROTOCOL_VERSION {
+    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
         return Err((
             BridgeRejectionCause::UnsupportedProtocolVersion,
-            format!(
-                "authorize supervisor failed: unsupported bridge protocol version {} (expected {})",
-                payload.protocol_version, SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+            unsupported_bridge_protocol_version_message(
+                "authorize supervisor failed",
+                payload.protocol_version,
             ),
         ));
     }
@@ -1823,6 +1835,10 @@ fn interaction_terminal_event(
 mod tests {
     use super::*;
     use meerkat_contracts::BridgePeerWiringPayload;
+    use meerkat_contracts::wire::supervisor_bridge::{
+        supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
+        supervisor_bridge_supported_protocol_versions,
+    };
     use meerkat_core::InteractionId;
     use meerkat_core::SendError;
     use meerkat_core::interaction::InboxInteraction;
@@ -2212,6 +2228,23 @@ mod tests {
                 .iter()
                 .any(|entry| entry.name.as_str() == "peer-removed"),
             "peer lifecycle retire must not revoke comms trust before topology validation"
+        );
+    }
+
+    #[test]
+    fn bridge_capabilities_report_canonical_protocol_versions() {
+        let capabilities = bridge_capabilities();
+        assert_eq!(
+            capabilities.current_protocol_version,
+            supervisor_bridge_current_protocol_version()
+        );
+        assert_eq!(
+            capabilities.default_protocol_version,
+            supervisor_bridge_default_protocol_version()
+        );
+        assert_eq!(
+            capabilities.supported_protocol_versions,
+            supervisor_bridge_supported_protocol_versions()
         );
     }
 
@@ -2858,6 +2891,77 @@ mod tests {
             self.sent.lock().await.push(cmd);
             Ok(receipt)
         }
+    }
+
+    #[tokio::test]
+    async fn bind_member_handler_response_reports_canonical_protocol_versions() {
+        let sent: Arc<tokio::sync::Mutex<Vec<CommsCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(CapturingRuntime {
+            peer_id: PEER_ID_RECEIVER.to_string(),
+            advertised_address: Some("inproc://receiver".to_string()),
+            bootstrap_token: Some("expected-token".to_string()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            sent: sent.clone(),
+        });
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let supervisor = BridgePeerSpec {
+            name: "mob/__mob_supervisor__".to_string(),
+            peer_id: PEER_ID_SUPERVISOR.to_string(),
+            address: "inproc://mob/__mob_supervisor__".to_string(),
+            pubkey: [0u8; 32],
+        };
+        let command = BridgeCommand::BindMember(
+            meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
+                supervisor: supervisor.clone(),
+                epoch: 0,
+                protocol_version: supervisor_bridge_default_protocol_version(),
+                expected_peer_id: PEER_ID_RECEIVER.to_string(),
+                expected_address: "inproc://receiver".to_string(),
+                bootstrap_token: "expected-token".into(),
+            },
+        );
+        let candidate = bridge_candidate(&supervisor.peer_id, &command);
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate,)
+                .await,
+            "bridge handler must own the BindMember command"
+        );
+
+        let (result, status) = sent
+            .lock()
+            .await
+            .iter()
+            .find_map(|cmd| match cmd {
+                CommsCommand::PeerResponse { result, status, .. } => {
+                    Some((result.clone(), *status))
+                }
+                _ => None,
+            })
+            .expect("handler must send a bind response");
+        assert!(matches!(
+            status,
+            meerkat_core::interaction::ResponseStatus::Completed
+        ));
+        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        let BridgeReply::BindMember(response) = reply else {
+            panic!("expected bind response");
+        };
+        assert_eq!(
+            response.capabilities.current_protocol_version,
+            supervisor_bridge_current_protocol_version()
+        );
+        assert_eq!(
+            response.capabilities.default_protocol_version,
+            supervisor_bridge_default_protocol_version()
+        );
+        assert_eq!(
+            response.capabilities.supported_protocol_versions,
+            supervisor_bridge_supported_protocol_versions()
+        );
     }
 
     #[tokio::test]

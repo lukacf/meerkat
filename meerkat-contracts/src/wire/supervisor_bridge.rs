@@ -24,6 +24,37 @@ pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootst
 ///   carry typed `BridgeDeliveryRejectionCause` data; the string `reason`
 ///   remains diagnostic presentation only.
 pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: u32 = 2;
+/// Canonical current supervisor bridge protocol version.
+pub const SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION: u32 = SUPERVISOR_BRIDGE_PROTOCOL_VERSION;
+/// Canonical default supervisor bridge protocol version for new authorities.
+pub const SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION: u32 = SUPERVISOR_BRIDGE_PROTOCOL_VERSION;
+/// Canonical set of protocol versions this runtime/wire contract accepts.
+pub const SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS: &[u32] =
+    &[SUPERVISOR_BRIDGE_PROTOCOL_VERSION];
+
+/// Return the canonical current supervisor bridge protocol version.
+pub const fn supervisor_bridge_current_protocol_version() -> u32 {
+    SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION
+}
+
+/// Return the canonical default supervisor bridge protocol version.
+pub const fn supervisor_bridge_default_protocol_version() -> u32 {
+    SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION
+}
+
+/// Return the canonical list of supported supervisor bridge protocol versions.
+pub fn supervisor_bridge_supported_protocol_versions() -> &'static [u32] {
+    SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS
+}
+
+/// Return `true` when `protocol_version` is accepted by this bridge contract.
+pub fn supervisor_bridge_protocol_version_supported(protocol_version: u32) -> bool {
+    supervisor_bridge_supported_protocol_versions().contains(&protocol_version)
+}
+
+fn default_supported_protocol_versions() -> Vec<u32> {
+    supervisor_bridge_supported_protocol_versions().to_vec()
+}
 
 /// Remove the one-time bind bootstrap token from an advertised bridge address.
 pub fn canonicalize_bridge_address(address: &str) -> String {
@@ -467,15 +498,48 @@ pub struct BridgeBindPayload {
 }
 
 /// Capabilities advertised by a member runtime on bind.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeCapabilities {
+    /// Protocol version implemented by the responding member runtime.
+    #[serde(default = "supervisor_bridge_current_protocol_version")]
+    pub current_protocol_version: u32,
+    /// Protocol version new supervisors should use for fresh authority records.
+    #[serde(default = "supervisor_bridge_default_protocol_version")]
+    pub default_protocol_version: u32,
+    /// Protocol versions accepted by the responding member runtime.
+    #[serde(default = "default_supported_protocol_versions")]
+    pub supported_protocol_versions: Vec<u32>,
+    #[serde(default)]
     pub deliver_member_input: bool,
+    #[serde(default)]
     pub observe_member: bool,
+    #[serde(default)]
     pub interrupt_member: bool,
+    #[serde(default)]
     pub retire_member: bool,
+    #[serde(default)]
     pub destroy_member: bool,
+    #[serde(default)]
     pub wire_member: bool,
+    #[serde(default)]
     pub unwire_member: bool,
+}
+
+impl Default for BridgeCapabilities {
+    fn default() -> Self {
+        Self {
+            current_protocol_version: supervisor_bridge_current_protocol_version(),
+            default_protocol_version: supervisor_bridge_default_protocol_version(),
+            supported_protocol_versions: supervisor_bridge_supported_protocol_versions().to_vec(),
+            deliver_member_input: false,
+            observe_member: false,
+            interrupt_member: false,
+            retire_member: false,
+            destroy_member: false,
+            wire_member: false,
+            unwire_member: false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -866,6 +930,80 @@ mod tests {
         assert_eq!(command.protocol_version(), 7);
     }
 
+    #[test]
+    fn supervisor_bridge_protocol_versions_are_reported_from_single_authority() {
+        assert_eq!(
+            supervisor_bridge_current_protocol_version(),
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            supervisor_bridge_default_protocol_version(),
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            supervisor_bridge_supported_protocol_versions(),
+            &[SUPERVISOR_BRIDGE_PROTOCOL_VERSION]
+        );
+        assert!(supervisor_bridge_protocol_version_supported(
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        ));
+        assert!(!supervisor_bridge_protocol_version_supported(1));
+        assert!(!supervisor_bridge_protocol_version_supported(
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1
+        ));
+    }
+
+    #[test]
+    fn bridge_capabilities_default_reports_canonical_protocol_versions() {
+        let capabilities = BridgeCapabilities::default();
+        assert_eq!(
+            capabilities.current_protocol_version,
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            capabilities.default_protocol_version,
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            capabilities.supported_protocol_versions,
+            vec![SUPERVISOR_BRIDGE_PROTOCOL_VERSION]
+        );
+    }
+
+    #[test]
+    fn bridge_capabilities_deserialize_legacy_without_protocol_report() {
+        let capabilities: BridgeCapabilities = serde_json::from_value(json!({
+            "deliver_member_input": true,
+            "observe_member": true,
+            "interrupt_member": true,
+            "retire_member": true,
+            "destroy_member": true,
+            "wire_member": true,
+            "unwire_member": true,
+        }))
+        .expect("legacy capability payload without protocol report should decode");
+
+        assert_eq!(
+            capabilities.current_protocol_version,
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            capabilities.default_protocol_version,
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            capabilities.supported_protocol_versions,
+            vec![SUPERVISOR_BRIDGE_PROTOCOL_VERSION]
+        );
+        assert!(capabilities.deliver_member_input);
+        assert!(capabilities.observe_member);
+        assert!(capabilities.interrupt_member);
+        assert!(capabilities.retire_member);
+        assert!(capabilities.destroy_member);
+        assert!(capabilities.wire_member);
+        assert!(capabilities.unwire_member);
+    }
+
     // -----------------------------------------------------------------------
     // 3. BridgeObservationResponse round-trip with all-present / all-absent
     //    optional fields. `skip_serializing_if = "Option::is_none"` must
@@ -1052,6 +1190,9 @@ mod tests {
                 "peer_id": "peer-x",
                 "address": "inproc://peer-x",
                 "capabilities": {
+                    "current_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                    "default_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                    "supported_protocol_versions": [SUPERVISOR_BRIDGE_PROTOCOL_VERSION],
                     "deliver_member_input": false,
                     "observe_member": false,
                     "interrupt_member": false,

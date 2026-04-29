@@ -2196,6 +2196,10 @@ mod tests {
     use futures::future::join_all;
     use indexmap::IndexMap;
 
+    fn default_bridge_protocol_version() -> u32 {
+        meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_default_protocol_version()
+    }
+
     fn temp_db_path() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mob.db");
@@ -2515,7 +2519,7 @@ mod tests {
             .unwrap()
             .runtime_metadata_store();
         let mob_id = MobId::from("mob");
-        let supervisor = SupervisorAuthorityRecord::generate(1);
+        let supervisor = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
         let overlay = ExternalBindingOverlayRecord {
             agent_identity: AgentIdentity::from("worker-1"),
             generation: Generation::new(2),
@@ -2606,8 +2610,8 @@ mod tests {
             .unwrap()
             .runtime_metadata_store();
         let mob_id = MobId::from("mob");
-        let first = SupervisorAuthorityRecord::generate(1);
-        let second = SupervisorAuthorityRecord::generate(1);
+        let first = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
+        let second = SupervisorAuthorityRecord::generate(default_bridge_protocol_version());
 
         assert!(
             store

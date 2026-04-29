@@ -4976,31 +4976,16 @@ fn compose_external_tool_dispatchers(
 }
 
 /// Build an `EphemeralSessionService` backed by the factory.
+#[cfg(test)]
 #[derive(Default)]
 struct CliServiceBuildDefaults {
     default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
     image_generation_machine: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     default_blob_store: Option<Arc<dyn meerkat_core::BlobStore>>,
-    #[cfg(test)]
     default_image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
 }
 
-impl CliServiceBuildDefaults {
-    fn runtime_owned(
-        default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
-        image_generation_machine: Arc<meerkat_runtime::MeerkatMachine>,
-        default_blob_store: Arc<dyn meerkat_core::BlobStore>,
-    ) -> Self {
-        Self {
-            default_schedule_tools,
-            image_generation_machine: Some(image_generation_machine),
-            default_blob_store: Some(default_blob_store),
-            #[cfg(test)]
-            default_image_generation_executor: None,
-        }
-    }
-}
-
+#[cfg(test)]
 fn build_cli_service_with_defaults(
     factory: AgentFactory,
     config: Config,
@@ -5011,12 +4996,24 @@ fn build_cli_service_with_defaults(
         builder = builder.with_image_generation_machine(machine);
     }
     builder.default_blob_store = defaults.default_blob_store;
-    #[cfg(test)]
-    {
-        builder.default_image_generation_executor = defaults.default_image_generation_executor;
-    }
+    builder.default_image_generation_executor = defaults.default_image_generation_executor;
     meerkat::surface::set_default_schedule_tools(&builder, defaults.default_schedule_tools);
     meerkat::surface::build_embedded_service_from_builder(builder, 64)
+}
+
+#[cfg(feature = "session-store")]
+fn build_cli_runtime_backed_service_with_defaults(
+    factory: AgentFactory,
+    config: Config,
+    persistence: PersistenceBundle,
+    default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
+) -> (
+    meerkat::PersistentSessionService<FactoryAgentBuilder>,
+    Arc<meerkat_runtime::MeerkatMachine>,
+) {
+    let builder = FactoryAgentBuilder::new(factory, config);
+    meerkat::surface::set_default_schedule_tools(&builder, default_schedule_tools);
+    meerkat::surface::build_runtime_backed_service(builder, 64, persistence)
 }
 
 #[cfg(test)]
@@ -5354,21 +5351,19 @@ async fn run_agent(
             config.comms.address = Some(addr.clone());
         }
 
-        // Build the parent session service with the same explicit scheduler tools the
-        // persistent CLI surface injects on resumed/runtime-backed paths.
-        let runtime_adapter = persistence.runtime_adapter();
+        // Build the parent session service on the runtime-backed persistent
+        // surface. CLI one-shots must leave the runtime snapshot as durable
+        // authority so shared RPC/REST realms can read them without trusting
+        // the compatibility SessionStore projection.
         let schedule_service = ScheduleService::new(persistence.schedule_store());
         let default_schedule_tools =
             Some(Arc::new(ScheduleToolDispatcher::new(schedule_service))
                 as Arc<dyn AgentToolDispatcher>);
-        let service = build_cli_service_with_defaults(
+        let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             config.clone(),
-            CliServiceBuildDefaults::runtime_owned(
-                default_schedule_tools,
-                runtime_adapter.clone(),
-                persistence.blob_store(),
-            ),
+            persistence.clone(),
+            default_schedule_tools,
         );
 
         if keep_alive {
@@ -5543,7 +5538,7 @@ async fn run_agent(
             let executor = Box::new(CliRuntimeExecutor {
                 service: service.clone() as Arc<dyn meerkat_core::service::SessionService>,
                 #[cfg(feature = "session-store")]
-                persistent_service: None,
+                persistent_service: Some(service.clone()),
                 session_id: session_id.clone(),
                 runtime_adapter: runtime_adapter.clone(),
                 event_tx: output_pipeline.event_sender(),
@@ -6423,15 +6418,15 @@ fn get_or_create_cli_persistent_surface_from_bundle(
     }
 
     let schedule_service = ScheduleService::new(persistence.schedule_store());
-    let builder = FactoryAgentBuilder::new(factory, config);
-    meerkat::surface::set_default_schedule_tools(
-        &builder,
-        Some(Arc::new(ScheduleToolDispatcher::new(
-            schedule_service.clone(),
-        ))),
+    let default_schedule_tools = Some(Arc::new(ScheduleToolDispatcher::new(
+        schedule_service.clone(),
+    )) as Arc<dyn AgentToolDispatcher>);
+    let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+        factory,
+        config,
+        persistence,
+        default_schedule_tools,
     );
-    let (service, runtime_adapter) =
-        meerkat::surface::build_runtime_backed_service(builder, 64, persistence);
     let service = Arc::new(service);
     let schedule_host = if schedule_host_supported(schedule_service.store().kind()) {
         let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(CliScheduleSessionHost {
@@ -12953,6 +12948,84 @@ capabilities = ["definitely_missing_capability"]
         assert!(names.contains("meerkat_schedule_create"));
         assert!(names.contains("meerkat_schedule_list"));
         assert!(names.contains("meerkat_schedule_occurrences"));
+    }
+
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn test_cli_runtime_backed_service_persists_authority_snapshot_for_one_shot() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Some(Arc::clone(&runtime_store)),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            None,
+        );
+
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings should be prepared");
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        ));
+
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "gpt-5.4".to_string(),
+                prompt: "seed".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(32),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(session),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..SessionBuildOptions::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("runtime-backed CLI service should create deferred session");
+
+        assert_eq!(created.session_id, session_id);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::new(session_id.to_string());
+        assert!(
+            runtime_store
+                .load_session_snapshot(&runtime_id)
+                .await
+                .expect("runtime snapshot load should succeed")
+                .is_some(),
+            "runtime-backed CLI one-shot service must write runtime authority"
+        );
+        assert!(
+            service
+                .load_authoritative_session(&session_id)
+                .await
+                .expect("authoritative load should succeed")
+                .is_some(),
+            "authoritative reads must resolve through the runtime snapshot"
+        );
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ use crate::error::ToolError;
 use crate::event::ExternalToolDelta;
 #[cfg(all(target_arch = "wasm32", test))]
 use crate::tokio;
-use crate::tool_catalog::{ToolCatalogCapabilities, ToolCatalogEntry};
+use crate::tool_catalog::{ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason};
 use crate::types::{ToolCallView, ToolDef, ToolName};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -91,6 +91,15 @@ impl ToolGateway {
             .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
             .collect::<Vec<_>>()
             .into()
+    }
+
+    fn route_not_found_as_unavailable(name: &str, err: ToolError) -> ToolError {
+        match err {
+            ToolError::NotFound { name: err_name } if err_name == name => {
+                ToolError::unavailable(name, ToolUnavailableReason::NotCurrentlyCallable)
+            }
+            other => other,
+        }
     }
 }
 
@@ -172,7 +181,8 @@ impl AgentToolDispatcher for ToolGateway {
     ///
     /// Returns:
     /// - `ToolError::NotFound` if the tool doesn't exist
-    /// - `ToolError::Unavailable` if the tool exists but is currently hidden
+    /// - `ToolError::Unavailable` if the tool exists but is hidden or the
+    ///   selected owner cannot route it anymore
     /// - The tool result if execution succeeds
     async fn dispatch(
         &self,
@@ -189,7 +199,11 @@ impl AgentToolDispatcher for ToolGateway {
                     if let Some(reason) = catalog_entry.callability.unavailable_reason() {
                         return Err(ToolError::unavailable(call.name, reason));
                     }
-                    return entry.dispatcher.dispatch(call).await;
+                    return entry
+                        .dispatcher
+                        .dispatch(call)
+                        .await
+                        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
                 }
             } else if entry
                 .dispatcher
@@ -197,7 +211,11 @@ impl AgentToolDispatcher for ToolGateway {
                 .iter()
                 .any(|tool| tool.name == call.name)
             {
-                return entry.dispatcher.dispatch(call).await;
+                return entry
+                    .dispatcher
+                    .dispatch(call)
+                    .await
+                    .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
             }
         }
         Err(ToolError::not_found(call.name))
@@ -382,8 +400,7 @@ impl AgentToolDispatcher for ToolGateway {
 
 /// Composes multiple dispatchers with live tool list delegation.
 ///
-/// Unlike [`ToolGateway`] (which caches the tool list at construction time),
-/// this composite calls `tools()` on each child dispatcher every time,
+/// Like [`ToolGateway`], this composite calls `tools()` on each child dispatcher every time,
 /// enabling children with dynamic tool lists (e.g. callback tool dispatchers
 /// backed by a shared registry) to surface additions/removals between turns.
 ///
@@ -438,7 +455,9 @@ impl AgentToolDispatcher for DynamicToolComposite {
                     if let Some(reason) = entry.callability.unavailable_reason() {
                         return Err(crate::error::ToolError::unavailable(call.name, reason));
                     }
-                    return d.dispatch(call).await;
+                    return d.dispatch(call).await.map_err(|err| {
+                        ToolGateway::route_not_found_as_unavailable(call.name, err)
+                    });
                 }
             }
             return Err(crate::error::ToolError::not_found(call.name));
@@ -446,7 +465,10 @@ impl AgentToolDispatcher for DynamicToolComposite {
 
         for d in &self.dispatchers {
             if d.tools().iter().any(|t| t.name == call.name) {
-                return d.dispatch(call).await;
+                return d
+                    .dispatch(call)
+                    .await
+                    .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err));
             }
         }
         Err(crate::error::ToolError::not_found(call.name))
@@ -587,7 +609,7 @@ impl AgentToolDispatcher for DynamicToolComposite {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::tool_catalog::{ToolCallability, ToolUnavailableReason};
+    use crate::tool_catalog::ToolCallability;
     use crate::types::ToolResult;
     use serde_json::Value;
     use serde_json::json;
@@ -717,6 +739,10 @@ mod tests {
         prefix: String,
     }
 
+    struct UnroutableExactDispatcher {
+        tool: Arc<ToolDef>,
+    }
+
     impl LiveExactMockDispatcher {
         fn new(prefix: &str, tool_name: &str, callable: Arc<AtomicBool>) -> Self {
             Self {
@@ -770,6 +796,19 @@ mod tests {
 
         fn remove_tool(&self, name: &str) {
             self.tools.lock().unwrap().retain(|tool| tool.name != name);
+        }
+    }
+
+    impl UnroutableExactDispatcher {
+        fn new(name: &str) -> Self {
+            Self {
+                tool: Arc::new(ToolDef {
+                    name: name.into(),
+                    description: format!("{name} tool"),
+                    input_schema: empty_object_schema(),
+                    provenance: None,
+                }),
+            }
         }
     }
 
@@ -909,6 +948,35 @@ mod tests {
             } else {
                 Err(ToolError::not_found(call.name))
             }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for UnroutableExactDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::clone(&self.tool)])
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::clone(&self.tool),
+                true,
+            )])
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
         }
     }
 
@@ -1116,6 +1184,33 @@ mod tests {
 
         let result = dispatch_json(&gateway, "initial", json!({})).await;
         assert!(matches!(result, Err(ToolError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn gateway_fails_closed_when_visible_identity_is_not_routable() {
+        let visible = Arc::new(UnroutableExactDispatcher::new("visible"));
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(visible)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            gateway
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>(),
+            vec!["visible".to_string()]
+        );
+
+        let err = dispatch_json(&gateway, "visible", json!({}))
+            .await
+            .unwrap_err();
+        let reason = match &err {
+            ToolError::Unavailable { reason, .. } => Some(*reason),
+            _ => None,
+        };
+        assert_eq!(reason, Some(ToolUnavailableReason::NotCurrentlyCallable));
     }
 
     #[tokio::test]

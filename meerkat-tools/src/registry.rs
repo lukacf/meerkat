@@ -13,11 +13,11 @@ pub struct ToolRegistry {
     tools: HashMap<ToolName, Arc<ToolDef>>,
 }
 
-/// Frozen registry of tool identities in catalog order.
+/// Registry of admitted tool identities in catalog order.
 ///
 /// This intentionally records only identity plus the static tool definition
-/// needed for validation/fallback projections. Live callability remains owned
-/// by the router catalog.
+/// needed for validation/fallback projections. Dispatchers may refresh it as
+/// dynamic catalogs change; live callability remains owned by the router catalog.
 #[derive(Debug, Clone, Default)]
 pub struct ToolIdentityRegistry {
     entries: Vec<ToolIdentityEntry>,
@@ -147,6 +147,15 @@ mod tests {
     use crate::schema::empty_object_schema;
     use serde_json::json;
 
+    fn test_tool(name: &str, description: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.into(),
+            description: description.to_string(),
+            input_schema: empty_object_schema(),
+            provenance: None,
+        })
+    }
+
     #[test]
     fn test_registry_register_and_get() {
         let mut registry = ToolRegistry::new();
@@ -204,5 +213,25 @@ mod tests {
         // Valid args
         let result = registry.validate("test_tool", &json!({"count": 42}));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn identity_registry_admits_late_identities_and_updates_existing_definitions() {
+        let mut registry = ToolIdentityRegistry::new();
+
+        registry.register(test_tool("initial", "old initial schema"));
+        registry.register(test_tool("late", "late schema"));
+        registry.register(test_tool("initial", "new initial schema"));
+
+        let names: Vec<_> = registry
+            .iter()
+            .map(|entry| entry.identity.name.to_string())
+            .collect();
+        assert_eq!(names, vec!["initial".to_string(), "late".to_string()]);
+        assert_eq!(
+            registry.get("initial").unwrap().tool.description,
+            "new initial schema"
+        );
+        assert!(registry.contains("late"));
     }
 }

@@ -14,6 +14,8 @@ use meerkat_core::{ToolCallability, ToolUnavailableReason};
 use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 use std::collections::HashSet;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::RwLock;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::registry::{ToolIdentityEntry, ToolIdentityRegistry, ToolRegistry};
@@ -46,7 +48,7 @@ impl AgentToolDispatcher for EmptyToolDispatcher {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct ToolDispatcher {
     router: Arc<dyn AgentToolDispatcher>,
-    frozen_registry: ToolIdentityRegistry,
+    identity_registry: RwLock<ToolIdentityRegistry>,
     default_timeout: Duration,
 }
 
@@ -54,19 +56,10 @@ pub struct ToolDispatcher {
 impl ToolDispatcher {
     /// Create a new tool dispatcher
     pub fn new(router: Arc<dyn AgentToolDispatcher>) -> Self {
-        let frozen_catalog = if router.tool_catalog_capabilities().exact_catalog {
-            router.tool_catalog()
-        } else {
-            router
-                .tools()
-                .iter()
-                .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
-                .collect::<Vec<_>>()
-                .into()
-        };
+        let initial_catalog = Self::catalog_snapshot_for(router.as_ref());
         Self {
             router,
-            frozen_registry: ToolIdentityRegistry::from_catalog(&frozen_catalog),
+            identity_registry: RwLock::new(ToolIdentityRegistry::from_catalog(&initial_catalog)),
             default_timeout: Duration::from_secs(30),
         }
     }
@@ -77,59 +70,109 @@ impl ToolDispatcher {
         self
     }
 
-    fn live_tool_def(&self, name: &str) -> Result<Arc<ToolDef>, ToolError> {
-        if !self.frozen_registry.contains(name) {
-            return Err(ToolError::NotFound { name: name.into() });
+    fn catalog_snapshot_for(router: &dyn AgentToolDispatcher) -> Arc<[ToolCatalogEntry]> {
+        if router.tool_catalog_capabilities().exact_catalog {
+            router.tool_catalog()
+        } else {
+            router
+                .tools()
+                .iter()
+                .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+                .collect::<Vec<_>>()
+                .into()
         }
-        if self.router.tool_catalog_capabilities().exact_catalog {
-            let Some(entry) = self
-                .router
-                .tool_catalog()
+    }
+
+    fn live_catalog_snapshot(&self) -> Arc<[ToolCatalogEntry]> {
+        Self::catalog_snapshot_for(self.router.as_ref())
+    }
+
+    fn refresh_identity_registry(&self, catalog: &[ToolCatalogEntry]) {
+        let mut registry = match self.identity_registry.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for entry in catalog {
+            registry.register(Arc::clone(&entry.tool));
+        }
+    }
+
+    fn registry_contains(&self, name: &str) -> bool {
+        match self.identity_registry.read() {
+            Ok(registry) => registry.contains(name),
+            Err(poisoned) => poisoned.into_inner().contains(name),
+        }
+    }
+
+    fn registry_entries(&self) -> Vec<ToolIdentityEntry> {
+        match self.identity_registry.read() {
+            Ok(registry) => registry.iter().cloned().collect(),
+            Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+        }
+    }
+
+    fn admitted_catalog_snapshot(&self) -> Arc<[ToolCatalogEntry]> {
+        let live_catalog = self.live_catalog_snapshot();
+        self.refresh_identity_registry(live_catalog.as_ref());
+
+        let mut emitted = HashSet::new();
+        let mut catalog = Vec::new();
+        for registry_entry in self.registry_entries() {
+            let name = registry_entry.identity.name.as_str();
+            if let Some(live_entry) = live_catalog
                 .iter()
                 .find(|entry| entry.tool.name == name)
                 .cloned()
-            else {
-                return Err(ToolError::unavailable(
-                    name,
-                    ToolUnavailableReason::NotCurrentlyCallable,
-                ));
-            };
+            {
+                emitted.insert(name.to_string());
+                catalog.push(live_entry);
+            } else {
+                emitted.insert(name.to_string());
+                catalog.push(Self::unavailable_entry(&registry_entry));
+            }
+        }
+
+        for entry in live_catalog.iter() {
+            if emitted.insert(entry.tool.name.to_string()) {
+                catalog.push(entry.clone());
+            }
+        }
+
+        catalog.into()
+    }
+
+    fn route_not_found_as_unavailable(name: &str, err: ToolError) -> ToolError {
+        match err {
+            ToolError::NotFound { name: err_name } if err_name == name => {
+                ToolError::unavailable(name, ToolUnavailableReason::NotCurrentlyCallable)
+            }
+            other => other,
+        }
+    }
+
+    fn live_tool_def(&self, name: &str) -> Result<Arc<ToolDef>, ToolError> {
+        let live_catalog = self.live_catalog_snapshot();
+        self.refresh_identity_registry(live_catalog.as_ref());
+
+        if let Some(entry) = live_catalog
+            .iter()
+            .find(|entry| entry.tool.name == name)
+            .cloned()
+        {
             if let Some(reason) = entry.callability.unavailable_reason() {
                 return Err(ToolError::unavailable(name, reason));
             }
             return Ok(entry.tool);
         }
 
-        self.router
-            .tools()
-            .iter()
-            .find(|tool| tool.name == name)
-            .cloned()
-            .ok_or_else(|| {
-                ToolError::unavailable(name, ToolUnavailableReason::NotCurrentlyCallable)
-            })
-    }
-
-    fn live_catalog_entry(&self, name: &str) -> Option<ToolCatalogEntry> {
-        let frozen_entry = self.frozen_registry.get(name)?;
-        if self.router.tool_catalog_capabilities().exact_catalog {
-            return self
-                .router
-                .tool_catalog()
-                .iter()
-                .find(|entry| entry.tool.name == name)
-                .cloned()
-                .or_else(|| Some(Self::unavailable_entry(frozen_entry)));
+        if self.registry_contains(name) {
+            return Err(ToolError::unavailable(
+                name,
+                ToolUnavailableReason::NotCurrentlyCallable,
+            ));
         }
 
-        Some(
-            self.router
-                .tools()
-                .iter()
-                .find(|tool| tool.name == name)
-                .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
-                .unwrap_or_else(|| Self::unavailable_entry(frozen_entry)),
-        )
+        Err(ToolError::NotFound { name: name.into() })
     }
 
     fn unavailable_entry(entry: &ToolIdentityEntry) -> ToolCatalogEntry {
@@ -160,7 +203,8 @@ impl ToolDispatcher {
             .await
             .map_err(|_| DispatchError::Timeout {
                 timeout_ms: self.default_timeout.as_millis() as u64,
-            })??;
+            })?
+            .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))?;
 
         Ok(outcome.result)
     }
@@ -197,6 +241,7 @@ impl AgentToolDispatcher for ToolDispatcher {
         tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
             .await
             .map_err(|_| ToolError::timeout(call.name, self.default_timeout.as_millis() as u64))?
+            .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
@@ -214,11 +259,7 @@ impl AgentToolDispatcher for ToolDispatcher {
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-        self.frozen_registry
-            .iter()
-            .filter_map(|entry| self.live_catalog_entry(entry.identity.name.as_str()))
-            .collect::<Vec<_>>()
-            .into()
+        self.admitted_catalog_snapshot()
     }
 
     fn pending_catalog_sources(&self) -> Arc<[String]> {
@@ -380,7 +421,27 @@ mod tests {
         tool_names: Mutex<Vec<&'static str>>,
     }
 
+    struct MutableExactDispatcher {
+        tool_names: Mutex<Vec<&'static str>>,
+    }
+
+    struct UnroutableVisibleDispatcher {
+        tool_name: &'static str,
+    }
+
     impl MutableDispatcher {
+        fn new(names: Vec<&'static str>) -> Self {
+            Self {
+                tool_names: Mutex::new(names),
+            }
+        }
+
+        fn add_tool(&self, name: &'static str) {
+            self.tool_names.lock().unwrap().push(name);
+        }
+    }
+
+    impl MutableExactDispatcher {
         fn new(names: Vec<&'static str>) -> Self {
             Self {
                 tool_names: Mutex::new(names),
@@ -433,6 +494,15 @@ mod tests {
             .into();
             Self { catalog }
         }
+    }
+
+    fn tool_def(name: &str) -> Arc<ToolDef> {
+        Arc::new(ToolDef {
+            name: name.into(),
+            description: format!("{name} tool"),
+            input_schema: json!({"type": "object"}),
+            provenance: None,
+        })
     }
 
     fn make_call<'a>(name: &'a str, args_raw: &'a serde_json::value::RawValue) -> ToolCallView<'a> {
@@ -508,6 +578,77 @@ mod tests {
                     name: call.name.into(),
                 })
             }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for MutableExactDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tool_catalog()
+                .iter()
+                .filter(|entry| entry.currently_callable())
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            self.tool_names
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|name| ToolCatalogEntry::session_inline(tool_def(name), true))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            if self.tool_names.lock().unwrap().contains(&call.name) {
+                Ok(ToolResult::new(
+                    call.id.to_string(),
+                    json!({"called": call.name}).to_string(),
+                    false,
+                )
+                .into())
+            } else {
+                Err(ToolError::NotFound {
+                    name: call.name.into(),
+                })
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for UnroutableVisibleDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([tool_def(self.tool_name)])
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            Arc::from([ToolCatalogEntry::session_inline(
+                tool_def(self.tool_name),
+                true,
+            )])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::NotFound {
+                name: call.name.into(),
+            })
         }
     }
 
@@ -622,8 +763,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatcher_freezes_identity_order_but_uses_live_callability() {
-        let router = Arc::new(MutableDispatcher::new(vec!["initial"]));
+    async fn dispatcher_admits_late_exact_catalog_identity_after_construction() {
+        let router = Arc::new(MutableExactDispatcher::new(vec!["initial"]));
         let dispatcher = ToolDispatcher::new(router.clone());
 
         let initial_names: Vec<_> = dispatcher
@@ -642,26 +783,83 @@ mod tests {
             .collect();
         assert_eq!(
             live_names,
-            vec!["initial".to_string()],
-            "dispatcher freezes identity/order at construction"
+            vec!["initial".to_string(), "late".to_string()],
+            "dispatcher must admit tool identities added after construction"
+        );
+
+        let catalog_names: Vec<_> = dispatcher
+            .tool_catalog()
+            .iter()
+            .map(|entry| entry.tool.name.to_string())
+            .collect();
+        assert_eq!(
+            catalog_names,
+            vec!["initial".to_string(), "late".to_string()]
         );
 
         let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
         let result = dispatcher.dispatch(make_call("late", &args_raw)).await;
-        assert!(matches!(result, Err(ToolError::NotFound { .. })));
+        assert!(result.is_ok());
 
         router.remove_tool("initial");
-        assert!(dispatcher.tools().is_empty());
+        let live_names: Vec<_> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(live_names, vec!["late".to_string()]);
+
         let catalog = dispatcher.tool_catalog();
-        assert_eq!(catalog.len(), 1);
-        assert_eq!(catalog[0].tool.name, "initial");
-        assert!(!catalog[0].currently_callable());
+        assert_eq!(catalog.len(), 2);
+        assert!(
+            !catalog
+                .iter()
+                .find(|entry| entry.tool.name == "initial")
+                .expect("initial remains admitted")
+                .currently_callable()
+        );
+        assert!(
+            catalog
+                .iter()
+                .find(|entry| entry.tool.name == "late")
+                .expect("late remains admitted")
+                .currently_callable()
+        );
 
         let result = dispatcher.dispatch(make_call("initial", &args_raw)).await;
         assert!(
             matches!(result, Err(ToolError::Unavailable { .. })),
-            "frozen identities use live router callability instead of cached callability"
+            "previously admitted identities use live router callability instead of returning NotFound"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_fails_closed_when_visible_identity_is_not_routable() {
+        let router = Arc::new(UnroutableVisibleDispatcher {
+            tool_name: "visible",
+        });
+        let dispatcher = ToolDispatcher::new(router);
+
+        assert_eq!(
+            dispatcher
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>(),
+            vec!["visible".to_string()]
+        );
+
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let err = dispatcher
+            .dispatch(make_call("visible", &args_raw))
+            .await
+            .unwrap_err();
+
+        let reason = match &err {
+            ToolError::Unavailable { reason, .. } => Some(*reason),
+            _ => None,
+        };
+        assert_eq!(reason, Some(ToolUnavailableReason::NotCurrentlyCallable));
     }
 
     #[tokio::test]

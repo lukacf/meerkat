@@ -2554,6 +2554,10 @@ fn render_named_domain_assignment(
         return format!("{{{rendered}}}");
     }
 
+    if let Some(samples) = known_structural_named_domain_samples(name, sample_cardinality) {
+        return format!("{{{}}}", samples.join(", "));
+    }
+
     if name == "ToolFilter" {
         let target_cardinality = sample_cardinality.max(2);
         let mut values = named_samples
@@ -2625,6 +2629,9 @@ fn sample_values(
         TypeRef::Named(_) if sample_cardinality == 0 => Vec::new(),
         TypeRef::Named(name) => {
             let name = name.as_str();
+            if let Some(samples) = known_structural_named_domain_samples(name, sample_cardinality) {
+                return samples;
+            }
             if let Some(samples) = named_samples.get(name) {
                 let limit = sample_cardinality.max(1);
                 let rendered = samples
@@ -2707,6 +2714,30 @@ fn known_named_domain_samples(name: &str, sample_cardinality: usize) -> Option<V
         samples
             .iter()
             .copied()
+            .take(sample_cardinality.max(1))
+            .collect(),
+    )
+}
+
+fn known_structural_named_domain_samples(
+    name: &str,
+    sample_cardinality: usize,
+) -> Option<Vec<String>> {
+    if name != "ToolVisibilityWitness" {
+        return None;
+    }
+
+    let stable_owner_key = tla_string("stable_owner_key");
+    let last_seen_provenance = tla_string("last_seen_provenance");
+    let samples = [
+        format!("{{{stable_owner_key}}}"),
+        format!("{{{last_seen_provenance}}}"),
+        format!("{{{stable_owner_key}, {last_seen_provenance}}}"),
+    ];
+
+    Some(
+        samples
+            .into_iter()
             .take(sample_cardinality.max(1))
             .collect(),
     )

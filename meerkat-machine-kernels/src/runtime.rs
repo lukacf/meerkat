@@ -11,6 +11,10 @@ use meerkat_machine_schema::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+const TOOL_PROVENANCE_TYPE: &str = "ToolProvenance";
+const TOOL_SOURCE_KIND_TYPE: &str = "ToolSourceKind";
+const TOOL_VISIBILITY_WITNESS_TYPE: &str = "ToolVisibilityWitness";
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KernelValue {
     Bool(bool),
@@ -153,6 +157,104 @@ fn option_map_matches_inner(
         return false;
     };
     value_matches_type(schema, inner, inner_ty)
+}
+
+fn string_key(value: &str) -> KernelValue {
+    KernelValue::String(value.to_string())
+}
+
+fn named_value_type_is(type_name: &NamedTypeId, expected: &str) -> bool {
+    type_name.as_str() == expected
+}
+
+fn tool_source_kind_matches(value: &KernelValue) -> bool {
+    let value = match value {
+        KernelValue::Named { type_name, value }
+            if named_value_type_is(type_name, TOOL_SOURCE_KIND_TYPE) =>
+        {
+            value.as_ref()
+        }
+        other => other,
+    };
+
+    matches!(
+        value,
+        KernelValue::String(kind)
+            if matches!(
+                kind.as_str(),
+                "Builtin"
+                    | "Shell"
+                    | "Comms"
+                    | "Memory"
+                    | "Schedule"
+                    | "Mob"
+                    | "MobTasks"
+                    | "Callback"
+                    | "Mcp"
+                    | "RustBundle"
+            )
+    )
+}
+
+fn tool_provenance_matches(value: &KernelValue) -> bool {
+    let value = match value {
+        KernelValue::Named { type_name, value }
+            if named_value_type_is(type_name, TOOL_PROVENANCE_TYPE) =>
+        {
+            value.as_ref()
+        }
+        other => other,
+    };
+
+    let KernelValue::Map(fields) = value else {
+        return false;
+    };
+    if fields.len() != 2 {
+        return false;
+    }
+
+    matches!(
+        fields.get(&string_key("kind")),
+        Some(kind) if tool_source_kind_matches(kind)
+    ) && matches!(
+        fields.get(&string_key("source_id")),
+        Some(KernelValue::String(_))
+    )
+}
+
+fn tool_visibility_witness_matches(value: &KernelValue) -> bool {
+    let KernelValue::Map(fields) = value else {
+        return false;
+    };
+
+    fields.iter().all(|(key, value)| match key {
+        KernelValue::String(key) if key == "stable_owner_key" => {
+            matches!(value, KernelValue::String(_))
+        }
+        KernelValue::String(key) if key == "last_seen_provenance" => tool_provenance_matches(value),
+        _ => false,
+    })
+}
+
+fn tool_visibility_witness_identity_len(value: &KernelValue) -> Option<usize> {
+    let KernelValue::Map(fields) = value else {
+        return None;
+    };
+
+    let mut len = 0;
+    if matches!(
+        fields.get(&string_key("stable_owner_key")),
+        Some(KernelValue::String(_))
+    ) {
+        len += 1;
+    }
+    if matches!(
+        fields.get(&string_key("last_seen_provenance")),
+        Some(provenance) if tool_provenance_matches(provenance)
+    ) {
+        len += 1;
+    }
+    Some(len)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -942,6 +1044,17 @@ impl GeneratedMachineKernel {
                     KernelValue::Set(items) => items.len(),
                     KernelValue::Map(items) => items.len(),
                     KernelValue::String(items) => items.chars().count(),
+                    KernelValue::Named { type_name, value }
+                        if named_value_type_is(&type_name, TOOL_VISIBILITY_WITNESS_TYPE) =>
+                    {
+                        tool_visibility_witness_identity_len(value.as_ref()).ok_or_else(|| {
+                            self.eval_error(
+                                transition_name,
+                                "Len expects structural ToolVisibilityWitness authority"
+                                    .to_string(),
+                            )
+                        })?
+                    }
                     KernelValue::Named { value, .. } => match *value {
                         KernelValue::Seq(items) => items.len(),
                         KernelValue::Set(items) => items.len(),
@@ -1293,6 +1406,10 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
 }
 
 fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> KernelValue {
+    if name.as_str() == TOOL_VISIBILITY_WITNESS_TYPE {
+        return KernelValue::Map(BTreeMap::new());
+    }
+
     match named_type_atom(schema, name) {
         Some(meerkat_machine_schema::RustTypeAtom::Bool) => KernelValue::Bool(false),
         Some(
@@ -1314,6 +1431,10 @@ fn named_type_inner_matches(
     name: &NamedTypeId,
     value: &KernelValue,
 ) -> bool {
+    if name.as_str() == TOOL_VISIBILITY_WITNESS_TYPE {
+        return tool_visibility_witness_matches(value);
+    }
+
     match named_type_atom(schema, name) {
         Some(meerkat_machine_schema::RustTypeAtom::Bool) => matches!(value, KernelValue::Bool(_)),
         Some(

@@ -14631,7 +14631,9 @@ fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
         TypeRef::String => KernelValue::String(String::new()),
         TypeRef::Named(name) => runtime_modeled_named_value(
             name,
-            if runtime_modeled_named_type_is_u64(name.as_str()) {
+            if name.as_str() == "ToolVisibilityWitness" {
+                KernelValue::Map(BTreeMap::new())
+            } else if runtime_modeled_named_type_is_u64(name.as_str()) {
                 KernelValue::U64(0)
             } else {
                 KernelValue::String(String::new())
@@ -14670,7 +14672,9 @@ fn runtime_modeled_named_value(
         return value;
     }
 
-    let value = if runtime_modeled_named_type_is_u64(type_name.as_str()) {
+    let value = if type_name.as_str() == "ToolVisibilityWitness" {
+        runtime_modeled_tool_visibility_witness_inner(value)
+    } else if runtime_modeled_named_type_is_u64(type_name.as_str()) {
         match value {
             KernelValue::U64(value) => KernelValue::U64(value),
             KernelValue::String(value) => KernelValue::U64(
@@ -14786,6 +14790,12 @@ fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Valu
                 value: Box::new(KernelValue::U64(value.as_u64().unwrap_or(0))),
             }
         }
+        TypeRef::Named(name) if name.as_str() == "ToolVisibilityWitness" => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(runtime_modeled_tool_visibility_witness_inner_from_json(
+                value,
+            )),
+        },
         TypeRef::Named(name) => KernelValue::Named {
             type_name: name.clone(),
             value: Box::new(KernelValue::String(
@@ -14947,14 +14957,84 @@ fn runtime_modeled_string_set(values: &[&str]) -> KernelValue {
     )
 }
 
+fn runtime_modeled_tool_source_kind_label(kind: &meerkat_core::ToolSourceKind) -> &'static str {
+    match kind {
+        meerkat_core::ToolSourceKind::Builtin => "Builtin",
+        meerkat_core::ToolSourceKind::Shell => "Shell",
+        meerkat_core::ToolSourceKind::Comms => "Comms",
+        meerkat_core::ToolSourceKind::Memory => "Memory",
+        meerkat_core::ToolSourceKind::Schedule => "Schedule",
+        meerkat_core::ToolSourceKind::Mob => "Mob",
+        meerkat_core::ToolSourceKind::MobTasks => "MobTasks",
+        meerkat_core::ToolSourceKind::Callback => "Callback",
+        meerkat_core::ToolSourceKind::Mcp => "Mcp",
+        meerkat_core::ToolSourceKind::RustBundle => "RustBundle",
+    }
+}
+
+fn runtime_modeled_tool_provenance_inner(provenance: &meerkat_core::ToolProvenance) -> KernelValue {
+    KernelValue::Map(BTreeMap::from([
+        (
+            KernelValue::String("kind".to_string()),
+            KernelValue::String(runtime_modeled_tool_source_kind_label(&provenance.kind).into()),
+        ),
+        (
+            KernelValue::String("source_id".to_string()),
+            KernelValue::String(provenance.source_id.to_string()),
+        ),
+    ]))
+}
+
+fn runtime_modeled_tool_visibility_witness_inner_from_domain(
+    witness: &meerkat_core::ToolVisibilityWitness,
+) -> KernelValue {
+    let mut fields = BTreeMap::new();
+    if let Some(stable_owner_key) = &witness.stable_owner_key {
+        fields.insert(
+            KernelValue::String("stable_owner_key".to_string()),
+            KernelValue::String(stable_owner_key.clone()),
+        );
+    }
+    if let Some(last_seen_provenance) = &witness.last_seen_provenance {
+        fields.insert(
+            KernelValue::String("last_seen_provenance".to_string()),
+            runtime_modeled_tool_provenance_inner(last_seen_provenance),
+        );
+    }
+    KernelValue::Map(fields)
+}
+
+fn runtime_modeled_tool_visibility_witness_inner_from_json(
+    value: &serde_json::Value,
+) -> KernelValue {
+    serde_json::from_value::<meerkat_core::ToolVisibilityWitness>(value.clone())
+        .map(|witness| runtime_modeled_tool_visibility_witness_inner_from_domain(&witness))
+        .unwrap_or_else(|_| KernelValue::Map(BTreeMap::new()))
+}
+
+fn runtime_modeled_tool_visibility_witness_inner(value: KernelValue) -> KernelValue {
+    match value {
+        KernelValue::Named { type_name, value }
+            if type_name.as_str() == "ToolVisibilityWitness" =>
+        {
+            *value
+        }
+        KernelValue::Map(_) => value,
+        KernelValue::String(raw) => {
+            serde_json::from_str::<meerkat_core::ToolVisibilityWitness>(&raw)
+                .map(|witness| runtime_modeled_tool_visibility_witness_inner_from_domain(&witness))
+                .unwrap_or_else(|_| KernelValue::Map(BTreeMap::new()))
+        }
+        _ => KernelValue::Map(BTreeMap::new()),
+    }
+}
+
 fn runtime_modeled_witness_map() -> KernelValue {
     let mut entries = BTreeMap::new();
     for (name, witness) in runtime_parity_witnesses() {
         entries.insert(
             KernelValue::String(name),
-            KernelValue::String(
-                serde_json::to_string(&witness).unwrap_or_else(|_| "\"<witness>\"".into()),
-            ),
+            runtime_modeled_tool_visibility_witness_inner_from_domain(&witness),
         );
     }
     KernelValue::Map(entries)

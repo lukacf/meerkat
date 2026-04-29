@@ -901,34 +901,8 @@ impl std::fmt::Display for ToolFilter {
         f.write_str(&self.0)
     }
 }
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct ToolVisibilityWitness(pub String);
-impl From<String> for ToolVisibilityWitness {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for ToolVisibilityWitness {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for ToolVisibilityWitness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+pub type ToolVisibilityWitness =
+    meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolVisibilityWitness;
 #[derive(
     Debug,
     Clone,

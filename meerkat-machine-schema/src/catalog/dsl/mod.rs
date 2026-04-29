@@ -225,7 +225,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("ToolProvenance"),
             NamedTypeBinding::string("ToolSourceKind"),
             NamedTypeBinding::string("TurnCancellationReason"),
-            NamedTypeBinding::string("ToolVisibilityWitness"),
+            NamedTypeBinding::type_path(
+                "ToolVisibilityWitness",
+                "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness",
+            ),
             NamedTypeBinding::string("TurnPhase"),
             NamedTypeBinding::string("TurnPrimitiveKind"),
             NamedTypeBinding::string("TurnTerminalOutcome"),

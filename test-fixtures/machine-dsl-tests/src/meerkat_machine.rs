@@ -1367,7 +1367,32 @@ pub enum SessionLlmCapabilitySurfaceStatus {
 }
 stub_newtype!(SessionToolVisibilityDelta);
 stub_newtype!(ToolFilter);
-stub_newtype!(ToolVisibilityWitness);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ToolSourceKind {
+    #[default]
+    Builtin,
+    Shell,
+    Comms,
+    Memory,
+    Schedule,
+    Mob,
+    MobTasks,
+    Callback,
+    Mcp,
+    RustBundle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ToolProvenance {
+    pub kind: ToolSourceKind,
+    pub source_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ToolVisibilityWitness {
+    pub stable_owner_key: Option<String>,
+    pub last_seen_provenance: Option<ToolProvenance>,
+}
 stub_newtype!(Generation);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1567,7 +1592,10 @@ mod tests {
             NamedTypeBinding::string("SessionToolVisibilityDelta"),
             NamedTypeBinding::string("SessionToolVisibilityState"),
             NamedTypeBinding::string("ToolFilter"),
-            NamedTypeBinding::string("ToolVisibilityWitness"),
+            NamedTypeBinding::type_path(
+                "ToolVisibilityWitness",
+                "crate::meerkat_machine::ToolVisibilityWitness",
+            ),
             NamedTypeBinding::string("WorkId"),
             // PeerEndpoint etc. are type_path bindings in the catalog;
             // for this test-fixture lib-scope validation, string is
@@ -1666,7 +1694,10 @@ mod tests {
                 "SessionToolVisibilityState",
             ),
             meerkat_machine_schema::identity::NamedTypeBinding::string("ToolFilter"),
-            meerkat_machine_schema::identity::NamedTypeBinding::string("ToolVisibilityWitness"),
+            meerkat_machine_schema::identity::NamedTypeBinding::type_path(
+                "ToolVisibilityWitness",
+                "crate::meerkat_machine::ToolVisibilityWitness",
+            ),
             meerkat_machine_schema::identity::NamedTypeBinding::string("WorkId"),
             meerkat_machine_schema::identity::NamedTypeBinding::string("PeerEndpoint"),
             meerkat_machine_schema::identity::NamedTypeBinding::string("PeerName"),

@@ -19,9 +19,9 @@ use meerkat_machine_schema::identity::{
 };
 use meerkat_machine_schema::{
     CompositionDriver, CompositionDriverRustBinding, CompositionSchemaError, DriverDispatchRoute,
-    RouteTargetKind, RouteVariantId, WatchedEffect, canonical_composition_coverage_manifests,
-    canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
-    meerkat_mob_seam_composition,
+    RouteTargetKind, RouteVariantId, RustTypeAtom, WatchedEffect,
+    canonical_composition_coverage_manifests, canonical_composition_schemas,
+    canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_mob_seam_composition,
 };
 
 #[test]
@@ -89,6 +89,23 @@ fn canonical_machine_registry_is_individually_valid() {
             schema.machine
         );
     }
+}
+
+#[test]
+fn meerkat_deferred_tool_witness_named_type_is_structural_authority() {
+    let schema = meerkat_machine();
+    let witness_type = NamedTypeId::parse("ToolVisibilityWitness").expect("named type");
+    let binding = schema
+        .named_type_binding(&witness_type)
+        .expect("ToolVisibilityWitness binding");
+
+    assert_eq!(
+        binding.rust,
+        RustTypeAtom::TypePath(
+            "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness".to_string()
+        ),
+        "deferred-tool authority must be bound to the typed witness projection, not String"
+    );
 }
 
 #[test]

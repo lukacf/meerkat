@@ -173,7 +173,19 @@ pub enum ToolFilter {
 
 /// Typed mirror of [`meerkat_core::types::ToolSourceKind`] — closed
 /// 10-variant discriminant for tool provenance classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ToolSourceKind {
     #[default]
     Builtin,
@@ -191,7 +203,18 @@ pub enum ToolSourceKind {
 /// Typed mirror of [`meerkat_core::types::ToolProvenance`] — structural
 /// projection carried inside [`ToolVisibilityWitness`], using the typed
 /// `ToolSourceKind` discriminant mirror.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct ToolProvenance {
     pub kind: ToolSourceKind,
     pub source_id: String,
@@ -199,7 +222,18 @@ pub struct ToolProvenance {
 
 /// Typed mirror of [`meerkat_core::ToolVisibilityWitness`] — structural
 /// projection of the two optional witness fields.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct ToolVisibilityWitness {
     pub stable_owner_key: Option<String>,
     pub last_seen_provenance: Option<ToolProvenance>,

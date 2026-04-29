@@ -1459,6 +1459,10 @@ impl MultiBackendProvisioner {
         super::bridge_protocol::decode_bridge_rejection_reply(protocol_version, value)
     }
 
+    fn bridge_rejection_error(rejection: super::bridge_protocol::BridgeRejectionReply) -> MobError {
+        MobError::from(rejection)
+    }
+
     async fn ensure_supervisor_authorized(
         &self,
         peer: &TrustedPeerDescriptor,
@@ -1490,7 +1494,7 @@ impl MultiBackendProvisioner {
                 .await?;
                 return Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address);
             }
-            return Err(MobError::WiringError(rejection.reason().to_string()));
+            return Err(Self::bridge_rejection_error(rejection));
         }
         Ok(peer.clone())
     }
@@ -1507,7 +1511,7 @@ impl MultiBackendProvisioner {
             .send_bridge_command(peer, command, timeout)
             .await?;
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            return Err(MobError::WiringError(rejection.reason().to_string()));
+            return Err(Self::bridge_rejection_error(rejection));
         }
         serde_json::from_value(value).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
@@ -1752,10 +1756,8 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .await?;
                 let payload = self.bridge_supervisor_payload().await?;
                 let command = super::bridge_protocol::BridgeCommand::RetireMember(payload);
-                self.supervisor_bridge.trust_recipient(&peer).await?;
-                let _ = self
-                    .supervisor_bridge
-                    .send_bridge_command(&peer, &command, Duration::from_secs(10))
+                let _retire: super::bridge_protocol::BridgeRetireResponse = self
+                    .send_bridge_command_typed(&peer, &command, Duration::from_secs(10))
                     .await?;
                 self.session
                     .ops_adapter
@@ -1790,10 +1792,8 @@ impl MobProvisioner for MultiBackendProvisioner {
                     .await?;
                 let payload = self.bridge_supervisor_payload().await?;
                 let command = super::bridge_protocol::BridgeCommand::InterruptMember(payload);
-                self.supervisor_bridge.trust_recipient(&peer).await?;
-                let _ = self
-                    .supervisor_bridge
-                    .send_bridge_command(&peer, &command, Duration::from_secs(5))
+                let _ack: super::bridge_protocol::BridgeAck = self
+                    .send_bridge_command_typed(&peer, &command, Duration::from_secs(5))
                     .await?;
                 Ok(())
             }
@@ -2058,10 +2058,36 @@ impl MobProvisioner for MultiBackendProvisioner {
 #[allow(clippy::expect_used)]
 mod bridge_rejection_tests {
     use super::MultiBackendProvisioner;
+    use crate::MobError;
     use crate::runtime::bridge_protocol::{
         BridgeRejectionCause, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
     };
     use serde_json::json;
+
+    fn known_bridge_rejection_causes() -> &'static [(BridgeRejectionCause, &'static str)] {
+        &[
+            (BridgeRejectionCause::NotBound, "not_bound"),
+            (BridgeRejectionCause::StaleSupervisor, "stale_supervisor"),
+            (BridgeRejectionCause::SenderMismatch, "sender_mismatch"),
+            (BridgeRejectionCause::AlreadyBound, "already_bound"),
+            (
+                BridgeRejectionCause::InvalidBootstrapToken,
+                "invalid_bootstrap_token",
+            ),
+            (
+                BridgeRejectionCause::UnsupportedProtocolVersion,
+                "unsupported_protocol_version",
+            ),
+            (
+                BridgeRejectionCause::InvalidSupervisorSpec,
+                "invalid_supervisor_spec",
+            ),
+            (BridgeRejectionCause::InvalidPeerSpec, "invalid_peer_spec"),
+            (BridgeRejectionCause::AddressMismatch, "address_mismatch"),
+            (BridgeRejectionCause::Unsupported, "unsupported"),
+            (BridgeRejectionCause::Internal, "internal"),
+        ]
+    }
 
     #[test]
     fn provisioner_decodes_typed_protocol_v2_bridge_rejection() {
@@ -2099,5 +2125,49 @@ mod bridge_rejection_tests {
             .expect("legacy raw string should decode only on protocol v1");
         assert_eq!(legacy.typed_cause(), None);
         assert!(legacy.is_legacy_v1_raw_string());
+    }
+
+    #[test]
+    fn provisioner_bridge_rejection_error_preserves_each_known_typed_cause() {
+        for (cause, wire_name) in known_bridge_rejection_causes() {
+            let reason = format!("typed bridge rejection: {wire_name}");
+            let value = json!({
+                "result": "rejected",
+                "cause": wire_name,
+                "reason": reason,
+            });
+            let rejection = MultiBackendProvisioner::bridge_rejection_reply(
+                SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                &value,
+            )
+            .expect("typed rejection should decode");
+
+            let error = MultiBackendProvisioner::bridge_rejection_error(rejection);
+
+            match error {
+                MobError::BridgeCommandRejected {
+                    cause: actual,
+                    reason: actual_reason,
+                } => {
+                    assert_eq!(actual, *cause);
+                    assert_eq!(actual_reason, reason);
+                }
+                other => panic!("expected typed bridge rejection error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn provisioner_legacy_bridge_rejection_error_stays_untyped() {
+        let value = json!("legacy rejection");
+        let legacy = MultiBackendProvisioner::bridge_rejection_reply(1, &value)
+            .expect("legacy raw string should decode only on protocol v1");
+
+        let error = MultiBackendProvisioner::bridge_rejection_error(legacy);
+
+        assert!(matches!(
+            error,
+            MobError::WiringError(reason) if reason == "legacy rejection"
+        ));
     }
 }

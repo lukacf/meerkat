@@ -279,6 +279,19 @@ struct RemoteDestroyOutcome {
     errors: Vec<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedRevokeCleanupFailure {
+    CommsPeerNotFound,
+    CommsPeerOffline,
+    CommsAdmissionDropped {
+        reason: meerkat_core::comms::AdmissionDropReason,
+    },
+    BridgeRejected {
+        cause: super::bridge_protocol::BridgeRejectionCause,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // MobActor
 // ---------------------------------------------------------------------------
@@ -806,6 +819,20 @@ impl MobActor {
         super::bridge_protocol::decode_bridge_rejection_reply(protocol_version, value)
     }
 
+    fn bridge_rejection_error(rejection: super::bridge_protocol::BridgeRejectionReply) -> MobError {
+        MobError::from(rejection)
+    }
+
+    fn bridge_rejection_error_with_reason(
+        rejection: &super::bridge_protocol::BridgeRejectionReply,
+        reason: String,
+    ) -> MobError {
+        match rejection.typed_cause() {
+            Some(cause) => MobError::BridgeCommandRejected { cause, reason },
+            None => MobError::WiringError(reason),
+        }
+    }
+
     async fn persist_rebound_binding(
         &self,
         prior_binding: &crate::RuntimeBinding,
@@ -892,7 +919,7 @@ impl MobActor {
                     "ensure_supervisor_authorized rebound peer",
                 );
             }
-            return Err(MobError::WiringError(rejection.reason().to_string()));
+            return Err(Self::bridge_rejection_error(rejection));
         }
         let _ack: super::bridge_protocol::BridgeAck =
             serde_json::from_value(value).map_err(|error| {
@@ -915,7 +942,7 @@ impl MobActor {
             .send_bridge_command(peer, command, timeout)
             .await?;
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            return Err(MobError::WiringError(rejection.reason().to_string()));
+            return Err(Self::bridge_rejection_error(rejection));
         }
         serde_json::from_value(value).map_err(|error| {
             MobError::Internal(format!("failed to decode bridge command response: {error}"))
@@ -7997,6 +8024,36 @@ impl MobActor {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn expected_revoke_cleanup_failure(error: &MobError) -> Option<ExpectedRevokeCleanupFailure> {
+        match error {
+            MobError::CommsError(meerkat_core::comms::SendError::PeerNotFound(_)) => {
+                Some(ExpectedRevokeCleanupFailure::CommsPeerNotFound)
+            }
+            MobError::CommsError(meerkat_core::comms::SendError::PeerOffline) => {
+                Some(ExpectedRevokeCleanupFailure::CommsPeerOffline)
+            }
+            MobError::CommsError(meerkat_core::comms::SendError::AdmissionDropped { reason }) => {
+                match reason {
+                    meerkat_core::comms::AdmissionDropReason::UntrustedSender
+                    | meerkat_core::comms::AdmissionDropReason::SessionClosed => {
+                        Some(ExpectedRevokeCleanupFailure::CommsAdmissionDropped {
+                            reason: *reason,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            MobError::BridgeCommandRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
+                ..
+            } => Some(ExpectedRevokeCleanupFailure::BridgeRejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::NotBound,
+            }),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     async fn destroy_remote_member_for_destroy(
         &mut self,
         entry: RosterEntry,
@@ -8080,18 +8137,17 @@ impl MobActor {
             .revoke_supervisor_for_binding(&binding, std::time::Duration::from_secs(5))
             .await
         {
-            let error_text = error.to_string().to_ascii_lowercase();
             let expected_after_destroy = remote_cleanup_complete
-                && (error_text.contains("peer not found")
-                    || error_text.contains("peer offline")
-                    || error_text.contains("no authorized supervisor registered"));
-            if expected_after_destroy {
+                .then(|| Self::expected_revoke_cleanup_failure(&error))
+                .flatten();
+            if let Some(cause) = expected_after_destroy {
                 let peer_id = match &binding {
                     crate::RuntimeBinding::External { peer_id, .. } => peer_id.as_str(),
                     crate::RuntimeBinding::Session => "session",
                 };
                 tracing::debug!(
                     peer_id = %peer_id,
+                    ?cause,
                     error = %error,
                     "destroy cleanup: supervisor revoke failed after terminal remote cleanup"
                 );
@@ -8397,7 +8453,6 @@ impl MobActor {
                         if let Some(rejection) =
                             Self::bridge_rejection_reply(next_payload.protocol_version, &value)
                         {
-                            let rejection_reason = rejection.reason().to_string();
                             if let Some(cause) = rejection.typed_cause()
                                 && super::bridge_fallback::should_fall_back_to_bind(cause)
                             {
@@ -8434,12 +8489,18 @@ impl MobActor {
                                         )?;
                                         None
                                     }
-                                    Err(bind_error) => Some(MobError::WiringError(format!(
-                                        "{rejection_reason}; bind fallback failed: {bind_error}"
-                                    ))),
+                                    Err(bind_error) => {
+                                        let reason = format!(
+                                            "{}; bind fallback failed: {bind_error}",
+                                            rejection.reason()
+                                        );
+                                        Some(Self::bridge_rejection_error_with_reason(
+                                            &rejection, reason,
+                                        ))
+                                    }
                                 }
                             } else {
-                                Some(MobError::WiringError(rejection_reason))
+                                Some(Self::bridge_rejection_error(rejection))
                             }
                         } else if let Err(error) =
                             serde_json::from_value::<super::bridge_protocol::BridgeAck>(value)
@@ -10639,11 +10700,38 @@ impl MobActor {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod bridge_rejection_tests {
-    use super::MobActor;
+    use super::{ExpectedRevokeCleanupFailure, MobActor};
+    use crate::MobError;
     use crate::runtime::bridge_protocol::{
         BridgeRejectionCause, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
     };
+    use meerkat_core::comms::{AdmissionDropReason, SendError};
     use serde_json::json;
+
+    fn known_bridge_rejection_causes() -> &'static [(BridgeRejectionCause, &'static str)] {
+        &[
+            (BridgeRejectionCause::NotBound, "not_bound"),
+            (BridgeRejectionCause::StaleSupervisor, "stale_supervisor"),
+            (BridgeRejectionCause::SenderMismatch, "sender_mismatch"),
+            (BridgeRejectionCause::AlreadyBound, "already_bound"),
+            (
+                BridgeRejectionCause::InvalidBootstrapToken,
+                "invalid_bootstrap_token",
+            ),
+            (
+                BridgeRejectionCause::UnsupportedProtocolVersion,
+                "unsupported_protocol_version",
+            ),
+            (
+                BridgeRejectionCause::InvalidSupervisorSpec,
+                "invalid_supervisor_spec",
+            ),
+            (BridgeRejectionCause::InvalidPeerSpec, "invalid_peer_spec"),
+            (BridgeRejectionCause::AddressMismatch, "address_mismatch"),
+            (BridgeRejectionCause::Unsupported, "unsupported"),
+            (BridgeRejectionCause::Internal, "internal"),
+        ]
+    }
 
     #[test]
     fn actor_decodes_typed_protocol_v2_bridge_rejection() {
@@ -10675,5 +10763,137 @@ mod bridge_rejection_tests {
             .expect("legacy raw string should decode only on protocol v1");
         assert_eq!(legacy.typed_cause(), None);
         assert!(legacy.is_legacy_v1_raw_string());
+    }
+
+    #[test]
+    fn actor_bridge_rejection_error_preserves_each_known_typed_cause() {
+        for (cause, wire_name) in known_bridge_rejection_causes() {
+            let reason = format!("typed bridge rejection: {wire_name}");
+            let value = json!({
+                "result": "rejected",
+                "cause": wire_name,
+                "reason": reason,
+            });
+            let rejection =
+                MobActor::bridge_rejection_reply(SUPERVISOR_BRIDGE_PROTOCOL_VERSION, &value)
+                    .expect("typed rejection should decode");
+
+            let error = MobActor::bridge_rejection_error(rejection);
+
+            match error {
+                MobError::BridgeCommandRejected {
+                    cause: actual,
+                    reason: actual_reason,
+                } => {
+                    assert_eq!(actual, *cause);
+                    assert_eq!(actual_reason, reason);
+                }
+                other => panic!("expected typed bridge rejection error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn actor_legacy_bridge_rejection_error_stays_untyped() {
+        let value = json!("legacy rejection");
+        let legacy = MobActor::bridge_rejection_reply(1, &value)
+            .expect("legacy raw string should decode only on protocol v1");
+
+        let error = MobActor::bridge_rejection_error(legacy);
+
+        assert!(matches!(
+            error,
+            MobError::WiringError(reason) if reason == "legacy rejection"
+        ));
+    }
+
+    #[test]
+    fn revoke_cleanup_expected_failures_are_typed() {
+        let cases = [
+            (
+                MobError::CommsError(SendError::PeerNotFound("peer-1".to_string())),
+                ExpectedRevokeCleanupFailure::CommsPeerNotFound,
+            ),
+            (
+                MobError::CommsError(SendError::PeerOffline),
+                ExpectedRevokeCleanupFailure::CommsPeerOffline,
+            ),
+            (
+                MobError::CommsError(SendError::AdmissionDropped {
+                    reason: AdmissionDropReason::UntrustedSender,
+                }),
+                ExpectedRevokeCleanupFailure::CommsAdmissionDropped {
+                    reason: AdmissionDropReason::UntrustedSender,
+                },
+            ),
+            (
+                MobError::CommsError(SendError::AdmissionDropped {
+                    reason: AdmissionDropReason::SessionClosed,
+                }),
+                ExpectedRevokeCleanupFailure::CommsAdmissionDropped {
+                    reason: AdmissionDropReason::SessionClosed,
+                },
+            ),
+            (
+                MobError::BridgeCommandRejected {
+                    cause: BridgeRejectionCause::NotBound,
+                    reason: "no authorized supervisor registered".to_string(),
+                },
+                ExpectedRevokeCleanupFailure::BridgeRejected {
+                    cause: BridgeRejectionCause::NotBound,
+                },
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(
+                MobActor::expected_revoke_cleanup_failure(&error),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn revoke_cleanup_does_not_treat_error_text_as_a_semantic_cause() {
+        let cases = [
+            MobError::WiringError("peer offline".to_string()),
+            MobError::Internal("no authorized supervisor registered".to_string()),
+            MobError::CommsError(SendError::Validation("peer not found".to_string())),
+            MobError::CommsError(SendError::AdmissionDropped {
+                reason: AdmissionDropReason::InboxFull,
+            }),
+            MobError::BridgeCommandRejected {
+                cause: BridgeRejectionCause::SenderMismatch,
+                reason: "no authorized supervisor registered".to_string(),
+            },
+        ];
+
+        for error in cases {
+            assert_eq!(MobActor::expected_revoke_cleanup_failure(&error), None);
+        }
+    }
+
+    #[test]
+    fn revoke_cleanup_expected_failure_ratchet_rejects_string_parsing() {
+        let source = include_str!("actor.rs");
+        let start = source
+            .find("fn expected_revoke_cleanup_failure")
+            .expect("expected cleanup classifier exists");
+        let end = source[start..]
+            .find("\n    async fn destroy_remote_member_for_destroy")
+            .expect("cleanup classifier precedes remote destroy cleanup");
+        let body = &source[start..start + end];
+
+        for disallowed in [
+            "to_ascii_lowercase",
+            "to_lowercase",
+            "error.to_string()",
+            ".contains(",
+        ] {
+            assert!(
+                !body.contains(disallowed),
+                "expected revoke cleanup classifier must not parse error text with {disallowed}"
+            );
+        }
     }
 }

@@ -5,6 +5,7 @@ use crate::runtime::MobState;
 use crate::store::FrameAtomicOperation;
 use crate::validate::Diagnostic;
 use crate::{MobId, RunId, StepId};
+use meerkat_contracts::wire::supervisor_bridge::{BridgeRejectionCause, BridgeRejectionReply};
 
 /// Errors returned by mob operations.
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +41,13 @@ pub enum MobError {
     /// A wiring operation failed.
     #[error("wiring error: {0}")]
     WiringError(String),
+
+    /// A supervisor bridge command was rejected by the remote member.
+    #[error("bridge command rejected ({cause:?}): {reason}")]
+    BridgeCommandRejected {
+        cause: BridgeRejectionCause,
+        reason: String,
+    },
 
     /// The member failed to restore durable session state and is broken until repaired.
     #[error(
@@ -232,6 +240,26 @@ impl From<crate::store::MobStoreError> for MobError {
     }
 }
 
+impl From<BridgeRejectionReply> for MobError {
+    fn from(rejection: BridgeRejectionReply) -> Self {
+        let cause = rejection.typed_cause();
+        let reason = rejection.reason().to_string();
+        match cause {
+            Some(cause) => Self::BridgeCommandRejected { cause, reason },
+            None => Self::WiringError(reason),
+        }
+    }
+}
+
+impl MobError {
+    pub fn bridge_rejection_cause(&self) -> Option<BridgeRejectionCause> {
+        match self {
+            Self::BridgeCommandRejected { cause, .. } => Some(*cause),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +370,10 @@ mod tests {
                 to: MobState::Running,
             },
             MobError::WiringError("w".to_string()),
+            MobError::BridgeCommandRejected {
+                cause: BridgeRejectionCause::NotBound,
+                reason: "bind required".to_string(),
+            },
             MobError::MemberRestoreFailed {
                 member_id: MeerkatId::from("m"),
                 session_id: Some(meerkat_core::types::SessionId::new()),

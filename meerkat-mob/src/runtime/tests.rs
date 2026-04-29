@@ -25005,6 +25005,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             format!("invalid_transition:{}->{}", from.as_str(), to.as_str())
         }
         MobError::WiringError(_) => "wiring_error".to_string(),
+        MobError::BridgeCommandRejected { cause, .. } => {
+            format!("bridge_command_rejected:{cause:?}")
+        }
         MobError::MemberRestoreFailed { .. } => "member_restore_failed".to_string(),
         MobError::KickoffWaitTimedOut { .. } => "kickoff_wait_timed_out".to_string(),
         MobError::ReadyWaitTimedOut { .. } => "ready_wait_timed_out".to_string(),

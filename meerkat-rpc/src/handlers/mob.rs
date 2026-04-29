@@ -1952,8 +1952,12 @@ pub async fn handle_reconcile(
                     .map(|f| meerkat_contracts::MobReconcileFailureWire {
                         agent_identity: f.agent_identity.to_string(),
                         stage: match f.stage {
-                            meerkat_mob::runtime::ReconcileStage::Spawn => "spawn".to_string(),
-                            meerkat_mob::runtime::ReconcileStage::Retire => "retire".to_string(),
+                            meerkat_mob::runtime::ReconcileStage::Spawn => {
+                                meerkat_contracts::WireMobReconcileStage::Spawn
+                            }
+                            meerkat_mob::runtime::ReconcileStage::Retire => {
+                                meerkat_contracts::WireMobReconcileStage::Retire
+                            }
                         },
                         error: f.error.to_string(),
                     })

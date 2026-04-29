@@ -947,6 +947,15 @@ pub struct MobReconcileOptionsWire {
     pub retire_stale: bool,
 }
 
+/// Closed wire stage for a per-identity `mob/reconcile` failure.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobReconcileStage {
+    Spawn,
+    Retire,
+}
+
 /// Request payload for `mob/reconcile`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -964,8 +973,7 @@ pub struct MobReconcileParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobReconcileFailureWire {
     pub agent_identity: String,
-    /// One of `"spawn"` or `"retire"`.
-    pub stage: String,
+    pub stage: WireMobReconcileStage,
     /// Stringified mob error.
     pub error: String,
 }
@@ -1181,6 +1189,30 @@ mod tests {
         };
 
         assert!(spec.validate_public_surface_metadata().is_err());
+    }
+
+    #[test]
+    fn mob_reconcile_failure_stage_is_typed_wire_enum() {
+        let failure = MobReconcileFailureWire {
+            agent_identity: "worker-1".into(),
+            stage: WireMobReconcileStage::Spawn,
+            error: "spawn failed".into(),
+        };
+
+        let json = serde_json::to_value(&failure).expect("serialize failure");
+        assert_eq!(json["stage"], "spawn");
+
+        let round_trip: MobReconcileFailureWire =
+            serde_json::from_value(json).expect("deserialize failure");
+        assert_eq!(round_trip.stage, WireMobReconcileStage::Spawn);
+
+        let err = serde_json::from_value::<MobReconcileFailureWire>(serde_json::json!({
+            "agent_identity": "worker-1",
+            "stage": "restart",
+            "error": "bad stage"
+        }))
+        .expect_err("unknown reconcile stage must be rejected");
+        assert!(err.to_string().contains("unknown variant"));
     }
 
     #[test]

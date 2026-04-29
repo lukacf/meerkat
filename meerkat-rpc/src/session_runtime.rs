@@ -6758,7 +6758,7 @@ mod tests {
             first_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Add
                     && payload.target == "broken-server"
-                    && payload.status == "pending"
+                    && payload.status_text() == "pending"
             }),
             "should emit pending event for staged add"
         );
@@ -6817,7 +6817,7 @@ mod tests {
         assert!(add_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Add
                 && payload.target == "test-server"
-                && payload.status == "pending"
+                && payload.status_text() == "pending"
         }));
 
         runtime
@@ -6841,7 +6841,7 @@ mod tests {
         assert!(remove_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Remove
                 && payload.target == "test-server"
-                && (payload.status == "applied" || payload.status == "draining")
+                && matches!(payload.status_text().as_str(), "applied" | "draining")
         }));
     }
 
@@ -6918,7 +6918,7 @@ mod tests {
         assert!(first_turn_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Remove
                 && payload.target == "timeout-server"
-                && payload.status == "draining"
+                && payload.status_text() == "draining"
         }));
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -6964,7 +6964,7 @@ mod tests {
             second_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Remove
                     && payload.target == "timeout-server"
-                    && (payload.status == "forced" || payload.status == "applied")
+                    && matches!(payload.status_text().as_str(), "forced" | "applied")
             }),
             "expected forced removal event on a follow-up boundary, got: {second_turn_events:?}"
         );
@@ -7040,7 +7040,7 @@ mod tests {
         assert!(first_turn_events.iter().any(|payload| {
             payload.operation == ToolConfigChangeOperation::Remove
                 && payload.target == "server-draining"
-                && payload.status == "draining"
+                && payload.status_text() == "draining"
         }));
         assert!(
             adapter.tools().is_empty(),
@@ -7080,7 +7080,7 @@ mod tests {
             next_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Add
                     && payload.target == "server-staged"
-                    && payload.status == "pending"
+                    && payload.status_text() == "pending"
             }),
             "expected Add+pending for server-staged at boundary, got: {next_turn_events:?}"
         );
@@ -7225,7 +7225,7 @@ mod tests {
             fail_turn_events.iter().any(|payload| {
                 payload.operation == ToolConfigChangeOperation::Remove
                     && payload.target == "lossless-server"
-                    && (payload.status == "forced" || payload.status == "applied")
+                    && matches!(payload.status_text().as_str(), "forced" | "applied")
             }),
             "removal of lossless-server should survive alongside broken add, got: {fail_turn_events:?}"
         );

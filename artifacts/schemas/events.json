@@ -1214,6 +1214,22 @@
               "phase"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "legacy_status",
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "status"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -4281,6 +4297,22 @@
             "required": [
               "kind",
               "phase"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "legacy_status",
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "status"
             ],
             "type": "object"
           }

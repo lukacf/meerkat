@@ -951,9 +951,16 @@ pub struct MeerkatMcpReloadInput {
     pub persisted: bool,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeerkatSkillsAction {
+    List,
+    Inspect,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatSkillsInput {
-    pub action: String,
+    pub action: MeerkatSkillsAction,
     /// Typed skill identity for the `inspect` action.
     #[serde(default)]
     pub skill_key: Option<meerkat_core::skills::SkillKey>,
@@ -1614,8 +1621,8 @@ async fn handle_meerkat_skills(
         .as_ref()
         .ok_or_else(|| "skills not enabled".to_string())?;
 
-    match input.action.as_str() {
-        "list" => {
+    match input.action {
+        MeerkatSkillsAction::List => {
             let entries = runtime
                 .list_all_with_provenance(&meerkat_core::skills::SkillFilter::default())
                 .await
@@ -1643,7 +1650,7 @@ async fn handle_meerkat_skills(
             serde_json::to_value(meerkat_contracts::SkillListResponse { skills: wire })
                 .map_err(|e| format!("serialization failed: {e}"))
         }
-        "inspect" => {
+        MeerkatSkillsAction::Inspect => {
             let skill_key = input
                 .skill_key
                 .as_ref()
@@ -1673,7 +1680,6 @@ async fn handle_meerkat_skills(
             })
             .map_err(|e| format!("serialization failed: {e}"))
         }
-        _ => Err(format!("unknown action: {}", input.action)),
     }
 }
 
@@ -3890,6 +3896,34 @@ mod tests {
             skills_tool["inputSchema"]["properties"]["source"].is_object(),
             "skills inspect should expose optional source selector"
         );
+    }
+
+    #[test]
+    fn test_tools_list_skills_schema_has_typed_action_enum() {
+        let tools = tools_list();
+        let skills_tool = tools
+            .iter()
+            .find(|t| t["name"] == "meerkat_skills")
+            .expect("meerkat_skills tool must exist");
+        let action_schema = &skills_tool["inputSchema"]["properties"]["action"];
+        let action_enum = action_schema.get("enum").or_else(|| {
+            let action_ref = action_schema["$ref"].as_str()?;
+            let definition = action_ref
+                .strip_prefix("#/$defs/")
+                .or_else(|| action_ref.strip_prefix("#/definitions/"))?;
+            skills_tool["inputSchema"]["$defs"][definition]
+                .get("enum")
+                .or_else(|| skills_tool["inputSchema"]["definitions"][definition].get("enum"))
+        });
+        assert_eq!(
+            action_enum,
+            Some(&serde_json::json!(["list", "inspect"])),
+            "skills action should be a closed typed enum, got {action_schema}"
+        );
+
+        let input: MeerkatSkillsInput =
+            serde_json::from_value(serde_json::json!({ "action": "list" })).unwrap();
+        assert!(matches!(input.action, MeerkatSkillsAction::List));
     }
 
     #[cfg(not(feature = "comms"))]

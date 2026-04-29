@@ -236,6 +236,9 @@ export type ToolConfigChangeStatus = {
   detail?: string | null;
   kind: "external_tool_delta";
   phase: ExternalToolDeltaPhase;
+} | {
+  kind: "legacy_status";
+  status: string;
 };
 
 export type ToolConfigChangedPayload = {

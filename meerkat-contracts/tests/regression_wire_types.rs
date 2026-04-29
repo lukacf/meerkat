@@ -479,19 +479,16 @@ fn agent_event_all_variants_roundtrip() {
             reason: "channel full".to_string(),
         },
         AgentEvent::ToolConfigChanged {
-            payload: ToolConfigChangedPayload {
-                operation: ToolConfigChangeOperation::Add,
-                target: "filesystem".to_string(),
-                status: "applied".to_string(),
-                status_info: Some(ToolConfigChangeStatus::external_tool_delta(
+            payload: ToolConfigChangedPayload::new(
+                ToolConfigChangeOperation::Add,
+                "filesystem",
+                ToolConfigChangeStatus::external_tool_delta(
                     meerkat_core::ExternalToolDeltaPhase::Applied,
                     None,
-                )),
-                persisted: true,
-                applied_at_turn: Some(5),
-                domain: None,
-                deferred_catalog_delta: None,
-            },
+                ),
+                true,
+            )
+            .with_applied_at_turn(Some(5)),
         },
     ];
 
@@ -743,19 +740,16 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             reason: "lag".to_string(),
         },
         AgentEvent::ToolConfigChanged {
-            payload: ToolConfigChangedPayload {
-                operation: ToolConfigChangeOperation::Reload,
-                target: "external".to_string(),
-                status: "applied".to_string(),
-                status_info: Some(ToolConfigChangeStatus::external_tool_delta(
+            payload: ToolConfigChangedPayload::new(
+                ToolConfigChangeOperation::Reload,
+                "external",
+                ToolConfigChangeStatus::external_tool_delta(
                     meerkat_core::ExternalToolDeltaPhase::Applied,
                     None,
-                )),
-                persisted: true,
-                applied_at_turn: Some(1),
-                domain: None,
-                deferred_catalog_delta: None,
-            },
+                ),
+                true,
+            )
+            .with_applied_at_turn(Some(1)),
         },
     ];
 

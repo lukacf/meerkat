@@ -32,6 +32,7 @@ pub mod oauth_flow;
 // register their runtimes on wasm32 so `build_agent` can resolve
 // provider credentials in the browser.
 pub mod resolver;
+pub mod self_hosted;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "keyring"))]
 pub use auth_store::KeyringTokenStore;
@@ -48,3 +49,4 @@ pub use auth_store::{
 pub use meerkat_core::auth::{RefreshCoordinator, RefreshError, TokenStore};
 
 pub use resolver::{resolve_external_authorizer, resolve_simple_secret};
+pub use self_hosted::SelfHostedProviderRuntime;

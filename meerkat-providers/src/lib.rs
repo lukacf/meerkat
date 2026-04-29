@@ -16,6 +16,7 @@ pub mod runtime {
     #[cfg(not(target_arch = "wasm32"))]
     pub use meerkat_auth_core::resolver::resolve_external_authorizer;
     pub use meerkat_auth_core::resolver::resolve_simple_secret;
+    pub use meerkat_auth_core::self_hosted::SelfHostedProviderRuntime;
     pub use meerkat_llm_core::provider_runtime::{
         AuthLease, DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod,
         NormalizedBackendKind, ProviderAuthError, ProviderBindingError, ProviderClientError,
@@ -30,6 +31,7 @@ pub use meerkat_llm_core::provider_runtime::{
     ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection, ResolverEnvironment, StaticLease,
     ValidatedBinding,
 };
+pub use runtime::SelfHostedProviderRuntime;
 
 // auth-core impls are non-wasm by construction (filesystem, keyring,
 // OS lockfile primitives are not available in the browser).

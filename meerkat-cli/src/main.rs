@@ -3993,6 +3993,208 @@ fn source_kind_label(source: &meerkat_core::CredentialSourceSpec) -> &'static st
     }
 }
 
+const SELF_HOSTED_LEGACY_REALM_ID: &str = "self_hosted_legacy";
+
+struct DoctorSelfHostedProbeConnection {
+    base_url: String,
+    bearer_token: Option<String>,
+}
+
+fn doctor_self_hosted_registry() -> meerkat_providers::ProviderRuntimeRegistry {
+    meerkat_providers::ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_providers::SelfHostedProviderRuntime))
+}
+
+fn doctor_resolver_environment() -> meerkat_providers::ResolverEnvironment {
+    let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(backend) = meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+            && let Ok(store) = backend.open()
+        {
+            env = env.with_token_store(store);
+        }
+        env = env.with_refresh_coordinator(Arc::new(
+            meerkat_providers::auth_store::InMemoryCoordinator::default(),
+        ));
+    }
+    env
+}
+
+fn doctor_configured_self_hosted_target(
+    config: &Config,
+    preferred_realm: &meerkat_core::RealmId,
+) -> anyhow::Result<Option<meerkat_core::ResolvedConnectionTarget>> {
+    if config.realm.contains_key(preferred_realm.as_str()) {
+        let target = meerkat_core::resolve_realm_binding_target_for_provider(
+            config,
+            meerkat_core::Provider::SelfHosted,
+            Some(preferred_realm),
+            None,
+            None,
+            None,
+            false,
+        )
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "selected realm '{}' self_hosted credential binding is unavailable: {err}",
+                preferred_realm.as_str()
+            )
+        })?;
+        return Ok(Some(target));
+    }
+
+    match meerkat_core::resolve_connection_ref_or_default_for_provider(
+        config,
+        meerkat_core::Provider::SelfHosted,
+        None,
+        Some(preferred_realm),
+        false,
+    ) {
+        Ok(target) => Ok(Some(target)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn doctor_legacy_self_hosted_binding_id(
+    server_id: &str,
+) -> anyhow::Result<meerkat_core::BindingId> {
+    if let Ok(binding_id) = meerkat_core::BindingId::parse(server_id.to_string()) {
+        return Ok(binding_id);
+    }
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in server_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let generated = format!("legacy-{hash:016x}");
+    meerkat_core::BindingId::parse(generated).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to derive transient legacy binding id for self-hosted server '{server_id}': {err}"
+        )
+    })
+}
+
+fn doctor_legacy_self_hosted_connection(
+    server_id: &str,
+    server: &meerkat_core::SelfHostedServerConfig,
+) -> anyhow::Result<(meerkat_core::RealmConnectionSet, ConnectionRef)> {
+    let realm_id = meerkat_core::RealmId::parse(SELF_HOSTED_LEGACY_REALM_ID).map_err(|err| {
+        anyhow::anyhow!(
+            "invalid self-hosted legacy realm id '{SELF_HOSTED_LEGACY_REALM_ID}': {err}"
+        )
+    })?;
+    let binding_id = doctor_legacy_self_hosted_binding_id(server_id)?;
+    let binding_key = binding_id.as_str().to_string();
+
+    let (auth_method, source) = match (&server.bearer_token, &server.bearer_token_env) {
+        (Some(secret), _) => (
+            "static_bearer".to_string(),
+            meerkat_core::CredentialSourceSpec::InlineSecret {
+                secret: secret.clone(),
+            },
+        ),
+        (None, Some(env)) => (
+            "static_bearer".to_string(),
+            meerkat_core::CredentialSourceSpec::Env {
+                env: env.clone(),
+                fallback: Vec::new(),
+            },
+        ),
+        (None, None) => (
+            "none".to_string(),
+            meerkat_core::CredentialSourceSpec::PlatformDefault,
+        ),
+    };
+
+    let backend = meerkat_core::BackendProfile {
+        id: server_id.to_string(),
+        provider: meerkat_core::Provider::SelfHosted,
+        backend_kind: "self_hosted".to_string(),
+        base_url: Some(server.base_url.clone()),
+        options: serde_json::Value::Null,
+    };
+    let auth = meerkat_core::AuthProfile {
+        id: format!("{server_id}_auth"),
+        provider: meerkat_core::Provider::SelfHosted,
+        auth_method,
+        source,
+        constraints: Default::default(),
+        metadata_defaults: Default::default(),
+    };
+    let binding = meerkat_core::ProviderBinding {
+        id: binding_key.clone(),
+        backend_profile: backend.id.clone(),
+        auth_profile: auth.id.clone(),
+        default_model: None,
+        policy: Default::default(),
+    };
+
+    let mut backends = std::collections::BTreeMap::new();
+    backends.insert(backend.id.clone(), backend);
+    let mut auth_profiles = std::collections::BTreeMap::new();
+    auth_profiles.insert(auth.id.clone(), auth);
+    let mut bindings = std::collections::BTreeMap::new();
+    bindings.insert(binding.id.clone(), binding);
+
+    Ok((
+        meerkat_core::RealmConnectionSet {
+            realm_id: SELF_HOSTED_LEGACY_REALM_ID.to_string(),
+            backends,
+            auth_profiles,
+            bindings,
+            default_binding: Some(binding_key),
+        },
+        ConnectionRef {
+            realm: realm_id,
+            binding: binding_id,
+            profile: None,
+        },
+    ))
+}
+
+async fn resolve_doctor_self_hosted_probe_connection(
+    config: &Config,
+    preferred_realm: &meerkat_core::RealmId,
+    server_id: &str,
+    server: &meerkat_core::SelfHostedServerConfig,
+) -> anyhow::Result<DoctorSelfHostedProbeConnection> {
+    let (realm, connection_ref) =
+        if let Some(target) = doctor_configured_self_hosted_target(config, preferred_realm)? {
+            (target.realm, target.connection_ref)
+        } else {
+            doctor_legacy_self_hosted_connection(server_id, server)?
+        };
+
+    let connection = doctor_self_hosted_registry()
+        .resolve(&realm, &connection_ref, &doctor_resolver_environment())
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "self-hosted credential resolution failed for server '{server_id}' through '{}:{}': {err}",
+                connection_ref.realm.as_str(),
+                connection_ref.binding.as_str()
+            )
+        })?;
+
+    if connection.resolved_authorizer().is_some() {
+        anyhow::bail!(
+            "self-hosted server '{server_id}' resolved dynamic authorizer auth, but doctor only supports bearer-token or authless probes"
+        );
+    }
+
+    let base_url = connection
+        .backend_profile
+        .base_url
+        .clone()
+        .unwrap_or_else(|| server.base_url.clone());
+    Ok(DoctorSelfHostedProbeConnection {
+        base_url: meerkat_core::model_registry::normalize_base_url(&base_url),
+        bearer_token: connection.resolved_secret(),
+    })
+}
+
 async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
     let mut ok = true;
     let (config, _) = load_config(scope).await?;
@@ -4032,11 +4234,26 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to build doctor HTTP client: {e}"))?;
 
         for (server_id, server) in &config.self_hosted.servers {
-            let base_url = meerkat_core::model_registry::normalize_base_url(&server.base_url);
-            let models_url = format!("{base_url}/models");
+            let resolved = match resolve_doctor_self_hosted_probe_connection(
+                &config,
+                &scope.locator.realm,
+                server_id,
+                server,
+            )
+            .await
+            {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    ok = false;
+                    println!(
+                        "warn\tself_hosted\tserver {server_id} credential resolution failed: {err}"
+                    );
+                    continue;
+                }
+            };
+            let models_url = format!("{}/models", resolved.base_url);
             let mut request = http.get(&models_url);
-
-            if let Some(token) = server.resolve_bearer_token() {
+            if let Some(token) = resolved.bearer_token {
                 request = request.bearer_auth(token);
             }
 
@@ -9710,6 +9927,116 @@ mod tests {
             context_root: None,
             user_config_root: None,
         }
+    }
+
+    async fn serve_one_models_request_requiring_bearer_token(
+        expected_token: &'static str,
+    ) -> (String, tokio::task::JoinHandle<Option<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test HTTP listener binds");
+        let base_url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("doctor connects");
+            let mut buffer = vec![0_u8; 4096];
+            let bytes = socket.read(&mut buffer).await.expect("request reads");
+            let request = String::from_utf8_lossy(&buffer[..bytes]);
+            let auth_header = request
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim())
+                })
+                .map(ToOwned::to_owned);
+
+            let body = r#"{"data":[{"id":"gemma"}]}"#;
+            let status = if auth_header.as_deref() == Some(expected_token) {
+                "200 OK"
+            } else {
+                "401 Unauthorized"
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("response writes");
+            auth_header
+        });
+        (base_url, handle)
+    }
+
+    #[tokio::test]
+    async fn doctor_self_hosted_reuses_realm_auth_binding_for_legacy_server_probe() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("state");
+        let scope = test_scope(state_root.clone(), "dev");
+        let paths = meerkat_store::realm_paths_in(&state_root, "dev");
+        tokio::fs::create_dir_all(paths.config_path.parent().expect("config dir"))
+            .await
+            .expect("config dir created");
+
+        let (base_url, server) =
+            serve_one_models_request_requiring_bearer_token("Bearer realm-token").await;
+        let config = format!(
+            r#"
+[self_hosted.servers.local]
+transport = "openai_compatible"
+base_url = "{base_url}"
+api_style = "chat_completions"
+
+[self_hosted.models.gemma-local]
+server = "local"
+remote_model = "gemma"
+display_name = "Gemma Local"
+family = "gemma"
+tier = "supported"
+vision = false
+image_tool_results = false
+inline_video = false
+supports_temperature = true
+supports_thinking = false
+supports_reasoning = false
+
+[realm.dev]
+default_binding = "local"
+
+[realm.dev.backend.local]
+provider = "self_hosted"
+backend_kind = "self_hosted"
+base_url = "{base_url}"
+
+[realm.dev.auth.local_auth]
+provider = "self_hosted"
+auth_method = "static_bearer"
+source = {{ kind = "inline_secret", secret = "realm-token" }}
+
+[realm.dev.binding.local]
+backend_profile = "local"
+auth_profile = "local_auth"
+default_model = "gemma"
+"#
+        );
+        tokio::fs::write(&paths.config_path, config)
+            .await
+            .expect("config writes");
+
+        let result = handle_doctor(&scope).await;
+        let observed_auth = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("doctor should probe the self-hosted server")
+            .expect("server task joins");
+
+        assert_eq!(observed_auth.as_deref(), Some("Bearer realm-token"));
+        assert!(
+            result.is_ok(),
+            "doctor must resolve self-hosted credentials through realm auth: {result:?}"
+        );
     }
 
     #[tokio::test]

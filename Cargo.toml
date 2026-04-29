@@ -93,6 +93,7 @@ parking_lot = "0.12"
 rusqlite = { version = "0.37", features = ["bundled"] }
 indexmap = { version = "2", features = ["serde"] }
 tokio-util = "0.7"
+notify = "8"
 
 # JSON Schema validation
 jsonschema = { version = "0.26", default-features = false }

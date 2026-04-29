@@ -178,6 +178,7 @@ rust_test(
     size = "small",
     data = [
         ":package_runfiles",
+        "//:repo_governance_files",
         "//meerkat-cli:cargo_manifest",
         "//meerkat-cli:package_runfiles",
         "//meerkat-comms:cargo_manifest",
@@ -259,6 +260,7 @@ rust_test(
     data = [
         ":package_runfiles",
         "//:github_workflows",
+        "//:repo_governance_files",
         "//meerkat-core:package_runfiles",
         "//meerkat-machine-schema:package_runfiles",
         "//meerkat-mob:package_runfiles",

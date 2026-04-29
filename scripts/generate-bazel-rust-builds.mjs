@@ -356,6 +356,9 @@ function workspaceDataLabels(target) {
   if (target.name === "rmat_audit") {
     labels.add("//:repo_governance_files");
   }
+  if (source.includes("scripts/")) {
+    labels.add("//:repo_governance_files");
+  }
   if (target.name === "protocol_codegen_drift") {
     for (const label of packageRunfileLabels) labels.add(label);
   }

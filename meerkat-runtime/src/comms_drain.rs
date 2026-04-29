@@ -1902,7 +1902,7 @@ mod tests {
             .add_trusted_peer(
                 TrustedPeerDescriptor::test_only_unsigned_typed(
                     "spoofed-target",
-                    spoofed_peer_id.clone(),
+                    spoofed_peer_id,
                     "inproc://spoofed-target",
                 )
                 .expect("valid spoofed target"),

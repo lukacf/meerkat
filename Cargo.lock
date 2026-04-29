@@ -2538,6 +2538,7 @@ dependencies = [
  "base64",
  "chrono",
  "inventory",
+ "jsonschema",
  "meerkat-core",
  "meerkat-schedule",
  "schemars 1.2.1",

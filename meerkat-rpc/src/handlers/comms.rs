@@ -2,7 +2,6 @@
 
 pub const COMMS_STREAM_CONTRACT_VERSION: &str = "0.3.0";
 
-use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use crate::error;
@@ -10,6 +9,9 @@ use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
 use super::{parse_params, parse_session_id_for_runtime};
+
+pub use meerkat_contracts::{CommsPeersParams, CommsSendParams};
+use meerkat_contracts::{CommsPeersResult, CommsSendResult};
 
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
@@ -54,81 +56,10 @@ fn normalize_send_error(
 }
 
 pub(crate) fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
-    match receipt {
-        meerkat_core::comms::SendReceipt::InputAccepted {
-            interaction_id,
-            stream_reserved,
-        } => {
-            serde_json::json!({
-                "kind": "input_accepted",
-                "interaction_id": interaction_id.0.to_string(),
-                "stream_reserved": stream_reserved,
-            })
-        }
-        meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
-            serde_json::json!({
-                "kind": "peer_message_sent",
-                "envelope_id": envelope_id.to_string(),
-                "acked": acked,
-            })
-        }
-        meerkat_core::comms::SendReceipt::PeerLifecycleSent { envelope_id } => {
-            serde_json::json!({
-                "kind": "peer_lifecycle_sent",
-                "envelope_id": envelope_id.to_string(),
-            })
-        }
-        meerkat_core::comms::SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved,
-        } => serde_json::json!({
-            "kind": "peer_request_sent",
-            "envelope_id": envelope_id.to_string(),
-            "interaction_id": interaction_id.0.to_string(),
-            "request_id": envelope_id.to_string(),
-            "stream_reserved": stream_reserved,
-        }),
-        meerkat_core::comms::SendReceipt::PeerResponseSent {
-            envelope_id,
-            in_reply_to,
-        } => serde_json::json!({
-            "kind": "peer_response_sent",
-            "envelope_id": envelope_id.to_string(),
-            "in_reply_to": in_reply_to.0.to_string(),
-        }),
-    }
-}
-
-/// Parameters for `comms/send`.
-///
-/// `command` carries the typed [`CommsCommandRequest`] enum (serde-tagged on
-/// `kind`). The wire shape is flat: `{"session_id": "...", "kind": "...", ...}`.
-#[derive(Debug, Deserialize)]
-pub struct CommsSendParams {
-    pub session_id: String,
-    #[serde(flatten)]
-    pub command: meerkat_core::comms::CommsCommandRequest,
-}
-
-impl CommsSendParams {
-    /// Recipient peer id for error normalization, if the command targets one.
-    pub fn peer_label(&self) -> Option<String> {
-        use meerkat_core::comms::CommsCommandRequest;
-        match &self.command {
-            CommsCommandRequest::Input { .. } => None,
-            CommsCommandRequest::PeerMessage { to, .. }
-            | CommsCommandRequest::PeerLifecycle { to, .. }
-            | CommsCommandRequest::PeerRequest { to, .. }
-            | CommsCommandRequest::PeerResponse { to, .. } => Some(to.to_string()),
-        }
-    }
-}
-
-/// Parameters for `comms/peers`.
-#[derive(Deserialize)]
-pub struct CommsPeersParams {
-    pub session_id: String,
+    serde_json::to_value(CommsSendResult::from(receipt)).unwrap_or_else(|error| {
+        tracing::error!(?error, "failed to serialize CommsSendResult");
+        serde_json::Value::Object(serde_json::Map::new())
+    })
 }
 
 /// Handle `comms/send` — dispatch a canonical comms command.
@@ -142,7 +73,7 @@ pub async fn handle_send(
         Err(resp) => return resp,
     };
 
-    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+    let session_id = match parse_session_id_for_runtime(id.clone(), params.session_id(), runtime) {
         Ok(sid) => sid,
         Err(resp) => return resp,
     };
@@ -159,7 +90,7 @@ pub async fn handle_send(
     };
 
     let peer_name = params.peer_label();
-    let cmd = match params.command.into_command(&session_id) {
+    let cmd = match params.into_command().into_command(&session_id) {
         Ok(cmd) => cmd,
         Err(err) => {
             return RpcResponse::error_with_data(
@@ -216,24 +147,16 @@ pub async fn handle_peers(
     };
 
     let peers = comms.peers().await;
-    let entries: Vec<serde_json::Value> = peers
-        .iter()
-        .map(|p| {
-            serde_json::json!({
-                "name": p.name.to_string(),
-                "peer_id": p.peer_id,
-                "address": p.address,
-                "source": format!("{:?}", p.source),
-                "sendable_kinds": p.sendable_kinds,
-                "capabilities": p.capabilities,
-                "reachability": p.reachability,
-                "last_unreachable_reason": p.last_unreachable_reason,
-                "meta": p.meta,
-            })
-        })
-        .collect();
+    let result = CommsPeersResult::from_entries(&peers);
 
-    RpcResponse::success(id, serde_json::json!({ "peers": entries }))
+    match serde_json::to_value(result) {
+        Ok(value) => RpcResponse::success(id, value),
+        Err(serialize_error) => RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("Serialize error: {serialize_error}"),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -246,8 +169,11 @@ mod tests {
     fn deserialize_input_command() {
         let json = r#"{"session_id":"sid_1","kind":"input","body":"hello"}"#;
         let params: CommsSendParams = serde_json::from_str(json).unwrap();
-        assert_eq!(params.session_id, "sid_1");
-        assert!(matches!(params.command, CommsCommandRequest::Input { .. }));
+        assert_eq!(params.session_id(), "sid_1");
+        assert!(matches!(
+            params.into_command(),
+            CommsCommandRequest::Input { .. }
+        ));
     }
 
     #[test]
@@ -277,6 +203,16 @@ mod tests {
         assert!(
             err.to_string().contains("source") || err.to_string().contains("webhookd"),
             "expected invalid-source serde error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_input_unknown_field_fails_at_serde_boundary() {
+        let json = r#"{"session_id":"sid_1","kind":"input","body":"hi","unexpected":true}"#;
+        let err = serde_json::from_str::<CommsSendParams>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected") || err.to_string().contains("unknown field"),
+            "expected unknown-field serde error, got: {err}"
         );
     }
 

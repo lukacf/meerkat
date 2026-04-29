@@ -92,6 +92,24 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobStreamCloseResult",
 ]
 
+COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES = [
+    "CommsPeersParams",
+    "CommsPeerEntry",
+    "CommsPeersResult",
+    "SessionStreamOpenParams",
+    "SessionStreamOpenResult",
+    "SessionStreamCloseParams",
+    "SessionStreamCloseResult",
+]
+
+COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
+    "CommsSendParams",
+    "CommsSendResult",
+    "CommsPeerSource",
+    "CommsPeerReachability",
+    "CommsPeerUnreachableReason",
+]
+
 MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireMemberRef",
     "WireMobBackendKind",
@@ -236,6 +254,8 @@ def _promote_nested_schema_def(name: str) -> bool:
         "ToolCallTimeoutContext",
         "WireTrustedPeerIdentity",
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
+        *COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
+        *COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES,
     }
 
 
@@ -728,6 +748,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_contract_dataclass(name)
     for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
+    for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
+        append_python_contract_dataclass(name)
     append_python_dataclass("RuntimeStateParams", params_schema, "Request payload for runtime/session_status.")
     append_python_dataclass(
         "RuntimeRealtimeAttachmentStatusParams",
@@ -867,6 +889,9 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         wire_schema,
         "Typed comms/send command (serde-tagged on `kind`).",
     )
+    for name in COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES:
+        root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
+        append_python_alias(name, root_schema, f"Comms/session-stream RPC contract for {name}.")
     types_content += "\n# Response payload for `runtime/session_submission`.\nInputStateResult = Optional[WireInputState]\n"
 
     (output_dir / "types.py").write_text(types_content)
@@ -1074,6 +1099,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_contract_interface(name)
     for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)
+    for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
+        append_typescript_contract_interface(name)
     append_typescript_interface("RuntimeStateParams", params_schema)
     append_typescript_interface("RuntimeRealtimeAttachmentStatusParams", params_schema)
     append_typescript_interface("RealtimeOpenRequest", params_schema)
@@ -1121,6 +1148,9 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireToolResultContent", wire_schema)
     append_typescript_alias("WireModelTier", schemas.get("models", {}))
     append_typescript_alias("CommsCommandRequest", wire_schema)
+    for name in COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES:
+        root_schema = params_schema if _lookup_named_schema(params_schema, name) else wire_schema
+        append_typescript_alias(name, root_schema)
     append_typescript_interface("WireRenderMetadata", wire_schema)
     append_typescript_alias("WireTrustedPeerIdentity", wire_schema)
     append_typescript_interface("WireTrustedPeerSpec", wire_schema)

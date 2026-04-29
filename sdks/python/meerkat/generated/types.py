@@ -1001,6 +1001,60 @@ class MobReconcileFailureWire:
 
 
 @dataclass
+class CommsPeersParams:
+    """Request payload for `comms/peers`."""
+    session_id: str
+
+
+@dataclass
+class CommsPeerEntry:
+    """One peer entry in the `comms/peers` response."""
+    address: dict[str, Any]
+    capabilities: Any
+    meta: dict[str, Any]
+    name: str
+    peer_id: str
+    reachability: CommsPeerReachability
+    sendable_kinds: list[str]
+    source: CommsPeerSource
+    last_unreachable_reason: Optional[CommsPeerUnreachableReason] = None
+
+
+@dataclass
+class CommsPeersResult:
+    """Response payload for `comms/peers`."""
+    peers: list[CommsPeerEntry]
+
+
+@dataclass
+class SessionStreamOpenParams:
+    """Request payload for `session/stream_open`."""
+    session_id: str
+
+
+@dataclass
+class SessionStreamOpenResult:
+    """Response payload for `session/stream_open`."""
+    opened: bool
+    session_id: str
+    stream_id: str
+
+
+@dataclass
+class SessionStreamCloseParams:
+    """Request payload for `session/stream_close`."""
+    stream_id: str
+
+
+@dataclass
+class SessionStreamCloseResult:
+    """Response payload for `session/stream_close`."""
+    already_closed: bool
+    closed: bool
+    stream_id: str
+
+
+@dataclass
 class RuntimeStateParams:
     """Request payload for `runtime/session_status`."""
     session_id: str
@@ -2397,6 +2451,90 @@ class CommsCommandPeerResponse(TypedDict, total=False):
     to: Required[str]
 
 CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse
+
+# Request payload for `comms/send`.
+class CommsSendParamsInput(TypedDict, total=False):
+    allow_self_session: NotRequired[bool]
+    blocks: NotRequired[list[dict[str, Any]]]
+    body: Required[str]
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    kind: Required[Literal['input']]
+    session_id: Required[str]
+    source: NotRequired[Literal['tcp', 'uds', 'stdin', 'webhook', 'rpc']]
+    stream: NotRequired[Literal['none', 'reserve_interaction']]
+
+class CommsSendParamsPeerMessage(TypedDict, total=False):
+    blocks: NotRequired[list[dict[str, Any]]]
+    body: Required[str]
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    kind: Required[Literal['peer_message']]
+    session_id: Required[str]
+    to: Required[str]
+
+class CommsSendParamsPeerLifecycle(TypedDict, total=False):
+    kind: Required[Literal['peer_lifecycle']]
+    lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
+    params: NotRequired[Any]
+    session_id: Required[str]
+    to: Required[str]
+
+class CommsSendParamsPeerRequest(TypedDict, total=False):
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    intent: Required[str]
+    kind: Required[Literal['peer_request']]
+    params: NotRequired[Any]
+    session_id: Required[str]
+    stream: NotRequired[Literal['none', 'reserve_interaction']]
+    to: Required[str]
+
+class CommsSendParamsPeerResponse(TypedDict, total=False):
+    handling_mode: NotRequired[Literal['queue', 'steer']]
+    in_reply_to: Required[str]
+    kind: Required[Literal['peer_response']]
+    result: NotRequired[Any]
+    session_id: Required[str]
+    status: Required[Literal['accepted', 'completed', 'failed']]
+    to: Required[str]
+
+CommsSendParams = CommsSendParamsInput | CommsSendParamsPeerMessage | CommsSendParamsPeerLifecycle | CommsSendParamsPeerRequest | CommsSendParamsPeerResponse
+
+# Response payload for `comms/send`.
+class CommsSendResultInputAccepted(TypedDict, total=False):
+    interaction_id: Required[str]
+    kind: Required[Literal['input_accepted']]
+    stream_reserved: Required[bool]
+
+class CommsSendResultPeerMessageSent(TypedDict, total=False):
+    acked: Required[bool]
+    envelope_id: Required[str]
+    kind: Required[Literal['peer_message_sent']]
+
+class CommsSendResultPeerLifecycleSent(TypedDict, total=False):
+    envelope_id: Required[str]
+    kind: Required[Literal['peer_lifecycle_sent']]
+
+class CommsSendResultPeerRequestSent(TypedDict, total=False):
+    envelope_id: Required[str]
+    interaction_id: Required[str]
+    kind: Required[Literal['peer_request_sent']]
+    request_id: Required[str]
+    stream_reserved: Required[bool]
+
+class CommsSendResultPeerResponseSent(TypedDict, total=False):
+    envelope_id: Required[str]
+    in_reply_to: Required[str]
+    kind: Required[Literal['peer_response_sent']]
+
+CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent
+
+# Stable public source labels for `comms/peers` entries.
+CommsPeerSource = Literal['Trusted', 'Inproc', 'TrustedAndInproc', 'Unknown']
+
+# Stable public reachability labels for `comms/peers` entries.
+CommsPeerReachability = Literal['unknown', 'reachable', 'unreachable']
+
+# Stable public unreachable-reason labels for `comms/peers` entries.
+CommsPeerUnreachableReason = Literal['offline_or_no_ack', 'transport_error', 'admission_dropped', 'unknown']
 
 # Response payload for `runtime/session_submission`.
 InputStateResult = Optional[WireInputState]

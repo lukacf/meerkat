@@ -49,33 +49,12 @@ fn is_transport_internal(message: &str) -> bool {
 
 #[cfg(feature = "comms")]
 fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
-    match receipt {
-        meerkat_core::comms::SendReceipt::InputAccepted {
-            interaction_id,
-            stream_reserved,
-        } => {
-            json!({"kind":"input_accepted","interaction_id": interaction_id.0.to_string(),"stream_reserved": stream_reserved})
-        }
-        meerkat_core::comms::SendReceipt::PeerMessageSent { envelope_id, acked } => {
-            json!({"kind":"peer_message_sent","envelope_id": envelope_id.to_string(),"acked": acked})
-        }
-        meerkat_core::comms::SendReceipt::PeerLifecycleSent { envelope_id } => {
-            json!({"kind":"peer_lifecycle_sent","envelope_id": envelope_id.to_string()})
-        }
-        meerkat_core::comms::SendReceipt::PeerRequestSent {
-            envelope_id,
-            interaction_id,
-            stream_reserved,
-        } => {
-            json!({"kind":"peer_request_sent","envelope_id": envelope_id.to_string(),"interaction_id": interaction_id.0.to_string(),"request_id": envelope_id.to_string(),"stream_reserved": stream_reserved})
-        }
-        meerkat_core::comms::SendReceipt::PeerResponseSent {
-            envelope_id,
-            in_reply_to,
-        } => {
-            json!({"kind":"peer_response_sent","envelope_id": envelope_id.to_string(),"in_reply_to": in_reply_to.0.to_string()})
-        }
-    }
+    serde_json::to_value(meerkat_contracts::CommsSendResult::from(receipt)).unwrap_or_else(
+        |error| {
+            tracing::error!(?error, "failed to serialize CommsSendResult");
+            serde_json::Value::Object(serde_json::Map::new())
+        },
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1844,7 +1823,7 @@ impl MethodRouter {
         };
         let session_id = match handlers::parse_session_id_for_runtime(
             id.clone(),
-            &params.session_id,
+            params.session_id(),
             &self.runtime,
         ) {
             Ok(sid) => sid,
@@ -1878,7 +1857,7 @@ impl MethodRouter {
             );
         };
         let peer_name = params.peer_label();
-        let cmd = match params.command.into_command(&session_id) {
+        let cmd = match params.into_command().into_command(&session_id) {
             Ok(cmd) => cmd,
             Err(err) => {
                 return RpcResponse::error_with_data(
@@ -1983,23 +1962,15 @@ impl MethodRouter {
             );
         };
         let peers = comms.peers().await;
-        let entries: Vec<serde_json::Value> = peers
-            .iter()
-            .map(|p| {
-                json!({
-                    "name": p.name.to_string(),
-                    "peer_id": p.peer_id,
-                    "address": p.address,
-                    "source": format!("{:?}", p.source),
-                    "sendable_kinds": p.sendable_kinds,
-                    "capabilities": p.capabilities,
-                    "reachability": p.reachability,
-                    "last_unreachable_reason": p.last_unreachable_reason,
-                    "meta": p.meta,
-                })
-            })
-            .collect();
-        RpcResponse::success(id, json!({"peers": entries}))
+        let result = meerkat_contracts::CommsPeersResult::from_entries(&peers);
+        match serde_json::to_value(result) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("Serialize error: {serialize_error}"),
+            ),
+        }
     }
 
     #[cfg(not(feature = "mini-surface"))]
@@ -2008,18 +1979,11 @@ impl MethodRouter {
         id: Option<crate::protocol::RpcId>,
         params: Option<&serde_json::value::RawValue>,
     ) -> RpcResponse {
-        use serde::Deserialize;
-        use serde_json::json;
-
-        #[derive(Deserialize)]
-        struct SessionStreamOpenParams {
-            session_id: String,
-        }
-
-        let params = match handlers::parse_params::<SessionStreamOpenParams>(params) {
-            Ok(p) => p,
-            Err(resp) => return resp.with_id(id),
-        };
+        let params =
+            match handlers::parse_params::<meerkat_contracts::SessionStreamOpenParams>(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
 
         let session_id = match handlers::parse_session_id_for_runtime(
             id.clone(),
@@ -2173,14 +2137,19 @@ impl MethodRouter {
             },
         );
 
-        RpcResponse::success(
-            id,
-            json!({
-                "stream_id": stream_id.to_string(),
-                "session_id": session_id.to_string(),
-                "opened": true,
-            }),
-        )
+        let result = meerkat_contracts::SessionStreamOpenResult {
+            stream_id: stream_id.to_string(),
+            session_id: session_id.to_string(),
+            opened: true,
+        };
+        match serde_json::to_value(result) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("Serialize error: {serialize_error}"),
+            ),
+        }
     }
 
     #[cfg(not(feature = "mini-surface"))]
@@ -2189,18 +2158,11 @@ impl MethodRouter {
         id: Option<crate::protocol::RpcId>,
         params: Option<&serde_json::value::RawValue>,
     ) -> RpcResponse {
-        use serde::Deserialize;
-        use serde_json::json;
-
-        #[derive(Deserialize)]
-        struct SessionStreamCloseParams {
-            stream_id: String,
-        }
-
-        let params = match handlers::parse_params::<SessionStreamCloseParams>(params) {
-            Ok(p) => p,
-            Err(resp) => return resp.with_id(id),
-        };
+        let params =
+            match handlers::parse_params::<meerkat_contracts::SessionStreamCloseParams>(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
 
         let stream_id = match Uuid::parse_str(&params.stream_id) {
             Ok(stream_id) => stream_id,
@@ -2243,14 +2205,19 @@ impl MethodRouter {
             None => self.closed_session_streams.lock().await.remove(&stream_id),
         };
 
-        RpcResponse::success(
-            id,
-            json!({
-                "stream_id": stream_id.to_string(),
-                "closed": true,
-                "already_closed": already_closed,
-            }),
-        )
+        let result = meerkat_contracts::SessionStreamCloseResult {
+            stream_id: stream_id.to_string(),
+            closed: true,
+            already_closed,
+        };
+        match serde_json::to_value(result) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("Serialize error: {serialize_error}"),
+            ),
+        }
     }
 
     #[cfg(feature = "mob")]

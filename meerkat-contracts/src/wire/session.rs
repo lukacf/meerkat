@@ -32,6 +32,40 @@ use meerkat_core::{
 };
 use std::convert::TryFrom;
 
+/// Request payload for `session/stream_open`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SessionStreamOpenParams {
+    pub session_id: String,
+}
+
+/// Response payload for `session/stream_open`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionStreamOpenResult {
+    pub stream_id: String,
+    pub session_id: String,
+    pub opened: bool,
+}
+
+/// Request payload for `session/stream_close`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SessionStreamCloseParams {
+    pub stream_id: String,
+}
+
+/// Response payload for `session/stream_close`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionStreamCloseResult {
+    pub stream_id: String,
+    pub closed: bool,
+    pub already_closed: bool,
+}
+
 /// Canonical session info for wire protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

@@ -189,6 +189,7 @@
     "description": "Typed wire request for `comms/send`.\n\nVariants are serde-tagged on `kind` and validated structurally at the\ndeserialization boundary. Required fields per kind are enforced by the\ntype system; invalid discriminators (`source`, `stream`, `handling_mode`,\n`status`) become serde deserialization errors rather than runtime\nstring-match failures.\n\nCross-field invariants that cannot be expressed structurally (e.g.\n`handling_mode` is forbidden on `Accepted` peer responses) are checked\nin [`CommsCommandRequest::into_command`].",
     "oneOf": [
       {
+        "additionalProperties": false,
         "description": "Inject input into the local session.",
         "properties": {
           "allow_self_session": {
@@ -251,6 +252,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "description": "Send a one-way peer message.",
         "properties": {
           "blocks": {
@@ -291,6 +293,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "description": "Send a one-way peer lifecycle notification.",
         "properties": {
           "kind": {
@@ -315,6 +318,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "description": "Send a request to a peer.",
         "properties": {
           "handling_mode": {
@@ -359,6 +363,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "description": "Send a response to a prior peer request.",
         "properties": {
           "handling_mode": {
@@ -398,6 +403,463 @@
       }
     ],
     "title": "CommsCommandRequest"
+  },
+  "CommsPeerEntry": {
+    "$defs": {
+      "CommsPeerReachability": {
+        "description": "Stable public reachability labels for `comms/peers` entries.",
+        "enum": [
+          "unknown",
+          "reachable",
+          "unreachable"
+        ],
+        "type": "string"
+      },
+      "CommsPeerSource": {
+        "description": "Stable public source labels for `comms/peers` entries.",
+        "enum": [
+          "Trusted",
+          "Inproc",
+          "TrustedAndInproc",
+          "Unknown"
+        ],
+        "type": "string"
+      },
+      "CommsPeerUnreachableReason": {
+        "description": "Stable public unreachable-reason labels for `comms/peers` entries.",
+        "enum": [
+          "offline_or_no_ack",
+          "transport_error",
+          "admission_dropped",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "PeerAddress": {
+        "description": "Typed peer address: transport atom plus endpoint string.\n\nThe `endpoint` is transport-specific (path for `Uds`, `host:port` for\n`Tcp`, agent name for `Inproc`) but is carried as a validated `String`\nso the transport atom can be branched on without re-parsing.",
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "transport": {
+            "$ref": "#/$defs/PeerTransport"
+          }
+        },
+        "required": [
+          "transport",
+          "endpoint"
+        ],
+        "type": "object"
+      },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
+      "PeerMeta": {
+        "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "PeerTransport": {
+        "description": "Typed transport atom for a peer address.\n\nReplaces the old free-form `address: String` on `PeerDirectoryEntry` so\ncallers cannot accidentally invent new transports by string concatenation\nat a call site.",
+        "oneOf": [
+          {
+            "const": "inproc",
+            "description": "In-process routing within this runtime (no network hop).",
+            "type": "string"
+          },
+          {
+            "const": "uds",
+            "description": "Unix domain socket.",
+            "type": "string"
+          },
+          {
+            "const": "tcp",
+            "description": "TCP endpoint.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One peer entry in the `comms/peers` response.",
+    "properties": {
+      "address": {
+        "$ref": "#/$defs/PeerAddress"
+      },
+      "capabilities": true,
+      "last_unreachable_reason": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/CommsPeerUnreachableReason"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "meta": {
+        "$ref": "#/$defs/PeerMeta"
+      },
+      "name": {
+        "$ref": "#/$defs/PeerName"
+      },
+      "peer_id": {
+        "$ref": "#/$defs/PeerId"
+      },
+      "reachability": {
+        "$ref": "#/$defs/CommsPeerReachability"
+      },
+      "sendable_kinds": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "source": {
+        "$ref": "#/$defs/CommsPeerSource"
+      }
+    },
+    "required": [
+      "name",
+      "peer_id",
+      "address",
+      "source",
+      "sendable_kinds",
+      "capabilities",
+      "reachability",
+      "meta"
+    ],
+    "title": "CommsPeerEntry",
+    "type": "object"
+  },
+  "CommsPeerReachability": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable public reachability labels for `comms/peers` entries.",
+    "enum": [
+      "unknown",
+      "reachable",
+      "unreachable"
+    ],
+    "title": "CommsPeerReachability",
+    "type": "string"
+  },
+  "CommsPeerSource": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable public source labels for `comms/peers` entries.",
+    "enum": [
+      "Trusted",
+      "Inproc",
+      "TrustedAndInproc",
+      "Unknown"
+    ],
+    "title": "CommsPeerSource",
+    "type": "string"
+  },
+  "CommsPeerUnreachableReason": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Stable public unreachable-reason labels for `comms/peers` entries.",
+    "enum": [
+      "offline_or_no_ack",
+      "transport_error",
+      "admission_dropped",
+      "unknown"
+    ],
+    "title": "CommsPeerUnreachableReason",
+    "type": "string"
+  },
+  "CommsPeersResult": {
+    "$defs": {
+      "CommsPeerEntry": {
+        "description": "One peer entry in the `comms/peers` response.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/PeerAddress"
+          },
+          "capabilities": true,
+          "last_unreachable_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CommsPeerUnreachableReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "meta": {
+            "$ref": "#/$defs/PeerMeta"
+          },
+          "name": {
+            "$ref": "#/$defs/PeerName"
+          },
+          "peer_id": {
+            "$ref": "#/$defs/PeerId"
+          },
+          "reachability": {
+            "$ref": "#/$defs/CommsPeerReachability"
+          },
+          "sendable_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source": {
+            "$ref": "#/$defs/CommsPeerSource"
+          }
+        },
+        "required": [
+          "name",
+          "peer_id",
+          "address",
+          "source",
+          "sendable_kinds",
+          "capabilities",
+          "reachability",
+          "meta"
+        ],
+        "type": "object"
+      },
+      "CommsPeerReachability": {
+        "description": "Stable public reachability labels for `comms/peers` entries.",
+        "enum": [
+          "unknown",
+          "reachable",
+          "unreachable"
+        ],
+        "type": "string"
+      },
+      "CommsPeerSource": {
+        "description": "Stable public source labels for `comms/peers` entries.",
+        "enum": [
+          "Trusted",
+          "Inproc",
+          "TrustedAndInproc",
+          "Unknown"
+        ],
+        "type": "string"
+      },
+      "CommsPeerUnreachableReason": {
+        "description": "Stable public unreachable-reason labels for `comms/peers` entries.",
+        "enum": [
+          "offline_or_no_ack",
+          "transport_error",
+          "admission_dropped",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "PeerAddress": {
+        "description": "Typed peer address: transport atom plus endpoint string.\n\nThe `endpoint` is transport-specific (path for `Uds`, `host:port` for\n`Tcp`, agent name for `Inproc`) but is carried as a validated `String`\nso the transport atom can be branched on without re-parsing.",
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "transport": {
+            "$ref": "#/$defs/PeerTransport"
+          }
+        },
+        "required": [
+          "transport",
+          "endpoint"
+        ],
+        "type": "object"
+      },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
+      "PeerMeta": {
+        "description": "Supplementary metadata attached to a peer for discovery.\n\nThe peer's routing name lives in `TrustedPeer.name` / `comms_name`.\n`PeerMeta` carries additional context: what the agent does and\narbitrary key/value labels.\n\n# Serde\n\nBoth fields use `skip_serializing_if`, so `PeerMeta::default()`\nserializes to `{}`.",
+        "properties": {
+          "description": {
+            "description": "What this agent does (e.g. \"Reviews pull requests for style issues\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value labels (e.g. `{\"lang\": \"rust\", \"team\": \"infra\"}`).\n\n`BTreeMap` keeps keys sorted for deterministic serialization.",
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "PeerTransport": {
+        "description": "Typed transport atom for a peer address.\n\nReplaces the old free-form `address: String` on `PeerDirectoryEntry` so\ncallers cannot accidentally invent new transports by string concatenation\nat a call site.",
+        "oneOf": [
+          {
+            "const": "inproc",
+            "description": "In-process routing within this runtime (no network hop).",
+            "type": "string"
+          },
+          {
+            "const": "uds",
+            "description": "Unix domain socket.",
+            "type": "string"
+          },
+          {
+            "const": "tcp",
+            "description": "TCP endpoint.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `comms/peers`.",
+    "properties": {
+      "peers": {
+        "items": {
+          "$ref": "#/$defs/CommsPeerEntry"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "peers"
+    ],
+    "title": "CommsPeersResult",
+    "type": "object"
+  },
+  "CommsSendResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `comms/send`.",
+    "oneOf": [
+      {
+        "properties": {
+          "interaction_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "input_accepted",
+            "type": "string"
+          },
+          "stream_reserved": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "interaction_id",
+          "stream_reserved"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "acked": {
+            "type": "boolean"
+          },
+          "envelope_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_message_sent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "envelope_id",
+          "acked"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "envelope_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_lifecycle_sent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "envelope_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "envelope_id": {
+            "type": "string"
+          },
+          "interaction_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_request_sent",
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "stream_reserved": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "envelope_id",
+          "interaction_id",
+          "request_id",
+          "stream_reserved"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "envelope_id": {
+            "type": "string"
+          },
+          "in_reply_to": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_response_sent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "envelope_id",
+          "in_reply_to"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "CommsSendResult"
   },
   "ContractVersion": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11550,6 +12012,50 @@
       "occurrences"
     ],
     "title": "ScheduleOccurrencesResult",
+    "type": "object"
+  },
+  "SessionStreamCloseResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `session/stream_close`.",
+    "properties": {
+      "already_closed": {
+        "type": "boolean"
+      },
+      "closed": {
+        "type": "boolean"
+      },
+      "stream_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "stream_id",
+      "closed",
+      "already_closed"
+    ],
+    "title": "SessionStreamCloseResult",
+    "type": "object"
+  },
+  "SessionStreamOpenResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `session/stream_open`.",
+    "properties": {
+      "opened": {
+        "type": "boolean"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "stream_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "stream_id",
+      "session_id",
+      "opened"
+    ],
+    "title": "SessionStreamOpenResult",
     "type": "object"
   },
   "SkillEntry": {

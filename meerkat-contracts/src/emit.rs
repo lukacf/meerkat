@@ -186,6 +186,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "SkillListResponse": schema_for!(crate::wire::SkillListResponse),
         "SkillInspectResponse": schema_for!(crate::wire::SkillInspectResponse),
         "CommsCommandRequest": schema_for!(crate::wire::CommsCommandRequest),
+        "CommsSendResult": schema_for!(crate::wire::CommsSendResult),
+        "CommsPeerSource": schema_for!(crate::wire::CommsPeerSource),
+        "CommsPeerReachability": schema_for!(crate::wire::CommsPeerReachability),
+        "CommsPeerUnreachableReason": schema_for!(crate::wire::CommsPeerUnreachableReason),
+        "CommsPeerEntry": schema_for!(crate::wire::CommsPeerEntry),
+        "CommsPeersResult": schema_for!(crate::wire::CommsPeersResult),
+        "SessionStreamOpenResult": schema_for!(crate::wire::SessionStreamOpenResult),
+        "SessionStreamCloseResult": schema_for!(crate::wire::SessionStreamCloseResult),
     });
     write_pretty_json(output_dir.join("wire-types.json"), &wire_types)?;
 
@@ -247,6 +255,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "InputStateParams": schema_for!(crate::wire::InputStateParams),
         "InputListParams": schema_for!(crate::wire::InputListParams),
         "RuntimeRealtimeAttachmentStatusParams": schema_for!(crate::wire::RuntimeRealtimeAttachmentStatusParams),
+        "SessionStreamOpenParams": schema_for!(crate::wire::SessionStreamOpenParams),
+        "SessionStreamCloseParams": schema_for!(crate::wire::SessionStreamCloseParams),
+        "CommsSendParams": schema_for!(crate::wire::CommsSendParams),
+        "CommsPeersParams": schema_for!(crate::wire::CommsPeersParams),
         "ScheduleIdParams": schema_for!(crate::wire::ScheduleIdParams),
         "ListSchedulesParams": schema_for!(crate::wire::ListSchedulesParams),
         "ScheduleOccurrencesParams": schema_for!(crate::wire::ScheduleOccurrencesParams),
@@ -1106,6 +1118,26 @@ mod tests {
         dir
     }
 
+    fn assert_schema_accepts(schema: &serde_json::Value, instance: &serde_json::Value) {
+        let validator = jsonschema::validator_for(schema).expect("schema compiles");
+        let errors = validator
+            .iter_errors(instance)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "schema should accept {instance}, got errors: {errors:?}"
+        );
+    }
+
+    fn assert_schema_rejects(schema: &serde_json::Value, instance: &serde_json::Value) {
+        let validator = jsonschema::validator_for(schema).expect("schema compiles");
+        assert!(
+            !validator.is_valid(instance),
+            "schema should reject invalid shape {instance}"
+        );
+    }
+
     #[test]
     fn emitted_schemas_catalog_auth_status_detail() {
         let output_dir = temp_output_dir("auth-status-detail");
@@ -1197,6 +1229,18 @@ mod tests {
                 "MobAppendSystemContextParams",
                 "MobAppendSystemContextResult",
             ),
+            (
+                "session/stream_open",
+                "SessionStreamOpenParams",
+                "SessionStreamOpenResult",
+            ),
+            (
+                "session/stream_close",
+                "SessionStreamCloseParams",
+                "SessionStreamCloseResult",
+            ),
+            ("comms/send", "CommsSendParams", "CommsSendResult"),
+            ("comms/peers", "CommsPeersParams", "CommsPeersResult"),
         ] {
             let method = methods
                 .iter()
@@ -1223,6 +1267,125 @@ mod tests {
         assert_eq!(
             cancel_all_work["result_type"], "MobCancelAllWorkResult",
             "mob/cancel_all_work emitted result_type drifted"
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_comms_and_session_stream_schemas_validate_public_shapes() {
+        let output_dir = temp_output_dir("comms-session-stream-contract-shapes");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let params: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("params.json")).unwrap()).unwrap();
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+
+        let session_stream_open = params
+            .get("SessionStreamOpenParams")
+            .expect("SessionStreamOpenParams schema must be emitted");
+        assert_schema_accepts(
+            session_stream_open,
+            &serde_json::json!({ "session_id": "sid_test" }),
+        );
+        assert_schema_rejects(
+            session_stream_open,
+            &serde_json::json!({ "stream_id": "not-open-params" }),
+        );
+
+        let session_stream_close = params
+            .get("SessionStreamCloseParams")
+            .expect("SessionStreamCloseParams schema must be emitted");
+        assert_schema_accepts(
+            session_stream_close,
+            &serde_json::json!({ "stream_id": uuid::Uuid::nil().to_string() }),
+        );
+        assert_schema_rejects(
+            session_stream_close,
+            &serde_json::json!({ "stream_id": 42 }),
+        );
+
+        let comms_send = params
+            .get("CommsSendParams")
+            .expect("CommsSendParams schema must be emitted");
+        assert_schema_accepts(
+            comms_send,
+            &serde_json::json!({
+                "session_id": "sid_test",
+                "kind": "input",
+                "body": "hello"
+            }),
+        );
+        assert_schema_rejects(
+            comms_send,
+            &serde_json::json!({
+                "session_id": "sid_test",
+                "kind": "input"
+            }),
+        );
+        assert_schema_rejects(
+            comms_send,
+            &serde_json::json!({
+                "session_id": "sid_test",
+                "kind": "bogus",
+                "body": "hello"
+            }),
+        );
+        assert_schema_rejects(
+            comms_send,
+            &serde_json::json!({
+                "session_id": "sid_test",
+                "kind": "input",
+                "body": "hello",
+                "unexpected": true
+            }),
+        );
+
+        let comms_peers = params
+            .get("CommsPeersParams")
+            .expect("CommsPeersParams schema must be emitted");
+        assert_schema_accepts(
+            comms_peers,
+            &serde_json::json!({ "session_id": "sid_test" }),
+        );
+        assert_schema_rejects(comms_peers, &serde_json::json!({ "session": "sid_test" }));
+
+        assert_schema_accepts(
+            wire_types
+                .get("SessionStreamOpenResult")
+                .expect("SessionStreamOpenResult schema must be emitted"),
+            &serde_json::json!({
+                "stream_id": uuid::Uuid::nil().to_string(),
+                "session_id": "sid_test",
+                "opened": true
+            }),
+        );
+        assert_schema_accepts(
+            wire_types
+                .get("SessionStreamCloseResult")
+                .expect("SessionStreamCloseResult schema must be emitted"),
+            &serde_json::json!({
+                "stream_id": uuid::Uuid::nil().to_string(),
+                "closed": true,
+                "already_closed": false
+            }),
+        );
+        assert_schema_accepts(
+            wire_types
+                .get("CommsSendResult")
+                .expect("CommsSendResult schema must be emitted"),
+            &serde_json::json!({
+                "kind": "input_accepted",
+                "interaction_id": uuid::Uuid::nil().to_string(),
+                "stream_reserved": true
+            }),
+        );
+        assert_schema_accepts(
+            wire_types
+                .get("CommsPeersResult")
+                .expect("CommsPeersResult schema must be emitted"),
+            &serde_json::json!({ "peers": [] }),
         );
 
         fs::remove_dir_all(&output_dir).unwrap();

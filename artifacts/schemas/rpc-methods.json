@@ -245,11 +245,15 @@
     },
     {
       "description": "Open a session event stream",
-      "name": "session/stream_open"
+      "name": "session/stream_open",
+      "params_type": "SessionStreamOpenParams",
+      "result_type": "SessionStreamOpenResult"
     },
     {
       "description": "Close a session event stream",
-      "name": "session/stream_close"
+      "name": "session/stream_close",
+      "params_type": "SessionStreamCloseParams",
+      "result_type": "SessionStreamCloseResult"
     },
     {
       "description": "Create a schedule",
@@ -608,11 +612,15 @@
     },
     {
       "description": "Send a comms command from a session",
-      "name": "comms/send"
+      "name": "comms/send",
+      "params_type": "CommsSendParams",
+      "result_type": "CommsSendResult"
     },
     {
       "description": "List peers visible to a session",
-      "name": "comms/peers"
+      "name": "comms/peers",
+      "params_type": "CommsPeersParams",
+      "result_type": "CommsPeersResult"
     }
   ],
   "notifications": [

@@ -491,7 +491,7 @@ impl std::fmt::Display for PeerLifecycleKind {
 /// in [`CommsCommandRequest::into_command`].
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CommsCommandRequest {
     /// Inject input into the local session.
     Input {

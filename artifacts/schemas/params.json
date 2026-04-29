@@ -77,6 +77,441 @@
     "title": "CommsParams",
     "type": "object"
   },
+  "CommsPeersParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `comms/peers`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "CommsPeersParams",
+    "type": "object"
+  },
+  "CommsSendParams": {
+    "$defs": {
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "ContentBlock": {
+        "oneOf": [
+          {
+            "description": "Plain text content.",
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded image content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "description": "Durable blob reference used by persisted history/runtime state.",
+                "properties": {
+                  "blob_id": {
+                    "$ref": "#/$defs/BlobId"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "description": "MIME type (e.g. \"image/png\", \"image/jpeg\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Base64-encoded video content.",
+            "oneOf": [
+              {
+                "description": "Base64-encoded inline bytes used for ingress and live execution.",
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "description": "Caller-provided clip duration in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "description": "MIME type (e.g. \"video/mp4\", \"video/webm\").",
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "HandlingMode": {
+        "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      },
+      "InputSource": {
+        "description": "Source for an input event posted to an agent.",
+        "enum": [
+          "tcp",
+          "uds",
+          "stdin",
+          "webhook",
+          "rpc"
+        ],
+        "type": "string"
+      },
+      "InputStreamMode": {
+        "description": "Whether this input/peer command should reserve a local interaction stream.",
+        "oneOf": [
+          {
+            "const": "none",
+            "description": "Do not reserve any stream.",
+            "type": "string"
+          },
+          {
+            "const": "reserve_interaction",
+            "description": "Reserve an interaction stream for the command.",
+            "type": "string"
+          }
+        ]
+      },
+      "InteractionId": {
+        "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
+      "PeerLifecycleKind": {
+        "description": "One-way peer lifecycle notification kind.\n\nThese notifications are control-plane topology updates, not correlated\npeer work requests. They intentionally do not create request/response\nlifecycles and must never require an LLM-authored reply.",
+        "enum": [
+          "mob.peer_added",
+          "mob.peer_retired",
+          "mob.peer_unwired"
+        ],
+        "type": "string"
+      },
+      "ResponseStatus": {
+        "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",
+        "enum": [
+          "accepted",
+          "completed",
+          "failed"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `comms/send`.",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "allow_self_session": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "input",
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InputSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stream": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InputStreamMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "session_id",
+          "body"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string"
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "peer_message",
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/PeerId"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id",
+          "to",
+          "body"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "peer_lifecycle",
+            "type": "string"
+          },
+          "lifecycle_kind": {
+            "$ref": "#/$defs/PeerLifecycleKind"
+          },
+          "params": {
+            "default": null
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/$defs/PeerId"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id",
+          "to",
+          "lifecycle_kind"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "intent": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "peer_request",
+            "type": "string"
+          },
+          "params": {
+            "default": null
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "stream": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/InputStreamMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "to": {
+            "$ref": "#/$defs/PeerId"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id",
+          "to",
+          "intent"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "in_reply_to": {
+            "$ref": "#/$defs/InteractionId"
+          },
+          "kind": {
+            "const": "peer_response",
+            "type": "string"
+          },
+          "result": {
+            "default": null
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/ResponseStatus"
+          },
+          "to": {
+            "$ref": "#/$defs/PeerId"
+          }
+        },
+        "required": [
+          "kind",
+          "session_id",
+          "to",
+          "in_reply_to",
+          "status"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "CommsSendParams"
+  },
   "CoreCreateParams": {
     "$defs": {
       "BindingId": {
@@ -6912,6 +7347,36 @@
       "schedule_id"
     ],
     "title": "ScheduleOccurrencesParams",
+    "type": "object"
+  },
+  "SessionStreamCloseParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/stream_close`.",
+    "properties": {
+      "stream_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "stream_id"
+    ],
+    "title": "SessionStreamCloseParams",
+    "type": "object"
+  },
+  "SessionStreamOpenParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/stream_open`.",
+    "properties": {
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "title": "SessionStreamOpenParams",
     "type": "object"
   },
   "SkillsParams": {

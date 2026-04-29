@@ -336,8 +336,18 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.session_streams_enabled {
         methods.extend([
-            RpcMethodDescriptor::basic("session/stream_open", "Open a session event stream"),
-            RpcMethodDescriptor::basic("session/stream_close", "Close a session event stream"),
+            RpcMethodDescriptor::typed(
+                "session/stream_open",
+                "Open a session event stream",
+                "SessionStreamOpenParams",
+                "SessionStreamOpenResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "session/stream_close",
+                "Close a session event stream",
+                "SessionStreamCloseParams",
+                "SessionStreamCloseResult",
+            ),
         ]);
     }
 
@@ -717,8 +727,18 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.comms_enabled {
         methods.extend([
-            RpcMethodDescriptor::basic("comms/send", "Send a comms command from a session"),
-            RpcMethodDescriptor::basic("comms/peers", "List peers visible to a session"),
+            RpcMethodDescriptor::typed(
+                "comms/send",
+                "Send a comms command from a session",
+                "CommsSendParams",
+                "CommsSendResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "comms/peers",
+                "List peers visible to a session",
+                "CommsPeersParams",
+                "CommsPeersResult",
+            ),
         ]);
     }
 
@@ -992,6 +1012,40 @@ mod tests {
             );
             assert_eq!(
                 descriptor.result_type, expected_result_type,
+                "{name} must advertise its concrete result type"
+            );
+        }
+    }
+
+    #[test]
+    fn comms_and_session_stream_methods_advertise_concrete_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params_type, expected_result_type) in [
+            (
+                "session/stream_open",
+                "SessionStreamOpenParams",
+                "SessionStreamOpenResult",
+            ),
+            (
+                "session/stream_close",
+                "SessionStreamCloseParams",
+                "SessionStreamCloseResult",
+            ),
+            ("comms/send", "CommsSendParams", "CommsSendResult"),
+            ("comms/peers", "CommsPeersParams", "CommsPeersResult"),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(
+                descriptor.params_type,
+                Some(expected_params_type),
+                "{name} must advertise its concrete params type"
+            );
+            assert_eq!(
+                descriptor.result_type,
+                Some(expected_result_type),
                 "{name} must advertise its concrete result type"
             );
         }

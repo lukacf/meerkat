@@ -28,9 +28,11 @@ pub use approval::{
     ApprovalRequestParams, ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalStatus,
 };
 pub use comms::{
-    CommsCommandError, CommsCommandRequest, HandlingMode as WireCommsHandlingMode,
-    InputSource as WireCommsInputSource, InputStreamMode as WireCommsInputStreamMode,
-    PeerName as WireCommsPeerName, ResponseStatus as WireCommsResponseStatus,
+    CommsCommandError, CommsCommandRequest, CommsPeerEntry, CommsPeerReachability, CommsPeerSource,
+    CommsPeerUnreachableReason, CommsPeersParams, CommsPeersResult, CommsSendParams,
+    CommsSendResult, HandlingMode as WireCommsHandlingMode, InputSource as WireCommsInputSource,
+    InputStreamMode as WireCommsInputStreamMode, PeerName as WireCommsPeerName,
+    ResponseStatus as WireCommsResponseStatus,
 };
 pub use connection::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
@@ -157,9 +159,10 @@ pub use schedule::{
     ScheduleOccurrencesResult, UpdateScheduleParams,
 };
 pub use session::{
-    WireAssistantBlock, WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory,
-    WireSessionInfo, WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall,
-    WireToolResult, WireToolResultContent,
+    SessionStreamCloseParams, SessionStreamCloseResult, SessionStreamOpenParams,
+    SessionStreamOpenResult, WireAssistantBlock, WireContentBlock, WireContentInput,
+    WireProviderMeta, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
+    WireStopReason, WireToolCall, WireToolResult, WireToolResultContent,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use supervisor_bridge::{

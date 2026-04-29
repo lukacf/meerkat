@@ -742,6 +742,46 @@ export interface MobReconcileFailureWire {
   stage: WireMobReconcileStage;
 }
 
+export interface CommsPeersParams {
+  session_id: string;
+}
+
+export interface CommsPeerEntry {
+  address: Record<string, unknown>;
+  capabilities: unknown;
+  last_unreachable_reason?: CommsPeerUnreachableReason;
+  meta: Record<string, unknown>;
+  name: string;
+  peer_id: string;
+  reachability: CommsPeerReachability;
+  sendable_kinds: string[];
+  source: CommsPeerSource;
+}
+
+export interface CommsPeersResult {
+  peers: CommsPeerEntry[];
+}
+
+export interface SessionStreamOpenParams {
+  session_id: string;
+}
+
+export interface SessionStreamOpenResult {
+  opened: boolean;
+  session_id: string;
+  stream_id: string;
+}
+
+export interface SessionStreamCloseParams {
+  stream_id: string;
+}
+
+export interface SessionStreamCloseResult {
+  already_closed: boolean;
+  closed: boolean;
+  stream_id: string;
+}
+
 export interface RuntimeStateParams {
   session_id: string;
 }
@@ -1359,6 +1399,95 @@ export interface CommsCommandPeerResponse {
 }
 
 export type CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse;
+
+export interface CommsSendParamsInput {
+  allow_self_session?: boolean;
+  blocks?: Record<string, unknown>[];
+  body: string;
+  handling_mode?: "queue" | "steer";
+  kind: "input";
+  session_id: string;
+  source?: "tcp" | "uds" | "stdin" | "webhook" | "rpc";
+  stream?: "none" | "reserve_interaction";
+}
+
+export interface CommsSendParamsPeerMessage {
+  blocks?: Record<string, unknown>[];
+  body: string;
+  handling_mode?: "queue" | "steer";
+  kind: "peer_message";
+  session_id: string;
+  to: string;
+}
+
+export interface CommsSendParamsPeerLifecycle {
+  kind: "peer_lifecycle";
+  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
+  params?: unknown;
+  session_id: string;
+  to: string;
+}
+
+export interface CommsSendParamsPeerRequest {
+  handling_mode?: "queue" | "steer";
+  intent: string;
+  kind: "peer_request";
+  params?: unknown;
+  session_id: string;
+  stream?: "none" | "reserve_interaction";
+  to: string;
+}
+
+export interface CommsSendParamsPeerResponse {
+  handling_mode?: "queue" | "steer";
+  in_reply_to: string;
+  kind: "peer_response";
+  result?: unknown;
+  session_id: string;
+  status: "accepted" | "completed" | "failed";
+  to: string;
+}
+
+export type CommsSendParams = CommsSendParamsInput | CommsSendParamsPeerMessage | CommsSendParamsPeerLifecycle | CommsSendParamsPeerRequest | CommsSendParamsPeerResponse;
+
+export interface CommsSendResultInputAccepted {
+  interaction_id: string;
+  kind: "input_accepted";
+  stream_reserved: boolean;
+}
+
+export interface CommsSendResultPeerMessageSent {
+  acked: boolean;
+  envelope_id: string;
+  kind: "peer_message_sent";
+}
+
+export interface CommsSendResultPeerLifecycleSent {
+  envelope_id: string;
+  kind: "peer_lifecycle_sent";
+}
+
+export interface CommsSendResultPeerRequestSent {
+  envelope_id: string;
+  interaction_id: string;
+  kind: "peer_request_sent";
+  request_id: string;
+  stream_reserved: boolean;
+}
+
+export interface CommsSendResultPeerResponseSent {
+  envelope_id: string;
+  in_reply_to: string;
+  kind: "peer_response_sent";
+}
+
+export type CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent;
+
+export type CommsPeerSource = "Trusted" | "Inproc" | "TrustedAndInproc" | "Unknown";
+
+export type CommsPeerReachability = "unknown" | "reachable" | "unreachable";
+
+export type CommsPeerUnreachableReason = "offline_or_no_ack" | "transport_error" | "admission_dropped" | "unknown";
 
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";

@@ -2303,8 +2303,7 @@ fn trusted_peer_descriptor_from_wire_spec(
     let derived_peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&spec.pubkey);
     if peer_id != derived_peer_id {
         return Err(format!(
-            "external peer_id '{}' does not match pubkey-derived peer_id '{}'",
-            peer_id, derived_peer_id
+            "external peer_id '{peer_id}' does not match pubkey-derived peer_id '{derived_peer_id}'"
         ));
     }
     let address = parse_wire_peer_address(&spec.address)?;

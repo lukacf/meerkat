@@ -50,7 +50,6 @@ pub mod composition;
 pub(crate) mod control_plane;
 pub mod driver;
 pub mod durability;
-pub mod generated;
 pub mod handles;
 pub mod identifiers;
 pub mod ingress_types;
@@ -65,6 +64,9 @@ pub mod ops_lifecycle;
 pub mod peer_handling_mode;
 pub mod policy;
 pub mod policy_table;
+#[allow(unused_imports)]
+#[path = "generated/protocol_supervisor_trust_publish.rs"]
+pub mod protocol_supervisor_trust_publish;
 pub mod queue;
 pub mod runtime_event;
 pub(crate) mod runtime_loop;

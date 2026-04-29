@@ -469,7 +469,7 @@ impl MobActor {
 
         #[cfg(feature = "runtime-adapter")]
         {
-            use meerkat_runtime::generated::protocol_supervisor_trust_publish;
+            use meerkat_runtime::protocol_supervisor_trust_publish;
 
             let next_name = spec.name.as_str().to_owned();
             let next_peer_id = spec.peer_id.as_str().to_owned();
@@ -9372,7 +9372,163 @@ impl MobActor {
     ) -> Result<bool, MobError> {
         let prepared =
             self.prepare_dsl_inputs(plan.machine_inputs(), "flow_frame_loop_store_plan")?;
-        let won = plan.apply_to_store(&self.run_store, run_id).await?;
+        let won = match &plan {
+            FlowFrameLoopStorePlan::GrantNodeSlot {
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => self
+                .run_store
+                .cas_grant_node_slot(
+                    run_id,
+                    expected_run_state,
+                    next_run_state.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::StartLoop {
+                loop_instance_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                initial_loop,
+                ..
+            } => self
+                .run_store
+                .cas_start_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_run_state,
+                    next_run_state.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    initial_loop.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::GrantBodyFrameStart {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                initial_frame,
+                ledger_entry,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_grant_body_frame_start(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    initial_frame.clone(),
+                    ledger_entry.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::RunStateOnly {
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_flow_state(run_id, expected_run_state, next_run_state)
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::SealFrame {
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => self
+                .run_store
+                .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::CompleteBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_complete_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::LoopRequestBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_loop_request_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::CompleteLoop {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_complete_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+        };
         if won {
             self.commit_prepared_dsl_input(prepared);
         }

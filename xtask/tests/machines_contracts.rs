@@ -781,7 +781,9 @@ fn mob_runtime_catalog_command_gate_ratchet_accepts_fail_closed_gates() {
         runtime.join("actor.rs"),
         r#"
 async fn handle_run_flow(&mut self) -> Result<RunId, MobError> {
-    self.apply_dsl_input(MobMachineInput::RunFlow, "run_flow_input")?;
+    let prepared = self.prepare_dsl_input(MobMachineInput::RunFlow, "run_flow_input")?;
+    self.create_pending_run().await?;
+    self.commit_prepared_dsl_input(prepared);
     Ok(RunId::new())
 }
 
@@ -872,7 +874,9 @@ fn live_flow_runtime_projection_ratchet_accepts_typed_outcome_commits() {
         r"
 async fn good(run_store: Store, run_id: &RunId, run: MobRun, command: MobMachineFlowRunCommand, authority: MobMachineFlowAuthorityToken) -> Result<(), MobError> {
     let outcome = apply_mob_machine_flow_run_command(&run.flow_state, command, authority)?;
-    run_store.cas_flow_state(run_id, &run.flow_state, &outcome.next_state).await?;
+    run_store
+        .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
+        .await?;
     Ok(())
 }
 ",
@@ -884,5 +888,66 @@ async fn good(run_store: Store, run_id: &RunId, run: MobRun, command: MobMachine
     assert!(
         mismatches.is_empty(),
         "expected CAS of a typed MobMachine flow outcome to be accepted, got {mismatches:#?}"
+    );
+}
+
+#[test]
+fn live_flow_runtime_projection_ratchet_accepts_actor_store_plan_commit() {
+    let dir = tempdir().expect("tempdir");
+    let runtime = dir.path().join("meerkat-mob/src/runtime");
+    fs::create_dir_all(&runtime).expect("create runtime dir");
+    fs::write(
+        runtime.join("actor.rs"),
+        r#"
+async fn commit_flow_frame_store_plan_in_actor(
+    &mut self,
+    run_id: &RunId,
+    plan: FlowFrameLoopStorePlan,
+) -> Result<bool, MobError> {
+    let prepared =
+        self.prepare_dsl_inputs(plan.machine_inputs(), "flow_frame_loop_store_plan")?;
+    let won = match &plan {
+        FlowFrameLoopStorePlan::GrantNodeSlot {
+            expected_run_state,
+            next_run_state,
+            frame_id,
+            expected_frame,
+            next_frame,
+            ..
+        } => self
+            .run_store
+            .cas_grant_node_slot(
+                run_id,
+                expected_run_state,
+                next_run_state.clone(),
+                frame_id,
+                expected_frame,
+                next_frame.clone(),
+            )
+            .await?,
+        FlowFrameLoopStorePlan::RunStateOnly {
+            expected_run_state,
+            next_run_state,
+            ..
+        } => self
+            .run_store
+            .cas_flow_state(run_id, expected_run_state, next_run_state)
+            .await?,
+        _ => false,
+    };
+    if won {
+        self.commit_prepared_dsl_input(prepared);
+    }
+    Ok(won)
+}
+"#,
+    )
+    .expect("write actor store plan commit");
+
+    let mismatches = collect_direct_flow_reducer_transition_mismatches(dir.path())
+        .expect("flow projection mutation mismatches");
+    assert!(
+        mismatches.is_empty(),
+        "expected actor-gated store plan commits to be accepted, got {mismatches:#?}"
     );
 }

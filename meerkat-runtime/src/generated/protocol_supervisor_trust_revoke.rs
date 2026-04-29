@@ -3,7 +3,7 @@
 // Closure policy: AckRequired
 // Liveness: eventual feedback under comms transport liveness — `send_bridge_response` surfaces the typed outcome
 
-use crate::meerkat_machine::dsl::MeerkatMachineEffect;
+use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};
 
 #[derive(Debug, Clone)]
 pub struct SupervisorTrustRevokeObligation {

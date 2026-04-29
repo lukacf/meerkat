@@ -21,7 +21,7 @@ Common commands:
   e2e-system-rbe           Bazel-native system e2e suite with runfile binaries.
   e2e-fast-rbe             Bazel-native fast e2e lane.
   e2e-live-rbe             Bazel-native live e2e lane.
-  e2e-smoke-rbe            Bazel-native smoke e2e lane.
+  e2e-smoke-rbe            Build the Bazel-native smoke e2e foundation.
   machine-authority-rbe    Bazel-native machine authority lane.
   rmat-audit-rbe           Bazel-native RMAT + ownership audit lane.
   seam-inventory-rbe       Bazel-native strict seam inventory lane.
@@ -256,14 +256,10 @@ case "${command}" in
     )
     ;;
   e2e-smoke-rbe)
-    command="test"
+    command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//tests/integration:e2e_smoke_lane_test"
     extra_args+=(
-      "${e2e_test_env[@]}"
-      --test_arg=--ignored
-      --test_output=errors
-      --test_summary=terse
       --color=no
       --curses=no
     )

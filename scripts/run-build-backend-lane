@@ -98,9 +98,13 @@ case "${lane}" in
     exec "${cargo_bin}" e2e-live
     ;;
   e2e-smoke)
-    if meerkat_buildbuddy_enabled &&
-      [[ "${MEERKAT_E2E_EXECUTION_MODE:-cargo}" != "prebuilt" ]]; then
-      exec "${root}/scripts/buildbuddy-dev" e2e-smoke
+    if meerkat_buildbuddy_enabled; then
+      "${root}/scripts/buildbuddy-dev" e2e-smoke
+      case "${BUILDBUDDY_DRY_RUN:-}" in
+        1|true|TRUE|yes|YES|on|ON)
+          exit 0
+          ;;
+      esac
     fi
     exec "${root}/scripts/e2e-smoke-lane"
     ;;

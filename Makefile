@@ -275,7 +275,7 @@ buildbuddy-e2e-live:
 	@scripts/buildbuddy-dev e2e-live $(BUILDBUDDY_ARGS)
 
 buildbuddy-e2e-smoke:
-	@echo "$(YELLOW)Running BuildBuddy e2e-smoke lane (requires provider keys)...$(NC)"
+	@echo "$(YELLOW)Building BuildBuddy e2e-smoke foundation...$(NC)"
 	@TEST="$(TEST)" SCENARIO="$(SCENARIO)" SUITE="$(SUITE)" scripts/buildbuddy-dev e2e-smoke $(BUILDBUDDY_ARGS)
 
 buildbuddy-agent-gate: buildbuddy-doctor
@@ -660,7 +660,7 @@ help:
 	@echo "  $(GREEN)buildbuddy-e2e-fast$(NC)- Run BuildBuddy e2e-fast lane"
 	@echo "  $(GREEN)buildbuddy-e2e-system$(NC)- Run BuildBuddy e2e-system lane"
 	@echo "  $(GREEN)buildbuddy-e2e-live$(NC)- Run BuildBuddy e2e-live lane (requires provider keys)"
-	@echo "  $(GREEN)buildbuddy-e2e-smoke$(NC)- Run BuildBuddy e2e-smoke lane (requires provider keys)"
+	@echo "  $(GREEN)buildbuddy-e2e-smoke$(NC)- Build BuildBuddy e2e-smoke foundation"
 	@echo "  $(GREEN)buildbuddy-agent-gate$(NC)- Run BuildBuddy gate for changed agent files (AGENT_GATE_ARGS=...)"
 	@echo "  $(GREEN)buildbuddy-ci-dispatch$(NC)- Dispatch optional BuildBuddy CI mode (BUILDBUDDY_CI_ARGS=...)"
 	@echo "  $(GREEN)buildbuddy-fast$(NC)- Run optional BuildBuddy fast test lane"

@@ -578,30 +578,81 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Option<Session>, SessionError> {
         if let Some(runtime_store) = self.runtime_store.as_ref() {
             let runtime_id = Self::runtime_id_for_session(id);
-            runtime_store
-                .load_session_snapshot(&runtime_id)
+            if let Some(runtime) =
+                Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await?
+            {
+                return Ok(Some(runtime));
+            }
+            self.promote_store_only_session_to_runtime_authority(id, &runtime_id, runtime_store)
                 .await
-                .map_err(|err| {
-                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                        "failed to load runtime session snapshot: {err}"
-                    )))
-                })?
-                .map(|bytes| {
-                    meerkat_core::session_migrations::deserialize_session_migrating(&bytes).map_err(
-                        |err| {
-                            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                                format!("failed to deserialize runtime session snapshot: {err}"),
-                            ))
-                        },
-                    )
-                })
-                .transpose()
         } else {
             self.store
                 .load(id)
                 .await
                 .map_err(|e| SessionError::Store(Box::new(e)))
         }
+    }
+
+    async fn load_runtime_session_snapshot(
+        runtime_store: &Arc<dyn RuntimeStore>,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<Session>, SessionError> {
+        runtime_store
+            .load_session_snapshot(runtime_id)
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to load runtime session snapshot: {err}"
+                )))
+            })?
+            .map(|bytes| {
+                meerkat_core::session_migrations::deserialize_session_migrating(&bytes).map_err(
+                    |err| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!("failed to deserialize runtime session snapshot: {err}"),
+                        ))
+                    },
+                )
+            })
+            .transpose()
+    }
+
+    async fn promote_store_only_session_to_runtime_authority(
+        &self,
+        id: &SessionId,
+        runtime_id: &LogicalRuntimeId,
+        runtime_store: &Arc<dyn RuntimeStore>,
+    ) -> Result<Option<Session>, SessionError> {
+        let Some(stored) = self
+            .store
+            .load(id)
+            .await
+            .map_err(|e| SessionError::Store(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        if stored.id() != id {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "session-store projection key {id} returned session {}",
+                    stored.id()
+                )),
+            ));
+        }
+
+        tracing::info!(
+            session_id = %id,
+            "promoting legacy store-only session projection to runtime authority"
+        );
+        self.save_normalized_session(stored).await?;
+        Self::load_runtime_session_snapshot(runtime_store, runtime_id)
+            .await?
+            .ok_or_else(|| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "runtime authority promotion did not persist session snapshot for {id}"
+                )))
+            })
+            .map(Some)
     }
 
     fn store_only_control_mutation_error(id: &SessionId, operation: &str) -> SessionError {
@@ -2123,7 +2174,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ///
     /// Runtime snapshots are the session authority when a runtime store is
     /// available. The `SessionStore` row is only a compatibility projection in
-    /// that mode and is not promoted or merged into the authoritative view.
+    /// that mode. Legacy store-only rows are first committed into the runtime
+    /// store before being exposed; existing runtime snapshots are never merged
+    /// with projection metadata.
     pub async fn load_authoritative_session(
         &self,
         id: &SessionId,
@@ -4538,7 +4591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_authoritative_load_rejects_store_only_projection() {
+    async fn test_runtime_backed_authoritative_load_promotes_store_only_projection() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -4563,31 +4616,40 @@ mod tests {
             .load_authoritative_session(&id)
             .await
             .expect("authoritative load should succeed");
-        assert!(
-            authoritative.is_none(),
-            "runtime-backed authority must not expose a store-only projection"
+        let authoritative =
+            authoritative.expect("store-only projection should be promoted into runtime authority");
+        assert_eq!(
+            authoritative.messages().len(),
+            raw_projection.messages().len(),
+            "promoted runtime authority must preserve the legacy transcript"
         );
-        assert!(
-            runtime_store
-                .load_session_snapshot(
-                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-                )
-                .await
-                .expect("runtime snapshot load should succeed")
-                .is_none(),
-            "store-only projection must not be migrated into runtime authority by read"
+        let runtime_snapshot = runtime_store
+            .load_session_snapshot(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+            )
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("store-only projection should be committed into runtime authority");
+        let runtime_session =
+            meerkat_core::session_migrations::deserialize_session_migrating(&runtime_snapshot)
+                .expect("runtime snapshot should deserialize");
+        assert_eq!(
+            runtime_session.messages().len(),
+            raw_projection.messages().len(),
+            "runtime snapshot is the durable authority after promotion"
         );
-        assert!(
-            matches!(service.read(&id).await, Err(SessionError::NotFound { .. })),
-            "read() must not expose a store-only projection in runtime-backed mode"
-        );
+        let view = service
+            .read(&id)
+            .await
+            .expect("read should recover session");
+        assert_eq!(view.state.session_id, id);
         let listed = service
             .list(SessionQuery::default())
             .await
             .expect("list should succeed");
         assert!(
-            listed.iter().all(|summary| summary.session_id != id),
-            "list() must not expose store-only projections in runtime-backed mode"
+            listed.iter().any(|summary| summary.session_id == id),
+            "list() should include the recovered runtime-authoritative session"
         );
         let raw_store_row = store
             .load(&id)
@@ -4598,16 +4660,6 @@ mod tests {
             raw_store_row.messages().len(),
             raw_projection.messages().len(),
             "compatibility projection should remain inert in the raw store"
-        );
-        assert!(
-            runtime_store
-                .load_session_snapshot(
-                    &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-                )
-                .await
-                .expect("runtime snapshot load should succeed")
-                .is_none(),
-            "store-only projection must remain outside runtime authority"
         );
     }
 

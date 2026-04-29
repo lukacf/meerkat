@@ -895,6 +895,16 @@ async fn resolve_bridge_response_route(
         }
         return Some(sender_route);
     }
+    if let Some(supervisor) = bridge_response_supervisor(candidate)
+        && let Some(route) = resolve_bridge_display_name_sender_route(
+            comms_runtime,
+            &candidate.interaction.from,
+            &supervisor,
+        )
+        .await
+    {
+        return Some(route);
+    }
 
     resolve_peer_route(comms_runtime, &candidate.interaction.from).await
 }
@@ -909,6 +919,27 @@ fn bridge_response_route_from_sender(sender: &str, peer: &BridgePeerSpec) -> Opt
         return None;
     }
     Some(PeerRoute::new(PeerId::from_ed25519_pubkey(&peer.pubkey)))
+}
+
+async fn resolve_bridge_display_name_sender_route(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    sender: &str,
+    peer: &BridgePeerSpec,
+) -> Option<PeerRoute> {
+    if sender != peer.name {
+        return None;
+    }
+    let expected_peer_id = PeerId::parse(&peer.peer_id).ok()?;
+    let peers = comms_runtime.peers().await;
+    let mut matches = peers.iter().filter(|entry| entry.name.as_str() == sender);
+    let entry = matches.next()?;
+    if matches.next().is_some() || entry.peer_id != expected_peer_id {
+        return None;
+    }
+    Some(PeerRoute::with_display_name(
+        entry.peer_id,
+        entry.name.clone(),
+    ))
 }
 
 fn bridge_response_supervisor(candidate: &PeerInputCandidate) -> Option<BridgePeerSpec> {
@@ -1949,6 +1980,58 @@ mod tests {
             route.peer_id.as_str(),
             spoofed_peer_id,
             "bridge replies must not route to the caller-supplied supervisor.peer_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_response_route_accepts_trusted_display_name_sender() {
+        let peer = meerkat_comms::Keypair::generate();
+        let peer_pubkey = peer.public_key();
+        let peer_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "mob/__mob_supervisor__",
+            peer_pubkey.to_peer_id().as_str(),
+            *peer_pubkey.as_bytes(),
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid peer spec");
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("bridge-response-display").expect("runtime"),
+        );
+        runtime
+            .add_trusted_peer(peer_spec.clone())
+            .await
+            .expect("trust peer");
+
+        let command = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec::from(peer_spec.clone()),
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        });
+        let candidate = bridge_candidate(peer_spec.name.as_str(), &command);
+        let route = resolve_bridge_response_route(&runtime, &candidate)
+            .await
+            .expect("trusted display-name sender should resolve through peer directory");
+
+        assert_eq!(route.peer_id, peer_spec.peer_id);
+        assert_eq!(
+            route.display_name.as_ref().map(|name| name.as_str()),
+            Some(peer_spec.name.as_str())
+        );
+
+        let spoofed = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec {
+                peer_id: PeerId::new().as_str(),
+                ..BridgePeerSpec::from(peer_spec.clone())
+            },
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        });
+        let spoofed_candidate = bridge_candidate(peer_spec.name.as_str(), &spoofed);
+        assert!(
+            resolve_bridge_response_route(&runtime, &spoofed_candidate)
+                .await
+                .is_none(),
+            "display-name senders must not route to a spoofed payload peer_id"
         );
     }
 

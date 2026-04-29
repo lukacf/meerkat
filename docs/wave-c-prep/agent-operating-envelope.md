@@ -34,7 +34,7 @@ Meerkat is pre-1.0. Cleanup waves delete freely. If you encounter anything named
 
 Everything else named Legacy/V0/Compat is delete-on-sight.
 
-### 3. No silent defaults on Option<typed-authority>
+### 3. No silent defaults on Option&lt;typed-authority&gt;
 
 If you encounter `Option<T>` where `T` is typed authority state (turn phase, session handle, trust descriptor, dispatcher binding): do NOT use `.unwrap_or_default()` or `.unwrap_or(T::default())` to fill in the `None` case. That's a silent-drop class.
 

@@ -115,7 +115,7 @@ fairness assumption explicitly. Liveness is verified by:
 
 ### Tranche 2 Proves
 
-**Structural + safety + scoped liveness** for TurnExecution <-> OpsLifecycle
+**Structural + safety + scoped liveness** for TurnExecution &lt;-&gt; OpsLifecycle
 barrier composition:
 - OpsLifecycle `WaitAllSatisfied` effect routes to TurnExecution
   `OpsBarrierSatisfied` input through a declared handoff protocol

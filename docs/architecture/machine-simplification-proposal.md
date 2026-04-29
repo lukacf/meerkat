@@ -507,7 +507,7 @@ The report is written as `meerkat-runtime-phase-parity.json` in the system temp
 directory.
 
 The checked-in row ledger for that audit now lives in
-[`docs/architecture/meerkat-runtime-schema-parity-ledger.md`](meerkat-runtime-schema-parity-ledger.md).
+[`docs/architecture/meerkat-runtime-schema-parity-ledger.md`](/architecture/meerkat-runtime-schema-parity-ledger).
 
 ### Current Meerkat coverage
 
@@ -623,7 +623,7 @@ cargo test -p meerkat-mob audit_mob_runtime_phase_parity_map \
 ```
 
 The checked-in row ledger for that audit now lives in
-[`docs/architecture/mob-runtime-schema-parity-ledger.md`](mob-runtime-schema-parity-ledger.md).
+[`docs/architecture/mob-runtime-schema-parity-ledger.md`](/architecture/mob-runtime-schema-parity-ledger).
 
 ### Current Mob coverage
 

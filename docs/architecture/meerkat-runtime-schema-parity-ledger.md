@@ -313,7 +313,7 @@ Current exact-parity state:
   run identity but still owns contributor queues and reset / stop / destroy /
   recover bookkeeping below the two checked-in machines
 - a second checked-in gap on the formal side is now closed too: the
-  `meerkat_mob_seam` composition models both the Mob <- Meerkat return leg and
+  `meerkat_mob_seam` composition models both the Mob &lt;- Meerkat return leg and
   the forward Mob -> Meerkat runtime-ingress request route. The checked-in seam
   still leaves `WorkRef -> InputId` translation below the machine boundary, but
   it no longer omits the behavior-bearing forward request itself
@@ -626,13 +626,13 @@ Outcome:
    raw `19,459 -> 459`, phase `19,459 -> 464`, full `19,459 -> 19,070`,
    TLC `1,814,665 generated / 19,459 distinct / depth 9`.
 4. Read that baseline together with the largest-block field projection from
-   [`docs/architecture/machine-simplification-proposal.md`](machine-simplification-proposal.md):
+   [`docs/architecture/machine-simplification-proposal.md`](/architecture/machine-simplification-proposal):
    the dominant Meerkat mixed block is now measured as `8,897` states over
    `4,560` extended-state tuples, with `3,096` tuples reused across multiple
    phases.
 5. Read that baseline together with the now-green Mob lifecycle-triangle
    ledger in
-   [`docs/architecture/mob-runtime-schema-parity-ledger.md`](mob-runtime-schema-parity-ledger.md).
+   [`docs/architecture/mob-runtime-schema-parity-ledger.md`](/architecture/mob-runtime-schema-parity-ledger).
 6. The remaining Meerkat edge is now narrower and mostly terminal/batch
    mechanics. `RuntimeIngressAuthority` no longer treats contributor staging,
    boundary application, run completion, replay rollback, or admission

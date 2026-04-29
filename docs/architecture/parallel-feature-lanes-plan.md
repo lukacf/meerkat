@@ -495,7 +495,7 @@ The total output of this effort should be a pull request from
 The PR is not ready until:
 
 - no violations of
-  [`meerkat-runtime-dogma.md`](meerkat-runtime-dogma.md) are
+  [`meerkat-runtime-dogma.md`](/architecture/meerkat-runtime-dogma) are
   introduced in any shape or form
 - every lane has contract-first tests and defensive tests for its high-risk
   failure modes

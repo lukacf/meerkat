@@ -80,7 +80,7 @@ Kept for grounding — useful regardless of boundary policy. Citations are to `m
 2. Expiry watermark (31).
 3. Refresh bookkeeping (32-33).
 
-Per-binding instance, <200 LOC including transitions. The header (3-23) documents that absorption into MeerkatMachine was tried, reviewed, and reversed — but the review rationale was "orthogonal per-binding fact," which is a *preference* argument, not a *forcing* one. It remains a merge candidate.
+Per-binding instance, &lt;200 LOC including transitions. The header (3-23) documents that absorption into MeerkatMachine was tried, reviewed, and reversed — but the review rationale was "orthogonal per-binding fact," which is a *preference* argument, not a *forcing* one. It remains a merge candidate.
 
 ## 3. Split risk — out of scope
 

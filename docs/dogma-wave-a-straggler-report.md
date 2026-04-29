@@ -110,7 +110,7 @@ No surviving non-test unimplemented/todo/panic("not implemented") in this branch
 | `meerkat-contracts/src/wire/mob.rs:701` | `context: Option<Value>` | Mob work context. |
 | `meerkat-contracts/src/wire/runtime.rs:33,45,57` | `result`, `payload`, `result` fields | Runtime command results. |
 | `meerkat-contracts/src/wire/runtime.rs:168,170,172,182,184,214` | `policy`, `terminal_outcome`, `durability`, `reconstruction_source`, `persisted_input`, `policy` | **All semantic state carried as untyped Value.** Overlaps violations #31/#38. |
-| `meerkat-contracts/src/wire/session.rs:402` | `args: Value` | Tool-call args — pragmatic per design (Box<RawValue> territory). |
+| `meerkat-contracts/src/wire/session.rs:402` | `args: Value` | Tool-call args — pragmatic per design (Box&lt;RawValue&gt; territory). |
 | `meerkat-core/src/lifecycle/run_primitive.rs:40` | `Json { value: serde_json::Value }` | ConversationContextAppend variant. |
 | `meerkat-core/src/lifecycle/core_executor.rs:42,82` | `CallbackPending { … args: Value }` | Callback routing. |
 

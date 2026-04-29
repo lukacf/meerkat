@@ -492,6 +492,13 @@ fn classify_lifecycle_intent(intent: &str) -> Option<PeerLifecycleKind> {
 pub struct PeerInputCandidate {
     /// The original interaction data.
     pub interaction: InboxInteraction,
+    /// Canonical sender identity captured at ingress.
+    ///
+    /// This is intentionally separate from [`InboxInteraction::from`], which
+    /// preserves the legacy display/source label used by downstream routing
+    /// and diagnostics. Prompt/schema projection for correlated requests must
+    /// use this canonical `PeerId` when present.
+    pub source_peer_id: Option<PeerId>,
     /// Pre-computed classification from ingress.
     pub class: PeerInputClass,
     /// Auth decision that admitted this candidate when it came from peer

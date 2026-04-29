@@ -768,7 +768,7 @@ mod tests {
         let ctx = ToolContext {
             router,
             trusted_peers,
-            runtime: Some(runtime.clone()),
+            runtime: Some(RuntimeCommsCommandHandle::new(runtime.clone())),
         };
 
         let result = handle_tools_call(&ctx, "send_response", &args)

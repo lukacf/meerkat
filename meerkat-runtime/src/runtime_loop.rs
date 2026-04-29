@@ -1531,6 +1531,7 @@ mod tests {
                 auth: None,
                 from_peer_id: None,
                 lifecycle_peer: None,
+                source_peer_id: None,
                 interaction: InboxInteraction {
                     id: meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4()),
                     from: "event:webhook".into(),

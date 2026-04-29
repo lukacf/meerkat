@@ -821,6 +821,7 @@ impl CoreCommsRuntime for CommsRuntime {
             .into_iter()
             .filter_map(|entry| {
                 let from_peer = entry.from_peer.unwrap_or_else(|| "unknown".to_string());
+                let source_peer_id = entry.from_peer_id;
                 let rendered_text = entry.text_projection.clone();
 
                 match entry.item {
@@ -908,6 +909,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 handling_mode: envelope_handling_mode,
                                 render_metadata: None,
                             },
+                            source_peer_id,
                             class: entry.class,
                             auth: Some(entry.auth),
                             from_peer_id: entry.from_peer_id,
@@ -933,6 +935,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             handling_mode,
                             render_metadata,
                         },
+                        source_peer_id: None,
                         class: entry.class,
                         auth: None,
                         from_peer_id: None,

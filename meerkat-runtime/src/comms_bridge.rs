@@ -4,6 +4,7 @@
 //! input families used by the comms classification bridge.
 
 use chrono::Utc;
+use meerkat_core::comms::PeerId;
 #[cfg(test)]
 use meerkat_core::interaction::ResponseStatus;
 use meerkat_core::interaction::{
@@ -55,7 +56,11 @@ pub fn classified_interaction_to_runtime_input(
         });
     }
 
-    interaction_to_peer_input(interaction, runtime_id)
+    interaction_to_peer_input_with_source_peer_id(
+        interaction,
+        runtime_id,
+        classified.source_peer_id,
+    )
 }
 
 /// Compatibility alias while callers migrate to the classified bridge naming.
@@ -71,15 +76,27 @@ pub fn interaction_to_peer_input(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
+    interaction_to_peer_input_with_source_peer_id(interaction, runtime_id, None)
+}
+
+fn interaction_to_peer_input_with_source_peer_id(
+    interaction: &InboxInteraction,
+    runtime_id: &LogicalRuntimeId,
+    source_peer_id: Option<PeerId>,
+) -> Input {
     let convention = map_convention(interaction);
     let durability = map_durability(&convention);
+    let source_peer = match (&interaction.content, source_peer_id) {
+        (InteractionContent::Request { .. }, Some(peer_id)) => peer_id.to_string(),
+        _ => interaction.from.clone(),
+    };
 
     Input::Peer(PeerInput {
         header: InputHeader {
             id: InputId::new(),
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
-                peer_id: interaction.from.clone(),
+                peer_id: source_peer,
                 runtime_id: Some(runtime_id.clone()),
             },
             durability,
@@ -297,12 +314,58 @@ mod tests {
     }
 
     #[test]
+    fn classified_request_uses_canonical_peer_id_for_runtime_projection() {
+        let source_peer_id =
+            PeerId::parse("11111111-1111-4111-8111-111111111111").expect("canonical peer id");
+        let request_id = make_interaction_id();
+        let classified = PeerInputCandidate {
+            interaction: InboxInteraction {
+                from: "test-mob/lead/l-requester".into(),
+                content: InteractionContent::Request {
+                    intent: "interpret_image".into(),
+                    params: serde_json::json!({"description": "tower with a light"}),
+                },
+                id: request_id,
+                rendered_text: "[COMMS REQUEST stale helper prose]".into(),
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                render_metadata: None,
+            },
+            source_peer_id: Some(source_peer_id),
+            class: PeerInputClass::ActionableRequest,
+            auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
+            from_peer_id: Some(source_peer_id),
+            lifecycle_peer: None,
+        };
+
+        let input =
+            peer_input_candidate_to_runtime_input(&classified, &LogicalRuntimeId::new("worker"));
+        let Input::Peer(peer) = &input else {
+            panic!("Expected PeerInput");
+        };
+        let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
+            panic!("Expected peer source");
+        };
+        assert_eq!(peer_id, "11111111-1111-4111-8111-111111111111");
+        assert_eq!(peer.body, "[COMMS REQUEST stale helper prose]");
+
+        let prompt = crate::input::input_prompt_text(&input);
+        assert!(prompt.starts_with(
+            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from peer_id 11111111-1111-4111-8111-111111111111."
+        ));
+        assert!(prompt.contains("\"peer_id\":\"11111111-1111-4111-8111-111111111111\""));
+        assert!(prompt.contains(&format!("\"in_reply_to\":\"{}\"", request_id.0)));
+        assert!(prompt.contains("\"status\":\"completed\""));
+        assert!(!prompt.contains("to=\""));
+    }
+
+    #[test]
     fn plain_event_to_external_event_input() {
         let classified = PeerInputCandidate {
             class: PeerInputClass::PlainEvent,
             auth: None,
             from_peer_id: None,
             lifecycle_peer: None,
+            source_peer_id: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
@@ -339,6 +402,7 @@ mod tests {
             auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
             from_peer_id: None,
             lifecycle_peer: None,
+            source_peer_id: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
@@ -476,6 +540,7 @@ mod tests {
             auth: None,
             from_peer_id: None,
             lifecycle_peer: None,
+            source_peer_id: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
@@ -516,6 +581,7 @@ mod tests {
             auth: None,
             from_peer_id: None,
             lifecycle_peer: None,
+            source_peer_id: None,
             interaction: InboxInteraction {
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {

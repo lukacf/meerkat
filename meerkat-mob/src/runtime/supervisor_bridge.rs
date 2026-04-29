@@ -320,6 +320,7 @@ mod tests {
             auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
             from_peer_id: None,
             lifecycle_peer: None,
+            source_peer_id: None,
         }
     }
 

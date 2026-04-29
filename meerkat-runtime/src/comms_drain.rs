@@ -1893,6 +1893,7 @@ mod tests {
             )),
             from_peer_id: None,
             lifecycle_peer: None,
+            source_peer_id: None,
         };
 
         assert!(
@@ -2135,6 +2136,7 @@ mod tests {
             auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
             from_peer_id: None,
             lifecycle_peer: Some("peer-1".to_string()),
+            source_peer_id: None,
         }
     }
 
@@ -3352,6 +3354,7 @@ mod tests {
             )),
             from_peer_id,
             lifecycle_peer: None,
+            source_peer_id: None,
         }
     }
 

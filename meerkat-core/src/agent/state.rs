@@ -3795,6 +3795,7 @@ mod tests {
                         handling_mode: crate::types::HandlingMode::Queue,
                         render_metadata: None,
                     },
+                    source_peer_id: None,
                     class: crate::interaction::PeerInputClass::ActionableMessage,
                     auth: Some(crate::interaction::PeerIngressAuthDecision::Required),
                     from_peer_id: None,

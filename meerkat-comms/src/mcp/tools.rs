@@ -514,6 +514,24 @@ mod tests {
     static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
         LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+    fn extract_projection_send_response_args(text: &str) -> Value {
+        let marker = "send_response with arguments ";
+        let start = text
+            .find(marker)
+            .map(|idx| idx + marker.len())
+            .expect("projection must include schema-owned send_response argument JSON");
+        let json_start = text[start..]
+            .find('{')
+            .map(|idx| start + idx)
+            .expect("projection must include a JSON argument object");
+        let json_end = text[json_start..]
+            .find("}.")
+            .map(|idx| json_start + idx)
+            .expect("projection JSON argument object must end before the sentence");
+        serde_json::from_str(&text[json_start..=json_end])
+            .expect("projection argument object must parse as JSON")
+    }
+
     struct RecordingRuntime {
         sent: Mutex<Vec<CommsCommand>>,
         notify: Arc<Notify>,
@@ -668,10 +686,117 @@ mod tests {
             !required_names.contains(&"handling_mode"),
             "send_response must not require handling_mode"
         );
-        assert!(required_names.contains(&"peer_id"));
-        assert!(!required_names.contains(&"display_name"));
-        assert!(required_names.contains(&"in_reply_to"));
-        assert!(required_names.contains(&"status"));
+        assert!(required_names.contains(&meerkat_core::SendResponseCallProjection::PEER_ID_FIELD));
+        assert!(
+            !required_names.contains(&meerkat_core::SendResponseCallProjection::DISPLAY_NAME_FIELD)
+        );
+        assert!(
+            required_names.contains(&meerkat_core::SendResponseCallProjection::IN_REPLY_TO_FIELD)
+        );
+        assert!(required_names.contains(&meerkat_core::SendResponseCallProjection::STATUS_FIELD));
+        assert!(!schema["properties"].as_object().unwrap().contains_key("to"));
+    }
+
+    #[test]
+    fn peer_request_projection_send_response_args_match_schema() {
+        let peer_id = PeerId::parse("11111111-1111-4111-8111-111111111111").expect("valid peer id");
+        let request_id =
+            uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid");
+        let projection = meerkat_core::format_peer_request_projection(
+            peer_id,
+            Some("incident-command-center/scribe/primary"),
+            request_id,
+            "ping",
+            &json!({"nonce": 7}),
+        );
+
+        assert!(projection.contains("peer_id"));
+        assert!(!projection.contains("to=\""));
+
+        let args = extract_projection_send_response_args(&projection);
+        let parsed: SendResponseInput =
+            serde_json::from_value(args.clone()).expect("projection args must match schema");
+
+        assert_eq!(parsed.peer_id, peer_id);
+        assert_eq!(
+            parsed.display_name.as_deref(),
+            Some("incident-command-center/scribe/primary")
+        );
+        assert_eq!(parsed.in_reply_to, request_id.to_string());
+        assert_eq!(parsed.status, ResponseStatus::Completed);
+        assert!(
+            !args
+                .as_object()
+                .expect("projection args object")
+                .contains_key("to")
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_request_projection_send_response_is_accepted_by_tool_boundary() {
+        let requester = Keypair::generate();
+        let requester_peer_id = requester.public_key().to_peer_id();
+        let request_id =
+            uuid::Uuid::parse_str("33333333-3333-4333-8333-333333333333").expect("valid uuid");
+        let projection = meerkat_core::format_peer_request_projection(
+            requester_peer_id,
+            Some("operator"),
+            request_id,
+            "ping",
+            &json!({}),
+        );
+        let mut args = extract_projection_send_response_args(&projection);
+        args["result"] = json!({"pong": true});
+
+        let trusted_peers = Arc::new(RwLock::new(TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "operator".to_string(),
+                pubkey: requester.public_key(),
+                addr: "inproc://operator".to_string(),
+                meta: crate::PeerMeta::default(),
+            }],
+        }));
+        let (_, inbox_sender) = crate::Inbox::new();
+        let router = Arc::new(Router::with_shared_peers(
+            Keypair::generate(),
+            trusted_peers.clone(),
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        ));
+        let runtime = Arc::new(RecordingRuntime::new());
+        let ctx = ToolContext {
+            router,
+            trusted_peers,
+            runtime: Some(runtime.clone()),
+        };
+
+        let result = handle_tools_call(&ctx, "send_response", &args)
+            .await
+            .expect("projection response args should be accepted by send_response");
+
+        assert_eq!(result["status"], "sent");
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerResponse {
+                to,
+                in_reply_to,
+                status,
+                result,
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer response command, got {sent:?}");
+        };
+        assert_eq!(to.peer_id, requester_peer_id);
+        assert_eq!(
+            to.display_name.as_ref().map(|name| name.as_str()),
+            Some("operator")
+        );
+        assert_eq!(in_reply_to.0, request_id);
+        assert_eq!(*status, ResponseStatus::Completed);
+        assert_eq!(result["pong"], true);
     }
 
     #[tokio::test]

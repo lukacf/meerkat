@@ -35,6 +35,7 @@ pub(crate) struct ClassificationResult {
     pub(crate) class: PeerInputClass,
     pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) from_peer: Option<String>,
+    pub(crate) from_peer_id: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
 }
 
@@ -50,8 +51,8 @@ pub(crate) struct PreparedIngressItem {
     pub(crate) auth: PeerIngressAuthDecision,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) trusted_sender: bool,
-    pub(crate) from_peer: Option<String>,
     pub(crate) from_peer_id: Option<meerkat_core::comms::PeerId>,
+    pub(crate) from_peer: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
     pub(crate) text_projection: String,
     #[allow(dead_code)]
@@ -135,6 +136,7 @@ impl IngressClassificationContext {
                         .get_name_by_pubkey(&envelope.from)
                         .unwrap_or_else(|| envelope.from.to_pubkey_string())
                 });
+                let from_peer_id = envelope.from.to_peer_id();
 
                 let (classification, lifecycle_peer, request_id) = match &envelope.kind {
                     MessageKind::Message { .. } => {
@@ -179,7 +181,8 @@ impl IngressClassificationContext {
                     MessageKind::Lifecycle { .. } => String::new(),
                     MessageKind::Request { intent, params, .. } => {
                         meerkat_core::format_peer_request_projection(
-                            &from_name,
+                            from_peer_id,
+                            Some(&from_name),
                             envelope.id,
                             intent,
                             params,
@@ -217,8 +220,8 @@ impl IngressClassificationContext {
                     class: classification.class,
                     auth: classification.auth,
                     trusted_sender,
-                    from_peer: Some(from_name),
                     from_peer_id: Some(envelope.from.to_peer_id()),
+                    from_peer: Some(from_name),
                     lifecycle_peer,
                     text_projection,
                     content_shape,
@@ -286,6 +289,7 @@ impl IngressClassificationContext {
                 class: prepared.class,
                 auth: prepared.auth,
                 from_peer: prepared.from_peer,
+                from_peer_id: prepared.from_peer_id.map(|peer_id| peer_id.to_string()),
                 lifecycle_peer: prepared.lifecycle_peer,
             })
         })
@@ -445,8 +449,13 @@ mod tests {
         );
         let item = InboxItem::External { envelope };
         let result = ctx.classify(&item).expect("should classify");
+        let expected_peer_id = sender.public_key().to_peer_id().to_string();
         assert_eq!(result.class, PeerInputClass::ActionableMessage);
         assert_eq!(result.from_peer.as_deref(), Some("sender-agent"));
+        assert_eq!(
+            result.from_peer_id.as_deref(),
+            Some(expected_peer_id.as_str())
+        );
         assert!(result.lifecycle_peer.is_none());
     }
 
@@ -465,8 +474,13 @@ mod tests {
         );
         let item = InboxItem::External { envelope };
         let result = ctx.classify(&item).expect("should classify");
+        let expected_peer_id = sender.public_key().to_peer_id().to_string();
         assert_eq!(result.class, PeerInputClass::ActionableRequest);
         assert_eq!(result.from_peer.as_deref(), Some("sender-agent"));
+        assert_eq!(
+            result.from_peer_id.as_deref(),
+            Some(expected_peer_id.as_str())
+        );
     }
 
     #[test]
@@ -640,6 +654,11 @@ mod tests {
             result.from_peer,
             Some(sender.public_key().to_pubkey_string())
         );
+        let expected_peer_id = sender.public_key().to_peer_id().to_string();
+        assert_eq!(
+            result.from_peer_id.as_deref(),
+            Some(expected_peer_id.as_str())
+        );
     }
 
     #[test]
@@ -763,8 +782,11 @@ mod tests {
         let prepared_request_id = prepared.request_id.map(|id| id.to_string());
         assert_eq!(prepared_request_id.as_deref(), Some(request_id.as_str()));
         assert!(prepared.text_projection.starts_with(&format!(
-            "[COMMS REQUEST from sender-agent (id: {request_id})]\nIntent: review"
+            "[COMMS REQUEST from peer_id {} (display_name: sender-agent) (id: {request_id})]\nIntent: review",
+            sender.public_key().to_peer_id()
         )));
+        assert!(prepared.text_projection.contains("\"peer_id\""));
+        assert!(!prepared.text_projection.contains("to=\""));
         assert_eq!(machine.external_calls(), 1);
     }
 

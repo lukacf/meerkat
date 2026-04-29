@@ -129,9 +129,84 @@ pub fn format_peer_message_projection(from_peer: &str, body: &str) -> String {
     format!("[COMMS MESSAGE from {from_peer}]\n{body}")
 }
 
+/// Schema-shaped model-facing `send_response` call affordance.
+///
+/// This helper owns the field names used when a prompt tells a model how to
+/// answer a correlated peer request. The MCP `SendResponseInput` schema must
+/// accept the object rendered here; comms tests pin that boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendResponseCallProjection {
+    pub peer_id: PeerId,
+    pub display_name: Option<String>,
+    pub in_reply_to: String,
+}
+
+impl SendResponseCallProjection {
+    pub const TOOL_NAME: &'static str = "send_response";
+    pub const PEER_ID_FIELD: &'static str = "peer_id";
+    pub const DISPLAY_NAME_FIELD: &'static str = "display_name";
+    pub const IN_REPLY_TO_FIELD: &'static str = "in_reply_to";
+    pub const STATUS_FIELD: &'static str = "status";
+    pub const RESULT_FIELD: &'static str = "result";
+
+    pub fn new(
+        peer_id: PeerId,
+        display_name: Option<&str>,
+        in_reply_to: impl Into<String>,
+    ) -> Self {
+        Self {
+            peer_id,
+            display_name: display_name
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned),
+            in_reply_to: in_reply_to.into(),
+        }
+    }
+
+    /// A concrete, schema-valid example argument object for a completed reply.
+    ///
+    /// The model may replace `status` with `"failed"` and replace `result`
+    /// with a task-specific JSON payload, but the object shape itself is the
+    /// same shape accepted by the MCP `send_response` input schema.
+    pub fn completed_example_args(&self) -> Value {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            Self::PEER_ID_FIELD.to_string(),
+            Value::String(self.peer_id.to_string()),
+        );
+        if let Some(display_name) = &self.display_name {
+            args.insert(
+                Self::DISPLAY_NAME_FIELD.to_string(),
+                Value::String(display_name.clone()),
+            );
+        }
+        args.insert(
+            Self::IN_REPLY_TO_FIELD.to_string(),
+            Value::String(self.in_reply_to.clone()),
+        );
+        args.insert(
+            Self::STATUS_FIELD.to_string(),
+            Value::String("completed".to_string()),
+        );
+        args.insert(Self::RESULT_FIELD.to_string(), serde_json::json!({}));
+        Value::Object(args)
+    }
+
+    pub fn instruction_text(&self) -> String {
+        let args = serde_json::to_string(&self.completed_example_args())
+            .unwrap_or_else(|_| "{}".to_string());
+        format!(
+            "Reply with {} with arguments {args}. Use status=\"failed\" instead of \"completed\" when the request cannot be fulfilled, and replace result with the JSON payload.",
+            Self::TOOL_NAME
+        )
+    }
+}
+
 /// Canonical model-facing text projection for a correlated peer request.
 pub fn format_peer_request_projection(
-    from_peer: &str,
+    from_peer_id: PeerId,
+    display_name: Option<&str>,
     request_id: impl std::fmt::Display,
     intent: &str,
     params: &Value,
@@ -144,14 +219,22 @@ pub fn format_peer_request_projection(
             serde_json::to_string_pretty(params).unwrap_or_default()
         )
     };
+    let request_id = request_id.to_string();
+    let display_suffix = display_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| format!(" (display_name: {name})"))
+        .unwrap_or_default();
+    let response_call =
+        SendResponseCallProjection::new(from_peer_id, display_name, request_id.clone());
 
     format!(
-        "[COMMS REQUEST from {from_peer} (id: {request_id})]\n\
+        "[COMMS REQUEST from peer_id {from_peer_id}{display_suffix} (id: {request_id})]\n\
          Intent: {intent}{params_str}\n\
          \n\
-         This is a correlated peer request. Reply with send_response using \
-         to=\"{from_peer}\", in_reply_to=\"{request_id}\", status=\"completed\" or \"failed\", and result=<JSON payload>. \
-         Do not answer this request with send_message."
+         This is a correlated peer request. {} \
+         Do not answer this request with send_message.",
+        response_call.instruction_text()
     )
 }
 

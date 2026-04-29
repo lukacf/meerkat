@@ -231,7 +231,8 @@ pub enum PeerConversationProjection {
         peer_id: String,
     },
     Request {
-        peer_id: String,
+        peer_id: crate::comms::PeerId,
+        display_name: Option<String>,
         request_id: String,
         intent: String,
         payload: Option<serde_json::Value>,
@@ -265,13 +266,28 @@ impl PeerConversationProjection {
             Self::Message { .. } => String::new(),
             Self::Request {
                 peer_id,
+                display_name,
                 request_id,
                 intent,
                 payload,
-            } => format!(
-                "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from {peer_id}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"{peer_id}\", in_reply_to=\"{request_id}\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply.",
-                format_peer_projection_payload(payload.as_ref())
-            ),
+            } => {
+                let display_suffix = display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(|name| format!(" (display_name: {name})"))
+                    .unwrap_or_default();
+                let response_call = crate::interaction::SendResponseCallProjection::new(
+                    *peer_id,
+                    display_name.as_deref(),
+                    request_id.clone(),
+                );
+                format!(
+                    "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from peer_id {peer_id}{display_suffix}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. {} Do not use send_message for this reply.",
+                    format_peer_projection_payload(payload.as_ref()),
+                    response_call.instruction_text()
+                )
+            }
             Self::ResponseProgress {
                 peer_id,
                 request_id,

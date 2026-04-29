@@ -358,7 +358,8 @@ impl CommsMessage {
                 intent,
                 params,
             } => meerkat_core::format_peer_request_projection(
-                &self.from_peer,
+                self.from_pubkey.to_peer_id(),
+                Some(&self.from_peer),
                 request_id,
                 intent.as_str(),
                 params,
@@ -722,9 +723,13 @@ mod tests {
         assert!(text.contains("review"));
         assert!(text.contains("550e8400-e29b-41d4-a716-446655440000"));
         assert!(text.contains("send_response"));
-        assert!(text.contains("to=\"coding-agent\""));
-        assert!(text.contains("in_reply_to=\"550e8400-e29b-41d4-a716-446655440000\""));
-        assert!(text.contains("status=\"completed\" or \"failed\""));
+        assert!(text.contains(&format!(
+            "\"peer_id\":\"{}\"",
+            PubKey::new([1u8; 32]).to_peer_id()
+        )));
+        assert!(text.contains("\"display_name\":\"coding-agent\""));
+        assert!(text.contains("\"in_reply_to\":\"550e8400-e29b-41d4-a716-446655440000\""));
+        assert!(text.contains("\"status\":\"completed\""));
         assert!(text.contains("Do not answer this request with send_message"));
     }
 

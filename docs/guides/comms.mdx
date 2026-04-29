@@ -626,7 +626,7 @@ Historically this was sometimes described as "turn-boundary inbox draining." Tha
 Incoming messages are formatted as text for the LLM:
 
 - **Message**: `[COMMS MESSAGE from <peer>]\n<body>`
-- **Request**: `[COMMS REQUEST from <peer> (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, use send_response with peer="<peer>", request_id="<uuid>"`
+- **Request**: `[COMMS REQUEST from peer_id <peer-id> (display_name: <name>) (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, call send_response with peer_id="<peer-id>", in_reply_to="<uuid>", status="completed" or "failed", and result=<json>. display_name is diagnostic only.`
 - **Response**: `[COMMS RESPONSE from <peer> (to request: <uuid>)]\nStatus: <status>\nResult: <json>`
 
 ## Typed peer lifecycle notices

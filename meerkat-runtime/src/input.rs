@@ -547,8 +547,20 @@ pub(crate) fn peer_projection_from_peer_input(
             peer_id: peer_id.clone(),
         }),
         Some(PeerConvention::Request { request_id, intent }) => {
+            let peer_id = match meerkat_core::comms::PeerId::parse(peer_id) {
+                Ok(peer_id) => peer_id,
+                Err(error) => {
+                    tracing::warn!(
+                        peer_id,
+                        error = %error,
+                        "dropping peer request projection with non-canonical peer_id"
+                    );
+                    return None;
+                }
+            };
             Some(PeerConversationProjection::Request {
-                peer_id: peer_id.clone(),
+                peer_id,
+                display_name: None,
                 request_id: request_id.clone(),
                 intent: intent.clone(),
                 payload: peer.payload.clone(),

@@ -913,7 +913,7 @@ mod tests {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "operator-rt".into(),
+                    peer_id: "11111111-1111-4111-8111-111111111111".into(),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -932,10 +932,15 @@ mod tests {
             handling_mode: None,
         });
 
-        assert_eq!(
-            input_to_prompt(&input),
-            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from operator-rt. Intent: checksum_token. Request ID: req-123. Params: {\n  \"subject\": \"alpha beta gamma\"\n}. This is not a normal user request and not a prompt for direct user-facing output. Handle it by calling send_response with to=\"operator-rt\", in_reply_to=\"req-123\", status=\"completed\" or \"failed\", and result=<JSON payload>. Do not use send_message for this reply."
-        );
+        let prompt = input_to_prompt(&input);
+        assert!(prompt.starts_with(
+            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from peer_id 11111111-1111-4111-8111-111111111111. Intent: checksum_token. Request ID: req-123."
+        ));
+        assert!(prompt.contains("\"peer_id\":\"11111111-1111-4111-8111-111111111111\""));
+        assert!(prompt.contains("\"in_reply_to\":\"req-123\""));
+        assert!(prompt.contains("\"status\":\"completed\""));
+        assert!(!prompt.contains("to=\""));
+        assert!(prompt.contains("Do not use send_message for this reply."));
     }
 
     #[test]

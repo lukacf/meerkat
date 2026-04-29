@@ -771,19 +771,25 @@ class MeerkatClient:
     async def send_peer_response_terminal(
         self,
         session_id: str,
-        peer_name: str,
+        route_identity: str,
+        display_identity: str,
         request_id: str,
         status: Literal["completed", "failed", "cancelled"],
         result: Any,
+        *,
+        transport_identity: str | None = None,
     ) -> ExternalEventOutcome:
         """Admit a correlated terminal peer response through the typed ingress."""
         params: dict[str, Any] = {
             "session_id": session_id,
-            "peer_name": peer_name,
+            "route_identity": route_identity,
+            "display_identity": display_identity,
             "request_id": request_id,
             "status": status,
             "result": result,
         }
+        if transport_identity is not None:
+            params["transport_identity"] = transport_identity
         return await self._request("session/peer_response_terminal", params)
 
 

@@ -26,7 +26,10 @@ pub struct ExternalEventParams {
 #[derive(Debug, Deserialize)]
 pub struct PeerResponseTerminalParams {
     pub session_id: String,
-    pub peer_name: meerkat_core::comms::PeerName,
+    #[serde(default)]
+    pub transport_identity: Option<String>,
+    pub route_identity: String,
+    pub display_identity: String,
     pub request_id: String,
     pub status: PeerResponseTerminalStatusWire,
     pub result: serde_json::Value,
@@ -104,10 +107,19 @@ pub async fn handle_peer_response_terminal(
         Err(resp) => return resp,
     };
 
+    let source = match meerkat_core::PeerResponseTerminalSource::parse(
+        params.transport_identity,
+        params.route_identity,
+        params.display_identity,
+    ) {
+        Ok(source) => source,
+        Err(err) => return RpcResponse::error(id, crate::error::INVALID_PARAMS, err.to_string()),
+    };
+
     let outcome = runtime
         .accept_peer_response_terminal_via_runtime(
             &session_id,
-            params.peer_name,
+            source,
             params.request_id,
             params.status,
             params.result,
@@ -224,20 +236,23 @@ mod tests {
 
     #[test]
     fn test_external_event_params_reject_variant_deserialization() {
-        let json = r#"{"session_id":"sid_123","kind":"peer_response_terminal","peer_name":"analyst","request_id":"req-1","status":"completed","result":{"token":"amber"}}"#;
+        let json = r#"{"session_id":"sid_123","kind":"peer_response_terminal","route_identity":"analyst-rt","display_identity":"Analyst","request_id":"req-1","status":"completed","result":{"token":"amber"}}"#;
         let params: ExternalEventParams = serde_json::from_str(json).unwrap();
         assert!(matches!(
             params.event,
             SessionExternalEventEnvelope::PeerResponseTerminal { .. }
         ));
         if let SessionExternalEventEnvelope::PeerResponseTerminal {
-            peer_name,
+            route_identity,
+            display_identity,
             request_id,
             status,
             result,
+            ..
         } = params.event
         {
-            assert_eq!(peer_name.as_str(), "analyst");
+            assert_eq!(route_identity, "analyst-rt");
+            assert_eq!(display_identity, "Analyst");
             assert_eq!(request_id, "req-1");
             assert_eq!(status, PeerResponseTerminalStatusWire::Completed);
             let result_value: serde_json::Value =
@@ -248,10 +263,11 @@ mod tests {
 
     #[test]
     fn test_peer_response_terminal_params_deserialization() {
-        let json = r#"{"session_id":"sid_123","peer_name":"analyst","request_id":"req-1","status":"failed","result":null}"#;
+        let json = r#"{"session_id":"sid_123","route_identity":"analyst-rt","display_identity":"Analyst","request_id":"req-1","status":"failed","result":null}"#;
         let params: PeerResponseTerminalParams = serde_json::from_str(json).unwrap();
         assert_eq!(params.session_id, "sid_123");
-        assert_eq!(params.peer_name.as_str(), "analyst");
+        assert_eq!(params.route_identity, "analyst-rt");
+        assert_eq!(params.display_identity, "Analyst");
         assert_eq!(params.request_id, "req-1");
         assert_eq!(params.status, PeerResponseTerminalStatusWire::Failed);
         assert_eq!(params.result, serde_json::Value::Null);

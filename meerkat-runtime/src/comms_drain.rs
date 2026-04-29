@@ -509,6 +509,7 @@ fn peer_input_from_delivery_payload(
             timestamp: chrono::Utc::now(),
             source: InputOrigin::Peer {
                 peer_id: sender_peer_id.as_str(),
+                display_identity: None,
                 runtime_id: Some(LogicalRuntimeId::new(session_id.to_string())),
             },
             durability: InputDurability::Durable,
@@ -1879,6 +1880,7 @@ mod tests {
         let candidate = PeerInputCandidate {
             interaction: InboxInteraction {
                 id: InteractionId(Uuid::new_v4()),
+                from_route: None,
                 from: sender_pubkey.to_pubkey_string(),
                 content: InteractionContent::Request {
                     intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
@@ -2124,6 +2126,7 @@ mod tests {
         PeerInputCandidate {
             interaction: InboxInteraction {
                 id: InteractionId(Uuid::new_v4()),
+                from_route: None,
                 from: "test-mob/__mob_supervisor__".to_string(),
                 content: InteractionContent::Request {
                     intent: intent.to_string(),
@@ -3340,6 +3343,7 @@ mod tests {
         PeerInputCandidate {
             interaction: InboxInteraction {
                 id: InteractionId(Uuid::new_v4()),
+                from_route: None,
                 from: sender.to_string(),
                 content: InteractionContent::Request {
                     intent: SUPERVISOR_BRIDGE_INTENT.to_string(),

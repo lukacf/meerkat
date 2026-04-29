@@ -835,6 +835,10 @@ mod tests {
     };
     use meerkat_core::types::SessionId;
 
+    const TEST_PEER_RESPONSE_ROUTE_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const TEST_PEER_RESPONSE_REQUEST_ID: &str = "22222222-2222-4222-8222-222222222222";
+    const TEST_PEER_RESPONSE_REQUEST_ID_2: &str = "33333333-3333-4333-8333-333333333333";
+
     fn background_spec(name: &str) -> OperationSpec {
         OperationSpec {
             id: meerkat_core::ops_lifecycle::OperationId::new(),
@@ -899,6 +903,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "p".into(),
+                    display_identity: Some("Peer P".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -924,6 +929,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "peer-1".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -953,6 +959,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "11111111-1111-4111-8111-111111111111".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -990,6 +997,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "analyst-rt".into(),
+                    display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -999,7 +1007,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
-                request_id: "req-123".into(),
+                request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
             body: "stale helper-local comms prose".into(),
@@ -1013,7 +1021,7 @@ mod tests {
 
         assert_eq!(
             input_to_prompt(&input),
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}."
+            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}."
         );
     }
 
@@ -1030,6 +1038,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "analyst-rt".into(),
+                    display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1039,7 +1048,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
-                request_id: "req-123".into(),
+                request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
             body: "stale helper-local comms prose".into(),
@@ -1130,6 +1139,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "analyst-rt".into(),
+                    display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1139,7 +1149,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
-                request_id: "req-123".into(),
+                request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
             body: "stale helper-local comms prose".into(),
@@ -1174,7 +1184,7 @@ mod tests {
         assert_eq!(staged.context_appends.len(), 1);
         assert_eq!(
             staged.context_appends[0].key,
-            "peer_response_terminal:analyst-rt:req-123"
+            "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
         );
         match &staged.context_appends[0].content {
             CoreRenderable::Text { text } => {
@@ -1200,6 +1210,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "analyst-rt".into(),
+                    display_identity: Some("Analyst".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1209,7 +1220,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
-                request_id: "req-123".into(),
+                request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
@@ -1243,7 +1254,8 @@ mod tests {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "analyst-rt".into(),
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
+                    display_identity: Some("analyst-rt".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1253,7 +1265,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
-                request_id: "req-123".into(),
+                request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
             body: String::new(),
@@ -1302,7 +1314,8 @@ mod tests {
                 id: InputId::new(),
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
-                    peer_id: "analyst-rt".into(),
+                    peer_id: TEST_PEER_RESPONSE_ROUTE_ID.into(),
+                    display_identity: Some("analyst-rt".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1312,7 +1325,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::ResponseTerminal {
-                request_id: "req-123".into(),
+                request_id: TEST_PEER_RESPONSE_REQUEST_ID.into(),
                 status: crate::input::ResponseTerminalStatus::Completed,
             }),
             body: String::new(),
@@ -1376,6 +1389,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: peer_id.into(),
+                    display_identity: Some("analyst-rt".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1399,6 +1413,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: peer_id.into(),
+                    display_identity: Some("analyst-rt".into()),
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1439,7 +1454,7 @@ mod tests {
         let terminal_first = make_shared_ephemeral_driver("terminal-first");
         let terminal_id = accept_queued_input_id(
             &terminal_first,
-            make_terminal_peer_response("analyst-rt", "req-terminal-first"),
+            make_terminal_peer_response(TEST_PEER_RESPONSE_ROUTE_ID, TEST_PEER_RESPONSE_REQUEST_ID),
         )
         .await;
         let _message_id = accept_queued_input_id(
@@ -1469,7 +1484,10 @@ mod tests {
             accept_queued_input_id(&message_first, make_peer_message("analyst-rt", "first")).await;
         let _terminal_id = accept_queued_input_id(
             &message_first,
-            make_terminal_peer_response("analyst-rt", "req-message-first"),
+            make_terminal_peer_response(
+                TEST_PEER_RESPONSE_ROUTE_ID,
+                TEST_PEER_RESPONSE_REQUEST_ID_2,
+            ),
         )
         .await;
 
@@ -1505,6 +1523,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "p".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1562,6 +1581,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "peer-1".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1613,6 +1633,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "peer-1".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -1833,6 +1854,7 @@ mod tests {
                 source_peer_id: None,
                 interaction: InboxInteraction {
                     id: meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4()),
+                    from_route: None,
                     from: "event:webhook".into(),
                     content: InteractionContent::Message {
                         body: "build failed".into(),
@@ -2088,6 +2110,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "p".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -2097,7 +2120,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
-                request_id: "r".into(),
+                request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".into(),
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "done".into(),
@@ -2127,6 +2150,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "p".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,

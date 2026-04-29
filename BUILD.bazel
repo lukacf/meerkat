@@ -74,6 +74,7 @@ filegroup(
             ".git/**",
             "bazel-*",
             "bazel-*/**",
+            "**/node_modules/**",
             "target/**",
             "**/BUILD",
             "**/BUILD.bazel",

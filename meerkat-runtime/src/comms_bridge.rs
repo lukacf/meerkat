@@ -59,6 +59,7 @@ pub fn classified_interaction_to_runtime_input(
         runtime_id,
         classified.source_peer_id,
         classified.from_peer_id,
+        Some(classified.class),
     )
 }
 
@@ -75,7 +76,7 @@ pub fn interaction_to_peer_input(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
-    interaction_to_peer_input_with_authority(interaction, runtime_id, None, None)
+    interaction_to_peer_input_with_authority(interaction, runtime_id, None, None, None)
 }
 
 fn interaction_to_peer_input_with_authority(
@@ -83,9 +84,11 @@ fn interaction_to_peer_input_with_authority(
     runtime_id: &LogicalRuntimeId,
     source_peer_id: Option<PeerId>,
     terminal_route_peer_id: Option<PeerId>,
+    ingress_class: Option<PeerInputClass>,
 ) -> Input {
-    let convention = map_convention(interaction);
+    let convention = map_convention(interaction, ingress_class);
     let durability = map_durability(&convention);
+    let terminal_route_peer_id = terminal_route_peer_id.or(interaction.from_route);
     let source_peer = match (&convention, source_peer_id, terminal_route_peer_id) {
         (PeerConvention::ResponseTerminal { .. }, _, Some(peer_id)) => peer_id.to_string(),
         (PeerConvention::ResponseTerminal { .. }, _, None) => String::new(),
@@ -120,16 +123,16 @@ fn interaction_to_peer_input_with_authority(
 }
 
 fn peer_handling_mode(interaction: &InboxInteraction) -> Option<meerkat_core::types::HandlingMode> {
-    if matches!(&interaction.content, InteractionContent::Response { .. }) {
-        return None;
-    }
     match interaction.handling_mode {
         meerkat_core::types::HandlingMode::Queue => None,
         mode => Some(mode),
     }
 }
 
-fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
+fn map_convention(
+    interaction: &InboxInteraction,
+    ingress_class: Option<PeerInputClass>,
+) -> PeerConvention {
     match &interaction.content {
         InteractionContent::Message { .. } => PeerConvention::Message,
         InteractionContent::Request { intent, .. } => PeerConvention::Request {
@@ -146,7 +149,29 @@ fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
             // matching here -- the inbox classifier and comms drain delegate
             // to the same call.
             let request_id = in_reply_to.to_string();
-            match meerkat_core::interaction::classify_response_terminality(*status) {
+            let terminality = match ingress_class {
+                Some(PeerInputClass::ResponseProgress) => {
+                    meerkat_core::interaction::TerminalityClass::Progress
+                }
+                Some(PeerInputClass::ResponseTerminal) => {
+                    match meerkat_core::interaction::classify_response_terminality(*status) {
+                        terminal @ meerkat_core::interaction::TerminalityClass::Terminal {
+                            ..
+                        } => terminal,
+                        other => {
+                            tracing::warn!(
+                                class = ?other,
+                                "terminal ingress class conflicted with response status; failing closed as terminal failure"
+                            );
+                            meerkat_core::interaction::TerminalityClass::Terminal {
+                                disposition: meerkat_core::interaction::TerminalDisposition::Failed,
+                            }
+                        }
+                    }
+                }
+                _ => meerkat_core::interaction::classify_response_terminality(*status),
+            };
+            match terminality {
                 meerkat_core::interaction::TerminalityClass::Progress => {
                     PeerConvention::ResponseProgress {
                         request_id,
@@ -262,6 +287,7 @@ fn map_durability(convention: &PeerConvention) -> InputDurability {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::interaction::ResponseStatus;
 
     fn make_interaction_id() -> meerkat_core::interaction::InteractionId {
         meerkat_core::interaction::InteractionId(uuid::Uuid::now_v7())
@@ -270,6 +296,7 @@ mod tests {
     #[test]
     fn message_to_peer_input() {
         let interaction = InboxInteraction {
+            from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
                 body: "hello".into(),
@@ -293,6 +320,7 @@ mod tests {
     #[test]
     fn request_to_peer_input() {
         let interaction = InboxInteraction {
+            from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Request {
                 intent: "mob.peer_added".into(),
@@ -330,6 +358,7 @@ mod tests {
         let request_id = make_interaction_id();
         let classified = PeerInputCandidate {
             interaction: InboxInteraction {
+                from_route: None,
                 from: "test-mob/lead/l-requester".into(),
                 content: InteractionContent::Request {
                     intent: "interpret_image".into(),
@@ -377,6 +406,7 @@ mod tests {
             lifecycle_peer: None,
             source_peer_id: None,
             interaction: InboxInteraction {
+                from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
                     body: "{\"ok\":true}".into(),
@@ -414,6 +444,7 @@ mod tests {
             lifecycle_peer: None,
             source_peer_id: None,
             interaction: InboxInteraction {
+                from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
                     body: "hello".into(),
@@ -447,6 +478,7 @@ mod tests {
         // relies on. The structured JSON still flows through `payload` for
         // consumers that need the raw params.
         let interaction = InboxInteraction {
+            from_route: None,
             from: "event:webhook".into(),
             content: InteractionContent::Request {
                 intent: "mob.peer_added".into(),
@@ -482,6 +514,7 @@ mod tests {
             },
         ];
         let interaction = InboxInteraction {
+            from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
                 body: "see image".into(),
@@ -513,6 +546,7 @@ mod tests {
             },
         ];
         let interaction = InboxInteraction {
+            from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
                 body: "please inspect this image".into(),
@@ -552,6 +586,7 @@ mod tests {
             lifecycle_peer: None,
             source_peer_id: None,
             interaction: InboxInteraction {
+                from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
                     body: "see image".into(),
@@ -593,6 +628,7 @@ mod tests {
             lifecycle_peer: None,
             source_peer_id: None,
             interaction: InboxInteraction {
+                from_route: None,
                 from: "event:webhook".into(),
                 content: InteractionContent::Message {
                     body: "urgent".into(),
@@ -620,8 +656,12 @@ mod tests {
     #[test]
     fn response_completed_to_terminal() {
         let in_reply_to = make_interaction_id();
+        let route_id = meerkat_core::comms::PeerId::from_uuid(
+            uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f2").unwrap(),
+        );
         let interaction = InboxInteraction {
-            from: "peer-1".into(),
+            from_route: Some(route_id),
+            from: "Peer One".into(),
             content: InteractionContent::Response {
                 status: ResponseStatus::Completed,
                 result: serde_json::json!({"ok": true}),
@@ -634,6 +674,17 @@ mod tests {
         };
         let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(p) = &input {
+            match &p.header.source {
+                InputOrigin::Peer {
+                    peer_id,
+                    display_identity,
+                    ..
+                } => {
+                    assert_eq!(peer_id, &route_id.to_string());
+                    assert_eq!(display_identity.as_deref(), Some("Peer One"));
+                }
+                other => panic!("Expected Peer source, got {other:?}"),
+            }
             assert!(matches!(
                 p.convention,
                 Some(PeerConvention::ResponseTerminal {
@@ -650,6 +701,17 @@ mod tests {
         } else {
             panic!("Expected PeerInput");
         }
+        let projection = crate::input::peer_projection(&input).expect("terminal projection");
+        let expected_key = format!("peer_response_terminal:{route_id}:{in_reply_to}");
+        assert_eq!(
+            projection.context_key().as_deref(),
+            Some(expected_key.as_str())
+        );
+        assert!(
+            projection.prompt_text().contains("from Peer One"),
+            "terminal prompt should use display identity: {}",
+            projection.prompt_text()
+        );
     }
 
     #[test]
@@ -658,8 +720,11 @@ mod tests {
         let classified = PeerInputCandidate {
             class: PeerInputClass::ResponseProgress,
             auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
+            source_peer_id: None,
+            from_peer_id: None,
             lifecycle_peer: None,
             interaction: InboxInteraction {
+                from_route: None,
                 from: "peer-1".into(),
                 content: InteractionContent::Response {
                     status: ResponseStatus::Completed,
@@ -689,9 +754,37 @@ mod tests {
     }
 
     #[test]
-    fn response_failed_to_terminal() {
+    fn response_terminal_without_route_fails_typed_projection() {
         let in_reply_to = make_interaction_id();
         let interaction = InboxInteraction {
+            from_route: None,
+            from: "Peer One".into(),
+            content: InteractionContent::Response {
+                status: ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+                in_reply_to,
+            },
+            id: make_interaction_id(),
+            rendered_text: String::new(),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        };
+        let input = interaction_to_peer_input(&interaction, &LogicalRuntimeId::new("test"));
+        let err = crate::input::validate_peer_response_terminal_fact(&input).unwrap_err();
+        assert!(matches!(
+            err,
+            meerkat_core::PeerResponseTerminalFactError::EmptyRouteIdentity
+        ));
+    }
+
+    #[test]
+    fn response_failed_to_terminal() {
+        let in_reply_to = make_interaction_id();
+        let route_id = meerkat_core::comms::PeerId::from_uuid(
+            uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f3").unwrap(),
+        );
+        let interaction = InboxInteraction {
+            from_route: Some(route_id),
             from: "peer-1".into(),
             content: InteractionContent::Response {
                 status: ResponseStatus::Failed,
@@ -721,6 +814,7 @@ mod tests {
     fn response_accepted_to_progress() {
         let in_reply_to = make_interaction_id();
         let interaction = InboxInteraction {
+            from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Response {
                 status: ResponseStatus::Accepted,
@@ -750,6 +844,7 @@ mod tests {
     #[test]
     fn peer_source_includes_runtime_id() {
         let interaction = InboxInteraction {
+            from_route: None,
             from: "peer-1".into(),
             content: InteractionContent::Message {
                 body: "hi".into(),
@@ -766,6 +861,7 @@ mod tests {
             if let InputOrigin::Peer {
                 peer_id,
                 runtime_id,
+                ..
             } = &p.header.source
             {
                 assert_eq!(peer_id, "peer-1");
@@ -783,6 +879,7 @@ mod tests {
         let in_reply_to = make_interaction_id();
         let interactions = vec![
             InboxInteraction {
+                from_route: None,
                 from: "p".into(),
                 content: InteractionContent::Message {
                     body: "m".into(),
@@ -794,6 +891,7 @@ mod tests {
                 render_metadata: None,
             },
             InboxInteraction {
+                from_route: None,
                 from: "p".into(),
                 content: InteractionContent::Request {
                     intent: "i".into(),
@@ -805,6 +903,9 @@ mod tests {
                 render_metadata: None,
             },
             InboxInteraction {
+                from_route: Some(meerkat_core::comms::PeerId::from_uuid(
+                    uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f6").unwrap(),
+                )),
                 from: "p".into(),
                 content: InteractionContent::Response {
                     status: ResponseStatus::Completed,

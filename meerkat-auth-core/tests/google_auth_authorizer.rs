@@ -69,10 +69,10 @@ struct MockFailure {
 async fn token_endpoint(State(state): State<MockState>, Form(form): Form<OAuthForm>) -> Response {
     let call = state.counter.fetch_add(1, Ordering::SeqCst) + 1;
     state.captured.lock().unwrap().push(form);
-    if let Some(failure) = &state.failure {
-        if call >= failure.from_call {
-            return (failure.status, Json(failure.body.clone())).into_response();
-        }
+    if let Some(failure) = &state.failure
+        && call >= failure.from_call
+    {
+        return (failure.status, Json(failure.body.clone())).into_response();
     }
     let expires_in = state
         .expires_in_by_call
@@ -97,10 +97,10 @@ async fn metadata_endpoint(
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let call = state.counter.fetch_add(1, Ordering::SeqCst) + 1;
-    if let Some(failure) = &state.failure {
-        if call >= failure.from_call {
-            return (failure.status, Json(failure.body.clone())).into_response();
-        }
+    if let Some(failure) = &state.failure
+        && call >= failure.from_call
+    {
+        return (failure.status, Json(failure.body.clone())).into_response();
     }
     let expires_in = state
         .expires_in_by_call

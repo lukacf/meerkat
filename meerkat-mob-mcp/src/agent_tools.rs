@@ -2184,6 +2184,7 @@ mod tests {
                         .ok_or_else(|| SendError::PeerNotFound(to.label()))?;
                     recipient.inbox.write().await.push(InboxInteraction {
                         id: InteractionId(uuid::Uuid::new_v4()),
+                        from_route: Some(self.peer_id),
                         from: self.name.clone(),
                         content: InteractionContent::Request { intent, params },
                         rendered_text: String::new(),

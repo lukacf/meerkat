@@ -4,7 +4,7 @@ use crate::store::SupervisorAuthorityRecord;
 use crate::tokio;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerRoute, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
 };
 use meerkat_core::interaction::{
     InteractionContent, PeerInputCandidate, TerminalityClass, classify_response_terminality,
@@ -306,6 +306,10 @@ mod tests {
         PeerInputCandidate {
             interaction: InboxInteraction {
                 id: InteractionId(uuid::Uuid::new_v4()),
+                from_route: Some(PeerId::from_uuid(
+                    uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f5")
+                        .expect("valid worker route id"),
+                )),
                 from: "worker-rt".to_string(),
                 content: InteractionContent::Response {
                     in_reply_to: InteractionId(request_envelope_id),

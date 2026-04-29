@@ -2322,7 +2322,7 @@ impl SessionRuntime {
     pub async fn accept_peer_response_terminal_via_runtime(
         self: &Arc<Self>,
         session_id: &SessionId,
-        peer_name: meerkat_core::comms::PeerName,
+        source: meerkat_core::PeerResponseTerminalSource,
         request_id: String,
         status: meerkat_contracts::PeerResponseTerminalStatusWire,
         result: serde_json::Value,
@@ -2334,20 +2334,13 @@ impl SessionRuntime {
 
         self.ensure_runtime_executor(session_id).await?;
 
-        let peer_name = meerkat_core::comms::PeerName::new(peer_name.as_str().to_string())
-            .map_err(|message| RpcError {
-                code: error::INVALID_PARAMS,
-                message,
-                data: None,
-            })?;
-
         let input =
-            meerkat_runtime::peer_response_terminal_input(&peer_name, request_id, status, result)
+            meerkat_runtime::peer_response_terminal_input(source, request_id, status, result)
                 .map_err(|err| RpcError {
-                code: error::INVALID_PARAMS,
-                message: err.to_string(),
-                data: None,
-            })?;
+                    code: error::INVALID_PARAMS,
+                    message: err.to_string(),
+                    data: None,
+                })?;
 
         self.runtime_adapter
             .accept_input(session_id, input)
@@ -4602,8 +4595,11 @@ mod tests {
             .stage_append(
                 &AppendSystemContextRequest {
                     text: "Authoritative peer token is birch seventeen.".to_string(),
-                    source: Some("peer_response_terminal:analyst:req-123".to_string()),
-                    idempotency_key: Some("req-123".to_string()),
+                    source: Some(
+                        "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+                            .to_string(),
+                    ),
+                    idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                 },
                 meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
             )
@@ -4624,7 +4620,7 @@ mod tests {
         );
         assert_eq!(
             runtime_context[0].source.as_deref(),
-            Some("peer_response_terminal:analyst:req-123")
+            Some("peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1")
         );
     }
 
@@ -4758,8 +4754,14 @@ mod tests {
                 &session_id,
                 AppendSystemContextRequest {
                     text: "Authoritative peer token is birch seventeen.".to_string(),
-                    source: Some("peer_response_terminal:analyst:req-123".to_string()),
-                    idempotency_key: Some("peer_response_terminal:analyst:req-123".to_string()),
+                    source: Some(
+                        "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+                            .to_string(),
+                    ),
+                    idempotency_key: Some(
+                        "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+                            .to_string(),
+                    ),
                 },
             )
             .await
@@ -4780,7 +4782,7 @@ mod tests {
         );
         assert_eq!(
             open_config.runtime_system_context[0].source.as_deref(),
-            Some("peer_response_terminal:analyst:req-123")
+            Some("peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1")
         );
         let seed_system_text = open_config
             .seed_messages
@@ -4994,6 +4996,7 @@ mod tests {
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
                             peer_id: "analyst-rt".to_string(),
+                            display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
                         durability: meerkat_runtime::InputDurability::Durable,
@@ -5003,7 +5006,7 @@ mod tests {
                         correlation_id: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
-                        request_id: "req-123".to_string(),
+                        request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
                     body: "done".to_string(),
@@ -5036,8 +5039,9 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
-                    text.contains("peer_response_terminal:analyst-rt:req-123")
-                        && text.contains("birch seventeen")
+                    text.contains(
+                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    ) && text.contains("birch seventeen")
                 }) {
                     break open_config;
                 }
@@ -5057,8 +5061,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             projected.iter().any(|text| {
-                text.contains("peer_response_terminal:analyst-rt:req-123")
-                    && text.contains("birch seventeen")
+                text.contains(
+                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                ) && text.contains("birch seventeen")
             }),
             "expected realtime projection to include runtime-owned terminal peer response: {projected:?}"
         );
@@ -5103,6 +5108,7 @@ mod tests {
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
                             peer_id: "analyst-rt".to_string(),
+                            display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
                         durability: meerkat_runtime::InputDurability::Durable,
@@ -5112,7 +5118,7 @@ mod tests {
                         correlation_id: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
-                        request_id: "req-123".to_string(),
+                        request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
                     body: "done".to_string(),
@@ -5145,8 +5151,9 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
-                    text.contains("peer_response_terminal:analyst-rt:req-123")
-                        && text.contains("birch seventeen")
+                    text.contains(
+                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    ) && text.contains("birch seventeen")
                 }) {
                     break session;
                 }
@@ -5166,8 +5173,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             authoritative_projected.iter().any(|text| {
-                text.contains("peer_response_terminal:analyst-rt:req-123")
-                    && text.contains("birch seventeen")
+                text.contains(
+                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                ) && text.contains("birch seventeen")
             }),
             "expected authoritative snapshot to include runtime-owned terminal peer response: {authoritative_projected:?}"
         );
@@ -5210,8 +5218,9 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
-                    text.contains("peer_response_terminal:analyst-rt:req-123")
-                        && text.contains("birch seventeen")
+                    text.contains(
+                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    ) && text.contains("birch seventeen")
                 }) {
                     break open_config;
                 }
@@ -5231,8 +5240,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             projected.iter().any(|text| {
-                text.contains("peer_response_terminal:analyst-rt:req-123")
-                    && text.contains("birch seventeen")
+                text.contains(
+                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                ) && text.contains("birch seventeen")
             }),
             "expected recovered realtime projection to include authoritative terminal peer response: {projected:?}"
         );
@@ -5277,6 +5287,7 @@ mod tests {
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
                             peer_id: "analyst-rt".to_string(),
+                            display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
                         durability: meerkat_runtime::InputDurability::Durable,
@@ -5286,7 +5297,7 @@ mod tests {
                         correlation_id: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
-                        request_id: "req-123".to_string(),
+                        request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
                     body: "done".to_string(),
@@ -5322,8 +5333,9 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
                 if projected.iter().any(|text| {
-                    text.contains("peer_response_terminal:analyst-rt:req-123")
-                        && text.contains("birch seventeen")
+                    text.contains(
+                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                    ) && text.contains("birch seventeen")
                 }) {
                     break session;
                 }
@@ -5343,8 +5355,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             projected.iter().any(|text| {
-                text.contains("peer_response_terminal:analyst-rt:req-123")
-                    && text.contains("birch seventeen")
+                text.contains(
+                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                ) && text.contains("birch seventeen")
             }),
             "expected accept_input_with_completion to persist runtime-owned terminal peer response: {projected:?}"
         );
@@ -5401,6 +5414,7 @@ mod tests {
                         timestamp: chrono::Utc::now(),
                         source: meerkat_runtime::InputOrigin::Peer {
                             peer_id: "analyst-rt".to_string(),
+                            display_identity: Some("Analyst".to_string()),
                             runtime_id: None,
                         },
                         durability: meerkat_runtime::InputDurability::Durable,
@@ -5410,7 +5424,7 @@ mod tests {
                         correlation_id: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
-                        request_id: "req-123".to_string(),
+                        request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
                         status: meerkat_runtime::ResponseTerminalStatus::Completed,
                     }),
                     body: "done".to_string(),
@@ -5436,7 +5450,9 @@ mod tests {
             AgentEvent::RunStarted { prompt, .. } => {
                 let normalized = prompt.text_content().to_lowercase();
                 assert!(
-                    normalized.contains("peer_response_terminal:analyst-rt:req-123"),
+                    normalized.contains(
+                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+                    ),
                     "run_started prompt should expose runtime system-context source: {normalized}"
                 );
                 assert!(
@@ -5632,9 +5648,9 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
-                    source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
-                    idempotency_key: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    source: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    idempotency_key: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![],
@@ -5660,8 +5676,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             projected.iter().any(|text| {
-                text.contains("peer_response_terminal:analyst-rt:req-123")
-                    && text.contains("birch seventeen")
+                text.contains(
+                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                ) && text.contains("birch seventeen")
             }),
             "expected realtime projection to include runtime context applied via session service: {projected:?}"
         );
@@ -5745,9 +5762,9 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
-                    source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
-                    idempotency_key: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"token\":\"birch seventeen\"}. For checksum_token requests, the exact token answer is `birch seventeen`.".to_string(),
+                    source: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
+                    idempotency_key: Some("peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
                 }],
                 vec![],
@@ -5805,8 +5822,9 @@ mod tests {
         );
         assert!(
             system_messages.iter().any(|text| {
-                text.contains("peer_response_terminal:analyst-rt:req-123")
-                    && text.contains("birch seventeen")
+                text.contains(
+                    "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                ) && text.contains("birch seventeen")
             }),
             "expected realtime projection to preserve authoritative token system context: {system_messages:?}"
         );

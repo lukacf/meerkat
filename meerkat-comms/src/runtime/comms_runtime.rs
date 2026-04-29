@@ -822,6 +822,7 @@ impl CoreCommsRuntime for CommsRuntime {
             .filter_map(|entry| {
                 let from_peer = entry.from_peer.unwrap_or_else(|| "unknown".to_string());
                 let source_peer_id = entry.from_peer_id;
+                let from_peer_id = entry.from_peer_id;
                 let rendered_text = entry.text_projection.clone();
 
                 match entry.item {
@@ -903,6 +904,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         Some(meerkat_core::ClassifiedInboxInteraction {
                             interaction: meerkat_core::InboxInteraction {
                                 id: meerkat_core::InteractionId(envelope.id),
+                                from_route: from_peer_id,
                                 from: from_peer,
                                 content,
                                 rendered_text,
@@ -912,7 +914,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             source_peer_id,
                             class: entry.class,
                             auth: Some(entry.auth),
-                            from_peer_id: entry.from_peer_id,
+                            from_peer_id,
                             lifecycle_peer: entry.lifecycle_peer,
                         })
                     }
@@ -929,6 +931,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             id: meerkat_core::InteractionId(
                                 interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
                             ),
+                            from_route: None,
                             from: format!("event:{source}"),
                             content: meerkat_core::InteractionContent::Message { body, blocks },
                             rendered_text,

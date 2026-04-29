@@ -33,6 +33,7 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
                 peer_id: "peer-1".into(),
+                display_identity: None,
                 runtime_id: None,
             },
             durability: InputDurability::Durable,

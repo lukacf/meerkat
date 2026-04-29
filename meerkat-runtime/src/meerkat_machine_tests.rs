@@ -516,6 +516,7 @@ fn make_progress_input(label: &str) -> Input {
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
                 peer_id: "peer-1".into(),
+                display_identity: None,
                 runtime_id: None,
             },
             durability: crate::input::InputDurability::Ephemeral,
@@ -4290,6 +4291,7 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
                 peer_id: "peer-interrupt".into(),
+                display_identity: None,
                 runtime_id: None,
             },
             durability: crate::input::InputDurability::Durable,
@@ -15480,6 +15482,7 @@ fn runtime_parity_peer_message(text: &str) -> Input {
             timestamp: Utc::now(),
             source: crate::input::InputOrigin::Peer {
                 peer_id: "runtime-parity".into(),
+                display_identity: None,
                 runtime_id: None,
             },
             durability: crate::input::InputDurability::Durable,

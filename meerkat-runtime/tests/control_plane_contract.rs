@@ -34,6 +34,7 @@ fn make_progress_input(label: &str) -> Input {
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
                 peer_id: "peer-1".into(),
+                display_identity: None,
                 runtime_id: None,
             },
             durability: InputDurability::Ephemeral,

@@ -91,7 +91,10 @@ pub enum PeerResponseTerminalStatusWire {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionPeerResponseTerminalParams {
     pub session_id: String,
-    pub peer_name: PeerName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_identity: Option<String>,
+    pub route_identity: String,
+    pub display_identity: String,
     pub request_id: String,
     pub status: PeerResponseTerminalStatusWire,
     #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
@@ -123,7 +126,10 @@ pub enum SessionExternalEventEnvelope {
     /// instead of routing terminal peer responses through the generic event
     /// ingress.
     PeerResponseTerminal {
-        peer_name: PeerName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport_identity: Option<String>,
+        route_identity: String,
+        display_identity: String,
         request_id: String,
         status: PeerResponseTerminalStatusWire,
         #[serde(deserialize_with = "deserialize_raw_json_box")]

@@ -347,14 +347,14 @@ function workspaceDataLabels(target) {
   if (source.includes(".github/")) {
     labels.add("//:github_workflows");
   }
+  if (source.includes("scripts/")) {
+    labels.add("//:repo_governance_files");
+  }
   if (source.includes("test-fixtures")) {
     labels.add("//:test_fixtures");
     labels.add("//test-fixtures/machine-dsl-tests:package_runfiles");
     labels.add("//test-fixtures/mcp-test-server:package_runfiles");
     labels.add("//test-fixtures/surface-build-fixtures:package_runfiles");
-  }
-  if (target.name === "rmat_audit") {
-    labels.add("//:repo_governance_files");
   }
   if (target.name === "protocol_codegen_drift") {
     for (const label of packageRunfileLabels) labels.add(label);
@@ -537,6 +537,7 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `            ".git/**",`,
     `            "bazel-*",`,
     `            "bazel-*/**",`,
+    `            "**/node_modules/**",`,
     `            "target/**",`,
     `            "**/BUILD",`,
     `            "**/BUILD.bazel",`,

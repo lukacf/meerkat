@@ -178,6 +178,7 @@ rust_test(
     size = "small",
     data = [
         ":package_runfiles",
+        "//:repo_governance_files",
         "//meerkat-cli:cargo_manifest",
         "//meerkat-cli:package_runfiles",
         "//meerkat-comms:cargo_manifest",
@@ -259,6 +260,7 @@ rust_test(
     data = [
         ":package_runfiles",
         "//:github_workflows",
+        "//:repo_governance_files",
         "//meerkat-core:package_runfiles",
         "//meerkat-machine-schema:package_runfiles",
         "//meerkat-mob:package_runfiles",
@@ -318,9 +320,12 @@ rust_test(
     ],
     data = [
         ":package_runfiles",
+        "//meerkat-contracts:package_runfiles",
+        "//meerkat-core:package_runfiles",
         "//meerkat-machine-kernels:package_runfiles",
         "//meerkat-machine-schema:package_runfiles",
         "//meerkat-mob:package_runfiles",
+        "//meerkat-rpc:package_runfiles",
         "//meerkat-runtime:package_runfiles",
         "//:workspace_runfiles",
         "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin",

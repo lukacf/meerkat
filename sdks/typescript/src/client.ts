@@ -570,18 +570,25 @@ export class MeerkatClient {
 
   async sendPeerResponseTerminal(
     sessionId: string,
-    peerName: string,
+    routeIdentity: string,
+    displayIdentity: string,
     requestId: string,
     status: "completed" | "failed" | "cancelled",
     result: unknown,
+    options?: { transportIdentity?: string },
   ): Promise<Record<string, unknown>> {
-    return this.request("session/peer_response_terminal", {
+    const params: Record<string, unknown> = {
       session_id: sessionId,
-      peer_name: peerName,
+      route_identity: routeIdentity,
+      display_identity: displayIdentity,
       request_id: requestId,
       status,
       result,
-    });
+    };
+    if (options?.transportIdentity !== undefined) {
+      params.transport_identity = options.transportIdentity;
+    }
+    return this.request("session/peer_response_terminal", params);
   }
 
   async injectContext(

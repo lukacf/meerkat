@@ -41,23 +41,28 @@ auth_profile = "default_openai"
     .expect("write realm config");
 }
 
-fn seed_token_file(root: &std::path::Path, body: &str) {
-    let token_dir = root
-        .join("config")
-        .join("meerkat")
-        .join("credentials")
-        .join("dev");
-    std::fs::create_dir_all(&token_dir).expect("mkdir token dir");
-    std::fs::write(token_dir.join("default_openai.json"), body).expect("write token file");
-}
+fn token_file_path(root: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let config_root = root.join("Library").join("Application Support");
+    #[cfg(not(target_os = "macos"))]
+    let config_root = root.join("config");
 
-fn token_file_exists(root: &std::path::Path) -> bool {
-    root.join("config")
+    config_root
         .join("meerkat")
         .join("credentials")
         .join("dev")
         .join("default_openai.json")
-        .exists()
+}
+
+fn seed_token_file(root: &std::path::Path, body: &str) {
+    let token_file = token_file_path(root);
+    let token_dir = token_file.parent().expect("token file has parent");
+    std::fs::create_dir_all(token_dir).expect("mkdir token dir");
+    std::fs::write(token_file, body).expect("write token file");
+}
+
+fn token_file_exists(root: &std::path::Path) -> bool {
+    token_file_path(root).exists()
 }
 
 fn rkat_binary() -> Option<PathBuf> {

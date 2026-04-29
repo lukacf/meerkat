@@ -20126,6 +20126,8 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         .real_comms(&sid_responder)
         .await
         .expect("responder comms");
+    let responder_route_identity = responder_comms.public_key().to_peer_id().to_string();
+    let responder_display_identity = test_comms_name("worker", "w-responder");
 
     let receipt = CoreCommsRuntime::send(
         &*requester_comms,
@@ -20185,14 +20187,13 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
                     let text = append.text.as_str();
                     let source = append.source.as_deref().unwrap_or_default();
                     let idempotency_key = append.idempotency_key.as_deref().unwrap_or_default();
+                    let expected_source =
+                        format!("peer_response_terminal:{responder_route_identity}:{request_id}");
                     text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
                         && text.contains("from test-mob/worker/w-responder")
                         && text.contains("lighthouse")
                         && text.contains(&format!("Request ID: {request_id}"))
-                        && source
-                            == format!(
-                                "peer_response_terminal:test-mob/worker/w-responder:{request_id}"
-                            )
+                        && source == expected_source
                         && idempotency_key == source
                 })
             {
@@ -20272,8 +20273,15 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         "terminal peer response reaction should be system-triggered, not a new user prompt"
     );
 
+    let duplicate_source = meerkat_core::PeerResponseTerminalSource::new(
+        None,
+        meerkat_core::PeerResponseTerminalRouteIdentity::parse(responder_route_identity)
+            .expect("responder route identity"),
+        meerkat_core::PeerResponseTerminalDisplayIdentity::parse(responder_display_identity)
+            .expect("responder display identity"),
+    );
     let duplicate = meerkat_runtime::peer_response_terminal_input(
-        &PeerName::new(test_comms_name("worker", "w-responder")).expect("peer name"),
+        duplicate_source,
         request_id.to_string(),
         meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
         serde_json::json!({"interpretation":"lighthouse"}),
@@ -20482,8 +20490,7 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
     .await
     .expect("requester should apply terminal peer response context after sent tool result");
 
-    let expected_context_key =
-        format!("peer_response_terminal:test-mob/worker/w-mcp-responder:{request_id}");
+    let expected_context_key = format!("peer_response_terminal:{responder_peer_id}:{request_id}");
     assert_eq!(
         requester_terminal_context.source.as_deref(),
         Some(expected_context_key.as_str())

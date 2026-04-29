@@ -2102,7 +2102,10 @@ enum RestSessionExternalEventEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct RestPeerResponseTerminalBody {
-    peer_name: meerkat_core::comms::PeerName,
+    #[serde(default)]
+    transport_identity: Option<String>,
+    route_identity: String,
+    display_identity: String,
     request_id: String,
     status: meerkat_contracts::PeerResponseTerminalStatusWire,
     result: Value,
@@ -2158,15 +2161,18 @@ async fn post_peer_response_terminal(
     webhook::verify_webhook(&headers, &state.webhook_auth)
         .map_err(|msg| ApiError::Unauthorized(msg.to_string()).into_response())?;
 
-    let peer_name = meerkat_core::comms::PeerName::new(body.peer_name.as_str().to_string())
-        .map_err(ApiError::BadRequest)
-        .map_err(IntoResponse::into_response)?;
+    let source = meerkat_core::PeerResponseTerminalSource::parse(
+        body.transport_identity,
+        body.route_identity,
+        body.display_identity,
+    )
+    .map_err(|err| ApiError::BadRequest(err.to_string()).into_response())?;
 
     let session_id =
         resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
 
     let input = meerkat_runtime::peer_response_terminal_input(
-        &peer_name,
+        source,
         body.request_id,
         body.status,
         body.result,

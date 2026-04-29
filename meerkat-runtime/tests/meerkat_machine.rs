@@ -659,6 +659,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "peer-1".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Ephemeral,
@@ -1055,9 +1056,12 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .lock()
         .expect("terminal_context_keys mutex")
         .clone();
+    let responder_route_id = responder_comms.public_key().to_peer_id();
     assert_eq!(
         keys,
-        vec![format!("peer_response_terminal:{name_b}:{request_id}")],
+        vec![format!(
+            "peer_response_terminal:{responder_route_id}:{request_id}"
+        )],
         "terminal response should render through typed context append"
     );
     let active_ids = adapter

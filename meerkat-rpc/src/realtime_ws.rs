@@ -3413,27 +3413,45 @@ async fn handle_product_session_tool_call(
     };
 
     match outcome_result {
-        Ok(outcome) => match submit_product_session_tool_result(
-            runtime,
-            binding,
-            product_session,
-            outcome.result,
-        )
-        .await
-        {
-            Ok(()) => {
-                frames.push(channel_event(RealtimeEvent::ToolCallCompleted { call_id }));
-                Ok(frames)
+        Ok(outcome) if outcome.result.is_error => {
+            let error_message = outcome.result.text_content();
+            let _ = submit_product_session_tool_error(
+                runtime,
+                binding,
+                product_session,
+                call_id.clone(),
+                error_message.clone(),
+            )
+            .await;
+            frames.push(channel_event(RealtimeEvent::ToolCallFailed {
+                call_id,
+                error: error_message,
+            }));
+            Ok(frames)
+        }
+        Ok(outcome) => {
+            match submit_product_session_tool_result(
+                runtime,
+                binding,
+                product_session,
+                outcome.result,
+            )
+            .await
+            {
+                Ok(()) => {
+                    frames.push(channel_event(RealtimeEvent::ToolCallCompleted { call_id }));
+                    Ok(frames)
+                }
+                Err(error) => {
+                    let error_message = error.message;
+                    frames.push(channel_event(RealtimeEvent::ToolCallFailed {
+                        call_id,
+                        error: error_message,
+                    }));
+                    Ok(frames)
+                }
             }
-            Err(error) => {
-                let error_message = error.message;
-                frames.push(channel_event(RealtimeEvent::ToolCallFailed {
-                    call_id,
-                    error: error_message,
-                }));
-                Ok(frames)
-            }
-        },
+        }
         Err(error) => {
             let error_message = error.to_string();
             let _ = submit_product_session_tool_error(

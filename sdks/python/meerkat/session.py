@@ -236,18 +236,23 @@ class Session:
 
     async def send_peer_response_terminal(
         self,
-        peer_name: str,
+        route_identity: str,
+        display_identity: str,
         request_id: str,
         status: str,
         result: Any,
+        *,
+        transport_identity: str | None = None,
     ) -> dict[str, Any]:
         """Admit a correlated terminal peer response into this session runtime."""
         return await self._client.send_peer_response_terminal(
             self._id,
-            peer_name,
+            route_identity,
+            display_identity,
             request_id,
             status,
             result,
+            transport_identity=transport_identity,
         )
 
     async def history(
@@ -420,18 +425,23 @@ class DeferredSession:
 
     async def send_peer_response_terminal(
         self,
-        peer_name: str,
+        route_identity: str,
+        display_identity: str,
         request_id: str,
         status: str,
         result: Any,
+        *,
+        transport_identity: str | None = None,
     ) -> dict[str, Any]:
         """Admit a correlated terminal peer response into this deferred session."""
         return await self._client.send_peer_response_terminal(
             self._id,
-            peer_name,
+            route_identity,
+            display_identity,
             request_id,
             status,
             result,
+            transport_identity=transport_identity,
         )
 
     async def history(

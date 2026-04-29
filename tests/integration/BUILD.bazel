@@ -207,6 +207,7 @@ rust_test(
     ],
     data = [
         ":package_runfiles",
+        "//:repo_governance_files",
         "//:workspace_runfiles",
     ],
     env = {
@@ -476,6 +477,7 @@ rust_test(
     ],
     data = [
         ":package_runfiles",
+        "//:repo_governance_files",
         "//:workspace_runfiles",
     ],
     env = {

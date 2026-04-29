@@ -128,17 +128,21 @@ export class Session {
   }
 
   async sendPeerResponseTerminal(
-    peerName: string,
+    routeIdentity: string,
+    displayIdentity: string,
     requestId: string,
     status: "completed" | "failed" | "cancelled",
     result: unknown,
+    options?: { transportIdentity?: string },
   ): Promise<Record<string, unknown>> {
     return this._client.sendPeerResponseTerminal(
       this._id,
-      peerName,
+      routeIdentity,
+      displayIdentity,
       requestId,
       status,
       result,
+      options,
     );
   }
 
@@ -269,17 +273,21 @@ export class DeferredSession {
   }
 
   async sendPeerResponseTerminal(
-    peerName: string,
+    routeIdentity: string,
+    displayIdentity: string,
     requestId: string,
     status: "completed" | "failed" | "cancelled",
     result: unknown,
+    options?: { transportIdentity?: string },
   ): Promise<Record<string, unknown>> {
     return this._client.sendPeerResponseTerminal(
       this._id,
-      peerName,
+      routeIdentity,
+      displayIdentity,
       requestId,
       status,
       result,
+      options,
     );
   }
 

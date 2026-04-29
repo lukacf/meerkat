@@ -615,18 +615,26 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             "RestPeerResponseTerminalRequest".to_string(),
             object_schema(
                 vec![
-                    ("peer_name", string_schema()),
+                    ("transport_identity", string_schema()),
+                    ("route_identity", string_schema()),
+                    ("display_identity", string_schema()),
                     ("request_id", string_schema()),
                     (
                         "status",
                         serde_json::json!({
                             "type": "string",
-                            "enum": ["completed", "failed"]
+                            "enum": ["completed", "failed", "cancelled"]
                         }),
                     ),
                     ("result", json_value.clone()),
                 ],
-                vec!["peer_name", "request_id", "status", "result"],
+                vec![
+                    "route_identity",
+                    "display_identity",
+                    "request_id",
+                    "status",
+                    "result",
+                ],
             ),
         );
         components.insert(

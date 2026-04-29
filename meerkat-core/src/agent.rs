@@ -773,6 +773,7 @@ pub trait CommsRuntime: Send + Sync {
             .into_iter()
             .map(|text| crate::interaction::InboxInteraction {
                 id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
+                from_route: None,
                 from: "unknown".into(),
                 content: crate::interaction::InteractionContent::Message {
                     body: text.clone(),

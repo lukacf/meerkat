@@ -214,6 +214,111 @@ mod tests {
 }
 
 #[test]
+fn peer_response_terminal_projection_ratchet_rejects_core_string_identity_bus() {
+    let dir = tempdir().expect("tempdir");
+    let core = dir.path().join("meerkat-core/src");
+    fs::create_dir_all(&core).expect("create core dir");
+    fs::write(
+        core.join("handles.rs"),
+        r#"
+pub struct PeerResponseTerminalSource {
+    pub transport_identity: Option<String>,
+    pub route_identity: String,
+    pub display_identity: String,
+}
+
+pub struct PeerResponseTerminalFact {
+    pub correlation_id: String,
+}
+
+impl PeerResponseTerminalFact {
+    pub fn context_key(&self) -> String {
+        peer_response_terminal_context_key(&self.source.route_identity, &self.correlation_id)
+    }
+}
+"#,
+    )
+    .expect("write core handles file");
+
+    let mismatches = collect_peer_response_terminal_projection_mismatches(dir.path())
+        .expect("peer response terminal projection mismatches");
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("transport_identity")),
+        "expected transport identity string bus to be rejected, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("route_identity")),
+        "expected route identity string bus to be rejected, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("display_identity")),
+        "expected display identity string bus to be rejected, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("correlation_id")),
+        "expected correlation id string bus to be rejected, got {mismatches:#?}"
+    );
+}
+
+#[test]
+fn peer_response_terminal_projection_ratchet_rejects_shell_peer_name_identity_bus() {
+    let dir = tempdir().expect("tempdir");
+    let contracts = dir.path().join("meerkat-contracts/src/wire");
+    let rpc = dir.path().join("meerkat-rpc/src");
+    fs::create_dir_all(&contracts).expect("create contracts dir");
+    fs::create_dir_all(rpc.join("handlers")).expect("create rpc handlers dir");
+    fs::write(
+        contracts.join("runtime.rs"),
+        r#"
+pub struct SessionPeerResponseTerminalParams {
+    pub peer_name: PeerName,
+}
+"#,
+    )
+    .expect("write contract boundary file");
+    fs::write(
+        rpc.join("session_runtime.rs"),
+        r#"
+fn bad(peer_name: PeerName) {
+    let route = PeerResponseTerminalRouteIdentity::parse(peer_name.as_str().to_string());
+    let display = PeerResponseTerminalDisplayIdentity::parse(peer_name.as_str().to_string());
+    let _ = peer_response_terminal_input(&peer_name, request_id, status, result);
+}
+"#,
+    )
+    .expect("write rpc boundary file");
+
+    let mismatches = collect_peer_response_terminal_projection_mismatches(dir.path())
+        .expect("peer response terminal projection mismatches");
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("pub peer_name: PeerName")),
+        "expected contract peer_name identity bus to be rejected, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("RouteIdentity")),
+        "expected route identity projection from peer_name to be rejected, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches
+            .iter()
+            .any(|mismatch| mismatch.contains("DisplayIdentity")),
+        "expected display identity projection from peer_name to be rejected, got {mismatches:#?}"
+    );
+}
+
+#[test]
 fn canonical_machine_inventory_matches_docs_and_artifact_bundle() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");

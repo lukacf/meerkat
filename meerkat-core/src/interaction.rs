@@ -97,7 +97,10 @@ pub enum InteractionContent {
 pub struct InboxInteraction {
     /// Unique identifier for this interaction.
     pub id: InteractionId,
-    /// Who sent this interaction (peer name or source label).
+    /// Machine route identity for peer senders. Plain external events leave
+    /// this unset because they are source-labelled, not peer-routed.
+    pub from_route: Option<PeerId>,
+    /// Who sent this interaction (peer display name or source label).
     pub from: String,
     /// The interaction content.
     pub content: InteractionContent,
@@ -826,6 +829,7 @@ mod tests {
     fn inbox_interaction_preserves_runtime_hints() {
         let interaction = InboxInteraction {
             id: InteractionId(Uuid::new_v4()),
+            from_route: None,
             from: "event:webhook".into(),
             content: InteractionContent::Message {
                 body: "hello".into(),

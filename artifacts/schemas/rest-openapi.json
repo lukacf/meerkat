@@ -8281,7 +8281,7 @@
       },
       "RestPeerResponseTerminalRequest": {
         "properties": {
-          "peer_name": {
+          "display_identity": {
             "type": "string"
           },
           "request_id": {
@@ -8290,16 +8290,24 @@
           "result": {
             "$ref": "#/components/schemas/JsonValue"
           },
+          "route_identity": {
+            "type": "string"
+          },
           "status": {
             "enum": [
               "completed",
-              "failed"
+              "failed",
+              "cancelled"
             ],
+            "type": "string"
+          },
+          "transport_identity": {
             "type": "string"
           }
         },
         "required": [
-          "peer_name",
+          "route_identity",
+          "display_identity",
           "request_id",
           "status",
           "result"

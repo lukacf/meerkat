@@ -700,6 +700,102 @@ pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Resu
         }
     }
 
+    let core_projection_owner = root.join("meerkat-core/src/handles.rs");
+    if core_projection_owner.exists() {
+        let rel = "meerkat-core/src/handles.rs";
+        let contents = fs::read_to_string(&core_projection_owner).with_context(|| {
+            format!(
+                "read peer-response terminal core projection owner {}",
+                core_projection_owner.display()
+            )
+        })?;
+        let production = contents
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap_or(contents.as_str());
+        let core_banned = [
+            (
+                "transport_identity: Option<String>",
+                "transport identity string bus",
+            ),
+            ("route_identity: String", "route identity string bus"),
+            ("display_identity: String", "display identity string bus"),
+            ("correlation_id: String", "correlation id string bus"),
+            (
+                "peer_response_terminal_context_key(&self.source.route_identity, &self.correlation_id)",
+                "untyped terminal context key projection",
+            ),
+        ];
+
+        for (line_idx, line) in production.lines().enumerate() {
+            for (token, reason) in core_banned {
+                if line.contains(token) {
+                    mismatches.push(format!(
+                        "{rel}:{}: {reason} `{token}` must use distinct typed peer-response terminal facts",
+                        line_idx + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    let shell_boundary_files = [
+        "meerkat-contracts/src/wire/runtime.rs",
+        "meerkat-rest/src/lib.rs",
+        "meerkat-rpc/src/handlers/event.rs",
+        "meerkat-rpc/src/session_runtime.rs",
+    ];
+    let shell_banned = [
+        (
+            "pub peer_name: PeerName",
+            "terminal shell peer_name identity bus",
+        ),
+        (
+            "peer_name: meerkat_core::comms::PeerName",
+            "terminal shell peer_name identity bus",
+        ),
+        (
+            "PeerResponseTerminalRouteIdentity::parse(peer_name",
+            "terminal route identity projected from peer_name",
+        ),
+        (
+            "PeerResponseTerminalDisplayIdentity::parse(peer_name",
+            "terminal display identity projected from peer_name",
+        ),
+        (
+            "peer_response_terminal_input(&peer_name",
+            "terminal input projected from peer_name",
+        ),
+    ];
+
+    for rel in shell_boundary_files {
+        let path = root.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "read peer-response terminal shell boundary file {}",
+                path.display()
+            )
+        })?;
+        let production = contents
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap_or(contents.as_str());
+
+        for (line_idx, line) in production.lines().enumerate() {
+            for (token, reason) in shell_banned {
+                if line.contains(token) {
+                    mismatches.push(format!(
+                        "{rel}:{}: {reason} `{token}` must transport typed route/display/correlation facts",
+                        line_idx + 1
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(mismatches)
 }
 

@@ -120,6 +120,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                 timestamp: chrono::Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: format!("local-bridge:{}", self.session_id),
+                    display_identity: Some(format!("local-bridge:{}", self.session_id)),
                     runtime_id: Some(LogicalRuntimeId::new(self.session_id.to_string())),
                 },
                 durability: InputDurability::Durable,

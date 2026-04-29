@@ -1519,8 +1519,11 @@ mod tests {
             .stage_append(
                 &AppendSystemContextRequest {
                     text: "Authoritative peer token is birch seventeen.".to_string(),
-                    source: Some("peer_response_terminal:analyst:req-123".to_string()),
-                    idempotency_key: Some("req-123".to_string()),
+                    source: Some(
+                        "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
+                            .to_string(),
+                    ),
+                    idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
                 },
                 accepted_at,
             )
@@ -1536,7 +1539,7 @@ mod tests {
         );
         assert_eq!(
             state.applied[0].source.as_deref(),
-            Some("peer_response_terminal:analyst:req-123")
+            Some("peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1")
         );
 
         let round_tripped: SessionSystemContextState =
@@ -1549,8 +1552,10 @@ mod tests {
     fn append_system_context_blocks_records_typed_applied_context() {
         let append = PendingSystemContextAppend {
             text: "Authoritative peer token is birch seventeen.".to_string(),
-            source: Some("peer_response_terminal:analyst:req-123".to_string()),
-            idempotency_key: Some("req-123".to_string()),
+            source: Some(
+                "peer_response_terminal:analyst:018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
+            ),
+            idempotency_key: Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string()),
             accepted_at: SystemTime::UNIX_EPOCH,
         };
         let mut session = Session::new();

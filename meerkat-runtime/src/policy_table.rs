@@ -681,6 +681,7 @@ mod tests {
                 timestamp: Utc::now(),
                 source: InputOrigin::Peer {
                     peer_id: "p".into(),
+                    display_identity: None,
                     runtime_id: None,
                 },
                 durability: InputDurability::Durable,
@@ -796,7 +797,7 @@ mod tests {
             }),
             Some(HandlingMode::Queue),
         );
-        let decision = DefaultPolicyTable::resolve(&input, false);
+        let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);

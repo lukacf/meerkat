@@ -1574,6 +1574,7 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn cas_grant_node_slot_with_authority(
         &self,
         run_id: &RunId,
@@ -1834,6 +1835,7 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn cas_loop_request_body_frame_with_authority(
         &self,
         run_id: &RunId,

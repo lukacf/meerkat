@@ -410,6 +410,7 @@ pub trait MobRunStore: Send + Sync {
         expected_frame: &FrameSnapshot,
         next_frame: FrameSnapshot,
     ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
     async fn cas_grant_node_slot_with_authority(
         &self,
         run_id: &RunId,
@@ -499,6 +500,7 @@ pub trait MobRunStore: Send + Sync {
         expected_run_state: &flow_run::State,
         next_run_state: flow_run::State,
     ) -> Result<bool, MobStoreError>;
+    #[allow(clippy::too_many_arguments)]
     async fn cas_loop_request_body_frame_with_authority(
         &self,
         run_id: &RunId,

@@ -221,14 +221,20 @@ impl GoogleAuthAuthorizer {
     }
 
     async fn get_token(&self) -> Result<String, AuthError> {
-        {
+        let cached = {
             let guard = self.cache.lock();
             if let Some(t) = guard.as_ref()
                 && t.expires_at - Utc::now()
                     > Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64)
             {
-                return Ok(t.access_token.clone());
+                Some((t.access_token.clone(), t.expires_at))
+            } else {
+                None
             }
+        };
+        if let Some((access_token, expires_at)) = cached {
+            self.publish_expires_at(expires_at);
+            return Ok(access_token);
         }
 
         let token = match self.chain {

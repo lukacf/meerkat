@@ -269,20 +269,36 @@ async fn authorize_publishes_token_expiry_to_auth_lease_handle() {
     .with_auth_lease_observer(lease_handle, lease_key.clone())
     .with_token_url_override(format!("{}/tenant-id/oauth2/v2.0/token", mock.base_url));
 
-    let mut headers = Vec::new();
-    let mut req = HttpAuthorizationRequest {
-        method: "POST",
-        url: "https://example.foundry.azure.com/v1/messages",
-        headers: &mut headers,
-    };
-    authorizer.authorize(&mut req).await.unwrap();
+    for _ in 0..2 {
+        let mut headers = Vec::new();
+        let mut req = HttpAuthorizationRequest {
+            method: "POST",
+            url: "https://example.foundry.azure.com/v1/messages",
+            headers: &mut headers,
+        };
+        authorizer.authorize(&mut req).await.unwrap();
+    }
 
     let acquired = handle.acquired.lock().unwrap();
-    assert_eq!(acquired.len(), 1);
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        1,
+        "second authorize should reuse the cached token"
+    );
+    assert_eq!(
+        acquired.len(),
+        2,
+        "cached token use must still publish auth-machine lease freshness"
+    );
     assert_eq!(acquired[0].0, lease_key);
+    assert_eq!(acquired[1].0, lease_key);
     assert!(
         acquired[0].1 > Utc::now().timestamp().max(0) as u64,
         "published auth-machine expiry must reflect the fetched token"
+    );
+    assert_eq!(
+        acquired[0].1, acquired[1].1,
+        "cached token lease observation should carry the same expiry"
     );
 }
 

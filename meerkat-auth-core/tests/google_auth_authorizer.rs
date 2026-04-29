@@ -29,7 +29,8 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 
 use meerkat_auth_core::authorizers::{GoogleAuthAuthorizer, GoogleAuthChain};
-use meerkat_core::{HttpAuthorizationRequest, HttpAuthorizer};
+use meerkat_core::handles::{AuthLeaseHandle, AuthLeaseSnapshot, DslTransitionError, LeaseKey};
+use meerkat_core::{BindingId, HttpAuthorizationRequest, HttpAuthorizer, ProfileId, RealmId};
 
 const TEST_PRIVATE_KEY: &str = include_str!("fixtures/test_sa_key.pem");
 
@@ -88,6 +89,65 @@ struct MockServer {
     base_url: String,
     counter: Arc<AtomicUsize>,
     captured: Arc<Mutex<Vec<OAuthForm>>>,
+}
+
+#[derive(Default)]
+struct RecordingAuthLeaseHandle {
+    acquired: Mutex<Vec<(LeaseKey, u64)>>,
+}
+
+impl AuthLeaseHandle for RecordingAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        lease_key: &LeaseKey,
+        expires_at: u64,
+    ) -> Result<(), DslTransitionError> {
+        self.acquired
+            .lock()
+            .unwrap()
+            .push((lease_key.clone(), expires_at));
+        Ok(())
+    }
+
+    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn complete_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+        _new_expires_at: u64,
+        _now: u64,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn refresh_failed(
+        &self,
+        _lease_key: &LeaseKey,
+        _permanent: bool,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+        }
+    }
 }
 
 async fn start_mock(token_value: &str) -> MockServer {
@@ -335,6 +395,66 @@ async fn token_is_cached_between_calls() {
         mock.counter.load(Ordering::SeqCst),
         1,
         "expected single fetch with caching"
+    );
+}
+
+#[tokio::test]
+async fn cached_token_authorize_publishes_token_expiry_to_auth_lease_handle() {
+    let mock = start_mock("lease-tracked-sa-token").await;
+    let tempdir = tempfile::tempdir().unwrap();
+    let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
+    let env_lookup = {
+        let sa_path = sa_path.clone();
+        Arc::new(move |k: &str| {
+            if k == "GOOGLE_APPLICATION_CREDENTIALS" {
+                Some(sa_path.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
+    };
+    let handle = Arc::new(RecordingAuthLeaseHandle::default());
+    let lease_key = LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("gemini").unwrap(),
+        Some(ProfileId::parse("google_adc").unwrap()),
+    );
+    let lease_handle: Arc<dyn AuthLeaseHandle> = handle.clone();
+    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+        .with_home_dir(tempdir.path())
+        .with_auth_lease_observer(lease_handle, lease_key.clone())
+        .with_token_url_override(format!("{}/token", mock.base_url));
+
+    for _ in 0..2 {
+        let mut headers = Vec::new();
+        let mut req = HttpAuthorizationRequest {
+            method: "POST",
+            url: "https://x.googleapis.com/",
+            headers: &mut headers,
+        };
+        authorizer.authorize(&mut req).await.unwrap();
+    }
+
+    let acquired = handle.acquired.lock().unwrap();
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        1,
+        "second authorize should reuse the cached token"
+    );
+    assert_eq!(
+        acquired.len(),
+        2,
+        "cached token use must still publish auth-machine lease freshness"
+    );
+    assert_eq!(acquired[0].0, lease_key);
+    assert_eq!(acquired[1].0, lease_key);
+    assert!(
+        acquired[0].1 > Utc::now().timestamp().max(0) as u64,
+        "published auth-machine expiry must reflect the fetched token"
+    );
+    assert_eq!(
+        acquired[0].1, acquired[1].1,
+        "cached token lease observation should carry the same expiry"
     );
 }
 

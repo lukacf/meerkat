@@ -303,8 +303,10 @@ impl std::fmt::Display for BridgeMemberRuntimeState {
 /// Mirrors `meerkat_core::comms::TrustedPeerDescriptor` (post-C-TRP) but is
 /// self-contained in the contracts crate so neither sender nor receiver
 /// needs a cross-crate dependency for deserialization. Fields stay
-/// stringly at the wire boundary — the typed `PeerId`/`PeerName`/
-/// `PeerAddress` atoms are only re-hydrated on the receiving side.
+/// stringly at the wire boundary — `peer_id` is the canonical comms routing
+/// UUID, while raw Ed25519 public key material is carried only in `pubkey`.
+/// The typed `PeerId`/`PeerName`/`PeerAddress` atoms are re-hydrated on the
+/// receiving side.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgePeerSpec {
     pub name: String,
@@ -458,6 +460,7 @@ pub struct BridgeBindPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
     pub protocol_version: u32,
+    /// Expected canonical member `PeerId`; not an Ed25519 public-key string.
     pub expected_peer_id: String,
     pub expected_address: String,
     pub bootstrap_token: BridgeBootstrapToken,
@@ -482,6 +485,7 @@ pub struct BridgeCapabilities {
 /// Response to a bind command.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeBindResponse {
+    /// Canonical member `PeerId`; transport public-key bytes stay out of this field.
     pub peer_id: String,
     pub address: String,
     pub capabilities: BridgeCapabilities,
@@ -1222,12 +1226,12 @@ mod tests {
         let raw = json!({
             "supervisor": {
                 "name": "mob/__mob_supervisor__",
-                "peer_id": "ed25519:supervisor",
+                "peer_id": "00000000-0000-0000-0000-00000000bbbb",
                 "address": "inproc://mob/__mob_supervisor__",
             },
             "epoch": 7,
             "protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
-            "expected_peer_id": "ed25519:member",
+            "expected_peer_id": "00000000-0000-0000-0000-00000000aaaa",
             "expected_address": "inproc://member",
             "bootstrap_token": "tok-raw-string",
         });

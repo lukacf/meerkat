@@ -364,27 +364,6 @@ impl MeerkatMachine {
                 }
 
                 let run_id = RunId::new();
-                self.preview_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
-                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                            &session_id,
-                        ),
-                        run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
-                    },
-                    "Prepare",
-                )
-                .await
-                .map_err(|reason| {
-                    tracing::error!(
-                        error = %reason,
-                        session_id = %session_id,
-                        "DSL rejected Prepare input"
-                    );
-                    let state = visible_state;
-                    Self::normalize_destroyed_error(RuntimeDriverError::NotReady { state })
-                })?;
-
                 let prepared = {
                     let mut driver = driver.lock().await;
                     let outcome = match driver
@@ -441,24 +420,47 @@ impl MeerkatMachine {
                         let next_phase = crate::runtime_state::run_return_phase_from_pre_run_phase(
                             driver.pre_run_phase(),
                         );
-                        let _ = machine_apply_run_return_projection(
+                        if let Err(rollback_err) = machine_apply_run_return_projection(
                             &mut driver,
                             &run_id,
                             crate::meerkat_machine::driver::RunReturnDisposition::Fail,
                             next_phase,
-                        );
+                        ) {
+                            return Err(RuntimeDriverError::Internal(format!(
+                                "failed to roll back runtime run after staging failure: {rollback_err}; staging failure: {err}"
+                            )));
+                        }
                         return Err(RuntimeDriverError::Internal(format!(
                             "failed to stage accepted input: {err}"
                         )));
                     }
 
-                    let primitive =
-                        crate::runtime_loop::input_to_primitive(&dequeued_input, dequeued_id)
-                            .map_err(|err| {
-                                RuntimeDriverError::Internal(format!(
-                                    "failed to build accepted input primitive: {err}"
-                                ))
-                            })?;
+                    let primitive = match crate::runtime_loop::input_to_primitive(
+                        &dequeued_input,
+                        dequeued_id.clone(),
+                    ) {
+                        Ok(primitive) => primitive,
+                        Err(err) => {
+                            let _ = driver.rollback_staged(std::slice::from_ref(&dequeued_id));
+                            let next_phase =
+                                crate::runtime_state::run_return_phase_from_pre_run_phase(
+                                    driver.pre_run_phase(),
+                                );
+                            if let Err(rollback_err) = machine_apply_run_return_projection(
+                                &mut driver,
+                                &run_id,
+                                crate::meerkat_machine::driver::RunReturnDisposition::Fail,
+                                next_phase,
+                            ) {
+                                return Err(RuntimeDriverError::Internal(format!(
+                                    "failed to roll back runtime run after primitive build failure: {rollback_err}; primitive build failure: {err}"
+                                )));
+                            }
+                            return Err(RuntimeDriverError::Internal(format!(
+                                "failed to build accepted input primitive: {err}"
+                            )));
+                        }
+                    };
 
                     MeerkatMachineRunPrepared {
                         input_id,
@@ -501,8 +503,8 @@ impl MeerkatMachine {
                 )
                 .await
                 {
-                    let should_unregister =
-                        !err.to_string().contains("runtime boundary commit failed");
+                    let should_unregister = err.should_unregister_session();
+                    let err = err.into_driver_error();
                     if should_unregister {
                         self.unregister_session_inner(&session_id).await;
                     }
@@ -536,7 +538,11 @@ impl MeerkatMachine {
                 };
 
                 if let Err(run_err) = fail_runtime_loop_run(&driver, run_id, error).await {
-                    self.unregister_session_inner(&session_id).await;
+                    let should_unregister = run_err.should_unregister_session();
+                    let run_err = run_err.into_driver_error();
+                    if should_unregister {
+                        self.unregister_session_inner(&session_id).await;
+                    }
                     return Err(RuntimeDriverError::Internal(format!(
                         "failed to persist runtime failure snapshot: {run_err}"
                     )));

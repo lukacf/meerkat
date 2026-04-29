@@ -1,0 +1,39 @@
+---
+title: "Realtime"
+description: "Capability-driven low-latency transport as a delivery mode of a session’s model."
+icon: "microphone"
+---
+
+Realtime in Meerkat is a delivery mode of the session’s LLM, not a separate conversation system.
+
+That means:
+
+- one canonical session history
+- model capability drives transport
+- attach/detach is runtime-managed
+- realtime belongs in the session model, not beside it
+
+## Why this is a concept
+
+Realtime changes how the model is reached, not what a session is.
+That makes it conceptually important even for readers who are not using audio or live channels today.
+
+## Mental model
+
+```text
+session
+  -> resolved model
+  -> capability says realtime or not
+  -> runtime manages the transport
+```
+
+## Key distinction
+
+- **attachment state** is runtime-owned
+- **product-layer bootstrap** is a host/API surface concern
+
+## See also
+
+- [Sessions](/concepts/sessions)
+- [Providers](/concepts/providers)
+- [Realtime guide](/guides/realtime)

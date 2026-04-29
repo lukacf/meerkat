@@ -6,6 +6,10 @@ icon: "anchor"
 
 For the full guide, see [Hooks](/guides/hooks).
 
+<Note>
+Start here after you understand the normal session/tool flow. If you are new to Meerkat overall, read [Examples: Sessions](/examples/sessions) first.
+</Note>
+
 ## Observer hook (background)
 
 A `post_tool_execution` background hook that logs every tool call to a file. Background hooks run asynchronously and never block the agent loop.
@@ -515,3 +519,8 @@ Hooks emit events into the session event stream. Subscribe to these to build das
 // HookRewriteApplied -- emitted when a hook applies a patch
 {"type": "hook_rewrite_applied", "hook_id": "pii-scrub", "point": "post_tool_execution", "patch": {"ToolResult": {"content": "***", "is_error": null}}}
 ```
+
+## Next step
+
+- [Examples: Tools](/examples/tools)
+- [Examples: Structured output](/examples/structured-output)

@@ -1,0 +1,49 @@
+---
+title: "Composability"
+description: "Why Meerkat is both a composable library and a practical product layer."
+icon: "cubes"
+---
+
+Composability is the core idea that explains almost everything else in Meerkat.
+
+Meerkat is:
+
+- a **library-first runtime**
+- with a **practical product layer**
+- exposed through **multiple peer surfaces**
+
+That means the same underlying system can be used as:
+
+- a Rust crate embedded in your app
+- a Python or TypeScript SDK backend
+- a CLI for hands-on work
+- a REST / JSON-RPC / MCP integration surface
+- a multi-agent runtime
+
+## Why this matters
+
+Because Meerkat is composable:
+
+- the surfaces are not separate products with separate semantics
+- examples should usually treat the major surfaces as peers
+- concepts such as realms, sessions, tools, and mobs should make sense across surfaces
+- advanced builder/developer docs can still be part of the public docs set, because the “developer” and “operator” roles often overlap
+
+## The practical consequence for docs
+
+The docs should reflect this structure:
+
+- `Concepts` explain the shared mental model
+- `Guides` show how to accomplish tasks on top of that model
+- `Examples` show runnable patterns across surfaces
+- `Reference` defines exact contracts and inventories
+- `Architecture` explains ownership and rationale
+
+This is also why a page such as release/distribution or self-hosting can still be public-facing: for a composable library, deployment and integration are part of normal usage, not purely internal concerns.
+
+## See also
+
+- [Concepts overview](/concepts/overview)
+- [Tools](/concepts/tools)
+- [Mobs](/concepts/mobs)
+- [Architecture](/reference/architecture)

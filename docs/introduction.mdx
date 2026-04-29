@@ -55,17 +55,41 @@ Those tools excel at interactive development with rich terminal UIs. Meerkat has
 
 ## Get started
 
-<CardGroup cols={4}>
+The intended onboarding spine is:
+
+`Introduction -> Quickstart -> Examples gallery -> choose a surface or workflow -> Concepts as needed`
+
+<CardGroup cols={3}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Install and run your first agent in under a minute.
+    Get to a first successful run as fast as possible.
+  </Card>
+  <Card title="Examples gallery" icon="code" href="/examples/gallery">
+    The central real-code hub for choosing a language, surface, or workflow.
   </Card>
   <Card title="Auth setup" icon="key" href="/guides/auth">
-    Configure provider credentials, realms, bindings, and OAuth flows.
+    Configure credentials and bindings when you need more than the env-var fast path.
   </Card>
-  <Card title="Hello examples" icon="play" href="/examples/gallery">
-    Start with the Rust, Python, or TypeScript hello-world examples.
+</CardGroup>
+
+## Choose your path
+
+<CardGroup cols={3}>
+  <Card title="Rust embedding" icon="code" href="/rust/overview">
+    Start here if Meerkat is part of your Rust application.
   </Card>
-  <Card title="Examples" icon="code" href="/examples/gallery">
-    Start with hello-world examples, then move into larger production patterns.
+  <Card title="Python / TypeScript" icon="terminal" href="/sdks/python/overview">
+    Start here if you want an SDK-backed product layer.
+  </Card>
+  <Card title="CLI / APIs" icon="plug" href="/cli/commands">
+    Start here if you are operating Meerkat as a practical surface first.
+  </Card>
+  <Card title="Multi-agent systems" icon="users" href="/examples/mobs">
+    Jump here if your main interest is orchestration and long-lived identity-first agents.
+  </Card>
+  <Card title="Self-hosting models" icon="microchip" href="/guides/self-hosting-models">
+    Start here if your first concern is local or self-managed models.
+  </Card>
+  <Card title="Architecture" icon="layer-group" href="/reference/architecture">
+    Start here if you need ownership, rationale, or internal structure first.
   </Card>
 </CardGroup>

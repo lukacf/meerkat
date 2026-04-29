@@ -1,0 +1,45 @@
+---
+title: "Scheduling"
+description: "Durable automated work over time: triggers, targets, occurrences, and delivery policies."
+icon: "clock"
+---
+
+Scheduling is Meerkat’s durable automation model.
+
+It exists to answer:
+
+- what should run later?
+- when should it run?
+- where should it be delivered?
+- what happens if it overlaps, misfires, or loses its target?
+
+## Why this is a concept
+
+Scheduling is more than a set of tool names. It introduces durable entities:
+
+- schedules
+- occurrences
+- triggers
+- targets
+- delivery policies
+
+## Mental model
+
+```text
+schedule
+  -> projected occurrences
+  -> due delivery
+  -> session or mob target
+```
+
+## What this concept owns
+
+- durable time-based automation semantics
+- occurrence lifecycle
+- target delivery model
+
+## See also
+
+- [Sessions](/concepts/sessions)
+- [Mobs](/concepts/mobs)
+- [Scheduling guide](/guides/scheduling)

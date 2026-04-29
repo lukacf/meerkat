@@ -1,0 +1,40 @@
+---
+title: "Skills Reference"
+description: "Low-level skill runtime reference: source transports, identity, injection paths, and discovery tools."
+icon: "graduation-cap"
+---
+
+Use this page when you need exact skill-system vocabulary rather than a task walkthrough.
+
+## Core identity model
+
+- `SkillKey { source_uuid, skill_name }`
+- `SkillRef`
+- source precedence and shadowing
+
+## Source transport families
+
+- filesystem
+- git
+- HTTP
+- stdio
+- embedded
+
+## Activation paths
+
+- preload at session creation
+- per-turn `skill_refs`
+- legacy slash-reference compatibility
+
+## Discovery tools
+
+- `browse_skills`
+- `load_skill`
+- `skill_list_resources`
+- `skill_read_resource`
+- `skill_invoke_function`
+
+## See also
+
+- [Skills guide](/guides/skills)
+- [Examples: Skills](/examples/skills)

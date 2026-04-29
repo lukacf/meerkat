@@ -6,6 +6,19 @@ icon: "wrench"
 
 Meerkat's tool system is trait-based. You implement `AgentToolDispatcher`, and the engine handles dispatch, parallel execution, and result injection. MCP servers are first-class -- register them and their tools appear alongside your custom tools with no code changes.
 
+## Mental model
+
+At the concept level, tools answer one question: **how does the agent act on the world?**
+
+The important conceptual layers are:
+
+- custom tools you own
+- built-in tools Meerkat can compose
+- MCP-provided external tools
+- runtime visibility/scoping rules
+
+The Rust trait example below is an implementation detail of that model, not the model itself.
+
 ## Custom tools
 
 Implement the `AgentToolDispatcher` trait:

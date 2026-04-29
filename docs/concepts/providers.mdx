@@ -6,6 +6,10 @@ icon: "server"
 
 Meerkat is provider-agnostic at the session/config/runtime model level. You can switch providers by changing the model name, and a configured self-hosted alias such as `gemma-4-31b` behaves like any other model ID in the runtime. Tool visibility and multimodal behavior still depend on model capabilities, so provider/model differences can affect the effective tool surface.
 
+<Note>
+This page is the concept layer for provider abstraction. Use [Auth](/guides/auth) and [Self-hosting models](/guides/self-hosting-models) for setup workflows, and use reference pages for exact capability and contract details.
+</Note>
+
 ## Provider setup
 
 <Tabs>
@@ -200,6 +204,9 @@ Configured self-hosted aliases are resolved by exact model ID match before prefi
 
 You can still override this with `--provider` on the CLI or `provider` in API requests.
 
-## Recommended next step
+## See also
 
-Follow [Self-hosted Gemma 4](/guides/self-hosted-gemma4) for complete Ollama, LM Studio, and vLLM setup recipes.
+- [Auth & bindings](/concepts/auth-and-bindings)
+- [Self-hosting models](/guides/self-hosting-models)
+- [Built-in tools reference](/reference/builtin-tools)
+- [Capability matrix](/reference/capability-matrix)

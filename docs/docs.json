@@ -27,45 +27,74 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": ["introduction", "quickstart", "guides/auth", "examples/gallery"]
+            "pages": ["introduction", "quickstart", "examples/gallery", "guides/auth"]
           },
           {
-            "group": "Core concepts",
+            "group": "Concepts",
             "pages": [
+              "concepts/overview",
+              "concepts/composability",
               "concepts/realms",
               "concepts/sessions",
+              "concepts/auth-and-bindings",
+              "concepts/memory-and-compaction",
+              "concepts/comms",
+              "concepts/mobs",
+              "concepts/scheduling",
+              "concepts/realtime",
               "concepts/tools",
               "concepts/providers",
               "concepts/configuration"
             ]
           },
           {
-            "group": "Guides",
+            "group": "Guides: Setup And Hosting",
             "pages": [
+              "guides/self-hosting-models",
               "guides/self-hosted-gemma4",
-              "guides/structured-output",
               "guides/image-generation",
+              "guides/mini-surfaces"
+            ]
+          },
+          {
+            "group": "Guides: Runtime Behavior",
+            "pages": [
+              "guides/structured-output",
               "guides/memory",
               "guides/hooks",
               "guides/skills",
-              "guides/mini-surfaces",
-              "guides/comms",
-              "guides/mobs",
-              "guides/mobpack",
               "guides/realtime",
               "guides/scheduling"
             ]
           },
           {
-            "group": "Examples",
+            "group": "Guides: Orchestration",
+            "pages": [
+              "guides/comms",
+              "guides/mobs",
+              "guides/mobpack"
+            ]
+          },
+          {
+            "group": "Examples: Foundations",
             "pages": [
               "examples/gallery",
               "examples/sessions",
-              "examples/tools",
-              "examples/structured-output",
+              "examples/tools"
+            ]
+          },
+          {
+            "group": "Examples: Capabilities",
+            "pages": [
               "examples/hooks",
               "examples/skills",
               "examples/memory",
+              "examples/structured-output"
+            ]
+          },
+          {
+            "group": "Examples: Orchestration And Deployment",
+            "pages": [
               "examples/comms",
               "examples/mobs",
               "examples/mobpack",
@@ -129,6 +158,12 @@
             "pages": [
               "reference/api-reference",
               "reference/builtin-tools",
+              "reference/hooks-reference",
+              "reference/skills-reference",
+              "reference/structured-output-reference",
+              "reference/comms-reference",
+              "reference/capability-matrix",
+              "reference/session-contracts",
               "reference/skills-governance-runbook"
             ]
           },
@@ -137,8 +172,16 @@
             "pages": [
               "reference/architecture",
               "reference/design-philosophy",
-              "reference/capability-matrix",
-              "reference/session-contracts",
+              "architecture/RMAT",
+              "architecture/formal-seam-closure",
+              "architecture/finite-ownership-ledger",
+              "architecture/identity-generation-and-runtime-epoch",
+              "architecture/meerkat-runtime-dogma"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
               "guides/cd-and-distribution"
             ]
           }

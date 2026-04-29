@@ -6,6 +6,18 @@ icon: "graduation-cap"
 
 Skills inject domain-specific knowledge into the agent's context. A skill is a markdown document with YAML frontmatter that gets included in the system prompt or per-turn context when its required capabilities are available.
 
+<Note>
+This page is the task-first guide. For the low-level runtime vocabulary and identity model, see [Skills reference](/reference/skills-reference).
+</Note>
+
+## What this guide is for
+
+Use this guide when you want to:
+
+- create or configure skill sources
+- preload or inject skills into sessions
+- understand when to use `preload_skills` vs `skill_refs`
+
 ## Skill sources
 
 Skills are discovered from multiple sources, in precedence order:
@@ -378,3 +390,9 @@ url = "https://github.com/company/skills.git"
 ```
 
 When layered user/project files are used, project settings override user settings and repositories are merged by name.
+
+## See also
+
+- [Examples: Skills](/examples/skills)
+- [Concepts overview](/concepts/overview)
+- [Composability](/concepts/composability)

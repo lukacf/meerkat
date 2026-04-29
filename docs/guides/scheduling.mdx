@@ -8,6 +8,15 @@ icon: "clock"
 
 Meerkat's scheduler persists **schedules** and projects concrete **occurrences** from them.
 
+## What this guide is for
+
+Use this guide when you want to:
+
+- create durable automated work
+- understand trigger and target shapes
+- choose overlap/misfire policies
+- decide between host APIs and agent-side schedule tools
+
 - A **schedule** is the durable rule: trigger + target + policies.
 - An **occurrence** is one planned delivery produced from that rule.
 - The **driver** claims due occurrences and delivers them to the target at runtime.

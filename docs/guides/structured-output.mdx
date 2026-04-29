@@ -6,6 +6,18 @@ icon: "square-code"
 
 Structured output forces the agent to produce validated JSON conforming to a schema you provide. The extraction runs as a separate turn after agentic work completes, with automatic retry on validation failure. Schemas are normalized across providers -- the same schema works with Anthropic, OpenAI, and Gemini, with provider-specific lowering handled transparently.
 
+<Note>
+This page is the task-first guide. For the low-level schema/type inventory, see [Structured output reference](/reference/structured-output-reference).
+</Note>
+
+## What this guide is for
+
+Use this guide when you want to:
+
+- extract validated JSON from an agent run
+- choose schema compatibility behavior
+- understand retry and warning behavior
+
 ## How it works
 
 When `output_schema` is configured on an agent, the execution flow is:
@@ -378,3 +390,9 @@ if let Some(warnings) = &result.schema_warnings {
     }
 }
 ```
+
+## See also
+
+- [Examples: Structured output](/examples/structured-output)
+- [API reference](/reference/api-reference)
+- [Rust overview](/rust/overview)

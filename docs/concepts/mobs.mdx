@@ -1,0 +1,46 @@
+---
+title: "Mobs"
+description: "Meerkat’s multi-agent coordination model built on stable member identity and host-vs-agent surfaces."
+icon: "users"
+---
+
+A mob is Meerkat’s multi-agent runtime model.
+
+It combines:
+
+- stable member identity
+- peer wiring
+- shared flows/tasks
+- host control planes
+- agent-facing mob tools
+
+## Why this is a concept
+
+Mobs are not just an advanced guide topic. They define how Meerkat thinks about:
+
+- identity-first long-lived agents
+- orchestration vs collaboration
+- multi-agent runtime ownership
+
+## Key distinction
+
+- **Host-side `mob/*` APIs** are for applications and SDKs
+- **agent-side `mob_*` tools** are for the model inside a running session
+
+This distinction needs to stay visible in both conceptual and practical docs.
+
+## Mental model
+
+```text
+mob definition
+  -> members
+  -> wiring
+  -> flows
+  -> host lifecycle + work lanes
+```
+
+## See also
+
+- [Comms](/concepts/comms)
+- [Mobs guide](/guides/mobs)
+- [Examples: Mobs](/examples/mobs)

@@ -1,0 +1,52 @@
+---
+title: "Auth And Bindings"
+description: "How Meerkat separates provider selection from credential resolution and binding identity."
+icon: "key"
+---
+
+Meerkat separates **what model/backend you want** from **which credentials or account should be used**.
+
+The core pieces are:
+
+- realms
+- auth profiles
+- backend profiles
+- bindings
+- `connection_ref`
+
+This model matters because the same app/session/mob can:
+
+- switch providers without changing its overall structure
+- run different mob members under different tenants/accounts
+- use env-var fallback for fast paths and explicit bindings for controlled paths
+
+## Mental model
+
+```text
+realm
+  -> backend profiles
+  -> auth profiles
+  -> bindings
+
+session / turn / mob member
+  -> connection_ref
+  -> provider runtime resolution
+```
+
+## What this concept owns
+
+- binding identity
+- credential resolution path
+- per-session / per-turn / per-member provider identity choice
+
+## What it does not own
+
+- the general model catalog (`Providers`)
+- session lifecycle (`Sessions`)
+- config write/CAS mechanics (`Configuration`)
+
+## See also
+
+- [Realms](/concepts/realms)
+- [Providers](/concepts/providers)
+- [Auth guide](/guides/auth)

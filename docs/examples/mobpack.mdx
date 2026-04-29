@@ -6,6 +6,10 @@ icon: "box"
 
 For the full guide, see [Mobpack](/guides/mobpack).
 
+<Note>
+This page is intentionally deployment-focused and CLI-heavy. Use [Examples: Mobs](/examples/mobs) first if you want to understand the multi-agent runtime before packaging it, and continue to [Examples: WASM](/examples/wasm) if your next step is browser delivery.
+</Note>
+
 ## Pack a mob directory
 
 Bundle a mob directory into a single portable `.mobpack` artifact containing the definition, skills, hooks, and config.
@@ -72,3 +76,7 @@ Trust policy resolution order:
 2. Environment variable: `RKAT_TRUST_POLICY=strict`
 3. Config file: `trust.policy` field
 4. Default: `permissive`
+
+## Next step
+
+After packaging and deploy flows, continue with [Examples: WASM](/examples/wasm) for the browser-target delivery path.

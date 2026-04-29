@@ -8,6 +8,15 @@ Realtime in Meerkat is **a delivery mode of the session's LLM, not a separate su
 
 This guide covers the capability-driven model, how to enable realtime on a session, how to observe the attachment status, and the live-topology reconfigure flow for swapping the session's model while a realtime binding is active.
 
+## What this guide is for
+
+Use this guide when you want to:
+
+- enable realtime-capable models
+- understand attachment state
+- bootstrap a realtime channel
+- reason about realtime in the context of the normal session model
+
 <Note>
 Public API surfaces consistently use `realtime` vocabulary. The converged terms are `ModelCapabilities.realtime`, `session/realtime_attachment_status`, and the `realtime/*` bootstrap methods (`realtime/open_info`, `realtime/status`, `realtime/capabilities`). Internal Rust symbols still use `live_` in some places (for example `attach_live`, `detach_live`, `reconfigure_live_topology`) — those are runtime-internal implementation details, not a caller-invoked surface.
 </Note>
@@ -314,3 +323,4 @@ Every member spawned under that profile is initialized on `gpt-realtime-1.5` and
 - [JSON-RPC API](/api/rpc) — `session/create`, `session/realtime_attachment_status`, `realtime/*` bootstrap
 - [REST API](/api/rest) — REST routes for session creation and realtime attachment status
 - Internal architecture reference: `.claude/skills/meerkat-architecture/references/realtime-attachment.md`
+- [Identity, Generation, and Hidden Runtime Epoch](/architecture/identity-generation-and-runtime-epoch) — architecture rationale for the authority/epoch model

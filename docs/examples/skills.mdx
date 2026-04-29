@@ -6,6 +6,15 @@ icon: "graduation-cap"
 
 For the full guide, see [Skills](/guides/skills).
 
+<Note>
+Recommended progression on this page:
+1. discover skills
+2. inspect a skill
+3. preload skills for a session
+4. inject typed skills at session start if you need explicit canonical references
+5. inject skills for one specific turn
+</Note>
+
 ## List available skills
 
 Discover all skills from every source (project, user, filesystem, git, HTTP, stdio, embedded) with provenance and shadowing info.
@@ -114,9 +123,11 @@ View the full body and metadata of a specific skill. Use `--source` to inspect a
   </Tab>
 </Tabs>
 
-## Inject skills on session create
+## Preload skills for a session
 
-Use the CLI `--skill` flag for preload-oriented local skill loading, or pass typed `skill_refs` through API surfaces to resolve and inject skill content when a session starts.
+Use this when the skill should shape the whole session from the start.
+
+`CLI --skill` is the preload-oriented local path. `preload_skills` is the explicit session-build surface on the APIs.
 
 <Tabs>
   <Tab title="CLI">
@@ -126,6 +137,72 @@ Use the CLI `--skill` flag for preload-oriented local skill loading, or pass typ
       --skill markdown-formatter
     ```
   </Tab>
+  <Tab title="JSON-RPC">
+    ```json
+    {
+      "jsonrpc": "2.0", "id": 1,
+      "method": "session/create",
+      "params": {
+        "prompt": "Extract emails",
+        "preload_skills": ["email-extractor", "markdown-formatter"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="REST">
+    ```bash
+    curl -X POST http://127.0.0.1:8080/sessions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "prompt": "Extract emails",
+        "preload_skills": ["email-extractor", "markdown-formatter"]
+      }'
+    ```
+  </Tab>
+  <Tab title="MCP">
+    ```json
+    {
+      "name": "meerkat_run",
+      "arguments": {
+        "prompt": "Extract emails",
+        "preload_skills": ["email-extractor", "markdown-formatter"]
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    result = await client.create_session(
+        "Extract emails",
+        preload_skills=["email-extractor", "markdown-formatter"],
+    )
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    const result = await client.createSession("Extract emails", {
+      preloadSkills: ["email-extractor", "markdown-formatter"],
+    });
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    let build_opts = SessionBuildOptions {
+        preload_skills: Some(vec![
+            "email-extractor".into(),
+            "markdown-formatter".into(),
+        ]),
+        ..Default::default()
+    };
+    ```
+  </Tab>
+</Tabs>
+
+## Typed session-start injection
+
+Use this when you want explicit canonical `SkillKey` references at session start rather than preload-by-id behavior.
+
+<Tabs>
   <Tab title="JSON-RPC">
     ```json
     {
@@ -469,18 +546,11 @@ Inject skills into a specific turn on an existing session. The skill content is 
   </Tab>
 </Tabs>
 
-## Skill sources
-
-Skills are discovered from multiple sources in precedence order. The first source providing a given skill ID wins.
-
-| Priority | Source | Location |
-|---|---|---|
-| 1 | Project | `.rkat/skills/` in the project root |
-| 2 | User | `~/.rkat/skills/` |
-| 3 | Git | Cloned repositories (configured in `config.toml`) |
-| 4 | HTTP | Remote skill servers (configured in `config.toml`) |
-| 5 | Embedded | Built-in skills from component crates |
-
 <Note>
-A project skill with the same ID as a built-in skill overrides the built-in. Use `rkat skill list --json` to see shadowing details.
+If you need the deeper source/precedence model, continue to the main [Skills guide](/guides/skills).
 </Note>
+
+## Next step
+
+- [Examples: Tools](/examples/tools)
+- [Examples: Memory](/examples/memory)

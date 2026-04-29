@@ -6,42 +6,18 @@ icon: "wrench"
 
 For concepts, see [Tools](/concepts/tools).
 
-## Custom tools (Rust SDK)
+<Note>
+If you are new to the tools system, start with **Enable built-in tools**, then **Register MCP servers**, then come back to **Custom tools (Rust SDK)** when you need to extend the runtime directly.
+</Note>
 
-Implement `AgentToolDispatcher` to define your own tools. The agent sees them alongside built-in and MCP tools.
+## Start here
 
-```rust
-struct MathTools;
+This page is structured from common product usage to advanced extension work:
 
-#[async_trait]
-impl AgentToolDispatcher for MathTools {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        vec![Arc::new(ToolDef {
-            name: "add".into(),
-            description: "Add two numbers".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"}
-                },
-                "required": ["a", "b"]
-            }),
-        })].into()
-    }
-
-    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        match call.name {
-            "add" => {
-                let args: AddArgs = call.parse_args()
-                    .map_err(|e| ToolError::invalid_arguments("add", e.to_string()))?;
-                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false).into())
-            }
-            _ => Err(ToolError::not_found(call.name)),
-        }
-    }
-}
-```
+1. enable built-in tools
+2. register MCP servers
+3. manage live MCP controls and tool scoping
+4. implement custom Rust tools when you need to extend the runtime directly
 
 ## Enable built-in tools
 
@@ -391,3 +367,46 @@ Tool visibility can change during a session. Changes are staged and atomically a
 </Tabs>
 
 **Composition rule:** most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The agent receives a `[SYSTEM NOTICE]` when its tool set changes, and a `tool_config_changed` event is emitted to the event stream.
+
+## Advanced: Custom tools (Rust SDK)
+
+Implement `AgentToolDispatcher` to define your own tools. The agent sees them alongside built-in and MCP tools.
+
+```rust
+struct MathTools;
+
+#[async_trait]
+impl AgentToolDispatcher for MathTools {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        vec![Arc::new(ToolDef {
+            name: "add".to_string(),
+            description: "Add two numbers".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"},
+                    "b": {"type": "number"}
+                },
+                "required": ["a", "b"]
+            }),
+        })].into()
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        match call.name {
+            "add" => {
+                let args: AddArgs = call.parse_args()
+                    .map_err(|e| ToolError::invalid_arguments("add", e.to_string()))?;
+                Ok(ToolResult::new(call.id.to_string(), format!("{}", args.a + args.b), false).into())
+            }
+            _ => Err(ToolError::not_found(call.name)),
+        }
+    }
+}
+```
+
+## Next step
+
+- [Examples: Skills](/examples/skills)
+- [Examples: Memory](/examples/memory)
+- [Examples: Comms](/examples/comms)

@@ -16,6 +16,15 @@ binding.
 Today, CLI `rkat auth login` is primarily a convenience bootstrap flow for the default `dev:*` credential namespace. If you need explicit realm/profile-targeted auth persistence such as `prod:openai`, use the REST/RPC auth surfaces or manage the realm config entries directly.
 </Note>
 
+## What this guide is for
+
+Use this guide when you need more than the env-var fast path:
+
+- explicit realm-scoped bindings
+- OAuth or cloud-IAM-backed auth
+- hot-swapping provider identity
+- per-mob-member credential overrides
+
 Both paths route through the same `ProviderRuntimeRegistry`. There's no
 hidden magic path: the env fallback is a synthesized realm with
 `CredentialSourceSpec::Env`, resolved by the same code that handles
@@ -287,5 +296,4 @@ Bedrock/Vertex/Foundry.
 - [Hooks](/guides/hooks) — observe auth events or gate turns on
   credential state
 - [Mobs](/guides/mobs) — per-member `connection_ref` overrides
-- Design doc `/architecture/meerkat-runtime-dogma` for the
-  dogma §1/§10/§12 rationale behind the realm/binding model
+- [Meerkat Runtime Dogma](/architecture/meerkat-runtime-dogma) — rationale behind the realm/binding model

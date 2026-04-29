@@ -6,6 +6,10 @@ icon: "globe"
 
 The WASM runtime compiles the full Meerkat agent stack to wasm32 for browser deployment. It routes through the same `AgentFactory::build_agent()` pipeline as all other surfaces.
 
+<Note>
+This page is intentionally browser/WASM-specific rather than a cross-surface tabbed page. Use [Examples: Mobpack](/examples/mobpack) first if you want the packaging/deployment path that usually leads into browser delivery.
+</Note>
+
 ## Build the WASM bundle
 
 <Tabs>
@@ -146,3 +150,8 @@ Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bin
 | **Hooks** | In-process hooks | Command hooks, filesystem hooks |
 | **Compaction** | Context compaction | -- |
 | **Other** | -- | MCP client, delegated work orchestration |
+
+## Next step
+
+- [Examples: Mobpack](/examples/mobpack) — the packaging/deployment path that often comes before browser delivery
+- [Examples: Mobs](/examples/mobs) — the multi-agent runtime model behind many WASM demos

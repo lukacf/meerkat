@@ -1,0 +1,37 @@
+---
+title: "Structured Output Reference"
+description: "Low-level structured-output reference: schema types, compatibility modes, warnings, and result fields."
+icon: "square-code"
+---
+
+Use this page when you need exact structured-output terminology and types rather than the task-first usage guide.
+
+## Core types
+
+- `OutputSchema`
+- `MeerkatSchema`
+- `SchemaCompat`
+- `SchemaFormat`
+- `SchemaWarning`
+- `CompiledSchema`
+
+## Request-side controls
+
+- `output_schema`
+- `structured_output_retries`
+- provider-specific lowering / strictness
+
+## Result-side fields
+
+- `structured_output`
+- `schema_warnings`
+- extraction-turn retry behavior
+
+## Validation note
+
+Schema validation depends on the `jsonschema` feature. Without it, Meerkat still parses JSON but skips schema validation.
+
+## See also
+
+- [Structured output guide](/guides/structured-output)
+- [Examples: Structured output](/examples/structured-output)

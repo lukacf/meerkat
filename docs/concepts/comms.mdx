@@ -1,0 +1,45 @@
+---
+title: "Comms"
+description: "How long-lived agents exchange messages and external events in Meerkat."
+icon: "tower-broadcast"
+---
+
+Comms is Meerkat’s inter-agent messaging model.
+
+It connects:
+
+- keep-alive sessions
+- peer discovery and trust
+- inbound work from other agents
+- inbound work from outside systems
+
+## Why this is a concept
+
+Comms is not just “some tools”. It defines:
+
+- what it means for a session to stay alive for future work
+- how peers are discovered and trusted
+- how host-side ingress differs from in-agent messaging
+
+## Mental model
+
+```text
+keep-alive session
+  -> comms runtime
+  -> peer messages / requests / responses
+  -> external events
+  -> runtime-backed admitted work
+```
+
+## Key distinction
+
+- **Agent-side comms tools** are what the model can use during a turn.
+- **Host-side comms/session ingress APIs** are what applications use to feed work into the runtime.
+
+That distinction should stay visible across the docs.
+
+## See also
+
+- [Tools](/concepts/tools)
+- [Comms guide](/guides/comms)
+- [Mobs](/concepts/mobs)

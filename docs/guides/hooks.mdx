@@ -6,6 +6,19 @@ icon: "anchor"
 
 Hooks let you run custom logic at defined points in the agent lifecycle -- before/after tool execution, LLM calls, or at turn boundaries. Use them for approval workflows, audit logging, content filtering, or input rewriting.
 
+<Note>
+This page is the task-first guide. For the low-level type and payload inventory, see [Hooks reference](/reference/hooks-reference).
+</Note>
+
+## What this guide is for
+
+Use this guide when you want to:
+
+- add approval gates
+- log or audit agent behavior
+- rewrite tool inputs or outputs
+- choose between in-process, command, and HTTP hook runtimes
+
 ## Hook points
 
 Eight extension points are available:
@@ -373,3 +386,9 @@ let overrides = HookRunOverrides {
 // Pass via AgentBuildConfig.hooks_override
 ```
 </Accordion>
+
+## See also
+
+- [Examples: Hooks](/examples/hooks)
+- [Concepts: Tools](/concepts/tools)
+- [Structured output](/guides/structured-output)

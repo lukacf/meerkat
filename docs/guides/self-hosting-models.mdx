@@ -1,0 +1,80 @@
+---
+title: "Self-hosting models"
+description: "General guide to using self-hosted OpenAI-compatible model servers with Meerkat, with Gemma 4 as a worked example."
+icon: "microchip"
+---
+
+Use this guide when you want Meerkat to talk to models served from your own infrastructure or a local machine.
+
+## What this guide is for
+
+This page explains the shared self-hosting model in Meerkat:
+
+- server definitions
+- model aliases
+- OpenAI-compatible transport expectations
+- validation and debugging
+
+It then points to Gemma 4 as the main worked example.
+
+## The shared Meerkat model
+
+Every self-hosted setup has two parts:
+
+1. a server definition under `self_hosted.servers.<server_id>`
+2. one or more model aliases under `self_hosted.models.<alias>`
+
+The alias is what users type. The upstream server/model identity stays inside the self-hosted config.
+
+## Recommended default
+
+For current Meerkat usage, prefer:
+
+- `transport = "openai_compatible"`
+- `api_style = "chat_completions"`
+
+for Ollama, LM Studio, and vLLM unless you have explicitly verified a different server-specific workflow.
+
+## Basic shape
+
+```toml
+[self_hosted.servers.local]
+transport = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+api_style = "chat_completions"
+bearer_token_env = "LOCAL_LLM_TOKEN"
+
+[self_hosted.models.my-local-model]
+server = "local"
+remote_model = "provider/model-name"
+display_name = "My Local Model"
+family = "custom"
+context_window = 128000
+max_output_tokens = 8192
+vision = true
+image_tool_results = true
+supports_temperature = true
+supports_thinking = true
+supports_reasoning = true
+```
+
+## Validation checklist
+
+- `rkat models` shows the alias under the `self_hosted` provider group
+- `rkat doctor` shows the server as reachable
+- `rkat run -m <alias> "say hello"` works without `--provider`
+- the configured alias matches the upstream `remote_model`
+
+## Worked example: Gemma 4
+
+For a detailed practical guide using real Gemma 4 aliases and server recipes, see:
+
+- [Self-hosted Gemma 4](/guides/self-hosted-gemma4)
+
+That page should be treated as the concrete worked example, not the entire generic self-hosting story.
+
+## See also
+
+- [Providers](/concepts/providers)
+- [Quickstart](/quickstart)
+- [CLI configuration](/cli/configuration)

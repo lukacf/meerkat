@@ -1,0 +1,43 @@
+---
+title: "Memory And Compaction"
+description: "The long-horizon conversation model: context compaction plus semantic recall."
+icon: "brain"
+---
+
+Meerkat handles long-running conversations with two related but distinct systems:
+
+- **context compaction**
+- **semantic memory**
+
+Compaction keeps the active session within practical context limits.
+Memory gives the agent a way to retrieve discarded context later.
+
+## Why this is a concept
+
+This is not just an implementation detail or optional addon. It shapes how Meerkat thinks about:
+
+- long-lived sessions
+- multi-turn work
+- what stays in immediate context
+- what becomes retrievable context
+
+## Mental model
+
+```text
+conversation grows
+  -> compaction rebuilds active history
+  -> discarded content can be indexed
+  -> agent recalls via memory_search when needed
+```
+
+## What this concept owns
+
+- immediate-context vs retrievable-context distinction
+- semantic recall as a tool-driven capability
+- the idea that long-horizon work is part of the session model, not external state glued on later
+
+## See also
+
+- [Sessions](/concepts/sessions)
+- [Tools](/concepts/tools)
+- [Memory guide](/guides/memory)

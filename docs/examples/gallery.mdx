@@ -53,12 +53,23 @@ If you are new to Meerkat, start with the three hello-world examples above befor
   </Card>
 </CardGroup>
 
-## Portable deployment
+## Deployment and packaging
 
 <CardGroup cols={2}>
   <Card title="028 Mobpack Release Triage" icon="box-archive" href="https://github.com/lukacf/meerkat/tree/main/examples/028-mobpack-release-triage-sh">
     **Shell** -- Build, sign, validate, and deploy a believable multi-role release-triage `.mobpack`. Trust policy, inspection, and realistic incident prompts.
   </Card>
+  <Card title="034 CodeMob MCP" icon="code" href="https://github.com/lukacf/meerkat/tree/main/examples/034-codemob-mcp">
+    **Rust (MCP)** -- Multi-agent MCP server for Claude Code. Teams deliberate on code reviews, architecture, brainstorming, and RCT pipelines via structured flows or free-form comms.
+  </Card>
+  <Card title="035 MDM TUX" icon="desktop" href="https://github.com/lukacf/meerkat/tree/main/examples/035-mdm-tux-rs">
+    **Rust (TUI)** -- Device management demo with ratatui TUI controller and target agents. Ed25519-signed comms over TCP, auto-registration, direct and hive modes.
+  </Card>
+</CardGroup>
+
+## Browser and WASM applications
+
+<CardGroup cols={2}>
   <Card title="029 Web Incident War Room" icon="fire" href="https://github.com/lukacf/meerkat/tree/main/examples/029-web-incident-war-room-sh">
     **Shell** -- Browser-deployable SEV war room with commander, SRE, comms, and scribe roles. Pack once, then ship a zero-install web bundle.
   </Card>
@@ -74,14 +85,14 @@ If you are new to Meerkat, start with the three hello-world examples above befor
   <Card title="033 The Office" icon="building" href="https://github.com/lukacf/meerkat/tree/main/examples/033-the-office-demo-sh">
     **Shell + Web** -- 10 autonomous agents run a pixel-art office. Events arrive at triage, fan out to specialists and PAs, with human-in-the-loop approval and a knowledge graph.
   </Card>
-  <Card title="034 CodeMob MCP" icon="code" href="https://github.com/lukacf/meerkat/tree/main/examples/034-codemob-mcp">
-    **Rust (MCP)** -- Multi-agent MCP server for Claude Code. Teams deliberate on code reviews, architecture, brainstorming, and RCT pipelines via structured flows or free-form comms.
-  </Card>
-  <Card title="035 MDM TUX" icon="desktop" href="https://github.com/lukacf/meerkat/tree/main/examples/035-mdm-tux-rs">
-    **Rust (TUI)** -- Device management demo with ratatui TUI controller and target agents. Ed25519-signed comms over TCP, auto-registration, direct and hive modes.
-  </Card>
 </CardGroup>
 
 ---
 
 All 35 examples (including single-feature demos and hello-world starters) are in `examples/` in the [repository](https://github.com/lukacf/meerkat/tree/main/examples).
+
+## Next step
+
+- Start with [Examples: Sessions](/examples/sessions) if you want the core conversation model first.
+- Jump to [Examples: Mobs](/examples/mobs) if your main goal is orchestration.
+- Continue to [Examples: Mobpack](/examples/mobpack) and [Examples: WASM](/examples/wasm) for deployment flows.

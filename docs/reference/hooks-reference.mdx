@@ -1,0 +1,34 @@
+---
+title: "Hooks Reference"
+description: "Low-level hook surface reference: hook points, capabilities, execution modes, payload fields, and patch shapes."
+icon: "anchor"
+---
+
+Use this page when you need exact hook vocabulary and structure rather than a procedural walkthrough.
+
+## Core enums
+
+| Type | Values |
+|------|--------|
+| `HookPoint` | `RunStarted`, `PreLlmRequest`, `PreToolExecution`, `TurnBoundary`, `PostLlmResponse`, `PostToolExecution`, `RunCompleted`, `RunFailed` |
+| `HookCapability` | `Observe`, `Guardrail`, `Rewrite` |
+| `HookExecutionMode` | `Foreground`, `Background` |
+| `HookFailurePolicy` | `FailOpen`, `FailClosed` |
+
+## Runtime families
+
+- in-process
+- command
+- HTTP
+
+## Payload highlights
+
+- `HookInvocation`
+- `HookToolResult`
+- `HookPatch`
+- `HookPatchEnvelope`
+
+## See also
+
+- [Hooks guide](/guides/hooks)
+- [Examples: Hooks](/examples/hooks)

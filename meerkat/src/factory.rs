@@ -779,6 +779,9 @@ impl meerkat_llm_core::provider_runtime::ProviderRuntime for SelfHostedProviderR
     > {
         use meerkat_llm_core::provider_runtime::{ResolvedConnection, StaticLease};
 
+        #[cfg(target_arch = "wasm32")]
+        let _ = env;
+
         let source_label = format!("self_hosted:{}", binding.auth_profile.id);
         let lease: Arc<dyn meerkat_core::AuthLease> = match binding
             .auth_profile

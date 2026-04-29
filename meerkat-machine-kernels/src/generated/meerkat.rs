@@ -549,6 +549,34 @@ impl std::fmt::Display for PeerTerminalDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub struct RealtimeReconnectCycleState(pub String);
+impl From<String> for RealtimeReconnectCycleState {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for RealtimeReconnectCycleState {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for RealtimeReconnectCycleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct RegistrationPhase(pub String);
 impl From<String> for RegistrationPhase {
     fn from(value: String) -> Self {
@@ -2217,6 +2245,7 @@ pub struct State {
     pub realtime_binding_authority_epoch: Option<u64>,
     pub realtime_reattach_required: bool,
     pub realtime_next_authority_epoch: u64,
+    pub realtime_reconnect_cycle_state: RealtimeReconnectCycleState,
     pub realtime_reconnect_attempt_count: u64,
     pub realtime_reconnect_next_retry_at_ms: Option<u64>,
     pub realtime_reconnect_deadline_at_ms: Option<u64>,
@@ -2852,11 +2881,16 @@ pub mod inputs {
         pub next_binding_state: RealtimeBindingState,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ProjectRealtimeReconnectProgress {
-        pub attempt_count: u64,
+    pub struct BeginRealtimeReconnectCycle {
         pub next_retry_at_ms: Option<u64>,
         pub deadline_at_ms: Option<u64>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ScheduleRealtimeReconnectRetry {
+        pub next_retry_at_ms: Option<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExhaustRealtimeReconnectCycle {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClearRealtimeReconnectProgress {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3185,7 +3219,9 @@ pub enum Input {
     RequireRealtimeReattach(inputs::RequireRealtimeReattach),
     RequireRealtimeReattachForAuthority(inputs::RequireRealtimeReattachForAuthority),
     PublishRealtimeSignal(inputs::PublishRealtimeSignal),
-    ProjectRealtimeReconnectProgress(inputs::ProjectRealtimeReconnectProgress),
+    BeginRealtimeReconnectCycle(inputs::BeginRealtimeReconnectCycle),
+    ScheduleRealtimeReconnectRetry(inputs::ScheduleRealtimeReconnectRetry),
+    ExhaustRealtimeReconnectCycle(inputs::ExhaustRealtimeReconnectCycle),
     ClearRealtimeReconnectProgress(inputs::ClearRealtimeReconnectProgress),
     BeginLiveTopologyReconfigure(inputs::BeginLiveTopologyReconfigure),
     MarkLiveTopologyDetached(inputs::MarkLiveTopologyDetached),
@@ -3381,9 +3417,9 @@ impl Input {
                 InputKind::RequireRealtimeReattachForAuthority
             }
             Self::PublishRealtimeSignal(_) => InputKind::PublishRealtimeSignal,
-            Self::ProjectRealtimeReconnectProgress(_) => {
-                InputKind::ProjectRealtimeReconnectProgress
-            }
+            Self::BeginRealtimeReconnectCycle(_) => InputKind::BeginRealtimeReconnectCycle,
+            Self::ScheduleRealtimeReconnectRetry(_) => InputKind::ScheduleRealtimeReconnectRetry,
+            Self::ExhaustRealtimeReconnectCycle(_) => InputKind::ExhaustRealtimeReconnectCycle,
             Self::ClearRealtimeReconnectProgress(_) => InputKind::ClearRealtimeReconnectProgress,
             Self::BeginLiveTopologyReconfigure(_) => InputKind::BeginLiveTopologyReconfigure,
             Self::MarkLiveTopologyDetached(_) => InputKind::MarkLiveTopologyDetached,
@@ -3582,7 +3618,9 @@ pub enum InputKind {
     RequireRealtimeReattach,
     RequireRealtimeReattachForAuthority,
     PublishRealtimeSignal,
-    ProjectRealtimeReconnectProgress,
+    BeginRealtimeReconnectCycle,
+    ScheduleRealtimeReconnectRetry,
+    ExhaustRealtimeReconnectCycle,
     ClearRealtimeReconnectProgress,
     BeginLiveTopologyReconfigure,
     MarkLiveTopologyDetached,
@@ -4631,11 +4669,21 @@ pub enum TransitionId {
     PublishRealtimeSignalRunning,
     PublishRealtimeSignalRetired,
     PublishRealtimeSignalStopped,
-    ProjectRealtimeReconnectProgressIdle,
-    ProjectRealtimeReconnectProgressAttached,
-    ProjectRealtimeReconnectProgressRunning,
-    ProjectRealtimeReconnectProgressRetired,
-    ProjectRealtimeReconnectProgressStopped,
+    BeginRealtimeReconnectCycleIdle,
+    BeginRealtimeReconnectCycleAttached,
+    BeginRealtimeReconnectCycleRunning,
+    BeginRealtimeReconnectCycleRetired,
+    BeginRealtimeReconnectCycleStopped,
+    ScheduleRealtimeReconnectRetryIdle,
+    ScheduleRealtimeReconnectRetryAttached,
+    ScheduleRealtimeReconnectRetryRunning,
+    ScheduleRealtimeReconnectRetryRetired,
+    ScheduleRealtimeReconnectRetryStopped,
+    ExhaustRealtimeReconnectCycleIdle,
+    ExhaustRealtimeReconnectCycleAttached,
+    ExhaustRealtimeReconnectCycleRunning,
+    ExhaustRealtimeReconnectCycleRetired,
+    ExhaustRealtimeReconnectCycleStopped,
     ClearRealtimeReconnectProgressIdle,
     ClearRealtimeReconnectProgressAttached,
     ClearRealtimeReconnectProgressRunning,
@@ -5108,6 +5156,7 @@ pub fn initial_state() -> State {
         realtime_binding_authority_epoch: None,
         realtime_reattach_required: false,
         realtime_next_authority_epoch: 0,
+        realtime_reconnect_cycle_state: RealtimeReconnectCycleState::default(),
         realtime_reconnect_attempt_count: 0,
         realtime_reconnect_next_retry_at_ms: None,
         realtime_reconnect_deadline_at_ms: None,

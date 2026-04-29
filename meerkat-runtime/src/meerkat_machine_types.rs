@@ -57,12 +57,10 @@ pub enum RealtimeAttachmentStatus {
     ReattachRequired,
 }
 
-/// Typed reconnect-progress carrier produced by the realtime-WS retry machine.
-/// Wave-c C-9c (R4): `attempt_count` and `next_retry_at` were
-/// hard-coded `0` or `1` in the two duplicate status projections; this
-/// struct is the typed carrier the retry machine emits so the canonical
-/// `RealtimeChannelStatus` projection can surface actual retry-budget
-/// exhaustion signal to RPC / MCP callers.
+/// Typed reconnect-progress carrier read from machine-owned reconnect state.
+/// `attempt_count` and `next_retry_at` used to be hard-coded or projected from
+/// websocket-local retry state; the canonical `RealtimeChannelStatus`
+/// projection now reads them from the MeerkatMachine lifecycle fields.
 ///
 /// `deadline_at` is the wall-clock cutoff after which the reconnect cycle
 /// will be abandoned (`reconnect_policy.max_total_ms` on top of the
@@ -113,16 +111,10 @@ impl RealtimeAttachmentStatus {
         }
     }
 
-    /// Wave-c C-9c (R3/R4) canonical projection, reconnect-progress-aware variant.
-    ///
-    /// Shell callers that own live reconnect state (the realtime-WS
-    /// handler inside the active socket loop) pass `Some(progress)` so
-    /// the projected `RealtimeChannelStatus` surfaces real retry-budget
-    /// data. Callers without retry-machine state (RPC `realtime/status`
-    /// responder, MCP bridge) pass `None` and get the current reconnect
-    /// defaults (`attempt_count = 1` for the two reconnecting states,
-    /// `0` elsewhere) — identical to the pre-C-9c projection output,
-    /// just routed through a single canonical site.
+    /// Canonical projection, reconnect-progress-aware variant. Active
+    /// reconnect progress is read from machine state and passed as
+    /// `Some(progress)`; reconnecting statuses without an active machine-owned
+    /// cycle report zero attempts and no retry deadline.
     pub fn to_channel_status(self, reconnect: Option<&ReconnectProgress>) -> RealtimeChannelStatus {
         let state = self.channel_state();
         let reason = self.default_reason().map(str::to_string);
@@ -132,7 +124,7 @@ impl RealtimeAttachmentStatus {
                 progress.next_retry_at.map(|dt| dt.to_rfc3339()),
                 progress.deadline_at.map(|dt| dt.to_rfc3339()),
             ),
-            (RealtimeChannelState::Reconnecting, None) => (1, None, None),
+            (RealtimeChannelState::Reconnecting, None) => (0, None, None),
             _ => (0, None, None),
         };
         RealtimeChannelStatus {
@@ -475,12 +467,11 @@ pub(crate) enum MeerkatMachineCommand {
     RuntimeRealtimeAttachmentStatus {
         session_id: SessionId,
     },
-    /// Wave-c C-9c R4: fully-projected public channel status. Returns the
-    /// bare `RealtimeAttachmentStatus` plus the retry-machine-tracked
-    /// `ReconnectProgress` (if any) read from DSL state, collapsed into a
+    /// Fully-projected public channel status. Returns attachment state plus
+    /// machine-owned reconnect lifecycle/progress collapsed into a
     /// ready-to-serialize [`RealtimeChannelStatus`]. Consumed by the
     /// `realtime/status` RPC handler and the MCP `meerkat_realtime_status`
-    /// tool so they no longer hand-compose a partial projection.
+    /// tool so they do not hand-compose partial projections.
     RuntimeRealtimeChannelStatus {
         session_id: SessionId,
     },

@@ -599,6 +599,31 @@ pub enum RealtimeBindingState {
     ReplacementPending,
 }
 
+/// Per-session realtime reconnect retry lifecycle.
+///
+/// The realtime websocket shell supplies time observations and jittered retry
+/// deadlines, but the canonical cycle phase, attempt count, exhaustion, and
+/// public status projection live in the MeerkatMachine state.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeReconnectCycleState {
+    #[default]
+    Idle,
+    Reconnecting,
+    Exhausted,
+}
+
 /// Product-turn lifecycle phase for a provider-managed realtime session
 /// (U9 / dogma #4).
 ///

@@ -145,7 +145,7 @@ fn product_turn_completion_is_logically_terminal(
 
 /// Tiny splitmix64 PRNG. Used to produce a per-channel full-jitter stream for
 /// reconnect backoff without pulling a crate-level `rand` dependency into the
-/// realtime hot path. Deterministic per retry machine: tests can seed it by
+/// realtime hot path. Deterministic per retry planner: tests can seed it by
 /// constructing the machine with a fixed seed.
 #[derive(Debug, Clone)]
 struct BackoffJitterRng {
@@ -286,30 +286,22 @@ async fn resolve_mob_member_session_id(
 }
 
 #[derive(Debug, Clone)]
-struct RealtimeReconnectRetryMachine {
+struct RealtimeReconnectRetryPlanner {
     policy: RealtimeReconnectPolicy,
-    cycle_started_at: Option<Instant>,
-    cycle_started_at_utc: Option<DateTime<Utc>>,
-    attempt_count: u32,
-    next_retry_deadline: Option<Instant>,
-    next_retry_at: Option<DateTime<Utc>>,
     jitter: BackoffJitterRng,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RealtimeReconnectFailure {
-    RetryScheduled(RealtimeChannelStatus),
-    Exhausted {
-        status: RealtimeChannelStatus,
-        error: RealtimeChannelErrorFrame,
-        close_reason: String,
-    },
+struct RealtimeReconnectRetrySchedule {
+    next_retry_at: DateTime<Utc>,
+    deadline_at: Option<DateTime<Utc>>,
 }
 
-impl RealtimeReconnectRetryMachine {
+impl RealtimeReconnectRetryPlanner {
     fn new(policy: RealtimeReconnectPolicy) -> Self {
         // Per-channel seed derived from the wall-clock plus an incrementing
-        // counter. Tests use `new_with_seed` for determinism.
+        // counter. Tests use `new_with_seed` for determinism. The planner owns
+        // only jitter/policy math; canonical cycle truth lives in the DSL.
         let seed = {
             let now_ns = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -332,11 +324,6 @@ impl RealtimeReconnectRetryMachine {
                 max_backoff_ms: policy.max_backoff_ms.max(policy.initial_backoff_ms),
                 max_total_ms: policy.max_total_ms,
             },
-            cycle_started_at: None,
-            cycle_started_at_utc: None,
-            attempt_count: 0,
-            next_retry_deadline: None,
-            next_retry_at: None,
             jitter: BackoffJitterRng::new(jitter_seed),
         }
     }
@@ -350,112 +337,48 @@ impl RealtimeReconnectRetryMachine {
         }
     }
 
-    fn is_active(&self) -> bool {
-        self.cycle_started_at.is_some()
-    }
-
-    fn deadline_at(&self) -> Option<String> {
-        let started = self.cycle_started_at_utc?;
+    fn deadline_at(&self, started: DateTime<Utc>) -> Option<DateTime<Utc>> {
         if self.policy.max_total_ms == 0 {
             return None;
         }
         let max_total =
             chrono::TimeDelta::from_std(Duration::from_millis(self.policy.max_total_ms))
                 .unwrap_or_else(|_| chrono::TimeDelta::zero());
-        Some((started + max_total).to_rfc3339())
+        Some(started + max_total)
     }
 
-    fn current_status(&self) -> Option<RealtimeChannelStatus> {
-        self.is_active().then(|| RealtimeChannelStatus {
-            state: RealtimeChannelState::Reconnecting,
-            attempt_count: self.attempt_count,
-            next_retry_at: self.next_retry_at.map(|deadline| deadline.to_rfc3339()),
-            deadline_at: self.deadline_at(),
-            reason: Some("realtime attachment requires reattach".to_string()),
-        })
+    fn begin_cycle_schedule(&mut self, now_utc: DateTime<Utc>) -> RealtimeReconnectRetrySchedule {
+        self.retry_schedule_for_attempt(1, now_utc, Some(now_utc))
     }
 
-    fn begin_if_needed(
+    fn retry_schedule_for_attempt(
         &mut self,
-        now: Instant,
+        attempt_count: u32,
         now_utc: DateTime<Utc>,
-    ) -> Option<RealtimeChannelStatus> {
-        if self.is_active() {
-            return None;
+        cycle_started_at_utc: Option<DateTime<Utc>>,
+    ) -> RealtimeReconnectRetrySchedule {
+        let backoff = self.backoff_for_attempt(attempt_count);
+        let next_retry_at = now_utc
+            + chrono::TimeDelta::from_std(backoff).unwrap_or_else(|_| chrono::TimeDelta::zero());
+        let deadline_at = cycle_started_at_utc.and_then(|started| self.deadline_at(started));
+        RealtimeReconnectRetrySchedule {
+            next_retry_at,
+            deadline_at,
         }
-        self.cycle_started_at = Some(now);
-        self.cycle_started_at_utc = Some(now_utc);
-        self.attempt_count = 1;
-        self.schedule_next_retry(now, now_utc);
-        self.current_status()
     }
 
-    fn clear(&mut self) {
-        self.cycle_started_at = None;
-        self.cycle_started_at_utc = None;
-        self.attempt_count = 0;
-        self.next_retry_deadline = None;
-        self.next_retry_at = None;
+    fn should_exhaust_attempt_budget(&self, attempt_count: u32) -> bool {
+        attempt_count >= self.policy.max_attempts
     }
 
-    fn should_exhaust(&self, now: Instant) -> bool {
-        let Some(started_at) = self.cycle_started_at else {
-            return false;
-        };
-        self.policy.max_total_ms > 0
-            && now.duration_since(started_at) >= Duration::from_millis(self.policy.max_total_ms)
+    fn attempt_due(status: &RealtimeChannelStatus, now_utc: DateTime<Utc>) -> bool {
+        parse_realtime_status_time(status.next_retry_at.as_deref())
+            .is_some_and(|deadline| now_utc >= deadline)
     }
 
-    fn attempt_due(&self, now: Instant) -> bool {
-        self.next_retry_deadline
-            .is_some_and(|deadline| now >= deadline)
-    }
-
-    fn on_attempt_failure(
-        &mut self,
-        now: Instant,
-        now_utc: DateTime<Utc>,
-        message: impl Into<String>,
-    ) -> RealtimeReconnectFailure {
-        let message = message.into();
-        if self.attempt_count >= self.policy.max_attempts || self.should_exhaust(now) {
-            self.clear();
-            return RealtimeReconnectFailure::Exhausted {
-                status: RealtimeChannelStatus {
-                    state: RealtimeChannelState::Error,
-                    attempt_count: 0,
-                    next_retry_at: None,
-                    deadline_at: None,
-                    reason: Some("realtime reconnect attempts exhausted".to_string()),
-                },
-                error: RealtimeChannelErrorFrame {
-                    code: RealtimeErrorCode::ReconnectExhausted,
-                    message: format!("realtime reconnect attempts exhausted: {message}"),
-                    details: None,
-                },
-                close_reason: "reconnect_exhausted".to_string(),
-            };
-        }
-
-        self.attempt_count += 1;
-        self.schedule_next_retry(now, now_utc);
-        RealtimeReconnectFailure::RetryScheduled(RealtimeChannelStatus {
-            state: RealtimeChannelState::Reconnecting,
-            attempt_count: self.attempt_count,
-            next_retry_at: self.next_retry_at.map(|deadline| deadline.to_rfc3339()),
-            deadline_at: self.deadline_at(),
-            reason: Some("realtime attachment requires reattach".to_string()),
-        })
-    }
-
-    fn schedule_next_retry(&mut self, now: Instant, now_utc: DateTime<Utc>) {
-        let backoff = self.backoff_for_attempt(self.attempt_count);
-        self.next_retry_deadline = Some(now + backoff);
-        self.next_retry_at = Some(
-            now_utc
-                + chrono::TimeDelta::from_std(backoff)
-                    .unwrap_or_else(|_| chrono::TimeDelta::zero()),
-        );
+    fn deadline_elapsed(status: &RealtimeChannelStatus, now_utc: DateTime<Utc>) -> bool {
+        parse_realtime_status_time(status.deadline_at.as_deref())
+            .is_some_and(|deadline| now_utc >= deadline)
     }
 
     /// Exponential full-jitter backoff: each attempt picks a uniform random
@@ -471,6 +394,34 @@ impl RealtimeReconnectRetryMachine {
             .min(self.policy.max_backoff_ms);
         let jittered_ms = self.jitter.draw_ms(capped_ms);
         Duration::from_millis(jittered_ms)
+    }
+}
+
+fn parse_realtime_status_time(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn realtime_status_time_ms(value: DateTime<Utc>) -> Option<u64> {
+    u64::try_from(value.timestamp_millis()).ok()
+}
+
+fn reconnect_exhausted_status() -> RealtimeChannelStatus {
+    RealtimeChannelStatus {
+        state: RealtimeChannelState::Error,
+        attempt_count: 0,
+        next_retry_at: None,
+        deadline_at: None,
+        reason: Some("realtime reconnect attempts exhausted".to_string()),
+    }
+}
+
+fn reconnect_exhausted_error(message: impl Into<String>) -> RealtimeChannelErrorFrame {
+    RealtimeChannelErrorFrame {
+        code: RealtimeErrorCode::ReconnectExhausted,
+        message: format!("realtime reconnect attempts exhausted: {}", message.into()),
+        details: None,
     }
 }
 
@@ -995,12 +946,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                         .unwrap_or_default()
                         .tool_timeout_ms_or_default();
                     let mut observer_fanout_rx = registered.observer_fanout_rx.take();
-                    let mut reconnect_retry = RealtimeReconnectRetryMachine::new(
+                    let mut reconnect_retry = RealtimeReconnectRetryPlanner::new(
                         accepted
                             .request
                             .reconnect_policy
                             .clone()
-                            .unwrap_or_else(RealtimeReconnectRetryMachine::default_policy),
+                            .unwrap_or_else(RealtimeReconnectRetryPlanner::default_policy),
                     );
                     let mut cleanup_performed = false;
                     let mut pending_turn = RealtimePendingTurn::default();
@@ -2092,7 +2043,6 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                 }
                             }
                             _ = poll_interval.tick() => {
-                                let now = Instant::now();
                                 let now_utc = Utc::now();
                                 match reconcile_product_session_binding(
                                     &state.runtime,
@@ -2114,7 +2064,6 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         product_turn_handle = observers.1;
                                         _wake_observer_guard = observers.2;
                                         _bridge_observer_guard = observers.3;
-                                        reconnect_retry.clear();
                                         clear_reconnect_progress_in_dsl(
                                             &state.runtime,
                                             binding.as_ref(),
@@ -2143,66 +2092,124 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                     Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired)
                                         if matches!(role, meerkat_contracts::RealtimeChannelRole::Primary) =>
                                     {
-                                        if let Some(status) = reconnect_retry.begin_if_needed(now, now_utc) {
-                                            project_reconnect_progress_to_dsl(
-                                                &state.runtime,
-                                                binding.as_ref(),
-                                                &status,
-                                            )
-                                            .await;
-                                            let _ = emit_status_update(
-                                                &mut socket,
-                                                &mut last_visible_status,
-                                                status,
-                                                true,
-                                                Some((state.host.as_ref(), &registered)),
-                                            )
-                                            .await;
-                                        }
-
-                                        if reconnect_retry.should_exhaust(now) {
-                                            let exhausted = reconnect_retry.on_attempt_failure(
-                                                now,
-                                                now_utc,
-                                                "realtime reconnect budget expired before the next retry",
-                                            );
-                                            if let RealtimeReconnectFailure::Exhausted {
-                                                status,
-                                                error,
-                                                close_reason,
-                                            } = exhausted
-                                            {
-                                                project_reconnect_progress_to_dsl(
-                                                    &state.runtime,
-                                                    binding.as_ref(),
-                                                    &status,
-                                                )
-                                                .await;
-                                                let _ = emit_status_update(
-                                                    &mut socket,
-                                                    &mut last_visible_status,
-                                                    status,
-                                                    false,
-                                                    Some((state.host.as_ref(), &registered)),
-                                                )
-                                                .await;
+                                        let mut channel_status = match current_channel_status(
+                                            &state.runtime,
+                                            binding.as_ref(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(status) => status,
+                                            Err(error) => {
                                                 let _ = send_server_frame(
                                                     &mut socket,
                                                     &RealtimeServerFrame::ChannelError(error),
                                                 )
                                                 .await;
-                                                let _ = send_server_frame(
-                                                    &mut socket,
-                                                    &RealtimeServerFrame::ChannelClosed(
-                                                        RealtimeChannelClosedFrame {
-                                                            reason: Some(close_reason),
-                                                        },
+                                                continue;
+                                            }
+                                        };
+
+                                        if channel_status.state == RealtimeChannelState::Error {
+                                            let _ = send_server_frame(
+                                                &mut socket,
+                                                &RealtimeServerFrame::ChannelError(
+                                                    reconnect_exhausted_error(
+                                                        "machine-owned reconnect cycle is exhausted",
                                                     ),
+                                                ),
+                                            )
+                                            .await;
+                                            let _ = send_server_frame(
+                                                &mut socket,
+                                                &RealtimeServerFrame::ChannelClosed(
+                                                    RealtimeChannelClosedFrame {
+                                                        reason: Some(
+                                                            "reconnect_exhausted".to_string(),
+                                                        ),
+                                                    },
+                                                ),
+                                            )
+                                            .await;
+                                            break;
+                                        }
+
+                                        if channel_status.attempt_count == 0
+                                            && channel_status.next_retry_at.is_none()
+                                        {
+                                            let schedule =
+                                                reconnect_retry.begin_cycle_schedule(now_utc);
+                                            begin_reconnect_cycle_in_dsl(
+                                                &state.runtime,
+                                                binding.as_ref(),
+                                                &schedule,
+                                            )
+                                            .await;
+                                            if let Ok(status) = current_channel_status(
+                                                &state.runtime,
+                                                binding.as_ref(),
+                                            )
+                                            .await
+                                            {
+                                                channel_status = status;
+                                                let _ = emit_status_update(
+                                                    &mut socket,
+                                                    &mut last_visible_status,
+                                                    channel_status.clone(),
+                                                    true,
+                                                    Some((state.host.as_ref(), &registered)),
                                                 )
                                                 .await;
-                                                break;
                                             }
-                                        } else if reconnect_retry.attempt_due(now) {
+                                        }
+
+                                        if RealtimeReconnectRetryPlanner::deadline_elapsed(
+                                            &channel_status,
+                                            now_utc,
+                                        ) {
+                                            exhaust_reconnect_cycle_in_dsl(
+                                                &state.runtime,
+                                                binding.as_ref(),
+                                            )
+                                            .await;
+                                            let status = current_channel_status(
+                                                &state.runtime,
+                                                binding.as_ref(),
+                                            )
+                                            .await
+                                            .unwrap_or_else(|_| reconnect_exhausted_status());
+                                            let _ = emit_status_update(
+                                                &mut socket,
+                                                &mut last_visible_status,
+                                                status,
+                                                false,
+                                                Some((state.host.as_ref(), &registered)),
+                                            )
+                                            .await;
+                                            let _ = send_server_frame(
+                                                &mut socket,
+                                                &RealtimeServerFrame::ChannelError(
+                                                    reconnect_exhausted_error(
+                                                        "realtime reconnect budget expired before the next retry",
+                                                    ),
+                                                ),
+                                            )
+                                            .await;
+                                            let _ = send_server_frame(
+                                                &mut socket,
+                                                &RealtimeServerFrame::ChannelClosed(
+                                                    RealtimeChannelClosedFrame {
+                                                        reason: Some(
+                                                            "reconnect_exhausted".to_string(),
+                                                        ),
+                                                    },
+                                                ),
+                                            )
+                                            .await;
+                                            break;
+                                        } else if RealtimeReconnectRetryPlanner::attempt_due(
+                                            &channel_status,
+                                            now_utc,
+                                        ) {
                                             match attempt_realtime_reconnect(
                                                 &state.runtime,
                                                 binding.as_ref(),
@@ -2237,35 +2244,17 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     .await
                                                         && projection != meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired
                                                     {
-                                                        reconnect_retry.clear();
                                                         clear_reconnect_progress_in_dsl(
                                                             &state.runtime,
                                                             binding.as_ref(),
                                                         )
                                                         .await;
-                                                        let _ = emit_status_update(
-                                                            &mut socket,
-                                                            &mut last_visible_status,
-                                                            projection.into(),
-                                                            false,
-                                                            Some((state.host.as_ref(), &registered)),
+                                                        if let Ok(status) = current_channel_status(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
                                                         )
-                                                        .await;
-                                                    }
-                                                }
-                                                Err(error) => {
-                                                    match reconnect_retry.on_attempt_failure(
-                                                        now,
-                                                        now_utc,
-                                                        error.message.clone(),
-                                                    ) {
-                                                        RealtimeReconnectFailure::RetryScheduled(status) => {
-                                                            project_reconnect_progress_to_dsl(
-                                                                &state.runtime,
-                                                                binding.as_ref(),
-                                                                &status,
-                                                            )
-                                                            .await;
+                                                        .await
+                                                        {
                                                             let _ = emit_status_update(
                                                                 &mut socket,
                                                                 &mut last_visible_status,
@@ -2275,17 +2264,76 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             )
                                                             .await;
                                                         }
-                                                        RealtimeReconnectFailure::Exhausted {
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    if reconnect_retry
+                                                        .should_exhaust_attempt_budget(
+                                                            channel_status.attempt_count,
+                                                        )
+                                                    {
+                                                        exhaust_reconnect_cycle_in_dsl(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                        )
+                                                        .await;
+                                                        let status = current_channel_status(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                        )
+                                                        .await
+                                                        .unwrap_or_else(|_| reconnect_exhausted_status());
+                                                        let _ = emit_status_update(
+                                                            &mut socket,
+                                                            &mut last_visible_status,
                                                             status,
-                                                            error,
-                                                            close_reason,
-                                                        } => {
-                                                            project_reconnect_progress_to_dsl(
-                                                                &state.runtime,
-                                                                binding.as_ref(),
-                                                                &status,
-                                                            )
-                                                            .await;
+                                                            false,
+                                                            Some((state.host.as_ref(), &registered)),
+                                                        )
+                                                        .await;
+                                                        let _ = send_server_frame(
+                                                            &mut socket,
+                                                            &RealtimeServerFrame::ChannelError(
+                                                                reconnect_exhausted_error(
+                                                                    error.message,
+                                                                ),
+                                                            ),
+                                                        )
+                                                        .await;
+                                                        let _ = send_server_frame(
+                                                            &mut socket,
+                                                            &RealtimeServerFrame::ChannelClosed(
+                                                                RealtimeChannelClosedFrame {
+                                                                    reason: Some(
+                                                                        "reconnect_exhausted".to_string(),
+                                                                    ),
+                                                                },
+                                                            ),
+                                                        )
+                                                        .await;
+                                                        break;
+                                                    } else {
+                                                        let next_attempt = channel_status
+                                                            .attempt_count
+                                                            .saturating_add(1);
+                                                        let schedule = reconnect_retry
+                                                            .retry_schedule_for_attempt(
+                                                                next_attempt,
+                                                                now_utc,
+                                                                None,
+                                                            );
+                                                        schedule_reconnect_retry_in_dsl(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                            &schedule,
+                                                        )
+                                                        .await;
+                                                        if let Ok(status) = current_channel_status(
+                                                            &state.runtime,
+                                                            binding.as_ref(),
+                                                        )
+                                                        .await
+                                                        {
                                                             let _ = emit_status_update(
                                                                 &mut socket,
                                                                 &mut last_visible_status,
@@ -2294,38 +2342,64 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                                 Some((state.host.as_ref(), &registered)),
                                                             )
                                                             .await;
-                                                            let _ = send_server_frame(
-                                                                &mut socket,
-                                                                &RealtimeServerFrame::ChannelError(error),
-                                                            )
-                                                            .await;
-                                                            let _ = send_server_frame(
-                                                                &mut socket,
-                                                                &RealtimeServerFrame::ChannelClosed(
-                                                                    RealtimeChannelClosedFrame {
-                                                                        reason: Some(close_reason),
-                                                                    },
-                                                                ),
-                                                            )
-                                                            .await;
-                                                            break;
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    Ok(projection) => {
-                                        reconnect_retry.clear();
+                                    Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired) => {
+                                        let status = match current_channel_status(
+                                            &state.runtime,
+                                            binding.as_ref(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(status) => status,
+                                            Err(error) => {
+                                                let _ = send_server_frame(
+                                                    &mut socket,
+                                                    &RealtimeServerFrame::ChannelError(error),
+                                                )
+                                                .await;
+                                                continue;
+                                            }
+                                        };
+                                        let _ = emit_status_update(
+                                            &mut socket,
+                                            &mut last_visible_status,
+                                            status,
+                                            false,
+                                            Some((state.host.as_ref(), &registered)),
+                                        )
+                                        .await;
+                                    }
+                                    Ok(_) => {
                                         clear_reconnect_progress_in_dsl(
                                             &state.runtime,
                                             binding.as_ref(),
                                         )
                                         .await;
+                                        let status = match current_channel_status(
+                                            &state.runtime,
+                                            binding.as_ref(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(status) => status,
+                                            Err(error) => {
+                                                let _ = send_server_frame(
+                                                    &mut socket,
+                                                    &RealtimeServerFrame::ChannelError(error),
+                                                )
+                                                .await;
+                                                continue;
+                                            }
+                                        };
                                         let _ = emit_status_update(
                                             &mut socket,
                                             &mut last_visible_status,
-                                            projection.into(),
+                                            status,
                                             false,
                                             Some((state.host.as_ref(), &registered)),
                                         )
@@ -2546,10 +2620,9 @@ async fn bind_realtime_target(
                 } else {
                     let status = runtime
                         .runtime_adapter()
-                        .realtime_attachment_status(&session_id)
+                        .realtime_channel_status(&session_id)
                         .await
-                        .map(RealtimeChannelStatus::from)
-                        .map_err(|err| runtime_error_frame(err, "status"))?;
+                        .map_err(|err| runtime_error_frame(err, "channel status"))?;
                     Ok(BindRealtimeTargetOutput {
                         status,
                         binding: Some(RealtimeSocketBinding::SessionPrimary { session_id }),
@@ -2559,10 +2632,9 @@ async fn bind_realtime_target(
             } else {
                 let status = runtime
                     .runtime_adapter()
-                    .realtime_attachment_status(&session_id)
+                    .realtime_channel_status(&session_id)
                     .await
-                    .map(RealtimeChannelStatus::from)
-                    .map_err(|err| runtime_error_frame(err, "status"))?;
+                    .map_err(|err| runtime_error_frame(err, "channel status"))?;
                 Ok(BindRealtimeTargetOutput {
                     status,
                     binding: Some(RealtimeSocketBinding::SessionObserver { session_id }),
@@ -2645,10 +2717,9 @@ async fn bind_realtime_target(
             } else {
                 let status = runtime
                     .runtime_adapter()
-                    .realtime_attachment_status(&current_session_id)
+                    .realtime_channel_status(&current_session_id)
                     .await
-                    .map(RealtimeChannelStatus::from)
-                    .map_err(|err| runtime_error_frame(err, "status"))?;
+                    .map_err(|err| runtime_error_frame(err, "channel status"))?;
                 Ok(BindRealtimeTargetOutput {
                     status,
                     binding: Some(binding),
@@ -2732,10 +2803,9 @@ async fn open_product_session_bridge(
 
     let status = runtime
         .runtime_adapter()
-        .realtime_attachment_status(session_id)
+        .realtime_channel_status(session_id)
         .await
-        .map(RealtimeChannelStatus::from)
-        .map_err(|err| runtime_error_frame(err, "status"))?;
+        .map_err(|err| runtime_error_frame(err, "channel status"))?;
     Ok((
         status,
         RealtimeProductSessionBridge {
@@ -2801,55 +2871,95 @@ async fn reconcile_product_session_binding(
     Ok(Some(status))
 }
 
-/// Project the reconnect retry machine's current `RealtimeChannelStatus` shape
-/// into DSL state so RPC/MCP `realtime/status` responders read real
-/// retry-budget data. Best-effort: failures log at `debug!` and do not break
-/// the websocket's direct status frame path.
-async fn project_reconnect_progress_to_dsl(
+async fn begin_reconnect_cycle_in_dsl(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
-    status: &RealtimeChannelStatus,
+    schedule: &RealtimeReconnectRetrySchedule,
 ) {
     let Ok(session_id) = resolve_binding_session_id(
         runtime,
         binding,
-        "reconnect progress projection is not wired to a realtime target",
+        "reconnect cycle begin is not wired to a realtime target",
     )
     .await
     else {
         return;
     };
-    let next_retry_at_ms = status
-        .next_retry_at
-        .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .and_then(|dt| u64::try_from(dt.timestamp_millis()).ok());
-    let deadline_at_ms = status
-        .deadline_at
-        .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .and_then(|dt| u64::try_from(dt.timestamp_millis()).ok());
     if let Err(err) = runtime
         .runtime_adapter()
-        .project_realtime_reconnect_progress(
+        .begin_realtime_reconnect_cycle(
             &session_id,
-            u64::from(status.attempt_count),
-            next_retry_at_ms,
-            deadline_at_ms,
+            realtime_status_time_ms(schedule.next_retry_at),
+            schedule.deadline_at.and_then(realtime_status_time_ms),
         )
         .await
     {
         tracing::debug!(
             ?err,
             session_id = %session_id,
-            "project_realtime_reconnect_progress failed; RPC/MCP status will see stale data until the next reconnect retry tick"
+            "begin_realtime_reconnect_cycle failed"
         );
     }
 }
 
-/// Clear the DSL's reconnect-progress fields when the retry machine exits its
-/// active cycle (successful reconnect, operator detach, non-reconnecting
-/// transition).
+async fn schedule_reconnect_retry_in_dsl(
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
+    schedule: &RealtimeReconnectRetrySchedule,
+) {
+    let Ok(session_id) = resolve_binding_session_id(
+        runtime,
+        binding,
+        "reconnect retry scheduling is not wired to a realtime target",
+    )
+    .await
+    else {
+        return;
+    };
+    if let Err(err) = runtime
+        .runtime_adapter()
+        .schedule_realtime_reconnect_retry(
+            &session_id,
+            realtime_status_time_ms(schedule.next_retry_at),
+        )
+        .await
+    {
+        tracing::debug!(
+            ?err,
+            session_id = %session_id,
+            "schedule_realtime_reconnect_retry failed"
+        );
+    }
+}
+
+async fn exhaust_reconnect_cycle_in_dsl(
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
+) {
+    let Ok(session_id) = resolve_binding_session_id(
+        runtime,
+        binding,
+        "reconnect exhaustion is not wired to a realtime target",
+    )
+    .await
+    else {
+        return;
+    };
+    if let Err(err) = runtime
+        .runtime_adapter()
+        .exhaust_realtime_reconnect_cycle(&session_id)
+        .await
+    {
+        tracing::debug!(
+            ?err,
+            session_id = %session_id,
+            "exhaust_realtime_reconnect_cycle failed"
+        );
+    }
+}
+
+/// Clear the DSL's reconnect-progress fields on cleanup paths that do not
+/// already pass through a machine-owned binding-ready transition.
 async fn clear_reconnect_progress_in_dsl(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
@@ -2871,7 +2981,7 @@ async fn clear_reconnect_progress_in_dsl(
         tracing::debug!(
             ?err,
             session_id = %session_id,
-            "C-9c R4: clear_realtime_reconnect_progress failed"
+            "clear_realtime_reconnect_progress failed"
         );
     }
 }
@@ -2891,6 +3001,23 @@ async fn current_binding_projection(
         .realtime_attachment_status(&session_id)
         .await
         .map_err(|err| runtime_error_frame(err, "status"))
+}
+
+async fn current_channel_status(
+    runtime: &SessionRuntime,
+    binding: Option<&RealtimeSocketBinding>,
+) -> Result<RealtimeChannelStatus, RealtimeChannelErrorFrame> {
+    let session_id = resolve_binding_session_id(
+        runtime,
+        binding,
+        "realtime status projection is not wired to the substrate yet",
+    )
+    .await?;
+    runtime
+        .runtime_adapter()
+        .realtime_channel_status(&session_id)
+        .await
+        .map_err(|err| runtime_error_frame(err, "channel status"))
 }
 
 async fn emit_status_update(
@@ -4093,15 +4220,51 @@ mod tests {
         RealtimeChannelTarget, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
         RealtimeOutputKind, RealtimeReconnectPolicy, RealtimeTurningMode,
     };
-    use meerkat_core::types::StopReason;
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_core::types::{SessionId, StopReason};
 
     use super::{
-        RealtimeErrorCode, RealtimeOpenError, RealtimeProtocolVersion, RealtimeReconnectFailure,
-        RealtimeReconnectRetryMachine, RealtimeSocketBinding, RealtimeTurnCompletionDisposition,
-        RealtimeWsHost, product_turn_completion_disposition,
+        AcceptedRealtimeOpen, RealtimeErrorCode, RealtimeOpenError, RealtimeProtocolVersion,
+        RealtimeReconnectRetryPlanner, RealtimeSocketBinding, RealtimeTurnCompletionDisposition,
+        RealtimeWsHost, bind_realtime_target, product_turn_completion_disposition,
         product_turn_completion_is_logically_terminal,
     };
     use tokio::time::Instant;
+
+    struct RealtimeOpenStatusNoopExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RealtimeOpenStatusNoopExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
 
     fn conservative_capabilities() -> RealtimeCapabilities {
         RealtimeCapabilities {
@@ -4114,6 +4277,69 @@ mod tests {
             video_supported: false,
             audio_input_format: None,
             audio_output_format: None,
+        }
+    }
+
+    fn test_session_runtime() -> crate::session_runtime::SessionRuntime {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        crate::session_runtime::SessionRuntime::new(
+            meerkat::AgentFactory::new(
+                std::env::temp_dir()
+                    .join(format!("meerkat-rpc-realtime-ws-{}", uuid::Uuid::new_v4())),
+            ),
+            meerkat_core::Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        )
+    }
+
+    async fn register_ready_realtime_session(
+        runtime: &crate::session_runtime::SessionRuntime,
+        session_id: &SessionId,
+    ) {
+        let adapter = runtime.runtime_adapter();
+        adapter
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(RealtimeOpenStatusNoopExecutor),
+            )
+            .await;
+        adapter
+            .project_realtime_attachment_intent(session_id, true)
+            .await
+            .expect("intent projection should succeed");
+        let authority = adapter
+            .replace_realtime_attachment(session_id)
+            .await
+            .expect("replace should mint realtime authority");
+        adapter
+            .publish_realtime_attachment_signal(
+                authority,
+                meerkat_runtime::RealtimeAttachmentStatus::BindingReady,
+            )
+            .await
+            .expect("binding ready should be accepted");
+    }
+
+    fn accepted_session_open(
+        session_id: &SessionId,
+        role: RealtimeChannelRole,
+    ) -> AcceptedRealtimeOpen {
+        AcceptedRealtimeOpen {
+            request: RealtimeOpenRequest {
+                target: RealtimeChannelTarget::SessionTarget {
+                    session_id: session_id.to_string(),
+                },
+                role,
+                turning_mode: RealtimeTurningMode::ProviderManaged,
+                reconnect_policy: None,
+                channel_config: None,
+            },
+            capabilities: conservative_capabilities(),
+            protocol_version: RealtimeProtocolVersion::CURRENT,
         }
     }
 
@@ -4658,37 +4884,27 @@ mod tests {
             max_backoff_ms: 200,
             max_total_ms: 1_000,
         };
-        let mut retry_machine = RealtimeReconnectRetryMachine::new_with_seed(policy, 0x5eed_face);
-        let started_at = Instant::now();
-        let started_status = retry_machine
-            .begin_if_needed(started_at, Utc::now())
-            .expect("initial reattach should start reconnect tracking");
-        assert_eq!(started_status.state, RealtimeChannelState::Reconnecting);
-        assert_eq!(started_status.attempt_count, 1);
-        let first_deadline = retry_machine
-            .next_retry_deadline
-            .expect("first reconnect should have a retry deadline");
-        let first_backoff = first_deadline.duration_since(started_at);
+        let mut retry_planner = RealtimeReconnectRetryPlanner::new_with_seed(policy, 0x5eed_face);
+        let started_utc = Utc::now();
+        let first_schedule = retry_planner.begin_cycle_schedule(started_utc);
+        let first_backoff = first_schedule
+            .next_retry_at
+            .signed_duration_since(started_utc)
+            .to_std()
+            .expect("jitter backoff should be positive");
         // attempt=1 cap = initial_backoff_ms * 2^0 = 50ms
         assert!(
             first_backoff <= Duration::from_millis(50),
             "attempt=1 full-jitter draw must be in [0, 50ms], got {first_backoff:?}",
         );
 
-        let first_failure_at = started_at + Duration::from_millis(60);
-        let first_failure =
-            retry_machine.on_attempt_failure(first_failure_at, Utc::now(), "transient failure");
-        match first_failure {
-            RealtimeReconnectFailure::RetryScheduled(status) => {
-                assert_eq!(status.state, RealtimeChannelState::Reconnecting);
-                assert_eq!(status.attempt_count, 2);
-            }
-            other => panic!("expected retry scheduling after first failure, got {other:?}"),
-        }
-        let second_deadline = retry_machine
-            .next_retry_deadline
-            .expect("second reconnect should have a retry deadline");
-        let second_backoff = second_deadline.duration_since(first_failure_at);
+        let first_failure_utc = started_utc + chrono::TimeDelta::milliseconds(60);
+        let second_schedule = retry_planner.retry_schedule_for_attempt(2, first_failure_utc, None);
+        let second_backoff = second_schedule
+            .next_retry_at
+            .signed_duration_since(first_failure_utc)
+            .to_std()
+            .expect("jitter backoff should be positive");
         // attempt=2 cap = min(initial*2, max) = min(100, 200) = 100ms
         assert!(
             second_backoff <= Duration::from_millis(100),
@@ -4698,47 +4914,128 @@ mod tests {
 
     #[test]
     fn reconnect_retry_exhausts_after_attempt_budget() {
-        let mut retry_machine = RealtimeReconnectRetryMachine::new(RealtimeReconnectPolicy {
+        let retry_planner = RealtimeReconnectRetryPlanner::new(RealtimeReconnectPolicy {
             max_attempts: 2,
             initial_backoff_ms: 10,
             max_backoff_ms: 40,
             max_total_ms: 1_000,
         });
-        let started_at = Instant::now();
-        retry_machine
-            .begin_if_needed(started_at, Utc::now())
-            .expect("initial reattach should start reconnect tracking");
-
-        let first_failure = retry_machine.on_attempt_failure(
-            started_at + Duration::from_millis(10),
-            Utc::now(),
-            "still disconnected",
+        assert!(
+            !retry_planner.should_exhaust_attempt_budget(1),
+            "first failed attempt should still allow the final retry"
         );
         assert!(
-            matches!(first_failure, RealtimeReconnectFailure::RetryScheduled(_)),
-            "first failure should schedule the second and final retry: {first_failure:?}"
+            retry_planner.should_exhaust_attempt_budget(2),
+            "attempt_count at the policy budget should exhaust in machine state"
         );
+    }
 
-        let exhausted = retry_machine.on_attempt_failure(
-            started_at + Duration::from_millis(30),
-            Utc::now(),
-            "still disconnected",
+    #[tokio::test]
+    async fn reconnect_open_status_for_observer_uses_machine_owned_attempts() {
+        let runtime = test_session_runtime();
+        let session_id = SessionId::new();
+        register_ready_realtime_session(&runtime, &session_id).await;
+        let adapter = runtime.runtime_adapter();
+        adapter
+            .require_realtime_attachment_reattach(&session_id)
+            .await
+            .expect("reattach should be required");
+        adapter
+            .begin_realtime_reconnect_cycle(
+                &session_id,
+                Some(1_700_000_000_000),
+                Some(1_700_000_030_000),
+            )
+            .await
+            .expect("reconnect cycle should begin");
+        adapter
+            .schedule_realtime_reconnect_retry(&session_id, Some(1_700_000_001_000))
+            .await
+            .expect("reconnect retry should be scheduled");
+
+        let bound = bind_realtime_target(
+            &runtime,
+            &accepted_session_open(&session_id, RealtimeChannelRole::Observer),
+            None,
+        )
+        .await
+        .expect("observer open should bind");
+
+        assert_eq!(bound.status.state, RealtimeChannelState::Reconnecting);
+        assert_eq!(
+            bound.status.attempt_count, 2,
+            "ChannelOpened status must surface machine-owned retry attempts"
         );
-        match exhausted {
-            RealtimeReconnectFailure::Exhausted {
-                status,
-                error,
-                close_reason,
-            } => {
-                assert_eq!(status.state, RealtimeChannelState::Error);
-                assert_eq!(error.code, RealtimeErrorCode::ReconnectExhausted);
-                assert_eq!(close_reason, "reconnect_exhausted");
-            }
-            other => panic!("expected reconnect exhaustion, got {other:?}"),
-        }
         assert!(
-            !retry_machine.is_active(),
-            "exhaustion should clear reconnect state"
+            bound.status.next_retry_at.is_some(),
+            "ChannelOpened status must surface machine-owned next_retry_at"
+        );
+        assert!(
+            bound.status.deadline_at.is_some(),
+            "ChannelOpened status must surface machine-owned deadline_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_open_status_for_primary_without_factory_uses_machine_owned_exhaustion() {
+        let runtime = test_session_runtime();
+        let session_id = SessionId::new();
+        register_ready_realtime_session(&runtime, &session_id).await;
+        let adapter = runtime.runtime_adapter();
+        adapter
+            .require_realtime_attachment_reattach(&session_id)
+            .await
+            .expect("reattach should be required");
+        adapter
+            .begin_realtime_reconnect_cycle(
+                &session_id,
+                Some(1_700_000_000_000),
+                Some(1_700_000_030_000),
+            )
+            .await
+            .expect("reconnect cycle should begin");
+        adapter
+            .exhaust_realtime_reconnect_cycle(&session_id)
+            .await
+            .expect("reconnect cycle should exhaust");
+
+        let bound = bind_realtime_target(
+            &runtime,
+            &accepted_session_open(&session_id, RealtimeChannelRole::Primary),
+            None,
+        )
+        .await
+        .expect("primary open without provider factory should bind");
+
+        assert_eq!(bound.status.state, RealtimeChannelState::Error);
+        assert_eq!(bound.status.attempt_count, 0);
+        assert_eq!(bound.status.next_retry_at, None);
+        assert_eq!(bound.status.deadline_at, None);
+        assert!(
+            bound
+                .status
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("exhausted")),
+            "ChannelOpened status must surface machine-owned reconnect exhaustion: {:?}",
+            bound.status
+        );
+    }
+
+    #[test]
+    fn reconnect_open_status_paths_do_not_use_attachment_projection() {
+        let source = include_str!("realtime_ws.rs");
+        let start = source
+            .find("async fn bind_realtime_target")
+            .expect("bind_realtime_target should exist");
+        let end = source[start..]
+            .find("/// Output of `bind_realtime_target`")
+            .map(|offset| start + offset)
+            .expect("bind_realtime_target output marker should exist");
+        let bind_source = &source[start..end];
+        assert!(
+            !bind_source.contains("realtime_attachment_status"),
+            "ChannelOpened open-status paths must read machine-owned realtime_channel_status, not attachment-only projection"
         );
     }
 
@@ -4877,15 +5174,15 @@ mod tests {
             max_backoff_ms: 5_000,
             max_total_ms: 0, // disable exhaustion budget so we can sample freely
         };
-        let mut retry_machine =
-            super::RealtimeReconnectRetryMachine::new_with_seed(policy, 0xfeed_d00d_f00d_beef);
+        let mut retry_planner =
+            super::RealtimeReconnectRetryPlanner::new_with_seed(policy, 0xfeed_d00d_f00d_beef);
 
         let mut draws = std::collections::BTreeSet::new();
         // Saturate the exponent quickly so later draws all share the same cap.
         let attempts: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
         for _ in 0..1_000 {
             for &attempt in &attempts {
-                let backoff = retry_machine.backoff_for_attempt(attempt);
+                let backoff = retry_planner.backoff_for_attempt(attempt);
                 draws.insert(backoff.as_millis() as u64);
             }
         }
@@ -4908,13 +5205,13 @@ mod tests {
             max_total_ms: 0,
         };
         let seed = 0x1234_5678_9abc_def0;
-        let mut a = super::RealtimeReconnectRetryMachine::new_with_seed(policy.clone(), seed);
-        let mut b = super::RealtimeReconnectRetryMachine::new_with_seed(policy, seed);
+        let mut a = super::RealtimeReconnectRetryPlanner::new_with_seed(policy.clone(), seed);
+        let mut b = super::RealtimeReconnectRetryPlanner::new_with_seed(policy, seed);
         for attempt in 1..=8u32 {
             assert_eq!(
                 a.backoff_for_attempt(attempt),
                 b.backoff_for_attempt(attempt),
-                "same-seed retry machines must draw identical backoff for attempt {attempt}",
+                "same-seed retry planners must draw identical backoff for attempt {attempt}",
             );
         }
     }
@@ -4930,33 +5227,20 @@ mod tests {
             max_backoff_ms: 200,
             max_total_ms: 1_000,
         };
-        let mut retry_machine = super::RealtimeReconnectRetryMachine::new_with_seed(policy, 0);
-        let started_at = Instant::now();
+        let mut retry_planner = super::RealtimeReconnectRetryPlanner::new_with_seed(policy, 0);
         let started_utc = Utc::now();
-        let status = retry_machine
-            .begin_if_needed(started_at, started_utc)
-            .expect("initial reattach should start reconnect tracking");
-        assert_eq!(status.state, RealtimeChannelState::Reconnecting);
+        let schedule = retry_planner.begin_cycle_schedule(started_utc);
         assert!(
-            status.deadline_at.is_some(),
-            "reconnect status with a max_total_ms budget must carry a deadline_at",
+            schedule.deadline_at.is_some(),
+            "reconnect schedule with a max_total_ms budget must carry a deadline_at",
         );
 
-        let on_failure = retry_machine.on_attempt_failure(
-            started_at + Duration::from_millis(25),
-            started_utc,
-            "transient failure",
+        let retry_schedule = retry_planner.retry_schedule_for_attempt(
+            2,
+            started_utc + chrono::TimeDelta::milliseconds(25),
+            Some(started_utc),
         );
-        match on_failure {
-            super::RealtimeReconnectFailure::RetryScheduled(status) => {
-                assert!(
-                    status.deadline_at.is_some(),
-                    "retry-scheduled status must carry deadline_at",
-                );
-                assert_eq!(status.deadline_at, retry_machine.deadline_at());
-            }
-            other => panic!("expected retry to be scheduled, got {other:?}"),
-        }
+        assert_eq!(retry_schedule.deadline_at, schedule.deadline_at);
     }
 
     #[test]
@@ -4967,11 +5251,9 @@ mod tests {
             max_backoff_ms: 200,
             max_total_ms: 0,
         };
-        let mut retry_machine = super::RealtimeReconnectRetryMachine::new_with_seed(policy, 0);
-        let status = retry_machine
-            .begin_if_needed(Instant::now(), Utc::now())
-            .expect("reattach should start");
-        assert_eq!(status.deadline_at, None);
+        let mut retry_planner = super::RealtimeReconnectRetryPlanner::new_with_seed(policy, 0);
+        let schedule = retry_planner.begin_cycle_schedule(Utc::now());
+        assert_eq!(schedule.deadline_at, None);
     }
 
     // -----------------------------------------------------------------------

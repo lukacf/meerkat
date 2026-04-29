@@ -240,6 +240,7 @@ pub(crate) fn project_state(
         realtime_binding_authority_epoch: None,
         realtime_reattach_required: false,
         realtime_next_authority_epoch: 1,
+        realtime_reconnect_cycle_state: super::dsl::RealtimeReconnectCycleState::Idle,
         realtime_reconnect_attempt_count: 0,
         realtime_reconnect_next_retry_at_ms: None,
         realtime_reconnect_deadline_at_ms: None,

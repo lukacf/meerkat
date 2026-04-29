@@ -5995,11 +5995,9 @@ mod tests {
         assert_eq!(result["status"]["state"], "opening");
     }
 
-    /// Wave-c C-9c R4 catching assertion: after the reconnect retry machine
-    /// projects its progress into DSL state via
-    /// `project_realtime_reconnect_progress`, a `realtime/status` RPC
-    /// response must surface the retry-machine-tracked `attempt_count` —
-    /// not the pre-R4 hard-coded `0`/`1` default.
+    /// Reconnect lifecycle assertion: after the websocket shell advances the
+    /// machine-owned reconnect cycle, a `realtime/status` RPC response must
+    /// surface the DSL-owned `attempt_count` and retry deadline.
     #[tokio::test]
     async fn realtime_status_surfaces_real_reconnect_attempt_count_not_hard_coded_default() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
@@ -6044,18 +6042,28 @@ mod tests {
             .await
             .expect("RequireRealtimeReattach should succeed");
 
-        // Simulate the realtime-WS overlay projecting its 5th-attempt
-        // state into the DSL. Without R4 wiring, the RPC responder
-        // reads `attempt_count = 1`; with R4 wiring, it must read 5.
+        // Simulate the realtime-WS shell telling the machine to begin a
+        // reconnect cycle and schedule four more attempts. The RPC responder
+        // must read attempt/deadline truth from the machine-owned lifecycle.
         adapter
-            .project_realtime_reconnect_progress(
+            .begin_realtime_reconnect_cycle(
                 &parsed_session_id,
-                5,
                 Some(1_700_000_000_000),
                 Some(1_700_000_030_000),
             )
             .await
-            .expect("reconnect-progress projection should succeed");
+            .expect("reconnect cycle begin should succeed");
+        for next_retry_at_ms in [
+            1_700_000_001_000,
+            1_700_000_002_000,
+            1_700_000_003_000,
+            1_700_000_004_000,
+        ] {
+            adapter
+                .schedule_realtime_reconnect_retry(&parsed_session_id, Some(next_retry_at_ms))
+                .await
+                .expect("reconnect retry scheduling should succeed");
+        }
 
         let response = router
             .dispatch(make_request(
@@ -6073,13 +6081,11 @@ mod tests {
         assert_eq!(status["state"], "reconnecting");
         assert_eq!(
             status["attempt_count"], 5,
-            "realtime/status must surface the overlay-projected attempt_count, \
-             not the pre-C-9c `1` hard-coded default — got {status:?}"
+            "realtime/status must surface machine-owned attempt_count, got {status:?}"
         );
         assert!(
             status["next_retry_at"].is_string(),
-            "realtime/status must surface next_retry_at from the overlay projection, \
-             got {status:?}"
+            "realtime/status must surface next_retry_at from machine state, got {status:?}"
         );
     }
 

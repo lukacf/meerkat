@@ -809,38 +809,66 @@ impl MeerkatMachine {
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
     }
 
-    /// Wave-c C-9c R4: project the realtime-WS retry-machine progress
-    /// (attempt count, next retry deadline) into DSL state so RPC/MCP
-    /// `realtime/status` queries surface real retry-budget data instead of
-    /// hard-coded `0`/`1` defaults.
-    ///
-    /// `next_retry_at_ms` / `deadline_at_ms` are milliseconds since the
-    /// Unix epoch (shell converts from `chrono::DateTime<Utc>` at the
-    /// emission site; the DSL stays chrono-free).
-    pub async fn project_realtime_reconnect_progress(
+    /// Begin a machine-owned realtime reconnect cycle. The websocket shell
+    /// supplies wall-clock retry deadlines; the DSL owns the cycle phase,
+    /// initial attempt, and public status projection.
+    pub async fn begin_realtime_reconnect_cycle(
         &self,
         session_id: &SessionId,
-        attempt_count: u64,
         next_retry_at_ms: Option<u64>,
         deadline_at_ms: Option<u64>,
     ) -> Result<(), RuntimeDriverError> {
         self.stage_session_dsl_input(
             session_id,
-            dsl::MeerkatMachineInput::ProjectRealtimeReconnectProgress {
-                attempt_count,
+            dsl::MeerkatMachineInput::BeginRealtimeReconnectCycle {
                 next_retry_at_ms,
                 deadline_at_ms,
             },
-            "ProjectRealtimeReconnectProgress",
+            "BeginRealtimeReconnectCycle",
         )
         .await
         .map(|_| ())
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
     }
 
-    /// Wave-c C-9c R4: clear the reconnect-progress fields. Shell fires
-    /// this when the retry cycle ends — successful reconnect (DSL
-    /// moves back to `BindingReady`) or operator detach.
+    /// Advance the machine-owned reconnect cycle to the next retry attempt.
+    /// The DSL increments the attempt count; the shell supplies only the
+    /// jittered deadline selected for that attempt.
+    pub async fn schedule_realtime_reconnect_retry(
+        &self,
+        session_id: &SessionId,
+        next_retry_at_ms: Option<u64>,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ScheduleRealtimeReconnectRetry { next_retry_at_ms },
+            "ScheduleRealtimeReconnectRetry",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Mark the machine-owned reconnect cycle exhausted. Public channel
+    /// status projects this as `RealtimeChannelState::Error` until a later
+    /// lifecycle transition clears or detaches the binding.
+    pub async fn exhaust_realtime_reconnect_cycle(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.stage_session_dsl_input(
+            session_id,
+            dsl::MeerkatMachineInput::ExhaustRealtimeReconnectCycle,
+            "ExhaustRealtimeReconnectCycle",
+        )
+        .await
+        .map(|_| ())
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
+    }
+
+    /// Clear machine-owned reconnect progress. Most successful recovery paths
+    /// clear through `PublishRealtimeSignal::BindingReady`; this explicit clear
+    /// remains for cleanup paths that end the cycle without a ready signal.
     pub async fn clear_realtime_reconnect_progress(
         &self,
         session_id: &SessionId,

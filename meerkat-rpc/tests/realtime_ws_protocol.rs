@@ -2604,6 +2604,116 @@ async fn reattach_required_primary_channel_retries_and_returns_to_opening_status
 }
 
 #[tokio::test]
+async fn observer_status_poll_preserves_machine_owned_reconnect_progress() {
+    let (_temp, runtime, config_store) = build_test_runtime();
+    let session_id_value = create_materialized_session(&runtime).await;
+    let session_id = session_id_value.to_string();
+    runtime
+        .runtime_adapter()
+        .apply_capability_driven_realtime_transport(&session_id_value)
+        .await
+        .expect("runtime should bind realtime-capable session");
+    runtime
+        .runtime_adapter()
+        .require_realtime_attachment_reattach(&session_id_value)
+        .await
+        .expect("reattach requirement should succeed");
+    runtime
+        .runtime_adapter()
+        .begin_realtime_reconnect_cycle(
+            &session_id_value,
+            Some(1_700_000_000_000),
+            Some(1_700_000_030_000),
+        )
+        .await
+        .expect("reconnect cycle should begin");
+    runtime
+        .runtime_adapter()
+        .schedule_realtime_reconnect_retry(&session_id_value, Some(1_700_000_001_000))
+        .await
+        .expect("second reconnect attempt should schedule");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}{REALTIME_WS_PATH}");
+    let host = Arc::new(RealtimeWsHost::new(ws_url.clone()));
+    let open_info = issue_open_info(
+        host.as_ref(),
+        &session_id,
+        RealtimeChannelRole::Observer,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    let server_host = Arc::clone(&host);
+    let server_runtime = Arc::clone(&runtime);
+    let server = tokio::spawn(async move {
+        serve_realtime_ws_listener(listener, server_host, server_runtime, config_store).await
+    });
+
+    let mut ws_stream = connect_and_open(
+        &ws_url,
+        &open_info,
+        RealtimeChannelRole::Observer,
+        RealtimeTurningMode::ProviderManaged,
+    )
+    .await;
+    match read_server_frame(&mut ws_stream).await {
+        RealtimeServerFrame::ChannelOpened(opened) => {
+            assert_eq!(opened.status.state, RealtimeChannelState::Reconnecting);
+            assert_eq!(opened.status.attempt_count, 2);
+            assert!(opened.status.next_retry_at.is_some());
+            assert!(opened.status.deadline_at.is_some());
+        }
+        other => panic!("expected channel.opened, got {other:?}"),
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if let Ok(frame) = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        read_server_frame(&mut ws_stream),
+    )
+    .await
+    {
+        match frame {
+            RealtimeServerFrame::ChannelStatus(status) => {
+                assert_eq!(status.status.state, RealtimeChannelState::Reconnecting);
+                assert_eq!(
+                    status.status.attempt_count, 2,
+                    "observer polling must not emit downgraded retry attempts"
+                );
+                assert!(
+                    status.status.next_retry_at.is_some(),
+                    "observer polling must preserve machine-owned next_retry_at"
+                );
+                assert!(
+                    status.status.deadline_at.is_some(),
+                    "observer polling must preserve machine-owned deadline_at"
+                );
+            }
+            RealtimeServerFrame::ChannelEvent(_)
+            | RealtimeServerFrame::ChannelError(_)
+            | RealtimeServerFrame::ChannelClosed(_)
+            | RealtimeServerFrame::ChannelOpened(_) => {}
+        }
+    }
+
+    let machine_status =
+        <meerkat_runtime::MeerkatMachine as SessionServiceRuntimeExt>::realtime_channel_status(
+            runtime.runtime_adapter().as_ref(),
+            &session_id_value,
+        )
+        .await
+        .expect("registered session should expose machine-owned channel status");
+    assert_eq!(
+        machine_status.attempt_count, 2,
+        "observer polling must not clear the canonical reconnect cycle"
+    );
+
+    let _ = ws_stream.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn second_channel_open_frame_yields_unexpected_channel_open() {
     let (_temp, runtime, config_store) = build_test_runtime();
     register_live_session(&runtime, "01234567-89ab-cdef-0123-456789abcdef").await;

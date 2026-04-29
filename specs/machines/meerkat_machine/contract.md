@@ -121,6 +121,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `realtime_binding_authority_epoch`: `Option<u64>`
 - `realtime_reattach_required`: `Bool`
 - `realtime_next_authority_epoch`: `u64`
+- `realtime_reconnect_cycle_state`: `RealtimeReconnectCycleState`
 - `realtime_reconnect_attempt_count`: `u64`
 - `realtime_reconnect_next_retry_at_ms`: `Option<u64>`
 - `realtime_reconnect_deadline_at_ms`: `Option<u64>`
@@ -286,7 +287,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RequireRealtimeReattach`
 - `RequireRealtimeReattachForAuthority`(authority_epoch: u64)
 - `PublishRealtimeSignal`(authority_epoch: u64, next_binding_state: RealtimeBindingState)
-- `ProjectRealtimeReconnectProgress`(attempt_count: u64, next_retry_at_ms: Option<u64>, deadline_at_ms: Option<u64>)
+- `BeginRealtimeReconnectCycle`(next_retry_at_ms: Option<u64>, deadline_at_ms: Option<u64>)
+- `ScheduleRealtimeReconnectRetry`(next_retry_at_ms: Option<u64>)
+- `ExhaustRealtimeReconnectCycle`
 - `ClearRealtimeReconnectProgress`
 - `BeginLiveTopologyReconfigure`(authority_epoch: u64)
 - `MarkLiveTopologyDetached`
@@ -4348,43 +4351,143 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `valid_next_state`
 - To: `Stopped`
 
-### `ProjectRealtimeReconnectProgressIdle`
+### `BeginRealtimeReconnectCycleIdle`
 - From: `Idle`
-- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- On: `BeginRealtimeReconnectCycle`(next_retry_at_ms, deadline_at_ms)
 - Guards:
   - `session_registered`
+  - `reattach_required`
+  - `cycle_idle`
 - Emits: `RealtimeReconnectProgressProjected`
 - To: `Idle`
 
-### `ProjectRealtimeReconnectProgressAttached`
+### `BeginRealtimeReconnectCycleAttached`
 - From: `Attached`
-- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- On: `BeginRealtimeReconnectCycle`(next_retry_at_ms, deadline_at_ms)
 - Guards:
   - `session_registered`
+  - `reattach_required`
+  - `cycle_idle`
 - Emits: `RealtimeReconnectProgressProjected`
 - To: `Attached`
 
-### `ProjectRealtimeReconnectProgressRunning`
+### `BeginRealtimeReconnectCycleRunning`
 - From: `Running`
-- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- On: `BeginRealtimeReconnectCycle`(next_retry_at_ms, deadline_at_ms)
 - Guards:
   - `session_registered`
+  - `reattach_required`
+  - `cycle_idle`
 - Emits: `RealtimeReconnectProgressProjected`
 - To: `Running`
 
-### `ProjectRealtimeReconnectProgressRetired`
+### `BeginRealtimeReconnectCycleRetired`
 - From: `Retired`
-- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- On: `BeginRealtimeReconnectCycle`(next_retry_at_ms, deadline_at_ms)
 - Guards:
   - `session_registered`
+  - `reattach_required`
+  - `cycle_idle`
 - Emits: `RealtimeReconnectProgressProjected`
 - To: `Retired`
 
-### `ProjectRealtimeReconnectProgressStopped`
+### `BeginRealtimeReconnectCycleStopped`
 - From: `Stopped`
-- On: `ProjectRealtimeReconnectProgress`(attempt_count, next_retry_at_ms, deadline_at_ms)
+- On: `BeginRealtimeReconnectCycle`(next_retry_at_ms, deadline_at_ms)
 - Guards:
   - `session_registered`
+  - `reattach_required`
+  - `cycle_idle`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Stopped`
+
+### `ScheduleRealtimeReconnectRetryIdle`
+- From: `Idle`
+- On: `ScheduleRealtimeReconnectRetry`(next_retry_at_ms)
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Idle`
+
+### `ScheduleRealtimeReconnectRetryAttached`
+- From: `Attached`
+- On: `ScheduleRealtimeReconnectRetry`(next_retry_at_ms)
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Attached`
+
+### `ScheduleRealtimeReconnectRetryRunning`
+- From: `Running`
+- On: `ScheduleRealtimeReconnectRetry`(next_retry_at_ms)
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Running`
+
+### `ScheduleRealtimeReconnectRetryRetired`
+- From: `Retired`
+- On: `ScheduleRealtimeReconnectRetry`(next_retry_at_ms)
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Retired`
+
+### `ScheduleRealtimeReconnectRetryStopped`
+- From: `Stopped`
+- On: `ScheduleRealtimeReconnectRetry`(next_retry_at_ms)
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Stopped`
+
+### `ExhaustRealtimeReconnectCycleIdle`
+- From: `Idle`
+- On: `ExhaustRealtimeReconnectCycle`()
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Idle`
+
+### `ExhaustRealtimeReconnectCycleAttached`
+- From: `Attached`
+- On: `ExhaustRealtimeReconnectCycle`()
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Attached`
+
+### `ExhaustRealtimeReconnectCycleRunning`
+- From: `Running`
+- On: `ExhaustRealtimeReconnectCycle`()
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Running`
+
+### `ExhaustRealtimeReconnectCycleRetired`
+- From: `Retired`
+- On: `ExhaustRealtimeReconnectCycle`()
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
+- Emits: `RealtimeReconnectProgressProjected`
+- To: `Retired`
+
+### `ExhaustRealtimeReconnectCycleStopped`
+- From: `Stopped`
+- On: `ExhaustRealtimeReconnectCycle`()
+- Guards:
+  - `session_registered`
+  - `cycle_reconnecting`
 - Emits: `RealtimeReconnectProgressProjected`
 - To: `Stopped`
 

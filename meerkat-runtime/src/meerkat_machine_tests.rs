@@ -1201,6 +1201,191 @@ async fn realtime_attachment_signal_rejects_stale_authority() {
 }
 
 #[tokio::test]
+async fn realtime_reconnect_retry_lifecycle_is_machine_owned() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            authority,
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    adapter
+        .require_realtime_attachment_reattach(&session_id)
+        .await
+        .expect("reattach requirement should succeed");
+    adapter
+        .begin_realtime_reconnect_cycle(&session_id, Some(1_000), Some(10_000))
+        .await
+        .expect("machine should begin reconnect cycle");
+
+    let initial_status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_channel_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("channel status should be readable");
+    assert_eq!(
+        initial_status.state,
+        meerkat_contracts::RealtimeChannelState::Reconnecting
+    );
+    assert_eq!(initial_status.attempt_count, 1);
+    assert_eq!(initial_status.next_retry_at, Some(rfc3339_ms(1_000)));
+    assert_eq!(initial_status.deadline_at, Some(rfc3339_ms(10_000)));
+
+    adapter
+        .schedule_realtime_reconnect_retry(&session_id, Some(2_500))
+        .await
+        .expect("machine should record the next retry attempt");
+    let retry_status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_channel_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("channel status should be readable");
+    assert_eq!(retry_status.attempt_count, 2);
+    assert_eq!(retry_status.next_retry_at, Some(rfc3339_ms(2_500)));
+    assert_eq!(retry_status.deadline_at, Some(rfc3339_ms(10_000)));
+
+    adapter
+        .exhaust_realtime_reconnect_cycle(&session_id)
+        .await
+        .expect("machine should own reconnect exhaustion");
+    let exhausted_status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_channel_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("channel status should be readable");
+    assert_eq!(
+        exhausted_status.state,
+        meerkat_contracts::RealtimeChannelState::Error
+    );
+    assert_eq!(exhausted_status.attempt_count, 0);
+    assert_eq!(exhausted_status.next_retry_at, None);
+    assert_eq!(exhausted_status.deadline_at, None);
+    assert!(
+        exhausted_status
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("exhausted")),
+        "exhausted status should explain reconnect exhaustion: {exhausted_status:?}"
+    );
+}
+
+#[tokio::test]
+async fn realtime_reconnect_progress_clears_after_recovery() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await;
+    adapter
+        .project_realtime_attachment_intent(&session_id, true)
+        .await
+        .expect("intent projection should succeed");
+    let authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("attach should mint authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            authority,
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("binding-ready signal should be accepted");
+
+    adapter
+        .require_realtime_attachment_reattach(&session_id)
+        .await
+        .expect("reattach requirement should succeed");
+    adapter
+        .begin_realtime_reconnect_cycle(&session_id, Some(1_000), Some(10_000))
+        .await
+        .expect("machine should begin reconnect cycle");
+    adapter
+        .schedule_realtime_reconnect_retry(&session_id, Some(2_000))
+        .await
+        .expect("machine should record the second retry attempt");
+
+    let reconnecting = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_channel_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("channel status should be readable");
+    assert_eq!(reconnecting.attempt_count, 2);
+
+    let recovered_authority = adapter
+        .attach_live(&session_id)
+        .await
+        .expect("reattach should mint fresh authority");
+    adapter
+        .publish_realtime_attachment_signal(
+            recovered_authority,
+            crate::RealtimeAttachmentStatus::BindingReady,
+        )
+        .await
+        .expect("recovered binding-ready signal should be accepted");
+
+    let recovered = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_channel_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("channel status should be readable");
+    assert_eq!(
+        recovered.state,
+        meerkat_contracts::RealtimeChannelState::Ready
+    );
+    assert_eq!(recovered.attempt_count, 0);
+    assert_eq!(recovered.next_retry_at, None);
+    assert_eq!(recovered.deadline_at, None);
+
+    adapter
+        .require_realtime_attachment_reattach(&session_id)
+        .await
+        .expect("second reattach requirement should succeed");
+    adapter
+        .begin_realtime_reconnect_cycle(&session_id, Some(3_000), Some(12_000))
+        .await
+        .expect("machine should begin a fresh reconnect cycle");
+    let fresh_cycle = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_channel_status(
+        &adapter,
+        &session_id,
+    )
+    .await
+    .expect("channel status should be readable");
+    assert_eq!(fresh_cycle.attempt_count, 1);
+    assert_eq!(fresh_cycle.next_retry_at, Some(rfc3339_ms(3_000)));
+    assert_eq!(fresh_cycle.deadline_at, Some(rfc3339_ms(12_000)));
+}
+
+fn rfc3339_ms(ms: u64) -> String {
+    let secs = i64::try_from(ms / 1_000).expect("test timestamp should fit i64");
+    let nanos = u32::try_from((ms % 1_000) * 1_000_000).expect("millis nanos should fit u32");
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nanos)
+        .expect("test timestamp should be valid")
+        .to_rfc3339()
+}
+
+#[tokio::test]
 async fn realtime_reattach_for_authority_rejects_stale_authority_without_mutation() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

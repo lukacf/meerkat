@@ -180,11 +180,9 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
-    /// Wave-c C-9c R4: fully-projected public channel status. Reads DSL
-    /// state (attachment + reconnect-progress) and returns a
-    /// ready-to-serialize `RealtimeChannelStatus` with real
-    /// `attempt_count` / `next_retry_at` / `deadline_at` sourced from the
-    /// overlay-projected fields, not hard-coded defaults.
+    /// Fully-projected public channel status. Reads DSL state (attachment plus
+    /// machine-owned reconnect lifecycle/progress) and returns a
+    /// ready-to-serialize `RealtimeChannelStatus`.
     async fn realtime_channel_status(
         &self,
         session_id: &SessionId,

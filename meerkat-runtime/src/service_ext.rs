@@ -64,10 +64,9 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
     ) -> Result<RealtimeAttachmentStatus, RuntimeDriverError>;
 
-    /// Wave-c C-9c R4: fully-projected public channel status. RPC / MCP
-    /// `realtime/status` responders use this so `attempt_count` /
-    /// `next_retry_at` / `deadline_at` come from DSL state projected off
-    /// the reconnect retry machine's progress, not hard-coded defaults.
+    /// Fully-projected public channel status. RPC / MCP `realtime/status`
+    /// responders use this so `attempt_count` / `next_retry_at` /
+    /// `deadline_at` come from machine-owned reconnect lifecycle state.
     async fn realtime_channel_status(
         &self,
         session_id: &SessionId,

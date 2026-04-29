@@ -236,6 +236,32 @@ pub enum RealtimeBindingState {
     ReplacementPending,
 }
 
+/// Per-session realtime reconnect retry lifecycle.
+///
+/// The realtime websocket shell supplies time observations and jittered retry
+/// deadlines, but the canonical cycle phase, attempt count, exhaustion, and
+/// public status projection live in the MeerkatMachine state. This replaces
+/// the previous websocket-local retry progress projection path.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeReconnectCycleState {
+    #[default]
+    Idle,
+    Reconnecting,
+    Exhausted,
+}
+
 /// Product-turn lifecycle phase for a provider-managed realtime session
 /// (U9 / dogma #4).
 ///
@@ -1272,20 +1298,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             realtime_reattach_required: bool,
             realtime_next_authority_epoch: u64,
 
-            // --- Realtime reconnect progress (wave-c C-9c R4) ---
+            // --- Realtime reconnect lifecycle ---
             //
-            // Retry-machine reconnect progress the realtime-WS shell projects
-            // into the DSL via `ProjectRealtimeReconnectProgress`. RPC/MCP
-            // `realtime/status` queries against a session whose socket is
-            // actively reconnecting read these fields through
-            // `project_realtime_attachment_status` so the public
-            // `RealtimeChannelStatus` surfaces real `attempt_count` and
-            // `next_retry_at` instead of the pre-R4 `1`/`0` hard-codes.
-            //
-            // Cleared on `PublishRealtimeSignal::BindingReady` and on any
-            // transition that returns the binding to `Unbound` without a
-            // reattach requirement, so progress fields fall to zero the
-            // instant the retry cycle ends.
+            // The websocket shell supplies time observations and jittered
+            // deadlines, but the DSL owns the reconnect cycle phase, attempt
+            // count, retry deadline, exhaustion marker, and public status
+            // projection.
+            realtime_reconnect_cycle_state: Enum<RealtimeReconnectCycleState>,
             realtime_reconnect_attempt_count: u64,
             realtime_reconnect_next_retry_at_ms: Option<u64>,
             realtime_reconnect_deadline_at_ms: Option<u64>,
@@ -1583,6 +1602,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             realtime_binding_authority_epoch = None,
             realtime_reattach_required = false,
             realtime_next_authority_epoch = 1,
+            realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle,
             realtime_reconnect_attempt_count = 0,
             realtime_reconnect_next_retry_at_ms = None,
             realtime_reconnect_deadline_at_ms = None,
@@ -1872,16 +1892,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             RequireRealtimeReattach,
             RequireRealtimeReattachForAuthority { authority_epoch: u64 },
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
-            // Wave-c C-9c R4: retry-machine reconnect progress projected
-            // into DSL state so RPC/MCP status queries read real retry state.
-            // The `*_ms` fields are millis-since-epoch so the DSL doesn't
-            // depend on `chrono::DateTime`; the shell converts at the
-            // projection boundary.
-            ProjectRealtimeReconnectProgress {
-                attempt_count: u64,
+            // Reconnect retry lifecycle. The websocket shell supplies
+            // millis-since-epoch retry deadlines from its clock/jitter source;
+            // the DSL owns cycle lifetime, attempt increments, exhaustion, and
+            // public status projection.
+            BeginRealtimeReconnectCycle {
                 next_retry_at_ms: Option<u64>,
                 deadline_at_ms: Option<u64>,
             },
+            ScheduleRealtimeReconnectRetry { next_retry_at_ms: Option<u64> },
+            ExhaustRealtimeReconnectCycle,
             ClearRealtimeReconnectProgress,
             // Live-topology reconfigure inputs.
             BeginLiveTopologyReconfigure { authority_epoch: u64 },
@@ -2168,10 +2188,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Realtime-attachment effects.
             RealtimeIntentProjected { present: bool },
             RealtimeBindingRotated { authority_epoch: u64 },
-            // Wave-c C-9c R4: reconnect-progress projected effect. Shell
-            // consumers (e.g. observability pipelines) can subscribe;
-            // production RPC/MCP `realtime/status` responders read the
-            // state field directly via `project_realtime_attachment_status`.
+            // Reconnect-progress state changed. Shell consumers (e.g.
+            // observability pipelines) can subscribe; production RPC/MCP
+            // `realtime/status` responders read the state fields directly.
             RealtimeReconnectProgressProjected {
                 attempt_count: u64,
                 next_retry_at_ms: Option<u64>,
@@ -6161,6 +6180,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
                 self.realtime_reattach_required = false;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
             }
             to Idle
             emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
@@ -6176,6 +6199,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
                 self.realtime_reattach_required = false;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
             }
             to Idle
             emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
@@ -6190,6 +6217,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = false;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
             }
             to Idle
         }
@@ -6203,6 +6234,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = true;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
             }
             to Idle
         }
@@ -6217,6 +6252,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.realtime_binding_authority_epoch = None;
                 self.realtime_reattach_required = true;
                 self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
             }
             to Idle
         }
@@ -6234,39 +6273,78 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.realtime_binding_state = next_binding_state;
                 self.realtime_reattach_required = false;
+                if next_binding_state == RealtimeBindingState::BindingReady {
+                    self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
+                    self.realtime_reconnect_attempt_count = 0;
+                    self.realtime_reconnect_next_retry_at_ms = None;
+                    self.realtime_reconnect_deadline_at_ms = None;
+                }
             }
             to Idle
         }
 
-        // Wave-c C-9c R4: retry-machine → DSL input that records the
-        // current reconnect-cycle attempt count and next-retry deadline so
-        // `project_realtime_attachment_status` can surface them to
-        // RPC/MCP `realtime/status` responders.
-        transition ProjectRealtimeReconnectProgress {
+        transition BeginRealtimeReconnectCycle {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ProjectRealtimeReconnectProgress { attempt_count, next_retry_at_ms, deadline_at_ms }
+            on input BeginRealtimeReconnectCycle { next_retry_at_ms, deadline_at_ms }
             guard "session_registered" { self.session_id != None }
+            guard "reattach_required" { self.realtime_reattach_required }
+            guard "cycle_idle" { self.realtime_reconnect_cycle_state == RealtimeReconnectCycleState::Idle }
             update {
-                self.realtime_reconnect_attempt_count = attempt_count;
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Reconnecting;
+                self.realtime_reconnect_attempt_count = 1;
                 self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
                 self.realtime_reconnect_deadline_at_ms = deadline_at_ms;
             }
             to Idle
             emit RealtimeReconnectProgressProjected {
-                attempt_count: attempt_count,
+                attempt_count: 1,
                 next_retry_at_ms: next_retry_at_ms,
                 deadline_at_ms: deadline_at_ms,
             }
         }
 
-        // Wave-c C-9c R4: reset the reconnect-progress fields. Shell fires
-        // this when the retry machine clears (successful reconnect, operator
-        // detach, or non-reconnecting lifecycle transition).
+        transition ScheduleRealtimeReconnectRetry {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ScheduleRealtimeReconnectRetry { next_retry_at_ms }
+            guard "session_registered" { self.session_id != None }
+            guard "cycle_reconnecting" { self.realtime_reconnect_cycle_state == RealtimeReconnectCycleState::Reconnecting }
+            update {
+                self.realtime_reconnect_attempt_count = self.realtime_reconnect_attempt_count + 1;
+                self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: self.realtime_reconnect_attempt_count,
+                next_retry_at_ms: next_retry_at_ms,
+                deadline_at_ms: self.realtime_reconnect_deadline_at_ms,
+            }
+        }
+
+        transition ExhaustRealtimeReconnectCycle {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ExhaustRealtimeReconnectCycle
+            guard "session_registered" { self.session_id != None }
+            guard "cycle_reconnecting" { self.realtime_reconnect_cycle_state == RealtimeReconnectCycleState::Reconnecting }
+            update {
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Exhausted;
+                self.realtime_reconnect_attempt_count = 0;
+                self.realtime_reconnect_next_retry_at_ms = None;
+                self.realtime_reconnect_deadline_at_ms = None;
+            }
+            to Idle
+            emit RealtimeReconnectProgressProjected {
+                attempt_count: 0,
+                next_retry_at_ms: None,
+                deadline_at_ms: None,
+            }
+        }
+
         transition ClearRealtimeReconnectProgress {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ClearRealtimeReconnectProgress
             guard "session_registered" { self.session_id != None }
             update {
+                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
                 self.realtime_reconnect_attempt_count = 0;
                 self.realtime_reconnect_next_retry_at_ms = None;
                 self.realtime_reconnect_deadline_at_ms = None;

@@ -1525,19 +1525,49 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublishRealtimeSignalStopped`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
-- `ProjectRealtimeReconnectProgressIdle`
+- `BeginRealtimeReconnectCycleIdle`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
-- `ProjectRealtimeReconnectProgressAttached`
+- `BeginRealtimeReconnectCycleAttached`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
-- `ProjectRealtimeReconnectProgressRunning`
+- `BeginRealtimeReconnectCycleRunning`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
-- `ProjectRealtimeReconnectProgressRetired`
+- `BeginRealtimeReconnectCycleRetired`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
-- `ProjectRealtimeReconnectProgressStopped`
+- `BeginRealtimeReconnectCycleStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ScheduleRealtimeReconnectRetryIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ScheduleRealtimeReconnectRetryAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ScheduleRealtimeReconnectRetryRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ScheduleRealtimeReconnectRetryRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ScheduleRealtimeReconnectRetryStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ExhaustRealtimeReconnectCycleIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `recycle_and_compaction`
+- `ExhaustRealtimeReconnectCycleAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ExhaustRealtimeReconnectCycleRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `ExhaustRealtimeReconnectCycleRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `recycle_and_compaction`
+- `ExhaustRealtimeReconnectCycleStopped`
   - anchors: `meerkat_machine`
   - scenarios: `realtime_connection_projection`
 - `ClearRealtimeReconnectProgressIdle`

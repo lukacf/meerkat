@@ -214,6 +214,15 @@ impl MobEventStore for InMemoryMobEventStore {
         Ok(self.events.read().await.clone())
     }
 
+    async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+        Ok(self
+            .events
+            .read()
+            .await
+            .last()
+            .map_or(0, |event| event.cursor))
+    }
+
     async fn clear(&self) -> Result<(), MobStoreError> {
         self.events.write().await.clear();
         Ok(())

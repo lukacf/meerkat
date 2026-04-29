@@ -128,10 +128,10 @@ pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisp
 pub use runtime::{
     HelperOptions, HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt,
     MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle,
-    MobHandle, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobSessionService, MobState, MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport,
-    SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec, SupervisorRotationReport,
-    WorkDeliveryReceipt,
+    MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle, MobMemberSnapshot,
+    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobState,
+    MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec, SpawnPolicy,
+    SpawnResult, SpawnSpec, SupervisorRotationReport, WorkDeliveryReceipt,
 };
 pub use runtime_mode::MobRuntimeMode;
 pub use snapshot::ParentToolScopeSnapshot;

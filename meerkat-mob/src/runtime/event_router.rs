@@ -107,10 +107,8 @@ async fn run_event_router(
     }
 
     // Seed cursor from current event store.
-    if let Ok(all_events) = handle.poll_events(0, usize::MAX).await
-        && let Some(last) = all_events.last()
-    {
-        mob_cursor = last.cursor;
+    if let Ok(cursor) = handle.events().latest_cursor().await {
+        mob_cursor = cursor;
     }
 
     let mut poll_interval = tokio::time::interval(config.poll_interval);

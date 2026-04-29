@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -700,6 +701,7 @@ pub struct MobHandle {
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) definition: Arc<MobDefinition>,
     pub(super) events: Arc<dyn MobEventStore>,
+    pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
@@ -796,6 +798,53 @@ pub struct MemberHandle {
 #[derive(Clone)]
 pub struct MobEventsView {
     handle: MobHandle,
+}
+
+/// Configuration for a structural mob event subscription.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct MobEventsSubscriptionConfig {
+    /// Cursor to start after. `None` starts at the current latest cursor.
+    pub after_cursor: Option<u64>,
+    /// How often to check the structural event log for new events.
+    pub poll_interval: Duration,
+    /// Maximum number of events read from the store per poll tick.
+    pub batch_limit: usize,
+    /// Capacity of the output event channel.
+    pub channel_capacity: usize,
+}
+
+impl Default for MobEventsSubscriptionConfig {
+    fn default() -> Self {
+        Self {
+            after_cursor: None,
+            poll_interval: Duration::from_millis(500),
+            batch_limit: 128,
+            channel_capacity: 256,
+        }
+    }
+}
+
+/// Handle for a structural mob event subscription.
+///
+/// Receives persisted [`crate::event::MobEvent`] records from the mob event
+/// ledger. Drop the handle, or call [`Self::cancel`], to stop the background
+/// watcher task.
+pub struct MobEventsSubscription {
+    pub event_rx: mpsc::Receiver<crate::event::MobEvent>,
+    cancel: CancellationToken,
+}
+
+impl MobEventsSubscription {
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+}
+
+impl Drop for MobEventsSubscription {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// Spawn request for first-class batch member provisioning.
@@ -981,11 +1030,59 @@ impl SpawnMemberSpec {
 
 impl MobEventsView {
     pub async fn latest_cursor(&self) -> Result<u64, MobError> {
-        Ok(self
-            .replay_all()
-            .await?
-            .last()
-            .map_or(0, |event| event.cursor))
+        self.handle
+            .events
+            .latest_cursor()
+            .await
+            .map_err(MobError::from)
+    }
+
+    /// Subscribe to structural mob events recorded in the mob event ledger.
+    ///
+    /// This is distinct from [`MobHandle::subscribe_mob_events`], which routes
+    /// member-agent events. The returned stream yields [`crate::event::MobEvent`]
+    /// records and starts after the current latest cursor.
+    pub async fn subscribe(&self) -> Result<MobEventsSubscription, MobError> {
+        self.subscribe_with_config(MobEventsSubscriptionConfig::default())
+            .await
+    }
+
+    /// Subscribe to structural mob events after an explicit cursor.
+    pub async fn subscribe_after(
+        &self,
+        after_cursor: u64,
+    ) -> Result<MobEventsSubscription, MobError> {
+        self.subscribe_with_config(MobEventsSubscriptionConfig {
+            after_cursor: Some(after_cursor),
+            ..MobEventsSubscriptionConfig::default()
+        })
+        .await
+    }
+
+    /// Like [`Self::subscribe`] with explicit polling and channel settings.
+    pub async fn subscribe_with_config(
+        &self,
+        config: MobEventsSubscriptionConfig,
+    ) -> Result<MobEventsSubscription, MobError> {
+        let config = MobEventsSubscriptionConfig {
+            poll_interval: if config.poll_interval.is_zero() {
+                Duration::from_millis(1)
+            } else {
+                config.poll_interval
+            },
+            batch_limit: config.batch_limit.max(1),
+            channel_capacity: config.channel_capacity.max(1),
+            ..config
+        };
+        let after_cursor = match config.after_cursor {
+            Some(cursor) => cursor,
+            None => self.latest_cursor().await?,
+        };
+        Ok(spawn_structural_event_subscription(
+            self.clone(),
+            after_cursor,
+            config,
+        ))
     }
 
     pub async fn poll(
@@ -1035,6 +1132,49 @@ impl MobEventsView {
             )),
         }
     }
+}
+
+#[allow(clippy::ignored_unit_patterns)]
+fn spawn_structural_event_subscription(
+    events: MobEventsView,
+    mut cursor: u64,
+    config: MobEventsSubscriptionConfig,
+) -> MobEventsSubscription {
+    let (event_tx, event_rx) = mpsc::channel(config.channel_capacity);
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    tokio::spawn(async move {
+        let mut poll_interval = tokio::time::interval(config.poll_interval);
+        #[cfg(not(target_arch = "wasm32"))]
+        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                () = cancel_clone.cancelled() => break,
+                _ = poll_interval.tick() => {
+                    let batch = match events.poll(cursor, config.batch_limit).await {
+                        Ok(batch) => batch,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "mob structural event subscription stopped after poll failure",
+                            );
+                            break;
+                        }
+                    };
+                    for event in batch {
+                        cursor = event.cursor;
+                        if event_tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    MobEventsSubscription { event_rx, cancel }
 }
 
 impl MobHandle {
@@ -1985,6 +2125,14 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    /// List flow runs for this mob, optionally filtered to one flow ID.
+    pub async fn list_runs(&self, flow_id: Option<&FlowId>) -> Result<Vec<MobRun>, MobError> {
+        self.run_store
+            .list_runs(&self.definition.id, flow_id)
+            .await
+            .map_err(MobError::from)
     }
 
     /// List all configured flow IDs in this mob definition.

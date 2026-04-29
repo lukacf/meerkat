@@ -584,6 +584,20 @@ impl MobEventStore for SqliteMobEventStore {
         .await
     }
 
+    async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+        let path = self.path.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let cursor: Option<i64> = conn
+                .query_row("SELECT MAX(cursor) FROM mob_events", [], |row| row.get(0))
+                .optional()
+                .map_err(se)?
+                .flatten();
+            Ok(cursor.map_or(0, i64_to_cursor))
+        })
+        .await
+    }
+
     async fn clear(&self) -> Result<(), MobStoreError> {
         let path = self.path.clone();
         run_sqlite_task(move || {

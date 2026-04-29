@@ -190,6 +190,9 @@ pub trait MobEventStore: Send + Sync {
     /// Replay all events from the beginning.
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError>;
 
+    /// Return the latest persisted event cursor, or 0 when no events exist.
+    async fn latest_cursor(&self) -> Result<u64, MobStoreError>;
+
     /// Delete all persisted events.
     async fn clear(&self) -> Result<(), MobStoreError>;
 

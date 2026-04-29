@@ -1399,6 +1399,7 @@ impl MobActor {
             roster: self.roster.clone(),
             definition: self.definition.clone(),
             events: self.events.clone(),
+            run_store: self.run_store.clone(),
             flow_streams: self.flow_streams.clone(),
             session_service: self.session_service.clone(),
             #[cfg(feature = "runtime-adapter")]

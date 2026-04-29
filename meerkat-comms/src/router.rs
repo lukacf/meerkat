@@ -366,7 +366,7 @@ impl Router {
                 }
             })
             .ok_or(SendError::PeerNotFound(dest))?;
-        let addr = PeerAddr::parse_legacy_schemeless_tcp(&peer.addr)?;
+        let addr = PeerAddr::parse(&peer.addr)?;
         let mut envelope = Envelope {
             id: envelope_id,
             from: self.keypair.public_key(),

@@ -92,21 +92,6 @@ impl PeerAddr {
         }
     }
 
-    /// Parse with the explicit legacy rule that schemeless input is TCP.
-    ///
-    /// Unknown `scheme://...` input still fails closed through [`Self::parse`].
-    pub fn parse_legacy_schemeless_tcp(s: &str) -> Result<Self, TransportError> {
-        if s.contains("://") {
-            return Self::parse(s);
-        }
-        if !s.contains(':') {
-            return Err(TransportError::InvalidAddress(
-                "TCP address must include port (host:port)".to_string(),
-            ));
-        }
-        Ok(PeerAddr::Tcp(s.to_string()))
-    }
-
     /// Check if this is an in-process address.
     pub fn is_inproc(&self) -> bool {
         matches!(self, PeerAddr::Inproc(_))
@@ -262,14 +247,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_legacy_schemeless_tcp_addr() {
-        let addr = PeerAddr::parse_legacy_schemeless_tcp("localhost:4200").unwrap();
-        match addr {
-            PeerAddr::Tcp(a) => assert_eq!(a, "localhost:4200"),
-            _ => panic!("expected Tcp variant"),
-        }
-
-        let result = PeerAddr::parse_legacy_schemeless_tcp("http://example.com:4200");
+    fn test_parse_rejects_schemeless_addr() {
+        let result = PeerAddr::parse("localhost:4200");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("unknown scheme"));

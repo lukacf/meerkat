@@ -30,11 +30,11 @@ mod tokio {
 use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
-use meerkat_contracts::{MobDefinitionInput, MobPeerTarget};
+use meerkat_contracts::MobDefinitionInput;
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
 use meerkat_core::agent::{AgentToolDispatcher, CommsRuntime as CoreCommsRuntime};
-use meerkat_core::comms::{CommsCommand, SendError, SendReceipt, TrustedPeerDescriptor};
+use meerkat_core::comms::{CommsCommand, PeerName, SendError, SendReceipt, TrustedPeerDescriptor};
 use meerkat_core::error::ToolError;
 use meerkat_core::interaction::{InteractionId, PeerInputCandidate};
 use meerkat_core::service::{
@@ -2088,8 +2088,8 @@ impl MobMcpDispatcher {
             ),
             tool(
                 "mob_wire",
-                &format!("Wire or unwire bidirectional trust between a local member and a peer target. \
-                     action: wire | unwire. {COMMON}"),
+	                &format!("Wire or unwire bidirectional trust between a local member and a peer target. \
+	                     action: wire | unwire. Use external_binding for wire and external name handles for unwire. {COMMON}"),
                 json!({
                     "type":"object",
                     "properties":{
@@ -2105,10 +2105,10 @@ impl MobMcpDispatcher {
                                 {
                                     "type":"object",
                                     "properties":{
-                                        "external":{
-                                            "type":"object",
-                                            "properties":{
-                                                "name":{"type":"string"},
+	                                        "external_binding":{
+	                                            "type":"object",
+	                                            "properties":{
+	                                                "name":{"type":"string"},
                                                 "address":{"type":"string"},
                                                 "identity":{
                                                     "type":"object",
@@ -2119,15 +2119,29 @@ impl MobMcpDispatcher {
                                                     "required":["kind","public_key"],
                                                     "additionalProperties":false
                                                 }
-                                            },
-                                            "required":["name","address","identity"],
-                                            "additionalProperties":false
-                                        }
-                                    },
-                                    "required":["external"]
-                                }
-                            ]
-                        },
+	                                            },
+	                                            "required":["name","address","identity"],
+	                                            "additionalProperties":false
+	                                        }
+	                                    },
+	                                    "required":["external_binding"]
+	                                },
+	                                {
+	                                    "type":"object",
+	                                    "properties":{
+	                                        "external":{
+	                                            "type":"object",
+	                                            "properties":{
+	                                                "name":{"type":"string"}
+	                                            },
+	                                            "required":["name"],
+	                                            "additionalProperties":false
+	                                        }
+	                                    },
+	                                    "required":["external"]
+	                                }
+	                            ]
+	                        },
                         "action":{"type":"string","enum":["wire","unwire"]}
                     },
                     "required":["mob_id","agent_identity","peer","action"]
@@ -2328,31 +2342,36 @@ struct RetireArgs {
 struct WireActionArgs {
     mob_id: String,
     agent_identity: String,
-    peer: MobPeerTarget,
+    peer: WireActionPeerTarget,
     action: String,
 }
 
-fn trusted_peer_descriptor_from_wire_spec(
-    spec: meerkat_contracts::WireTrustedPeerSpec,
-) -> Result<TrustedPeerDescriptor, String> {
-    trusted_peer_descriptor_from_wire_parts(spec.name, spec.address, spec.identity)
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WireActionPeerTarget {
+    Local {
+        local: String,
+    },
+    ExternalBinding {
+        external_binding: WireActionExternalBinding,
+    },
+    External {
+        external: WireActionExternalHandle,
+    },
 }
 
-fn trusted_peer_descriptor_from_wire_parts(
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireActionExternalBinding {
     name: String,
     address: String,
     identity: meerkat_contracts::WireTrustedPeerIdentity,
-) -> Result<TrustedPeerDescriptor, String> {
-    let name = meerkat_core::comms::PeerName::new(name.clone())
-        .map_err(|e| format!("invalid peer name '{name}': {e}"))?;
-    let resolved = identity.resolve().map_err(|e| e.to_string())?;
-    let address = parse_wire_peer_address(&address)?;
-    Ok(TrustedPeerDescriptor {
-        name,
-        peer_id: resolved.peer_id,
-        address,
-        pubkey: resolved.pubkey,
-    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireActionExternalHandle {
+    name: String,
 }
 
 fn runtime_binding_from_wire(
@@ -2378,31 +2397,32 @@ fn runtime_binding_from_wire(
 
 impl WireActionArgs {
     fn resolve(self) -> Result<(String, AgentIdentity, meerkat_mob::PeerTarget, String), String> {
+        let action = self.action;
+        let target = match self.peer {
+            WireActionPeerTarget::Local { local } => meerkat_mob::PeerTarget::Local(local.into()),
+            WireActionPeerTarget::ExternalBinding { external_binding } => {
+                meerkat_mob::PeerTarget::ExternalBinding(meerkat_mob::ExternalPeerBindingSpec::new(
+                    external_binding.name,
+                    external_binding.address,
+                    external_binding.identity,
+                ))
+            }
+            WireActionPeerTarget::External { external } => {
+                if action == "wire" {
+                    return Err("wire external peer requires external_binding".to_string());
+                }
+                let peer_name = PeerName::new(external.name)
+                    .map_err(|e| format!("invalid external peer name: {e}"))?;
+                meerkat_mob::PeerTarget::ExternalName(peer_name)
+            }
+        };
         Ok((
             self.mob_id,
             AgentIdentity::from(self.agent_identity),
-            match self.peer {
-                MobPeerTarget::Local(member_id) => meerkat_mob::PeerTarget::Local(member_id.into()),
-                MobPeerTarget::External(spec) => {
-                    meerkat_mob::PeerTarget::External(trusted_peer_descriptor_from_wire_spec(spec)?)
-                }
-            },
-            self.action,
+            target,
+            action,
         ))
     }
-}
-
-fn parse_wire_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
-    let (scheme, endpoint) = raw
-        .split_once("://")
-        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
-    let transport = match scheme {
-        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
-        "uds" => meerkat_core::comms::PeerTransport::Uds,
-        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
-        other => return Err(format!("unknown peer address transport: {other}")),
-    };
-    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 #[derive(Deserialize)]
 struct RunFlowArgs {
@@ -2980,16 +3000,19 @@ mod tests {
     use tokio::time::{Duration, Instant, sleep};
 
     const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
-    const ED25519_PUBLIC_KEY_ZERO: &str = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-    fn external_peer_target(public_key: &str) -> MobPeerTarget {
-        MobPeerTarget::External(meerkat_contracts::WireTrustedPeerSpec {
-            name: "external-worker".to_string(),
-            address: "inproc://external-worker".to_string(),
-            identity: meerkat_contracts::WireTrustedPeerIdentity::Ed25519PublicKey {
-                public_key: public_key.to_string(),
-            },
-        })
+    fn external_peer_target(public_key: &str) -> WireActionPeerTarget {
+        serde_json::from_value(json!({
+            "external_binding": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": public_key
+                }
+            }
+        }))
+        .expect("external binding target should deserialize")
     }
 
     #[test]
@@ -3058,24 +3081,68 @@ mod tests {
     }
 
     #[test]
-    fn wire_action_args_rejects_external_peer_zero_pubkey() {
-        let err = WireActionArgs {
-            mob_id: "mob".to_string(),
-            agent_identity: "worker".to_string(),
-            peer: external_peer_target(ED25519_PUBLIC_KEY_ZERO),
-            action: "wire".to_string(),
-        }
-        .resolve()
-        .expect_err("zero pubkey external peers must be rejected");
+    fn wire_action_args_rejects_raw_external_peer_atoms() {
+        let err = serde_json::from_value::<WireActionPeerTarget>(json!({
+            "external": {
+                "name": "external-worker",
+                "peer_id": meerkat_core::comms::PeerId::from_ed25519_pubkey(&[7u8; 32]).to_string(),
+                "address": "inproc://external-worker",
+                "pubkey": vec![7u8; 32]
+            }
+        }))
+        .expect_err("raw peer_id/pubkey external peer shape must be rejected");
 
+        let msg = err.to_string();
         assert!(
-            err.contains("public_key") || err.contains("non-zero"),
-            "expected pubkey validation error, got: {err}"
+            msg.contains("external")
+                || msg.contains("external_binding")
+                || msg.contains("did not match"),
+            "unexpected error: {msg}"
         );
     }
 
     #[test]
-    fn wire_action_args_resolves_canonical_external_peer_identity() {
+    fn wire_action_args_rejects_missing_external_binding_pubkey_material() {
+        let err = serde_json::from_value::<WireActionPeerTarget>(json!({
+            "external_binding": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key"
+                }
+            }
+        }))
+        .expect_err("missing external binding pubkey material must fail closed");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("public_key") || msg.contains("identity") || msg.contains("did not match"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_action_args_rejects_external_handle_for_wire_action() {
+        let err = WireActionArgs {
+            mob_id: "mob".to_string(),
+            agent_identity: "worker".to_string(),
+            peer: serde_json::from_value(json!({
+                "external": { "name": "external-worker" }
+            }))
+            .expect("external handle should deserialize"),
+            action: "wire".to_string(),
+        }
+        .resolve()
+        .expect_err("wire action must require external_binding");
+
+        assert!(
+            err.contains("external_binding"),
+            "expected external_binding validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_action_args_passes_external_binding_to_mob_authority() {
         let resolved = WireActionArgs {
             mob_id: "mob".to_string(),
             agent_identity: "worker".to_string(),
@@ -3083,18 +3150,35 @@ mod tests {
             action: "wire".to_string(),
         }
         .resolve()
-        .expect("canonical external peer identity should resolve");
+        .expect("canonical external peer binding should resolve as request");
 
         let (_mob_id, _local, target, _action) = resolved;
-        let meerkat_mob::PeerTarget::External(descriptor) = target else {
-            panic!("canonical external peer should resolve to an external descriptor");
+        let meerkat_mob::PeerTarget::ExternalBinding(binding) = target else {
+            panic!("canonical external peer should remain mob-resolved external binding");
         };
-        let pubkey = [7u8; 32];
-        assert_eq!(descriptor.pubkey, pubkey);
-        assert_eq!(
-            descriptor.peer_id,
-            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey)
-        );
+        assert_eq!(binding.name, "external-worker");
+        assert_eq!(binding.address, "inproc://external-worker");
+    }
+
+    #[test]
+    fn wire_action_args_unwire_accepts_external_name_handle() {
+        let resolved = WireActionArgs {
+            mob_id: "mob".to_string(),
+            agent_identity: "worker".to_string(),
+            peer: serde_json::from_value(json!({
+                "external": { "name": "external-worker" }
+            }))
+            .expect("external handle should deserialize"),
+            action: "unwire".to_string(),
+        }
+        .resolve()
+        .expect("external handle should be valid for unwire");
+
+        let (_mob_id, _local, target, _action) = resolved;
+        let meerkat_mob::PeerTarget::ExternalName(peer_name) = target else {
+            panic!("unwire external should use the external peer handle");
+        };
+        assert_eq!(peer_name.as_str(), "external-worker");
     }
 
     struct MockComms {
@@ -3840,6 +3924,23 @@ mod tests {
                 "mob_wait_kickoff",
                 "mob_wait_ready",
             ]
+        );
+    }
+
+    #[test]
+    fn test_mob_wire_schema_uses_external_binding_without_raw_peer_atoms() {
+        let tools = tools_list();
+        let schema = tools
+            .iter()
+            .find(|tool| tool["name"] == "mob_wire")
+            .and_then(|tool| tool.get("inputSchema"))
+            .expect("mob_wire schema present");
+        let schema_text = serde_json::to_string(schema).expect("schema should encode");
+
+        assert!(schema_text.contains("external_binding"));
+        assert!(
+            !schema_text.contains("\"peer_id\"") && !schema_text.contains("\"pubkey\""),
+            "mob_wire schema must not expose raw comms identity atoms: {schema_text}"
         );
     }
 

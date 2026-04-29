@@ -903,7 +903,7 @@ impl AgentMobToolSurface {
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         let local = AgentIdentity::from(args.member_id.as_str());
-        let target = peer_target_from_args(args.peer)?;
+        let target = wire_peer_target_from_args(args.peer);
         self.state
             .mob_wire(&mob_id, local, target)
             .await
@@ -915,12 +915,12 @@ impl AgentMobToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let args: WireArgs = call
+        let args: UnwireArgs = call
             .parse_args()
             .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let mob_id = meerkat_mob::MobId::from(args.mob_id.as_str());
         let local = AgentIdentity::from(args.member_id.as_str());
-        let target = peer_target_from_args(args.peer)?;
+        let target = unwire_peer_target_from_args(args.peer)?;
         self.state
             .mob_unwire(&mob_id, local, target)
             .await
@@ -1440,15 +1440,15 @@ fn build_tool_defs_with_profile_support(
         ),
         tool_def(
             TOOL_MOB_WIRE,
-            "Wire a mob member to another local member or an external peer.\n\n\
+            "Wire a mob member to another local member or an external binding.\n\n\
              Creates a comms trust relationship so the wired members can exchange messages. \
              For local members (both in the same mob roster), wiring is bidirectional. \
              For external peers (outside the roster), trust is added on the local member's side.\n\n\
              PEER TARGET TYPES:\n\
              - {\"local\": \"member-id\"} — another member in the same mob roster.\n\
-             - {\"external\": {\"name\": \"peer-name\", \"address\": \"tcp://host:port\", \
+             - {\"external_binding\": {\"name\": \"peer-name\", \"address\": \"tcp://host:port\", \
                \"identity\": {\"kind\": \"ed25519_public_key\", \"public_key\": \"ed25519:...\"}}} \
-               — a trusted peer outside the roster.",
+               — a typed external binding request resolved by the mob authority.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1466,7 +1466,7 @@ fn build_tool_defs_with_profile_support(
                             {
                                 "type": "object",
                                 "properties": {
-                                    "external": {
+                                    "external_binding": {
                                         "type": "object",
                                         "properties": {
                                             "name": {"type": "string"},
@@ -1485,10 +1485,10 @@ fn build_tool_defs_with_profile_support(
                                         "additionalProperties": false
                                     }
                                 },
-                                "required": ["external"]
+                                "required": ["external_binding"]
                             }
                         ],
-                        "description": "Target peer: local member or external trusted peer"
+                        "description": "Target peer: local member or typed external binding"
                     }
                 },
                 "required": ["mob_id", "member_id", "peer"]
@@ -1498,7 +1498,8 @@ fn build_tool_defs_with_profile_support(
             TOOL_MOB_UNWIRE,
             "Remove a wiring relationship between a mob member and a peer.\n\n\
              Removes the comms trust relationship established by mob_wire. \
-             Same peer target format as mob_wire.",
+             Use {\"local\": \"member-id\"} for roster peers or \
+             {\"external\": {\"name\": \"peer-name\"}} for an external binding handle.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1519,19 +1520,9 @@ fn build_tool_defs_with_profile_support(
                                     "external": {
                                         "type": "object",
                                         "properties": {
-                                            "name": {"type": "string"},
-                                            "address": {"type": "string"},
-                                            "identity": {
-                                                "type": "object",
-                                                "properties": {
-                                                    "kind": {"type": "string", "enum": ["ed25519_public_key"]},
-                                                    "public_key": {"type": "string"}
-                                                },
-                                                "required": ["kind", "public_key"],
-                                                "additionalProperties": false
-                                            }
+                                            "name": {"type": "string"}
                                         },
-                                        "required": ["name", "address", "identity"],
+                                        "required": ["name"],
                                         "additionalProperties": false
                                     }
                                 },
@@ -1755,33 +1746,66 @@ struct WireArgs {
 }
 
 #[derive(Debug, Deserialize)]
+struct UnwireArgs {
+    mob_id: String,
+    member_id: String,
+    peer: UnwirePeerArg,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum WirePeerArg {
+    Local {
+        local: String,
+    },
+    ExternalBinding {
+        external_binding: ExternalPeerBindingArg,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum UnwirePeerArg {
     Local { local: String },
-    External { external: ExternalPeerArg },
+    External { external: ExternalPeerHandleArg },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExternalPeerArg {
+struct ExternalPeerBindingArg {
     name: String,
     address: String,
     identity: meerkat_contracts::WireTrustedPeerIdentity,
 }
 
-fn peer_target_from_args(
-    peer: WirePeerArg,
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalPeerHandleArg {
+    name: String,
+}
+
+fn wire_peer_target_from_args(peer: WirePeerArg) -> meerkat_mob::PeerTarget {
+    match peer {
+        WirePeerArg::Local { local } => meerkat_mob::PeerTarget::Local(local.into()),
+        WirePeerArg::ExternalBinding { external_binding } => {
+            meerkat_mob::PeerTarget::ExternalBinding(meerkat_mob::ExternalPeerBindingSpec::new(
+                external_binding.name,
+                external_binding.address,
+                external_binding.identity,
+            ))
+        }
+    }
+}
+
+fn unwire_peer_target_from_args(
+    peer: UnwirePeerArg,
 ) -> Result<meerkat_mob::PeerTarget, meerkat_core::error::ToolError> {
     match peer {
-        WirePeerArg::Local { local } => Ok(meerkat_mob::PeerTarget::Local(local.into())),
-        WirePeerArg::External { external } => {
-            let descriptor = crate::trusted_peer_descriptor_from_wire_parts(
-                external.name,
-                external.address,
-                external.identity,
-            )
-            .map_err(|e| meerkat_core::error::ToolError::invalid_arguments("mob_wire", e))?;
-            Ok(meerkat_mob::PeerTarget::External(descriptor))
+        UnwirePeerArg::Local { local } => Ok(meerkat_mob::PeerTarget::Local(local.into())),
+        UnwirePeerArg::External { external } => {
+            let peer_name = PeerName::new(external.name)
+                .map_err(|e| meerkat_core::error::ToolError::invalid_arguments("mob_unwire", e))?;
+            Ok(meerkat_mob::PeerTarget::ExternalName(peer_name))
         }
     }
 }
@@ -1868,7 +1892,7 @@ mod tests {
 
     fn canonical_agent_wire_peer_arg() -> WirePeerArg {
         serde_json::from_value(serde_json::json!({
-            "external": {
+            "external_binding": {
                 "name": "external-worker",
                 "address": "inproc://external-worker",
                 "identity": {
@@ -1881,21 +1905,14 @@ mod tests {
     }
 
     #[test]
-    fn agent_mcp_wire_accepts_canonical_external_peer_identity() {
-        let target = peer_target_from_args(canonical_agent_wire_peer_arg())
-            .expect("canonical agent external peer identity should resolve");
+    fn agent_mcp_wire_accepts_typed_external_binding_request() {
+        let target = wire_peer_target_from_args(canonical_agent_wire_peer_arg());
 
-        let meerkat_mob::PeerTarget::External(descriptor) = target else {
-            panic!("canonical agent external peer should resolve to an external descriptor");
+        let meerkat_mob::PeerTarget::ExternalBinding(binding) = target else {
+            panic!("canonical agent external peer should remain a mob-resolved external binding");
         };
-        let pubkey = [7u8; 32];
-        assert_eq!(descriptor.name.as_str(), "external-worker");
-        assert_eq!(descriptor.address.to_string(), "inproc://external-worker");
-        assert_eq!(descriptor.pubkey, pubkey);
-        assert_eq!(
-            descriptor.peer_id,
-            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey)
-        );
+        assert_eq!(binding.name, "external-worker");
+        assert_eq!(binding.address, "inproc://external-worker");
     }
 
     #[test]
@@ -1912,7 +1929,9 @@ mod tests {
 
         let msg = err.to_string();
         assert!(
-            msg.contains("peer_id") || msg.contains("identity") || msg.contains("did not match"),
+            msg.contains("external")
+                || msg.contains("external_binding")
+                || msg.contains("did not match"),
             "unexpected error: {msg}"
         );
     }
@@ -1920,7 +1939,7 @@ mod tests {
     #[test]
     fn agent_mcp_wire_rejects_external_peer_missing_pubkey_material() {
         let err = serde_json::from_value::<WirePeerArg>(serde_json::json!({
-            "external": {
+            "external_binding": {
                 "name": "external-worker",
                 "address": "inproc://external-worker",
                 "identity": {
@@ -1934,6 +1953,39 @@ mod tests {
         assert!(
             msg.contains("public_key") || msg.contains("identity") || msg.contains("did not match"),
             "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn agent_mcp_unwire_accepts_external_peer_name_handle() {
+        let target = unwire_peer_target_from_args(
+            serde_json::from_value::<UnwirePeerArg>(serde_json::json!({
+                "external": { "name": "external-worker" }
+            }))
+            .expect("external handle should deserialize"),
+        )
+        .expect("external handle should convert");
+
+        let meerkat_mob::PeerTarget::ExternalName(peer_name) = target else {
+            panic!("unwire external should use the external peer handle");
+        };
+        assert_eq!(peer_name.as_str(), "external-worker");
+    }
+
+    #[test]
+    fn agent_mcp_wire_schema_uses_external_binding_without_raw_peer_atoms() {
+        let tools = build_tool_defs();
+        let schema = tools
+            .iter()
+            .find(|tool| tool.name == TOOL_MOB_WIRE)
+            .map(|tool| &tool.input_schema)
+            .expect("wire tool schema present");
+        let schema_text = serde_json::to_string(schema).expect("schema should encode");
+
+        assert!(schema_text.contains("external_binding"));
+        assert!(
+            !schema_text.contains("\"peer_id\"") && !schema_text.contains("\"pubkey\""),
+            "wire schema must not expose raw comms identity atoms: {schema_text}"
         );
     }
 

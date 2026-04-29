@@ -11724,6 +11724,106 @@ async fn test_unwire_external_removes_trust_and_projection() {
     );
 }
 
+const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+const ED25519_PUBLIC_KEY_ZERO: &str = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+fn external_binding_peer_target(public_key: &str) -> PeerTarget {
+    PeerTarget::ExternalBinding(ExternalPeerBindingSpec::new(
+        "external-worker",
+        "inproc://external-worker",
+        meerkat_contracts::WireTrustedPeerIdentity::Ed25519PublicKey {
+            public_key: public_key.to_string(),
+        },
+    ))
+}
+
+#[tokio::test]
+async fn test_wire_external_binding_resolves_inside_mob_authority() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-binding"),
+            None,
+        )
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(
+            AgentIdentity::from("l-binding"),
+            external_binding_peer_target(ED25519_PUBLIC_KEY_7),
+        )
+        .await
+        .expect("wire external binding");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("l-binding"))
+        .await
+        .expect("member should exist");
+    let descriptor = entry
+        .external_peer_specs
+        .get(&AgentIdentity::from("external-worker"))
+        .expect("external binding should project descriptor");
+    let expected_pubkey = [7u8; 32];
+    assert_eq!(descriptor.pubkey, expected_pubkey);
+    assert_eq!(
+        descriptor.peer_id,
+        PeerId::from_ed25519_pubkey(&expected_pubkey)
+    );
+
+    let trusted = service.trusted_peer_names(&sid_l).await;
+    assert!(
+        trusted.iter().any(|name| name == "external-worker"),
+        "mob authority should install trust after resolving external binding"
+    );
+}
+
+#[tokio::test]
+async fn test_wire_external_binding_rejects_zero_pubkey_before_trust_install() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-zero"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    let err = handle
+        .wire(
+            AgentIdentity::from("l-zero"),
+            external_binding_peer_target(ED25519_PUBLIC_KEY_ZERO),
+        )
+        .await
+        .expect_err("zero pubkey external binding must fail closed");
+    let message = err.to_string();
+    assert!(
+        message.contains("public_key") || message.contains("non-zero"),
+        "expected pubkey validation error, got: {message}"
+    );
+
+    let entry = handle
+        .get_member(&AgentIdentity::from("l-zero"))
+        .await
+        .expect("member should exist");
+    assert!(
+        !entry
+            .external_peer_specs
+            .contains_key(&AgentIdentity::from("external-worker")),
+        "failed external binding must not project an external edge"
+    );
+
+    let trusted = service.trusted_peer_names(&sid_l).await;
+    assert!(
+        !trusted.iter().any(|name| name == "external-worker"),
+        "failed external binding must not install comms trust"
+    );
+}
+
 #[tokio::test]
 async fn test_resume_seeds_mob_machine_topology_from_event_projection() {
     let service = Arc::new(MockSessionService::new());

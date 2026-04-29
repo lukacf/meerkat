@@ -18,7 +18,9 @@ use crate::run::{MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, MobRunS
 use crate::tokio;
 use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
-use meerkat_core::comms::{PeerLifecycleKind, PeerRoute, TrustedPeerDescriptor};
+use meerkat_core::comms::{
+    PeerAddress, PeerLifecycleKind, PeerName, PeerRoute, TrustedPeerDescriptor,
+};
 use meerkat_core::time_compat::SystemTime;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -5551,10 +5553,13 @@ impl MobActor {
     /// 5. Append `MembersWired` event and project it through the roster.
     ///    Append failure also rolls back trust + DSL wire.
     ///
-    /// External peer targets ([`PeerTarget::External`]) are routed to
-    /// [`Self::handle_wire_external`], whose descriptor-bearing trust edge is
-    /// admitted by `MobMachineInput::WireExternalPeer` instead of being
-    /// coerced into a member `WiringEdge`.
+    /// External peer targets are routed to [`Self::handle_wire_external`],
+    /// whose descriptor-bearing trust edge is admitted by
+    /// `MobMachineInput::WireExternalPeer` instead of being coerced into a
+    /// member `WiringEdge`. Public surfaces should pass
+    /// [`PeerTarget::ExternalBinding`], which this actor resolves before trust
+    /// installation; pre-resolved [`PeerTarget::External`] is retained for
+    /// internal callers and tests.
     async fn handle_wire(
         &mut self,
         local: MeerkatId,
@@ -5562,6 +5567,15 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let peer_identity = match target {
             super::handle::PeerTarget::Local(id) => id,
+            super::handle::PeerTarget::ExternalName(name) => {
+                return Err(MobError::WiringError(format!(
+                    "wire external peer '{name}' requires external_binding"
+                )));
+            }
+            super::handle::PeerTarget::ExternalBinding(binding) => {
+                let descriptor = Self::trusted_peer_descriptor_from_external_binding(binding)?;
+                return self.handle_wire_external(local, descriptor).await;
+            }
             super::handle::PeerTarget::External(descriptor) => {
                 return self.handle_wire_external(local, descriptor).await;
             }
@@ -6203,13 +6217,18 @@ impl MobActor {
                 }
                 id
             }
+            super::handle::PeerTarget::ExternalName(peer_name) => {
+                return self.handle_unwire_external(local, peer_name, None).await;
+            }
+            super::handle::PeerTarget::ExternalBinding(binding) => {
+                let descriptor = Self::trusted_peer_descriptor_from_external_binding(binding)?;
+                let peer_name = descriptor.name.clone();
+                return self
+                    .handle_unwire_external(local, peer_name, Some(descriptor))
+                    .await;
+            }
             super::handle::PeerTarget::External(descriptor) => {
-                let peer_name = meerkat_core::comms::PeerName::new(descriptor.name.clone())
-                    .map_err(|error| {
-                        MobError::WiringError(format!(
-                            "unwire external peer has invalid peer name: {error}",
-                        ))
-                    })?;
+                let peer_name = descriptor.name.clone();
                 return self
                     .handle_unwire_external(local, peer_name, Some(descriptor))
                     .await;
@@ -6769,6 +6788,33 @@ impl MobActor {
                 );
             }
         }
+    }
+
+    fn trusted_peer_descriptor_from_external_binding(
+        binding: super::handle::ExternalPeerBindingSpec,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        let name = PeerName::new(binding.name.clone()).map_err(|error| {
+            MobError::WiringError(format!(
+                "external binding has invalid peer name '{}': {error}",
+                binding.name
+            ))
+        })?;
+        let resolved = binding
+            .identity
+            .resolve()
+            .map_err(|error| MobError::WiringError(error.to_string()))?;
+        let address = PeerAddress::parse(&binding.address).map_err(|error| {
+            MobError::WiringError(format!(
+                "external binding has invalid peer address '{}': {error}",
+                binding.address
+            ))
+        })?;
+        Ok(TrustedPeerDescriptor {
+            name,
+            peer_id: resolved.peer_id,
+            address,
+            pubkey: resolved.pubkey,
+        })
     }
 
     /// Wire a local member to an external trusted peer.

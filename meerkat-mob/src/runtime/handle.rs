@@ -684,8 +684,39 @@ pub struct HelperResult {
 pub enum PeerTarget {
     /// Another member in the same mob roster.
     Local(AgentIdentity),
+    /// External peer handle for operations that only need the mob-owned edge.
+    ExternalName(meerkat_core::comms::PeerName),
+    /// A typed external binding request resolved by the mob actor before trust install.
+    ExternalBinding(ExternalPeerBindingSpec),
     /// A trusted peer that lives outside the local mob roster.
     External(TrustedPeerDescriptor),
+}
+
+/// Typed request to bind a local member to an external peer.
+///
+/// App-facing surfaces provide this shape instead of comms-owned `peer_id` /
+/// `pubkey` atoms. The mob actor resolves the evidence into a
+/// `TrustedPeerDescriptor` immediately before the machine admits the external
+/// edge and before any trust is installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalPeerBindingSpec {
+    pub name: String,
+    pub address: String,
+    pub identity: meerkat_contracts::WireTrustedPeerIdentity,
+}
+
+impl ExternalPeerBindingSpec {
+    pub fn new(
+        name: impl Into<String>,
+        address: impl Into<String>,
+        identity: meerkat_contracts::WireTrustedPeerIdentity,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            address: address.into(),
+            identity,
+        }
+    }
 }
 
 // DELETE_ME A5 DSL-schema migration: `MeerkatId` is now a type alias

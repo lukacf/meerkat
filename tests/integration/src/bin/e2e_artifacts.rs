@@ -3,17 +3,18 @@ use std::path::PathBuf;
 
 use meerkat_integration_tests::e2e_lanes::{
     E2eSelection, Lane, materialize_local_cargo_plan, plan_for_selection,
-    smoke_test_filter_for_selection,
+    run_prebuilt_smoke_selection, smoke_test_filter_for_selection,
 };
 
-fn main() {
-    if let Err(error) = run() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = run().await {
         eprintln!("error: {error}");
         std::process::exit(2);
     }
 }
 
-fn run() -> Result<(), String> {
+async fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1).collect::<VecDeque<_>>();
     let Some(command) = args.pop_front() else {
         usage();
@@ -51,6 +52,11 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        "run-smoke" => {
+            let (manifest, rest) = parse_manifest_arg(args, "run-smoke")?;
+            let selection = parse_selection(rest)?;
+            run_prebuilt_smoke_selection(&selection, &manifest).await
+        }
         "smoke-test-filter" => {
             let selection = parse_selection(args)?;
             if let Some(filter) = smoke_test_filter_for_selection(&selection)? {
@@ -67,6 +73,23 @@ fn run() -> Result<(), String> {
             Err(format!("unknown command '{command}'"))
         }
     }
+}
+
+fn parse_manifest_arg(
+    mut args: VecDeque<String>,
+    command: &str,
+) -> Result<(PathBuf, VecDeque<String>), String> {
+    let mut manifest = None;
+    let mut rest = VecDeque::new();
+    while let Some(arg) = args.pop_front() {
+        if arg == "--manifest" {
+            manifest = args.pop_front().map(PathBuf::from);
+        } else {
+            rest.push_back(arg);
+        }
+    }
+    let manifest = manifest.ok_or_else(|| format!("{command} requires --manifest <path>"))?;
+    Ok((manifest, rest))
 }
 
 fn parse_selection(mut args: VecDeque<String>) -> Result<E2eSelection, String> {
@@ -108,6 +131,6 @@ fn parse_selection(mut args: VecDeque<String>) -> Result<E2eSelection, String> {
 
 fn usage() {
     eprintln!(
-        "usage: e2e_artifacts <plan|materialize|smoke-test-filter> [--lane smoke|--scenario N|--suite NAME|--test NAME] [--manifest PATH]"
+        "usage: e2e_artifacts <plan|materialize|run-smoke|smoke-test-filter> [--lane smoke|--scenario N|--suite NAME|--test NAME] [--manifest PATH]"
     );
 }

@@ -104,4 +104,7 @@ fi
   "${selection_args[@]}"
 
 export MEERKAT_E2E_EXECUTION_MODE=prebuilt
-exec "${root}/scripts/repo-cargo" "${test_args[@]}"
+exec "${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts -- \
+  run-smoke \
+  --manifest "${MEERKAT_E2E_ARTIFACT_MANIFEST}" \
+  "${selection_args[@]}"

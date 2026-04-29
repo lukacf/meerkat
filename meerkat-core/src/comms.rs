@@ -27,12 +27,22 @@ pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
 /// (per the Wave-B V5 dogma note), but their `PeerId`s never collide — the
 /// underlying UUID is globally unique.
 ///
-/// Constructed either freshly (`PeerId::new`) for a peer minted locally,
-/// or parsed from a hyphenated UUID (`PeerId::parse`) when we've been given
-/// an identity over the wire.
+/// Constructed freshly (`PeerId::new`) for a peer minted locally, parsed
+/// from a hyphenated UUID (`PeerId::parse`) when we've been given an identity
+/// over the wire, or derived from a 32-byte Ed25519 public key when a transport
+/// still authenticates by raw signing key.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PeerId(#[cfg_attr(feature = "schema", schemars(with = "String"))] pub Uuid);
+
+/// UUIDv5 namespace for deriving [`PeerId`] from an Ed25519 signing pubkey.
+///
+/// `PeerId` is the canonical runtime routing key: both the router and the
+/// trust store index peers by `PeerId`, never by display name. The derivation
+/// is a content hash of the 32-byte public key so a given key always resolves
+/// to the same `PeerId` across runtimes.
+const PEER_ID_ED25519_PUBKEY_NAMESPACE: Uuid =
+    Uuid::from_u128(0x6d65_6572_6b61_7450_6565_7249_6430_0001);
 
 impl PeerId {
     /// Mint a new `PeerId` with a fresh UUID v7 (time-ordered).
@@ -53,6 +63,11 @@ impl PeerId {
                 input: s.to_string(),
                 source,
             })
+    }
+
+    /// Derive the canonical routing id for a 32-byte Ed25519 public key.
+    pub fn from_ed25519_pubkey(pubkey: &[u8; 32]) -> Self {
+        Self(Uuid::new_v5(&PEER_ID_ED25519_PUBKEY_NAMESPACE, pubkey))
     }
 
     /// Hyphenated UUID string form.

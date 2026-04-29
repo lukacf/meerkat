@@ -2,26 +2,12 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use meerkat_core::comms::PeerId;
 use rand_core::OsRng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use thiserror::Error;
 use zeroize::Zeroize;
-
-/// UUIDv5 namespace for deriving [`PeerId`] from a signing pubkey.
-///
-/// `PeerId` is the canonical runtime routing key: both the router and the
-/// trust store index peers by `PeerId`, never by display name. The
-/// derivation is a content hash (UUIDv5) of the 32-byte Ed25519 pubkey
-/// so a given pubkey always resolves to the same `PeerId` across runtimes.
-///
-/// Kept in `identity.rs` (next to [`PubKey`]) so the namespace travels
-/// with the type it hashes. Router and runtime helpers call back into
-/// [`PubKey::to_peer_id`] rather than duplicating this constant.
-const PEER_ID_UUID_NAMESPACE: uuid::Uuid =
-    uuid::Uuid::from_u128(0x6d65_6572_6b61_7450_6565_7249_6430_0001);
 
 /// Errors that can occur during identity operations.
 #[derive(Debug, Error)]
@@ -110,19 +96,20 @@ impl PubKey {
         &self.0
     }
 
-    /// Derive the canonical [`PeerId`] for this signing pubkey (typed).
+    /// Derive the canonical [`meerkat_core::comms::PeerId`] for this signing
+    /// pubkey (typed).
     ///
     /// The derivation is a UUIDv5 hash of the 32-byte pubkey under
-    /// [`PEER_ID_UUID_NAMESPACE`]. A given pubkey always maps to the
-    /// same `PeerId`, so the router and trust store can index by
+    /// the core-owned peer-id namespace. A given pubkey always maps to the
+    /// same peer id, so the router and trust store can index by
     /// `PeerId` without handing around the raw pubkey everywhere.
     ///
     /// Note: this is a one-way derivation — `PeerId` is a content hash,
     /// not a reversible encoding. To round-trip the pubkey bytes through
     /// a string (for CBOR/JSON carriers, bootstrap tokens, etc.) use
     /// [`Self::to_pubkey_string`] / [`Self::from_pubkey_string`].
-    pub fn to_peer_id(&self) -> PeerId {
-        PeerId::from_uuid(uuid::Uuid::new_v5(&PEER_ID_UUID_NAMESPACE, &self.0))
+    pub fn to_peer_id(&self) -> meerkat_core::comms::PeerId {
+        meerkat_core::comms::PeerId::from_ed25519_pubkey(&self.0)
     }
 
     /// Encode this pubkey as `"ed25519:<base64>"`.
@@ -282,6 +269,7 @@ impl Keypair {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_core::comms::PeerId;
     use std::mem::size_of;
     use tempfile::TempDir;
 

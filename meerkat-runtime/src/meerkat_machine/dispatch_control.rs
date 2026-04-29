@@ -178,7 +178,7 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Stopped) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                let previous_dsl_state = if state == RuntimeState::Retired {
+                let staged_dsl = if state == RuntimeState::Retired {
                     // The DSL Retire transition is intentionally not
                     // self-looping. Command-level idempotence belongs here,
                     // after reading the DSL-authoritative phase, while the
@@ -186,7 +186,7 @@ impl MeerkatMachine {
                     None
                 } else {
                     Some(
-                        self.stage_session_dsl_input(
+                        self.stage_session_dsl_transition(
                             &session_id,
                             crate::meerkat_machine::dsl::MeerkatMachineInput::Retire {
                                 session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
@@ -205,8 +205,8 @@ impl MeerkatMachine {
                     Ok(report) => report,
                     Err(err) => {
                         drop(drv);
-                        if let Some(previous_dsl_state) = previous_dsl_state {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        if let Some(staged_dsl) = staged_dsl {
+                            self.restore_session_dsl_state(&session_id, staged_dsl.previous_state)
                                 .await;
                         }
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
@@ -214,10 +214,30 @@ impl MeerkatMachine {
                 };
                 drop(drv);
 
+                let mut commit_error = None;
+                if let Some(staged_dsl) = staged_dsl
+                    && let Err(reason) = self
+                        .commit_session_dsl_transition_preserving_committed_state(
+                            &session_id,
+                            staged_dsl,
+                            "Retire",
+                        )
+                        .await
+                {
+                    driver
+                        .lock()
+                        .await
+                        .sync_control_projection_from_dsl_authority();
+                    commit_error = Some(reason);
+                }
+
                 if report.inputs_pending_drain > 0 {
                     if let Some(ref tx) = wake_tx
                         && tx.send(()).await.is_ok()
                     {
+                        if let Some(reason) = commit_error {
+                            return Err(RuntimeControlPlaneError::Internal(reason));
+                        }
                         return Ok(MeerkatMachineCommandResult::RetireReport(report));
                     }
 
@@ -231,6 +251,9 @@ impl MeerkatMachine {
                     comp.resolve_all_terminated("retired without runtime loop");
                     report.inputs_abandoned += abandoned;
                     report.inputs_pending_drain = 0;
+                }
+                if let Some(reason) = commit_error {
+                    return Err(RuntimeControlPlaneError::Internal(reason));
                 }
                 Ok(MeerkatMachineCommandResult::RetireReport(report))
             }
@@ -433,9 +456,13 @@ impl MeerkatMachine {
                 };
                 drop(drv);
 
-                self.apply_session_dsl_input(&session_id, destroy_input, "Destroy")
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                let apply_result = self
+                    .apply_session_dsl_input_preserving_committed_state(
+                        &session_id,
+                        destroy_input,
+                        "Destroy",
+                    )
+                    .await;
                 driver
                     .lock()
                     .await
@@ -443,6 +470,9 @@ impl MeerkatMachine {
 
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime destroyed");
+                if let Err(reason) = apply_result {
+                    return Err(RuntimeControlPlaneError::Internal(reason));
+                }
                 Ok(MeerkatMachineCommandResult::DestroyReport(report))
             }
             MeerkatMachineCommand::RuntimeState { runtime_id } => {

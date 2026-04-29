@@ -59,13 +59,28 @@ impl MeerkatMachine {
                 generation: crate::meerkat_machine::dsl::Generation::from(0),
                 session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
             };
-            let _ = self
-                .stage_session_dsl_input(&session_id, dsl_input, "PrepareBindings")
+            let staged = self
+                .stage_session_dsl_transition(&session_id, dsl_input, "PrepareBindings")
                 .await
                 .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
             {
                 let mut driver = driver_handle.lock().await;
-                machine_prepare_bindings_projection(&mut driver)?;
+                if let Err(err) = machine_prepare_bindings_projection(&mut driver) {
+                    drop(driver);
+                    self.restore_session_dsl_state(&session_id, staged.previous_state)
+                        .await;
+                    return Err(err);
+                }
+            }
+            if let Err(reason) = self
+                .commit_session_dsl_transition(&session_id, staged, "PrepareBindings")
+                .await
+            {
+                driver_handle
+                    .lock()
+                    .await
+                    .sync_control_projection_from_dsl_authority();
+                return Err(RuntimeDriverError::Internal(reason));
             }
         }
         // Share ONE HandleDslAuthority across all 5 handles so their

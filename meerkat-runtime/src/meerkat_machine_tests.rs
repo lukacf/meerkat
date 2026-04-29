@@ -53,6 +53,121 @@ fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
     Arc::new(meerkat_store::MemoryBlobStore::new())
 }
 
+#[derive(Default)]
+struct RecordingMeerkatSignalSurface {
+    log: tokio::sync::Mutex<
+        Vec<(
+            meerkat_machine_schema::identity::SignalVariantId,
+            Vec<(
+                meerkat_machine_schema::identity::FieldId,
+                crate::composition::OwnedFieldValue,
+            )>,
+        )>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl crate::composition::SignalConsumerSurface for RecordingMeerkatSignalSurface {
+    fn instance_id(&self) -> &meerkat_machine_schema::identity::MachineInstanceId {
+        static ID: std::sync::OnceLock<meerkat_machine_schema::identity::MachineInstanceId> =
+            std::sync::OnceLock::new();
+        ID.get_or_init(|| {
+            meerkat_machine_schema::identity::MachineInstanceId::parse("mob")
+                .expect("canonical instance id")
+        })
+    }
+
+    async fn receive_signal(
+        &self,
+        variant: meerkat_machine_schema::identity::SignalVariantId,
+        projected_fields: Vec<(
+            meerkat_machine_schema::identity::FieldId,
+            crate::composition::OwnedFieldValue,
+        )>,
+    ) -> Result<(), String> {
+        self.log.lock().await.push((variant, projected_fields));
+        Ok(())
+    }
+}
+
+struct RejectingMeerkatSignalSurface;
+
+#[async_trait::async_trait]
+impl crate::composition::SignalConsumerSurface for RejectingMeerkatSignalSurface {
+    fn instance_id(&self) -> &meerkat_machine_schema::identity::MachineInstanceId {
+        static ID: std::sync::OnceLock<meerkat_machine_schema::identity::MachineInstanceId> =
+            std::sync::OnceLock::new();
+        ID.get_or_init(|| {
+            meerkat_machine_schema::identity::MachineInstanceId::parse("mob")
+                .expect("canonical instance id")
+        })
+    }
+
+    async fn receive_signal(
+        &self,
+        _variant: meerkat_machine_schema::identity::SignalVariantId,
+        _projected_fields: Vec<(
+            meerkat_machine_schema::identity::FieldId,
+            crate::composition::OwnedFieldValue,
+        )>,
+    ) -> Result<(), String> {
+        Err("injected signal commit failure".to_string())
+    }
+}
+
+fn prepare_bindings_input(
+    session_id: &SessionId,
+    runtime_id: &str,
+    fence_token: u64,
+) -> dsl::MeerkatMachineInput {
+    dsl::MeerkatMachineInput::PrepareBindings {
+        agent_runtime_id: dsl::AgentRuntimeId::from(runtime_id.to_string()),
+        fence_token: dsl::FenceToken(fence_token),
+        generation: dsl::Generation(0),
+        session_id: dsl::SessionId::from_domain(session_id),
+    }
+}
+
+fn install_recording_meerkat_signal_dispatcher(
+    machine: &MeerkatMachine,
+) -> Arc<RecordingMeerkatSignalSurface> {
+    let signal_surface = Arc::new(RecordingMeerkatSignalSurface::default());
+    let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+    let table = crate::composition::RouteTable::from_schema(&schema).expect("catalog routes");
+    let dispatcher: crate::composition::CatalogCompositionSignalDispatcher<
+        crate::meerkat_machine::composition::MeerkatSeamSignal,
+    > = crate::composition::CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
+        .with_consumer(signal_surface.clone());
+    machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+    signal_surface
+}
+
+fn install_rejecting_meerkat_signal_dispatcher(machine: &MeerkatMachine) {
+    let signal_surface = Arc::new(RejectingMeerkatSignalSurface);
+    let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+    let table = crate::composition::RouteTable::from_schema(&schema).expect("catalog routes");
+    let dispatcher: crate::composition::CatalogCompositionSignalDispatcher<
+        crate::meerkat_machine::composition::MeerkatSeamSignal,
+    > = crate::composition::CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
+        .with_consumer(signal_surface);
+    machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+}
+
+async fn assert_no_runtime_binding(machine: &MeerkatMachine, session_id: &SessionId) {
+    let state = machine
+        .session_dsl_state(session_id)
+        .await
+        .expect("session DSL state");
+    assert!(
+        state.active_runtime_id.is_none(),
+        "rollback must not leave a staged active_runtime_id"
+    );
+    assert!(
+        state.active_fence_token.is_none(),
+        "rollback must not leave a staged active_fence_token"
+    );
+}
+
 #[test]
 fn legacy_run_handler_does_not_restore_dsl_snapshots_by_hand() {
     let source = include_str!("meerkat_machine/dispatch_ingress.rs");
@@ -69,6 +184,223 @@ fn legacy_run_handler_does_not_restore_dsl_snapshots_by_hand() {
         !legacy_run_handler.contains("restore_session_dsl_state"),
         "legacy run must not manually restore DSL authority",
     );
+}
+
+#[tokio::test]
+async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_apply() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+
+    let previous_state = machine
+        .stage_session_dsl_input(
+            &session_id,
+            prepare_bindings_input(&session_id, "rt-provisional", 7),
+            "PrepareBindings(test provisional)",
+        )
+        .await
+        .expect("provisional stage");
+
+    assert!(
+        signal_surface.log.lock().await.is_empty(),
+        "provisional DSL effects must not be observable before commit"
+    );
+
+    machine
+        .restore_session_dsl_state(&session_id, previous_state)
+        .await;
+
+    let (_, effects) = machine
+        .apply_session_dsl_input(
+            &session_id,
+            prepare_bindings_input(&session_id, "rt-authoritative", 11),
+            "PrepareBindings(test authoritative)",
+        )
+        .await
+        .expect("authoritative apply");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, dsl::MeerkatMachineEffect::RuntimeBound { .. }))
+    );
+
+    let log = signal_surface.log.lock().await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0.as_str(), "ObserveRuntimeReady");
+    assert_eq!(log[0].1[0].0.as_str(), "agent_runtime_id");
+    assert!(
+        matches!(&log[0].1[0].1, crate::composition::OwnedFieldValue::Str(value) if value == "rt-authoritative")
+    );
+}
+
+#[tokio::test]
+async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_state() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+
+    let previous_state = machine
+        .stage_session_dsl_input(
+            &session_id,
+            prepare_bindings_input(&session_id, "rt-rolled-back", 17),
+            "PrepareBindings(test rollback)",
+        )
+        .await
+        .expect("provisional stage");
+    machine
+        .restore_session_dsl_state(&session_id, previous_state)
+        .await;
+
+    assert!(
+        signal_surface.log.lock().await.is_empty(),
+        "rolled-back provisional effects must not leak routed signals"
+    );
+    assert_no_runtime_binding(&machine, &session_id).await;
+}
+
+#[tokio::test]
+async fn authoritative_dsl_apply_rolls_back_state_when_effect_dispatch_fails() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    install_rejecting_meerkat_signal_dispatcher(&machine);
+
+    let err = match machine
+        .apply_session_dsl_input(
+            &session_id,
+            prepare_bindings_input(&session_id, "rt-dispatch-fails", 23),
+            "PrepareBindings(test dispatch failure)",
+        )
+        .await
+    {
+        Ok(_) => panic!("dispatch failure should reject authoritative apply"),
+        Err(err) => err,
+    };
+    assert!(err.contains("injected signal commit failure"), "{err}");
+    assert_no_runtime_binding(&machine, &session_id).await;
+}
+
+#[tokio::test]
+async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatch_fails() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare bindings before destroy");
+    install_rejecting_meerkat_signal_dispatcher(&machine);
+
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let err = crate::traits::RuntimeControlPlane::destroy(&machine, &runtime_id)
+        .await
+        .expect_err("signal dispatch failure should surface");
+    assert!(
+        err.to_string().contains("injected signal commit failure"),
+        "{err}"
+    );
+    assert_eq!(
+        machine.existing_session_runtime_state(&session_id).await,
+        Some(RuntimeState::Destroyed),
+        "irreversible shell destroy must not roll DSL authority back to an earlier phase"
+    );
+}
+
+#[tokio::test]
+async fn persistent_retire_keeps_committed_dsl_state_when_runtime_retired_signal_dispatch_fails() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    install_rejecting_meerkat_signal_dispatcher(&machine);
+
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let err = crate::traits::RuntimeControlPlane::retire(&machine, &runtime_id)
+        .await
+        .expect_err("signal dispatch failure should surface");
+    assert!(
+        err.to_string().contains("injected signal commit failure"),
+        "{err}"
+    );
+    assert_eq!(
+        machine.existing_session_runtime_state(&session_id).await,
+        Some(RuntimeState::Retired),
+        "durably committed retire must not roll live DSL authority back to an earlier phase"
+    );
+    assert_eq!(
+        crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load persisted runtime state"),
+        Some(RuntimeState::Retired),
+        "persistent retire shell commit remains authoritative after routed-effect failure"
+    );
+
+    let recovered = MeerkatMachine::persistent(
+        store as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    recovered.register_session(session_id.clone()).await;
+    assert_eq!(
+        recovered.existing_session_runtime_state(&session_id).await,
+        Some(RuntimeState::Retired),
+        "cold restart must agree with the live process after failed retire signal dispatch"
+    );
+}
+
+#[tokio::test]
+async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+
+    let bindings = machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare bindings commits");
+    assert_eq!(bindings.session_id, session_id);
+
+    let log = signal_surface.log.lock().await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].0.as_str(), "ObserveRuntimeReady");
+    assert_eq!(log[0].1[0].0.as_str(), "agent_runtime_id");
+    assert!(matches!(
+        &log[0].1[0].1,
+        crate::composition::OwnedFieldValue::Str(value) if value == &session_id.to_string()
+    ));
+}
+
+#[tokio::test]
+async fn rejected_provisional_dsl_transition_emits_no_routed_signal_or_state() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+
+    let err = machine
+        .stage_session_dsl_input(
+            &session_id,
+            dsl::MeerkatMachineInput::Commit {
+                input_id: dsl::InputId::from("missing-input"),
+                run_id: dsl::RunId::from("missing-run"),
+            },
+            "Commit(test rejected provisional)",
+        )
+        .await
+        .expect_err("commit is invalid outside Running");
+
+    assert!(
+        err.contains("no matching transition") || err.contains("guard rejected"),
+        "{err}"
+    );
+    assert!(
+        signal_surface.log.lock().await.is_empty(),
+        "rejected provisional transition must not publish routed signals"
+    );
+    assert_no_runtime_binding(&machine, &session_id).await;
 }
 
 fn finite_switch_request(

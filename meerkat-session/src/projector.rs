@@ -24,6 +24,13 @@ pub struct SessionProjector {
     output_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointState {
+    Valid(u64),
+    Missing,
+    Invalid,
+}
+
 impl SessionProjector {
     /// Create a new projector targeting the given output directory.
     pub fn new(output_dir: impl Into<PathBuf>) -> Self {
@@ -137,25 +144,32 @@ impl SessionProjector {
 
     /// Read the last checkpoint seq for a session (0 if no checkpoint).
     pub async fn read_checkpoint(&self, session_id: &SessionId) -> u64 {
+        match self.read_checkpoint_state(session_id).await {
+            CheckpointState::Valid(seq) => seq,
+            CheckpointState::Missing | CheckpointState::Invalid => 0,
+        }
+    }
+
+    async fn read_checkpoint_state(&self, session_id: &SessionId) -> CheckpointState {
         let path = self.session_dir(session_id).join("checkpoint");
         match tokio::fs::read_to_string(&path).await {
             Ok(s) => match s.trim().parse() {
-                Ok(seq) => seq,
+                Ok(seq) => CheckpointState::Valid(seq),
                 Err(err) => {
                     tracing::warn!(
                         checkpoint = ?path,
-                        "invalid checkpoint contents (defaulting to 0): {err}"
+                        "invalid checkpoint contents: {err}"
                     );
-                    0
+                    CheckpointState::Invalid
                 }
             },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => CheckpointState::Missing,
             Err(err) => {
                 tracing::warn!(
                     checkpoint = ?path,
-                    "failed to read checkpoint (defaulting to 0): {err}"
+                    "failed to read checkpoint: {err}"
                 );
-                0
+                CheckpointState::Invalid
             }
         }
     }
@@ -174,11 +188,7 @@ impl SessionProjector {
         // Remove derived files that may no longer be rewritten by the replay.
         for file_name in ["events.jsonl", "summary.txt", "checkpoint"] {
             let path = dir.join(file_name);
-            match tokio::fs::remove_file(&path).await {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(ProjectionError::Io(err)),
-            }
+            remove_derived_path(&path).await?;
         }
 
         // Replay from seq 1, replacing any previous derived output.
@@ -192,8 +202,39 @@ impl SessionProjector {
         event_store: &E,
         session_id: &SessionId,
     ) -> Result<u64, ProjectionError> {
-        let checkpoint = self.read_checkpoint(session_id).await;
-        self.project(event_store, session_id, checkpoint + 1).await
+        match self.read_checkpoint_state(session_id).await {
+            CheckpointState::Valid(checkpoint) => {
+                self.project(event_store, session_id, checkpoint + 1).await
+            }
+            CheckpointState::Missing => self.project(event_store, session_id, 1).await,
+            CheckpointState::Invalid => self.replay(event_store, session_id).await,
+        }
+    }
+}
+
+async fn remove_derived_path(path: &Path) -> Result<(), ProjectionError> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => {
+            tokio::fs::remove_dir_all(path)
+                .await
+                .map_err(ProjectionError::Io)
+        }
+        Err(err) => {
+            // macOS reports remove_file(directory) as PermissionDenied.
+            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                match tokio::fs::metadata(path).await {
+                    Ok(metadata) if metadata.is_dir() => {
+                        return tokio::fs::remove_dir_all(path)
+                            .await
+                            .map_err(ProjectionError::Io);
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+            Err(ProjectionError::Io(err))
+        }
     }
 }
 
@@ -400,5 +441,76 @@ mod tests {
             std::fs::read_to_string(projector.session_dir(&sid).join("events.jsonl")).unwrap();
         let lines: Vec<&str> = events_content.trim().lines().collect();
         assert_eq!(lines.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_projector_resume_rebuilds_after_invalid_checkpoint_without_duplicates() {
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first".to_string(),
+                },
+            ],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+
+        let session_dir = projector.session_dir(&sid);
+        tokio::fs::write(session_dir.join("checkpoint"), b"not-a-seq")
+            .await
+            .unwrap();
+        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+
+        let seq = projector.resume(&store, &sid).await.unwrap();
+        assert_eq!(seq, 3);
+
+        let events_content = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = events_content.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        let checkpoint = std::fs::read_to_string(session_dir.join("checkpoint")).unwrap();
+        assert_eq!(checkpoint.trim(), "3");
+    }
+
+    #[tokio::test]
+    async fn test_projector_resume_rebuilds_after_unreadable_checkpoint_without_duplicates() {
+        let dir = TempDir::new().unwrap();
+        let projector = SessionProjector::new(dir.path().join(".rkat"));
+        let store = MemEventStore::new();
+        let sid = SessionId::new();
+
+        store.add_events(
+            &sid,
+            &[
+                AgentEvent::TurnStarted { turn_number: 0 },
+                AgentEvent::TextComplete {
+                    content: "first".to_string(),
+                },
+            ],
+        );
+        projector.project(&store, &sid, 1).await.unwrap();
+
+        let session_dir = projector.session_dir(&sid);
+        let checkpoint_path = session_dir.join("checkpoint");
+        tokio::fs::remove_file(&checkpoint_path).await.unwrap();
+        tokio::fs::create_dir(&checkpoint_path).await.unwrap();
+        store.add_events(&sid, &[AgentEvent::TurnStarted { turn_number: 1 }]);
+
+        let seq = projector.resume(&store, &sid).await.unwrap();
+        assert_eq!(seq, 3);
+
+        let events_content = std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap();
+        let lines: Vec<&str> = events_content.trim().lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        assert!(checkpoint_path.is_file());
+        let checkpoint = std::fs::read_to_string(checkpoint_path).unwrap();
+        assert_eq!(checkpoint.trim(), "3");
     }
 }

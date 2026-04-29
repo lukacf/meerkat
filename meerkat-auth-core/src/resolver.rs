@@ -2,9 +2,9 @@
 //!
 //! Plan §6.11 closure: resolvers return typed credential material that
 //! provider runtimes wrap into real leases. Simple-secret paths cover
-//! `InlineSecret` / `Env` / `ExternalResolver` (via the typed
+//! `InlineSecret` / `Env` / `ExternalResolver` (only via the typed
 //! `ResolvedAuthEnvelope::InlineSecret` variant — dogma §5 closure
-//! replaced the `"__secret__"` synthetic-header-key convention) for
+//! rejects the `"__secret__"` synthetic-header-key convention) for
 //! `api_key` / `static_bearer` auth methods. External-authorizer
 //! resolution now returns typed auth material rather than `()`, so
 //! provider runtimes no longer end in placeholder empty leases.
@@ -324,26 +324,21 @@ pub async fn resolve_external_authorizer(
 
 /// Extract a simple secret from a resolved envelope. Dogma §5:
 /// `ResolvedAuthEnvelope::InlineSecret` is the typed canonical
-/// variant. The legacy `StaticHeaders` shape is still accepted
-/// transitively — a single header maps to the secret — but external
-/// resolvers should produce the typed variant directly.
+/// variant. `StaticHeaders` is intentionally rejected on
+/// api_key/static_bearer paths so header material cannot become an
+/// implicit secret shape.
 fn extract_secret_from_envelope(
     envelope: ResolvedAuthEnvelope,
 ) -> Result<String, ProviderAuthError> {
     match envelope {
         ResolvedAuthEnvelope::InlineSecret { secret, .. } => Ok(secret),
-        ResolvedAuthEnvelope::StaticHeaders { headers, .. } => {
-            if let [(_, value)] = headers.as_slice() {
-                Ok(value.clone())
-            } else {
-                Err(ProviderAuthError::SourceResolutionFailed(
-                    "external resolver returned StaticHeaders with \
-                     multiple entries; api_key/static_bearer path \
-                     requires InlineSecret or a single-entry \
-                     StaticHeaders envelope"
-                        .into(),
-                ))
-            }
+        ResolvedAuthEnvelope::StaticHeaders { .. } => {
+            Err(ProviderAuthError::SourceResolutionFailed(
+                "external resolver returned StaticHeaders envelope; \
+                 api_key/static_bearer path requires InlineSecret, \
+                 or use external_authorizer for header material"
+                    .into(),
+            ))
         }
         ResolvedAuthEnvelope::DynamicAuthorizer { .. } => {
             Err(ProviderAuthError::SourceResolutionFailed(
@@ -464,18 +459,17 @@ mod tests {
     }
 
     #[test]
-    fn extract_secret_single_header_legacy() {
-        // Back-compat: a single-header StaticHeaders envelope is still
-        // accepted. Multi-header envelopes (which previously carried
-        // the `__secret__` key alongside other wire headers) are an
-        // error — external resolvers should use the typed InlineSecret
-        // variant.
+    fn extract_secret_static_headers_errors_for_simple_secret() {
+        // Simple-secret resolvers fail closed: StaticHeaders are only
+        // valid for external_authorizer leases, not as an implicit
+        // api_key/static_bearer secret shape.
         let env = ResolvedAuthEnvelope::StaticHeaders {
             headers: vec![("Authorization".into(), "Bearer sk-y".into())],
             metadata: Default::default(),
             expires_at: None,
         };
-        assert_eq!(extract_secret_from_envelope(env).unwrap(), "Bearer sk-y");
+        let err = extract_secret_from_envelope(env).unwrap_err();
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
     }
 
     #[test]
@@ -571,6 +565,46 @@ mod tests {
             metadata_defaults: Default::default(),
         });
         binding
+    }
+
+    struct StaticEnvelopeResolver(ResolvedAuthEnvelope);
+
+    #[async_trait::async_trait]
+    impl meerkat_llm_core::provider_runtime::registry::ExternalAuthResolverHandle
+        for StaticEnvelopeResolver
+    {
+        async fn resolve(
+            &self,
+            _binding: &ValidatedBinding,
+        ) -> Result<ResolvedAuthEnvelope, AuthError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn simple_secret_external_static_headers_fails_closed() {
+        let binding = simple_secret_binding(
+            CredentialSourceSpec::ExternalResolver {
+                handle: "host".into(),
+            },
+            "api_key",
+        );
+        let env = ResolverEnvironment::testing().with_external_resolver(
+            "host",
+            Arc::new(StaticEnvelopeResolver(
+                ResolvedAuthEnvelope::StaticHeaders {
+                    headers: vec![("Authorization".into(), "Bearer sk-y".into())],
+                    metadata: Default::default(),
+                    expires_at: None,
+                },
+            )),
+        );
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderAuthError::SourceResolutionFailed(_)));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -194,7 +194,11 @@ case "${lane}" in
   e2e-smoke)
     smoke_filter="$(e2e_smoke_test_filter)"
     if [[ -n "${smoke_filter}" ]]; then
-      extra_args=(--test_arg="${smoke_filter}" "${extra_args[@]}")
+      if [[ "${#extra_args[@]}" -gt 0 ]]; then
+        extra_args=(--test_arg="${smoke_filter}" "${extra_args[@]}")
+      else
+        extra_args=(--test_arg="${smoke_filter}")
+      fi
     fi
     run_bazel_with_extra e2e-smoke-rbe
     ;;

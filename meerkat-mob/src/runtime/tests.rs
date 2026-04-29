@@ -5993,6 +5993,70 @@ async fn test_respawn_restores_local_wiring_from_mob_machine_edge() {
 }
 
 #[tokio::test]
+async fn test_respawn_ignores_machine_local_edge_to_retired_peer() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let left = MeerkatId::from("respawn-stale-left");
+    let right = MeerkatId::from("respawn-stale-right");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            left.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn left");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            right.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn right");
+    handle
+        .wire(
+            AgentIdentity::from(left.as_str()),
+            PeerTarget::Local(AgentIdentity::from(right.as_str())),
+        )
+        .await
+        .expect("wire peers");
+
+    handle
+        .retire(AgentIdentity::from(right.as_str()))
+        .await
+        .expect("retire old peer");
+    assert!(
+        handle
+            .get_member(&AgentIdentity::from(right.as_str()))
+            .await
+            .is_none(),
+        "test setup should remove the old peer from the live roster"
+    );
+
+    handle
+        .respawn(
+            AgentIdentity::from(left.as_str()),
+            Some("ignore stale peer".into()),
+        )
+        .await
+        .expect("respawn should ignore machine edge to retired peer");
+    let left_after = handle
+        .get_member(&AgentIdentity::from(left.as_str()))
+        .await
+        .expect("left after respawn");
+    assert!(
+        !left_after
+            .wired_to
+            .contains(&AgentIdentity::from(right.as_str())),
+        "stale machine edge to retired peer must not be restored into roster projection"
+    );
+}
+
+#[tokio::test]
 async fn test_respawn_archive_failure_returns_cleanup_ambiguous_report() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let member_id = MeerkatId::from("respawn-ambiguous");

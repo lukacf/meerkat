@@ -6988,14 +6988,21 @@ impl MobActor {
 
         // 1. Snapshot all replacement inputs before retiring. Topology comes
         // from the MobMachine authority; the roster is only the read model
-        // that supplies profile/runtime binding details for the old member.
-        let restore_wiring = self.machine_restore_wiring_plan(&agent_identity)?;
+        // that supplies profile/runtime binding details for the old member and
+        // filters stale local edges whose peers are no longer live.
         let snapshot = {
             let roster = self.roster.read().await;
             let entry = roster
                 .get(&agent_identity)
                 .cloned()
                 .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+            let live_local_identities = roster
+                .list()
+                .map(|entry| MeerkatId::from(entry.agent_identity.as_str()))
+                .collect::<HashSet<_>>();
+            let restore_wiring = self
+                .machine_restore_wiring_plan(&agent_identity, &live_local_identities)
+                .map_err(MobRespawnError::from)?;
             let binding = match &entry.member_ref {
                 crate::event::MemberRef::BackendPeer {
                     peer_id,
@@ -9501,6 +9508,7 @@ impl MobActor {
     fn machine_restore_wiring_plan(
         &self,
         agent_identity: &MeerkatId,
+        live_local_identities: &HashSet<MeerkatId>,
     ) -> Result<RestoreWiringPlan, MobError> {
         let local =
             mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
@@ -9514,7 +9522,10 @@ impl MobActor {
                 None
             };
             if let Some(peer) = peer {
-                local_peers.push(MeerkatId::from(peer.0.as_str()));
+                let peer_identity = MeerkatId::from(peer.0.as_str());
+                if live_local_identities.contains(&peer_identity) {
+                    local_peers.push(peer_identity);
+                }
             }
         }
         local_peers.sort();

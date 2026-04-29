@@ -26,10 +26,16 @@ use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
     MobRunStatus, StepLedgerEntry,
 };
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+
+/// Receiver for append-driven structural mob events.
+pub type MobEventReceiver = broadcast::Receiver<MobEvent>;
 
 /// Frame-aware atomic persistence operation required by the flow/frame store contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +198,13 @@ pub trait MobEventStore: Send + Sync {
 
     /// Return the latest persisted event cursor, or 0 when no events exist.
     async fn latest_cursor(&self) -> Result<u64, MobStoreError>;
+
+    /// Subscribe to structural events appended through this store after this call.
+    fn subscribe(&self) -> Result<MobEventReceiver, MobStoreError> {
+        Err(MobStoreError::Internal(
+            "mob event store does not support native event subscriptions".to_string(),
+        ))
+    }
 
     /// Delete all persisted events.
     async fn clear(&self) -> Result<(), MobStoreError>;

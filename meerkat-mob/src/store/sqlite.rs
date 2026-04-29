@@ -26,8 +26,10 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
+const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
 
 const CREATE_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS mob_events (
@@ -157,6 +159,7 @@ where
 #[derive(Debug, Clone)]
 pub struct SqliteMobStores {
     path: PathBuf,
+    event_tx: broadcast::Sender<MobEvent>,
 }
 
 impl SqliteMobStores {
@@ -164,12 +167,14 @@ impl SqliteMobStores {
         let path = path.as_ref().to_path_buf();
         // Validate the path works by opening and immediately closing.
         let _conn = open_connection(&path)?;
-        Ok(Self { path })
+        let (event_tx, _event_rx) = broadcast::channel(EVENT_SUBSCRIPTION_CHANNEL_CAPACITY);
+        Ok(Self { path, event_tx })
     }
 
     pub fn event_store(&self) -> SqliteMobEventStore {
         SqliteMobEventStore {
             path: self.path.clone(),
+            event_tx: self.event_tx.clone(),
         }
     }
 
@@ -459,6 +464,7 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
 #[derive(Clone)]
 pub struct SqliteMobEventStore {
     path: PathBuf,
+    event_tx: broadcast::Sender<MobEvent>,
 }
 
 impl std::fmt::Debug for SqliteMobEventStore {
@@ -475,7 +481,7 @@ const EVENT_CURSOR_KEY: &str = "next_cursor";
 impl MobEventStore for SqliteMobEventStore {
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         let path = self.path.clone();
-        run_sqlite_task(move || {
+        let stored = run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let cursor = next_event_cursor(&tx)?;
@@ -496,12 +502,14 @@ impl MobEventStore for SqliteMobEventStore {
             tx.commit().map_err(se)?;
             Ok(stored)
         })
-        .await
+        .await?;
+        let _ = self.event_tx.send(stored.clone());
+        Ok(stored)
     }
 
     async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         let path = self.path.clone();
-        run_sqlite_task(move || {
+        let stored = run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let mut cursor = get_next_cursor(&tx)?;
@@ -527,7 +535,11 @@ impl MobEventStore for SqliteMobEventStore {
             tx.commit().map_err(se)?;
             Ok(results)
         })
-        .await
+        .await?;
+        for event in &stored {
+            let _ = self.event_tx.send(event.clone());
+        }
+        Ok(stored)
     }
 
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
@@ -596,6 +608,10 @@ impl MobEventStore for SqliteMobEventStore {
             Ok(cursor.map_or(0, i64_to_cursor))
         })
         .await
+    }
+
+    fn subscribe(&self) -> Result<super::MobEventReceiver, MobStoreError> {
+        Ok(self.event_tx.subscribe())
     }
 
     async fn clear(&self) -> Result<(), MobStoreError> {
@@ -2052,6 +2068,30 @@ mod tests {
 
         let replayed = store.replay_all().await.unwrap();
         assert_eq!(replayed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_event_store_subscribe_receives_appended_events() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().event_store();
+        let mut rx = store.subscribe().expect("subscribe");
+
+        let stored = store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("subscription should receive appended event")
+            .expect("subscription should stay open");
+
+        assert_eq!(observed.cursor, stored.cursor);
+        assert!(matches!(observed.kind, MobEventKind::MobCompleted));
     }
 
     #[tokio::test]

@@ -23,12 +23,25 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
+
+const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
 
 /// In-memory event store for tests and ephemeral mobs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InMemoryMobEventStore {
     events: Arc<RwLock<Vec<MobEvent>>>,
+    event_tx: broadcast::Sender<MobEvent>,
+}
+
+impl Default for InMemoryMobEventStore {
+    fn default() -> Self {
+        let (event_tx, _event_rx) = broadcast::channel(EVENT_SUBSCRIPTION_CHANNEL_CAPACITY);
+        Self {
+            events: Arc::new(RwLock::new(Vec::new())),
+            event_tx,
+        }
+    }
 }
 
 impl InMemoryMobEventStore {
@@ -180,6 +193,8 @@ impl MobEventStore for InMemoryMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
+        drop(events);
+        let _ = self.event_tx.send(stored.clone());
         Ok(stored)
     }
 
@@ -196,6 +211,10 @@ impl MobEventStore for InMemoryMobEventStore {
             };
             events.push(stored.clone());
             results.push(stored);
+        }
+        drop(events);
+        for event in &results {
+            let _ = self.event_tx.send(event.clone());
         }
         Ok(results)
     }
@@ -221,6 +240,10 @@ impl MobEventStore for InMemoryMobEventStore {
             .await
             .last()
             .map_or(0, |event| event.cursor))
+    }
+
+    fn subscribe(&self) -> Result<super::MobEventReceiver, MobStoreError> {
+        Ok(self.event_tx.subscribe())
     }
 
     async fn clear(&self) -> Result<(), MobStoreError> {
@@ -966,6 +989,29 @@ mod tests {
             .unwrap();
         assert_eq!(removed, 1);
         assert_eq!(store.replay_all().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_event_store_subscribe_receives_appended_events() {
+        let store = InMemoryMobEventStore::new();
+        let mut rx = store.subscribe().expect("subscribe");
+
+        let stored = store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("subscription should receive appended event")
+            .expect("subscription should stay open");
+
+        assert_eq!(observed.cursor, stored.cursor);
+        assert!(matches!(observed.kind, MobEventKind::MobCompleted));
     }
 
     #[tokio::test]

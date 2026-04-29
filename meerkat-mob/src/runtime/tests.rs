@@ -1518,15 +1518,20 @@ impl MobSessionService for MockSessionService {
 
 struct FaultInjectedMobEventStore {
     events: RwLock<Vec<MobEvent>>,
+    event_tx: tokio::sync::broadcast::Sender<MobEvent>,
     fail_on_kind: RwLock<HashSet<&'static str>>,
+    poll_calls: AtomicU64,
     replay_calls: AtomicU64,
 }
 
 impl FaultInjectedMobEventStore {
     fn new() -> Self {
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4096);
         Self {
             events: RwLock::new(Vec::new()),
+            event_tx,
             fail_on_kind: RwLock::new(HashSet::new()),
+            poll_calls: AtomicU64::new(0),
             replay_calls: AtomicU64::new(0),
         }
     }
@@ -1537,6 +1542,10 @@ impl FaultInjectedMobEventStore {
 
     fn replay_calls(&self) -> u64 {
         self.replay_calls.load(Ordering::Relaxed)
+    }
+
+    fn poll_calls(&self) -> u64 {
+        self.poll_calls.load(Ordering::Relaxed)
     }
 
     fn kind_label(kind: &MobEventKind) -> &'static str {
@@ -1590,10 +1599,13 @@ impl MobEventStore for FaultInjectedMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
+        drop(events);
+        let _ = self.event_tx.send(stored.clone());
         Ok(stored)
     }
 
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
+        self.poll_calls.fetch_add(1, Ordering::Relaxed);
         let events = self.events.read().await;
         Ok(events
             .iter()
@@ -1615,6 +1627,10 @@ impl MobEventStore for FaultInjectedMobEventStore {
             .await
             .last()
             .map_or(0, |event| event.cursor))
+    }
+
+    fn subscribe(&self) -> Result<crate::store::MobEventReceiver, MobStoreError> {
+        Ok(self.event_tx.subscribe())
     }
 
     async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
@@ -19045,17 +19061,23 @@ async fn test_mob_events_view_latest_cursor_uses_store_cursor_without_replay() {
 
 #[tokio::test]
 async fn test_mob_events_view_subscribe_streams_structural_events() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    let poll_calls_before = events.poll_calls();
     let mut subscription = handle
         .events()
         .subscribe_with_config(MobEventsSubscriptionConfig {
-            poll_interval: Duration::from_millis(10),
             batch_limit: 16,
             channel_capacity: 16,
             ..MobEventsSubscriptionConfig::default()
         })
         .await
         .expect("subscribe to structural mob events");
+    assert_eq!(
+        events.poll_calls(),
+        poll_calls_before,
+        "live structural subscription should not poll to start at the latest cursor"
+    );
 
     handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
@@ -19075,6 +19097,11 @@ async fn test_mob_events_view_subscribe_streams_structural_events() {
     .expect("subscription stream should remain open until the spawn event arrives");
 
     assert!(observed.cursor > 0);
+    assert_eq!(
+        events.poll_calls(),
+        poll_calls_before,
+        "live structural subscription should receive append notifications without polling"
+    );
 }
 
 #[tokio::test]

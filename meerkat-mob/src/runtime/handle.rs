@@ -806,9 +806,7 @@ pub struct MobEventsView {
 pub struct MobEventsSubscriptionConfig {
     /// Cursor to start after. `None` starts at the current latest cursor.
     pub after_cursor: Option<u64>,
-    /// How often to check the structural event log for new events.
-    pub poll_interval: Duration,
-    /// Maximum number of events read from the store per poll tick.
+    /// Maximum number of persisted events read per catch-up batch.
     pub batch_limit: usize,
     /// Capacity of the output event channel.
     pub channel_capacity: usize,
@@ -818,7 +816,6 @@ impl Default for MobEventsSubscriptionConfig {
     fn default() -> Self {
         Self {
             after_cursor: None,
-            poll_interval: Duration::from_millis(500),
             batch_limit: 128,
             channel_capacity: 256,
         }
@@ -829,7 +826,7 @@ impl Default for MobEventsSubscriptionConfig {
 ///
 /// Receives persisted [`crate::event::MobEvent`] records from the mob event
 /// ledger. Drop the handle, or call [`Self::cancel`], to stop the background
-/// watcher task.
+/// forwarding task.
 pub struct MobEventsSubscription {
     pub event_rx: mpsc::Receiver<crate::event::MobEvent>,
     cancel: CancellationToken,
@@ -1059,28 +1056,27 @@ impl MobEventsView {
         .await
     }
 
-    /// Like [`Self::subscribe`] with explicit polling and channel settings.
+    /// Like [`Self::subscribe`] with explicit catch-up and channel settings.
     pub async fn subscribe_with_config(
         &self,
         config: MobEventsSubscriptionConfig,
     ) -> Result<MobEventsSubscription, MobError> {
         let config = MobEventsSubscriptionConfig {
-            poll_interval: if config.poll_interval.is_zero() {
-                Duration::from_millis(1)
-            } else {
-                config.poll_interval
-            },
             batch_limit: config.batch_limit.max(1),
             channel_capacity: config.channel_capacity.max(1),
             ..config
         };
+        let explicit_after_cursor = config.after_cursor.is_some();
+        let source_rx = self.handle.events.subscribe().map_err(MobError::from)?;
         let after_cursor = match config.after_cursor {
             Some(cursor) => cursor,
             None => self.latest_cursor().await?,
         };
         Ok(spawn_structural_event_subscription(
             self.clone(),
+            source_rx,
             after_cursor,
+            explicit_after_cursor,
             config,
         ))
     }
@@ -1137,7 +1133,9 @@ impl MobEventsView {
 #[allow(clippy::ignored_unit_patterns)]
 fn spawn_structural_event_subscription(
     events: MobEventsView,
+    mut source_rx: crate::store::MobEventReceiver,
     mut cursor: u64,
+    catch_up_on_start: bool,
     config: MobEventsSubscriptionConfig,
 ) -> MobEventsSubscription {
     let (event_tx, event_rx) = mpsc::channel(config.channel_capacity);
@@ -1145,29 +1143,50 @@ fn spawn_structural_event_subscription(
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
-        let mut poll_interval = tokio::time::interval(config.poll_interval);
-        #[cfg(not(target_arch = "wasm32"))]
-        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        if catch_up_on_start
+            && !catch_up_structural_events(&events, &event_tx, &mut cursor, config.batch_limit)
+                .await
+        {
+            return;
+        }
 
         loop {
             tokio::select! {
                 () = cancel_clone.cancelled() => break,
-                _ = poll_interval.tick() => {
-                    let batch = match events.poll(cursor, config.batch_limit).await {
-                        Ok(batch) => batch,
-                        Err(error) => {
-                            tracing::warn!(
-                                error = %error,
-                                "mob structural event subscription stopped after poll failure",
-                            );
-                            break;
+                received = source_rx.recv() => {
+                    match received {
+                        Ok(event) => {
+                            if event.cursor > cursor.saturating_add(1)
+                                && !catch_up_structural_events(
+                                    &events,
+                                    &event_tx,
+                                    &mut cursor,
+                                    config.batch_limit,
+                                )
+                                .await
+                            {
+                                return;
+                            }
+                            if event.cursor > cursor {
+                                cursor = event.cursor;
+                                if event_tx.send(event).await.is_err() {
+                                    return;
+                                }
+                            }
                         }
-                    };
-                    for event in batch {
-                        cursor = event.cursor;
-                        if event_tx.send(event).await.is_err() {
-                            return;
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            if !catch_up_structural_events(
+                                &events,
+                                &event_tx,
+                                &mut cursor,
+                                config.batch_limit,
+                            )
+                            .await
+                            {
+                                return;
+                            }
                         }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
@@ -1175,6 +1194,44 @@ fn spawn_structural_event_subscription(
     });
 
     MobEventsSubscription { event_rx, cancel }
+}
+
+async fn catch_up_structural_events(
+    events: &MobEventsView,
+    event_tx: &mpsc::Sender<crate::event::MobEvent>,
+    cursor: &mut u64,
+    batch_limit: usize,
+) -> bool {
+    loop {
+        let batch = match events.poll(*cursor, batch_limit).await {
+            Ok(batch) => batch,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "mob structural event subscription stopped after catch-up failure",
+                );
+                return false;
+            }
+        };
+        if batch.is_empty() {
+            return true;
+        }
+
+        let is_complete = batch.len() < batch_limit;
+        for event in batch {
+            if event.cursor <= *cursor {
+                continue;
+            }
+            *cursor = event.cursor;
+            if event_tx.send(event).await.is_err() {
+                return false;
+            }
+        }
+
+        if is_complete {
+            return true;
+        }
+    }
 }
 
 impl MobHandle {
@@ -1946,7 +2003,7 @@ impl MobHandle {
         })
     }
 
-    /// Access a read-only events view for polling/replay.
+    /// Access a read-only events view for polling, replay, and subscription.
     pub fn events(&self) -> MobEventsView {
         MobEventsView {
             handle: self.clone(),

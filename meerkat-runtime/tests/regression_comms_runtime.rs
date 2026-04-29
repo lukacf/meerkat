@@ -152,6 +152,41 @@ async fn completed_response_idle_wakes() {
     );
 }
 
+#[tokio::test]
+async fn completed_response_admission_stamps_context_and_run_apply_intent() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+    let interaction = make_response("peer-1", ResponseStatus::Completed);
+    let input = interaction_to_peer_input(&interaction, &rid());
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = outcome else {
+        panic!("expected terminal peer response to be accepted");
+    };
+
+    let semantics = driver
+        .admitted_runtime_semantics(&input_id)
+        .expect("accepted input should have runtime semantics");
+    assert_eq!(
+        semantics.execution_kind,
+        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+    );
+    assert_eq!(
+        semantics.peer_response_terminal_apply_intent,
+        Some(
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun
+        )
+    );
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Queued)
+    );
+    let projection = driver
+        .admitted_primitive_projection(&input_id)
+        .expect("accepted input should have primitive projection");
+    assert!(projection.append.is_none());
+    assert!(projection.context_append.is_some());
+}
+
 // ---------------------------------------------------------------------------
 // §2: Accepted response injects context, no continuation (no wake)
 // ---------------------------------------------------------------------------

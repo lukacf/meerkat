@@ -106,26 +106,19 @@ impl CoreExecutor for SessionRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        // Context-only-immediate primitives (e.g. peer_response_terminal
-        // with handling_mode=None) must land as runtime system-context
-        // appends on the session transcript, not trigger a turn. Without
-        // this gate, the authoritative peer terminal result is dropped
-        // and subsequent turns (including realtime recalls on the
-        // reconstructed session state) cannot see the peer-returned
-        // token/status.
-        // A context-only staged primitive — no conversation appends, only
-        // context appends (e.g. peer_response_terminal) — must not trigger a
-        // turn. Route it through `apply_runtime_context_appends` regardless
-        // of the apply boundary: the runtime boundary for peer terminal
-        // responses is Steer-derived (RunCheckpoint), so the core
-        // `is_context_only_immediate` gate (boundary == Immediate) does not
-        // match. Keep the stricter gate for explicit immediate short-circuits
-        // used elsewhere; here we only need to detect that no turn work is
-        // implied by this primitive.
-        if let RunPrimitive::StagedInput(staged) = &primitive
-            && staged.appends.is_empty()
-            && !staged.context_appends.is_empty()
-        {
+        if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+            return Err(CoreExecutorError::ApplyFailed {
+                reason: reason.to_string(),
+            });
+        }
+
+        // Context-only staged primitives may land directly as runtime
+        // system-context appends, but terminal peer responses carry a typed
+        // apply intent that requires a requester reaction turn.
+        if primitive.is_context_only_apply_without_turn() {
+            let RunPrimitive::StagedInput(staged) = &primitive else {
+                unreachable!("context-only apply without turn only matches staged primitives");
+            };
             return self
                 .runtime
                 .apply_runtime_context_appends_via_service(
@@ -219,14 +212,16 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        // A context-only staged primitive must not trigger a turn. See the
-        // corresponding short-circuit in SessionRuntimeExecutor::apply for
-        // why we check `appends.is_empty() && !context_appends.is_empty()`
-        // instead of the stricter `is_context_only_immediate` gate.
-        if let RunPrimitive::StagedInput(staged) = &primitive
-            && staged.appends.is_empty()
-            && !staged.context_appends.is_empty()
-        {
+        if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+            return Err(CoreExecutorError::ApplyFailed {
+                reason: reason.to_string(),
+            });
+        }
+
+        if primitive.is_context_only_apply_without_turn() {
+            let RunPrimitive::StagedInput(staged) = &primitive else {
+                unreachable!("context-only apply without turn only matches staged primitives");
+            };
             return self
                 .session_service
                 .apply_runtime_context_appends(

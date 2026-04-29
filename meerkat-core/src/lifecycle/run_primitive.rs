@@ -92,6 +92,19 @@ pub enum RuntimeExecutionKind {
     ResumePending,
 }
 
+/// Machine-owned apply intent for terminal peer responses.
+///
+/// Terminal peer responses are context facts and requester wake/reaction work.
+/// This closed intent prevents context-only executor shortcuts from inferring a
+/// different meaning from the primitive's append shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerResponseTerminalApplyIntent {
+    /// Append the durable system-context fact, then run the requester reaction
+    /// turn using the appended context.
+    AppendContextAndRun,
+}
+
 /// Opaque model identifier carried by a per-turn override.
 ///
 /// A bare string here is a failure of the typed-metadata invariant: validation
@@ -1052,6 +1065,10 @@ pub struct RuntimeTurnMetadata {
     /// `Some(ResumePending)` forces `run_pending`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_kind: Option<RuntimeExecutionKind>,
+    /// Typed terminal peer-response apply intent classified by the runtime
+    /// machine at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
 impl RuntimeTurnMetadata {
@@ -1071,6 +1088,7 @@ impl RuntimeTurnMetadata {
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
             && self.execution_kind.is_none()
+            && self.peer_response_terminal_apply_intent.is_none()
     }
 
     /// Merge another metadata carrier into this one. Scalar conflicts (two
@@ -1127,6 +1145,11 @@ impl RuntimeTurnMetadata {
             &mut self.execution_kind,
             other.execution_kind,
             "execution_kind",
+        )?;
+        merge_scalar(
+            &mut self.peer_response_terminal_apply_intent,
+            other.peer_response_terminal_apply_intent,
+            "peer_response_terminal_apply_intent",
         )?;
 
         // Collections: accumulate.
@@ -1314,6 +1337,57 @@ impl RunPrimitive {
         }
     }
 
+    pub fn peer_response_terminal_apply_intent(&self) -> Option<PeerResponseTerminalApplyIntent> {
+        self.turn_metadata()
+            .and_then(|metadata| metadata.peer_response_terminal_apply_intent)
+    }
+
+    pub fn is_peer_response_terminal_context_and_run(&self) -> bool {
+        matches!(
+            self.peer_response_terminal_apply_intent(),
+            Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+        )
+    }
+
+    pub fn peer_response_terminal_apply_intent_violation(&self) -> Option<&'static str> {
+        if !self.is_peer_response_terminal_context_and_run() {
+            return None;
+        }
+
+        let RunPrimitive::StagedInput(staged) = self else {
+            return Some("terminal peer-response apply intent requires a staged primitive");
+        };
+        if staged.boundary != RunApplyBoundary::RunStart {
+            return Some("terminal peer-response apply intent requires RunStart boundary");
+        }
+        if !staged.appends.is_empty() || staged.context_appends.is_empty() {
+            return Some(
+                "terminal peer-response apply intent requires context-only staged appends",
+            );
+        }
+        if staged
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.execution_kind)
+            != Some(RuntimeExecutionKind::ContentTurn)
+        {
+            return Some("terminal peer-response apply intent requires ContentTurn execution kind");
+        }
+        None
+    }
+
+    /// Whether this primitive's context appends should be applied without
+    /// running a requester reaction turn.
+    pub fn is_context_only_apply_without_turn(&self) -> bool {
+        matches!(
+            self,
+            RunPrimitive::StagedInput(staged)
+            if staged.appends.is_empty()
+                && !staged.context_appends.is_empty()
+                && !self.is_peer_response_terminal_context_and_run()
+        )
+    }
+
     /// Whether this primitive is a context-only staged input that should be
     /// routed to `apply_runtime_context_appends` rather than a full turn.
     pub fn is_context_only_immediate(&self) -> bool {
@@ -1485,6 +1559,51 @@ mod tests {
             turn_metadata: None,
         });
         assert!(!p.is_context_only_immediate());
+    }
+
+    #[test]
+    fn context_only_apply_without_turn_true_for_plain_context() {
+        let p = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: vec![],
+            context_appends: vec![ConversationContextAppend {
+                key: "k".into(),
+                content: CoreRenderable::Text { text: "ctx".into() },
+            }],
+            contributing_input_ids: vec![],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+        });
+
+        assert!(p.is_context_only_apply_without_turn());
+    }
+
+    #[test]
+    fn terminal_peer_response_context_and_run_bypasses_context_only_shortcut() {
+        let p = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends: vec![],
+            context_appends: vec![ConversationContextAppend {
+                key: "peer_response_terminal:analyst-rt:req-123".into(),
+                content: CoreRenderable::Text {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".into(),
+                },
+            }],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                peer_response_terminal_apply_intent: Some(
+                    PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                ),
+                ..Default::default()
+            }),
+        });
+
+        assert!(p.is_peer_response_terminal_context_and_run());
+        assert_eq!(p.peer_response_terminal_apply_intent_violation(), None);
+        assert!(!p.is_context_only_apply_without_turn());
     }
 
     #[test]

@@ -792,6 +792,16 @@ pub(crate) fn machine_input_execution_kind(
         .unwrap_or(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
 }
 
+pub(crate) fn machine_input_peer_response_terminal_apply_intent(
+    driver: &DriverEntry,
+    work_id: &InputId,
+) -> Option<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent> {
+    driver
+        .driver_ingress()
+        .runtime_semantics(work_id)
+        .and_then(|semantics| semantics.peer_response_terminal_apply_intent)
+}
+
 pub(crate) fn machine_batch_execution_kind(
     driver: &DriverEntry,
     work_ids: &[InputId],
@@ -808,6 +818,16 @@ pub(crate) fn machine_batch_execution_kind(
     } else {
         Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
     }
+}
+
+pub(crate) fn machine_batch_peer_response_terminal_apply_intent(
+    driver: &DriverEntry,
+    work_ids: &[InputId],
+) -> Option<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent> {
+    work_ids
+        .iter()
+        .filter_map(|id| machine_input_peer_response_terminal_apply_intent(driver, id))
+        .next()
 }
 
 pub(crate) fn machine_batch_primitive_projections(

@@ -10,9 +10,9 @@ use std::time::Duration;
 use meerkat_core::connection::ConnectionRef;
 use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, GeminiProviderTag, KeepAliveMode, KeepAlivePolicy, ModelId,
-    OpenAiProviderTag, ProviderParamsOverride, ProviderTag, ReasoningEffort, ReasoningMode,
-    RuntimeExecutionKind, RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind,
-    TurnMetadataMergeConflict,
+    OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride, ProviderTag,
+    ReasoningEffort, ReasoningMode, RuntimeExecutionKind, RuntimeTurnMetadata, TurnInstruction,
+    TurnInstructionKind, TurnMetadataMergeConflict,
 };
 use meerkat_core::provider::Provider;
 use meerkat_core::service::TurnToolOverlay;
@@ -68,6 +68,9 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             salience: RenderSalience::Urgent,
         }),
         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+        peer_response_terminal_apply_intent: Some(
+            PeerResponseTerminalApplyIntent::AppendContextAndRun,
+        ),
     }
 }
 

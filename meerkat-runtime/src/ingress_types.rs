@@ -8,7 +8,8 @@
 
 use meerkat_core::lifecycle::RuntimeExecutionKind;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationAppend, ConversationContextAppend, RunApplyBoundary,
+    ConversationAppend, ConversationContextAppend, PeerResponseTerminalApplyIntent,
+    RunApplyBoundary,
 };
 
 use crate::identifiers::InputKind;
@@ -39,6 +40,7 @@ pub struct RequestId(pub String);
 pub struct RuntimeInputSemantics {
     pub boundary: RunApplyBoundary,
     pub execution_kind: RuntimeExecutionKind,
+    pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
 /// Admitted conversation projection for one input.
@@ -71,9 +73,23 @@ impl RuntimeInputSemantics {
             | InputKind::ExternalEvent
             | InputKind::Operation => RuntimeExecutionKind::ContentTurn,
         };
+        let peer_response_terminal_apply_intent = match kind {
+            InputKind::PeerResponseTerminal => {
+                Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+            }
+            InputKind::Prompt
+            | InputKind::PeerMessage
+            | InputKind::PeerRequest
+            | InputKind::PeerResponseProgress
+            | InputKind::FlowStep
+            | InputKind::ExternalEvent
+            | InputKind::Continuation
+            | InputKind::Operation => None,
+        };
         Self {
             boundary,
             execution_kind,
+            peer_response_terminal_apply_intent,
         }
     }
 }
@@ -106,6 +122,10 @@ mod tests {
 
         assert_eq!(semantics.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(semantics.execution_kind, RuntimeExecutionKind::ContentTurn);
+        assert_eq!(
+            semantics.peer_response_terminal_apply_intent,
+            Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+        );
     }
 
     #[test]
@@ -120,5 +140,6 @@ mod tests {
             semantics.execution_kind,
             RuntimeExecutionKind::ResumePending
         );
+        assert_eq!(semantics.peer_response_terminal_apply_intent, None);
     }
 }

@@ -7,7 +7,9 @@
 //! under the hood).
 
 use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
-use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive, StagedRunInput};
+use meerkat_core::lifecycle::run_primitive::{
+    PeerResponseTerminalApplyIntent, RunApplyBoundary, RunPrimitive, StagedRunInput,
+};
 use meerkat_core::lifecycle::{InputId, RunId};
 
 #[cfg(test)]
@@ -139,16 +141,25 @@ fn primitive_turn_start_input(
                 admitted_content_shape,
             },
         ),
-        RunPrimitive::StagedInput(staged)
-            if staged.appends.is_empty() && !staged.context_appends.is_empty() =>
-        {
+        RunPrimitive::StagedInput(_) if primitive.is_peer_response_terminal_context_and_run() => {
             Some(
-                crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
                     run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                    primitive_kind:
+                        crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
                     admitted_content_shape,
+                    vision_enabled: false,
+                    image_tool_results_enabled: false,
+                    max_extraction_retries: 0,
                 },
             )
         }
+        RunPrimitive::StagedInput(_) if primitive.is_context_only_apply_without_turn() => Some(
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                admitted_content_shape,
+            },
+        ),
         RunPrimitive::StagedInput(staged) if staged.appends.is_empty() => None,
         RunPrimitive::StagedInput(_) => Some(
             crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
@@ -178,6 +189,9 @@ async fn prepare_turn_state_for_primitive(
     run_id: &RunId,
     primitive: &RunPrimitive,
 ) -> Result<(), crate::RuntimeDriverError> {
+    if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+        return Err(crate::RuntimeDriverError::Internal(reason.to_string()));
+    }
     let Some(input) = primitive_turn_start_input(run_id, primitive) else {
         return Ok(());
     };
@@ -217,7 +231,15 @@ pub(crate) fn try_inputs_to_primitive_with_boundary(
         .iter()
         .map(|(_, input)| runtime_input_projection(input))
         .collect::<Vec<_>>();
-    try_projected_inputs_to_primitive_with_boundary(inputs, &projections, boundary, execution_kind)
+    let peer_response_terminal_apply_intent =
+        fallback_batch_peer_response_terminal_apply_intent(inputs, boundary);
+    try_projected_inputs_to_primitive_with_boundary(
+        inputs,
+        &projections,
+        boundary,
+        execution_kind,
+        peer_response_terminal_apply_intent,
+    )
 }
 
 pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
@@ -225,6 +247,7 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     projections: &[crate::ingress_types::RuntimeInputProjection],
     boundary: RunApplyBoundary,
     execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+    peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let appends = projections
         .iter()
@@ -245,6 +268,7 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     let turn_metadata = {
         let mut meta = turn_metadata.unwrap_or_default();
         meta.execution_kind = execution_kind;
+        meta.peer_response_terminal_apply_intent = peer_response_terminal_apply_intent;
         Some(meta)
     };
 
@@ -294,6 +318,18 @@ fn fallback_batch_execution_kind(
     } else {
         Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
     }
+}
+
+fn fallback_batch_peer_response_terminal_apply_intent(
+    inputs: &[(InputId, Input)],
+    _boundary: RunApplyBoundary,
+) -> Option<PeerResponseTerminalApplyIntent> {
+    inputs
+        .iter()
+        .filter_map(|(_, input)| {
+            fallback_unadmitted_semantics(input).peer_response_terminal_apply_intent
+        })
+        .next()
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
@@ -630,6 +666,11 @@ async fn process_queue(
                 .collect::<Vec<_>>();
             let execution_kind =
                 crate::meerkat_machine::machine_batch_execution_kind(&d, &staged_ids);
+            let peer_response_terminal_apply_intent =
+                crate::meerkat_machine::machine_batch_peer_response_terminal_apply_intent(
+                    &d,
+                    &staged_ids,
+                );
             let projections =
                 crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_ids);
             let primitive = try_projected_inputs_to_primitive_with_boundary(
@@ -637,6 +678,7 @@ async fn process_queue(
                 &projections,
                 boundary,
                 execution_kind,
+                peer_response_terminal_apply_intent,
             );
             Some((contributing_input_ids, staged_ids, run_id, primitive))
         };
@@ -1083,7 +1125,8 @@ mod tests {
     }
 
     #[test]
-    fn peer_response_terminal_creates_immediate_context_staged_input() -> Result<(), String> {
+    fn peer_response_terminal_forced_immediate_boundary_is_invalid_apply_intent()
+    -> Result<(), String> {
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
@@ -1117,6 +1160,13 @@ mod tests {
             RunApplyBoundary::Immediate,
         )
         .expect("single input metadata cannot conflict");
+        assert!(
+            primitive
+                .peer_response_terminal_apply_intent_violation()
+                .is_some(),
+            "terminal peer response with an immediate boundary must fail the typed apply invariant"
+        );
+        assert!(!primitive.is_context_only_apply_without_turn());
         let staged = match primitive {
             RunPrimitive::StagedInput(staged) => staged,
             other => return Err(format!("expected staged input, got {other:?}")),
@@ -1186,6 +1236,139 @@ mod tests {
         // None for the ResponseTerminal convention.
         assert!(staged.appends.is_empty());
         assert_eq!(staged.context_appends.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn queued_peer_response_terminal_starts_requester_reaction_turn() -> Result<(), String> {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "analyst-rt".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::ResponseTerminal {
+                request_id: "req-123".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            body: String::new(),
+            payload: Some(serde_json::json!({
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            })),
+            blocks: None,
+            handling_mode: None,
+        });
+        let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
+            .expect("single input metadata cannot conflict");
+        let run_id = RunId::new();
+
+        let start_input = primitive_turn_start_input(&run_id, &primitive).ok_or_else(|| {
+            "terminal response should start a requester reaction turn".to_string()
+        })?;
+
+        match start_input {
+            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                run_id: got_run_id,
+                primitive_kind,
+                admitted_content_shape,
+                ..
+            } => {
+                assert_eq!(
+                    got_run_id,
+                    crate::meerkat_machine::dsl::RunId::from_domain(&run_id)
+                );
+                assert_eq!(
+                    primitive_kind,
+                    crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn
+                );
+                assert_eq!(admitted_content_shape, "context");
+                Ok(())
+            }
+            other => Err(format!("expected StartConversationRun, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn peer_response_terminal_apply_intent_is_policy_runtime_and_executor_consistent()
+    -> Result<(), String> {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "analyst-rt".into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::ResponseTerminal {
+                request_id: "req-123".into(),
+                status: crate::input::ResponseTerminalStatus::Completed,
+            }),
+            body: String::new(),
+            payload: Some(serde_json::json!({
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            })),
+            blocks: None,
+            handling_mode: None,
+        });
+
+        let policy = crate::policy_table::DefaultPolicyTable::resolve(&input, true);
+        assert_eq!(policy.apply_mode, crate::ApplyMode::StageRunStart);
+        assert_eq!(policy.wake_mode, crate::WakeMode::WakeIfIdle);
+        assert_eq!(policy.queue_mode, crate::QueueMode::Fifo);
+
+        let semantics = crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            &policy,
+            input.kind(),
+        );
+        assert_eq!(semantics.boundary, RunApplyBoundary::RunStart);
+        assert_eq!(
+            semantics.execution_kind,
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+        );
+        assert_eq!(
+            semantics.peer_response_terminal_apply_intent,
+            Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+        );
+
+        let primitive = try_inputs_to_primitive_with_boundary(
+            &[(input.id().clone(), input)],
+            semantics.boundary,
+            Some(semantics.execution_kind),
+        )
+        .expect("single input metadata cannot conflict");
+        let metadata = primitive
+            .turn_metadata()
+            .ok_or_else(|| "terminal primitive should carry metadata".to_string())?;
+        assert_eq!(
+            metadata.peer_response_terminal_apply_intent,
+            Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+        );
+        assert!(primitive.is_peer_response_terminal_context_and_run());
+        assert_eq!(
+            primitive.peer_response_terminal_apply_intent_violation(),
+            None
+        );
+        assert!(
+            !primitive.is_context_only_apply_without_turn(),
+            "executor context-only shortcut must not swallow terminal peer responses"
+        );
+
         Ok(())
     }
 

@@ -778,6 +778,8 @@ pub struct WireRuntimeTurnMetadata {
     pub render_metadata: Option<crate::wire::mob::WireRenderMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_kind: Option<WireRuntimeExecutionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_response_terminal_apply_intent: Option<WirePeerResponseTerminalApplyIntent>,
 }
 
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].
@@ -787,6 +789,15 @@ pub struct WireRuntimeTurnMetadata {
 pub enum WireRuntimeExecutionKind {
     ContentTurn,
     ResumePending,
+}
+
+/// Typed wire projection of
+/// [`meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WirePeerResponseTerminalApplyIntent {
+    AppendContextAndRun,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind>
@@ -812,6 +823,30 @@ impl From<WireRuntimeExecutionKind>
     }
 }
 
+impl From<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent>
+    for WirePeerResponseTerminalApplyIntent
+{
+    fn from(
+        value: meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent,
+    ) -> Self {
+        match value {
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun => {
+                Self::AppendContextAndRun
+            }
+        }
+    }
+}
+
+impl From<WirePeerResponseTerminalApplyIntent>
+    for meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent
+{
+    fn from(value: WirePeerResponseTerminalApplyIntent) -> Self {
+        match value {
+            WirePeerResponseTerminalApplyIntent::AppendContextAndRun => Self::AppendContextAndRun,
+        }
+    }
+}
+
 impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireRuntimeTurnMetadata {
     fn from(value: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata) -> Self {
         Self {
@@ -830,6 +865,9 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
+            peer_response_terminal_apply_intent: value
+                .peer_response_terminal_apply_intent
+                .map(Into::into),
         }
     }
 }
@@ -853,6 +891,9 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
+            peer_response_terminal_apply_intent: value
+                .peer_response_terminal_apply_intent
+                .map(Into::into),
         }
     }
 }

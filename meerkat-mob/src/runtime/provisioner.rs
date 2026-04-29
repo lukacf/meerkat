@@ -709,14 +709,19 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         run_id: CoreRunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        // Context-only staged primitive — no conversation appends, just
-        // context (e.g. peer_response_terminal with Steer→RunCheckpoint
-        // boundary). Must not trigger a turn. See SessionRuntimeExecutor
-        // for the rationale on relaxing the boundary==Immediate gate.
-        if let RunPrimitive::StagedInput(staged) = &primitive
-            && staged.appends.is_empty()
-            && !staged.context_appends.is_empty()
-        {
+        if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+            return Err(CoreExecutorError::ApplyFailed {
+                reason: reason.to_string(),
+            });
+        }
+
+        // Context-only staged primitives may land directly as runtime
+        // system-context appends, but terminal peer responses carry a typed
+        // apply intent that requires a requester reaction turn.
+        if primitive.is_context_only_apply_without_turn() {
+            let RunPrimitive::StagedInput(staged) = &primitive else {
+                unreachable!("context-only apply without turn only matches staged primitives");
+            };
             return self
                 .session_service
                 .apply_runtime_context_appends_with_boundary(

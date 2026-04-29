@@ -808,9 +808,10 @@ impl SessionRuntime {
             provider_params: None,
             clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
             render_metadata: None,
-            execution_kind: None,
             connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
             clear_connection_ref: overrides.is_some_and(|ov| ov.clear_connection_ref),
+            execution_kind: None,
+            peer_response_terminal_apply_intent: None,
         };
         (!metadata.is_empty()).then_some(metadata)
     }
@@ -2371,15 +2372,21 @@ impl SessionRuntime {
         _additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
-        // Context-only staged primitive (e.g. peer_response_terminal) must
-        // land as runtime system-context appends rather than trigger a turn.
-        // Runtime boundary is Steer-derived (RunCheckpoint), so the stricter
-        // `is_context_only_immediate` gate misses; use the
-        // appends-empty + context-appends-nonempty criterion directly.
-        if let RunPrimitive::StagedInput(staged) = primitive
-            && staged.appends.is_empty()
-            && !staged.context_appends.is_empty()
-        {
+        if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+            return Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: reason.to_string(),
+                data: None,
+            });
+        }
+
+        // Context-only staged primitives may land directly as runtime
+        // system-context appends, but terminal peer responses carry a typed
+        // apply intent that requires a requester reaction turn.
+        if primitive.is_context_only_apply_without_turn() {
+            let RunPrimitive::StagedInput(staged) = primitive else {
+                unreachable!("context-only apply without turn only matches staged primitives");
+            };
             return self
                 .service
                 .apply_runtime_context_appends(

@@ -7209,7 +7209,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
             .await?;
         }
 
-        let turn2_pcm = openai_tts_pcm("Say only copper canyon.").await?;
+        let turn2_pcm = openai_tts_pcm("Say only pineapple.").await?;
         eprintln!("[scenario 72] send turn 2 audio");
         let mut turn2_capture = match send_realtime_audio_and_wait_for_commit(
             &mut sender,
@@ -7270,8 +7270,8 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
         let turn2_output_audio_text = normalized_output_audio_transcript(&turn2_capture).await?;
         if turn2_capture.output_audio_pcm.is_empty()
             || !pcm_has_non_silence(&turn2_capture.output_audio_pcm)
-            || !(turn2_output_audio_text.contains("copper canyon")
-                || turn2_output_text.contains("copper canyon"))
+            || !(turn2_output_audio_text.contains("pineapple")
+                || turn2_output_text.contains("pineapple"))
         {
             dump_realtime_audio_artifacts(scenario_name, "turn-2", &turn2_pcm, &turn2_capture)
                 .await?;

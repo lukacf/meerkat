@@ -17,6 +17,8 @@ export type AgentErrorReason = {
   reason_type: "llm_invalid_model";
 } | {
   provider_error: unknown;
+  provider_error_kind: LlmProviderErrorKind;
+  provider_error_retryability: LlmProviderErrorRetryability;
   reason_type: "llm_provider_error";
 } | {
   duration_ms: number;
@@ -131,6 +133,10 @@ export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_v
 export type HookRevision = number;
 
 export type InteractionId = string;
+
+export type LlmProviderErrorKind = "invalid_request" | "content_filtered" | "server_error" | "server_overloaded" | "connection_reset" | "unknown" | "stream_parse_error" | "incomplete_response";
+
+export type LlmProviderErrorRetryability = "retryable" | "non_retryable";
 
 export type LlmRetryFailure = {
   duration_ms?: number | null;

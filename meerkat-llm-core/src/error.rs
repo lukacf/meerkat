@@ -2,7 +2,7 @@
 //!
 //! Categorized by whether they're retryable.
 
-use meerkat_core::error::LlmFailureReason;
+use meerkat_core::error::{LlmFailureReason, LlmProviderError, LlmProviderErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
@@ -136,50 +136,78 @@ impl LlmError {
             },
             Self::AuthenticationFailed { .. } | Self::InvalidApiKey => LlmFailureReason::AuthError,
             Self::ModelNotFound { model } => LlmFailureReason::InvalidModel(model.clone()),
-            Self::InvalidRequest { message } => LlmFailureReason::ProviderError(json!({
-                "kind": "invalid_request",
-                "retryable": false,
-                "message": message,
-            })),
-            Self::ContentFiltered { reason } => LlmFailureReason::ProviderError(json!({
-                "kind": "content_filtered",
-                "retryable": false,
-                "message": reason,
-            })),
-            Self::ServerError { status, message } => LlmFailureReason::ProviderError(json!({
-                "kind": "server_error",
-                "retryable": *status >= 500,
-                "status": status,
-                "message": message,
-            })),
-            Self::ServerOverloaded => LlmFailureReason::ProviderError(json!({
-                "kind": "server_overloaded",
-                "retryable": true,
-                "message": self.to_string(),
-            })),
+            Self::InvalidRequest { message } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::InvalidRequest,
+                    json!({
+                        "message": message,
+                    }),
+                ))
+            }
+            Self::ContentFiltered { reason } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::ContentFiltered,
+                    json!({
+                        "message": reason,
+                    }),
+                ))
+            }
+            Self::ServerError { status, message } => {
+                let details = json!({
+                    "status": status,
+                    "message": message,
+                });
+                if self.is_retryable() {
+                    LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                        LlmProviderErrorKind::ServerError,
+                        details,
+                    ))
+                } else {
+                    LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                        LlmProviderErrorKind::ServerError,
+                        details,
+                    ))
+                }
+            }
+            Self::ServerOverloaded => LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::ServerOverloaded,
+                json!({
+                    "message": self.to_string(),
+                }),
+            )),
             Self::NetworkTimeout { duration_ms } => LlmFailureReason::NetworkTimeout {
                 duration_ms: *duration_ms,
             },
-            Self::ConnectionReset => LlmFailureReason::ProviderError(json!({
-                "kind": "connection_reset",
-                "retryable": true,
-                "message": self.to_string(),
-            })),
-            Self::Unknown { message } => LlmFailureReason::ProviderError(json!({
-                "kind": "unknown",
-                "retryable": self.is_retryable(),
-                "message": message,
-            })),
-            Self::StreamParseError { message } => LlmFailureReason::ProviderError(json!({
-                "kind": "stream_parse_error",
-                "retryable": self.is_retryable(),
-                "message": message,
-            })),
-            Self::IncompleteResponse { message } => LlmFailureReason::ProviderError(json!({
-                "kind": "incomplete_response",
-                "retryable": self.is_retryable(),
-                "message": message,
-            })),
+            Self::ConnectionReset => LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::ConnectionReset,
+                json!({
+                    "message": self.to_string(),
+                }),
+            )),
+            Self::Unknown { message } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::Unknown,
+                    json!({
+                        "message": message,
+                    }),
+                ))
+            }
+            Self::StreamParseError { message } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::StreamParseError,
+                    json!({
+                        "message": message,
+                    }),
+                ))
+            }
+            Self::IncompleteResponse { message } => {
+                LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                    LlmProviderErrorKind::IncompleteResponse,
+                    json!({
+                        "message": message,
+                    }),
+                ))
+            }
         }
     }
 }
@@ -307,6 +335,35 @@ mod tests {
         assert_eq!(
             reason,
             LlmFailureReason::NetworkTimeout { duration_ms: 30000 }
+        );
+    }
+
+    #[test]
+    fn provider_failure_reason_uses_typed_kind_and_retryability() {
+        let reason = LlmError::ServerOverloaded.failure_reason();
+        let LlmFailureReason::ProviderError(provider_error) = reason else {
+            panic!("expected provider error");
+        };
+
+        assert_eq!(
+            provider_error.kind,
+            meerkat_core::error::LlmProviderErrorKind::ServerOverloaded
+        );
+        assert_eq!(
+            provider_error.retryability,
+            meerkat_core::error::LlmProviderErrorRetryability::Retryable
+        );
+        assert_eq!(
+            provider_error.details["message"],
+            serde_json::json!("Server overloaded (503)")
+        );
+        assert!(
+            provider_error.details.get("kind").is_none(),
+            "provider error kind must not be carried in untyped JSON"
+        );
+        assert!(
+            provider_error.details.get("retryable").is_none(),
+            "provider error retryability must not be carried in untyped JSON"
         );
     }
 

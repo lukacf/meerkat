@@ -4,6 +4,8 @@
 //! typed retry plan admitted by the turn authority.
 
 use crate::error::{AgentError, LlmFailureReason};
+#[cfg(test)]
+use crate::error::{LlmProviderError, LlmProviderErrorKind};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -62,9 +64,8 @@ impl LlmRetryFailure {
                     duration_ms: Some(*duration_ms),
                     message: message.clone(),
                 }),
-                LlmFailureReason::ProviderError(value)
-                    if value.get("retryable").and_then(serde_json::Value::as_bool)
-                        == Some(true) =>
+                LlmFailureReason::ProviderError(provider_error)
+                    if provider_error.is_retryable() =>
                 {
                     Some(Self {
                         provider: (*provider).to_string(),
@@ -399,6 +400,48 @@ mod tests {
             provider: "test",
             reason: LlmFailureReason::AuthError,
             message: "auth".to_string(),
+        };
+
+        assert!(policy.schedule_retry(&error, 0, None).is_none());
+    }
+
+    #[test]
+    fn retry_schedule_reads_typed_provider_retryability() {
+        let policy = RetryPolicy::default().with_max_retries(3);
+        let error = AgentError::Llm {
+            provider: "test",
+            reason: LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::ServerOverloaded,
+                serde_json::json!({
+                    "retryable": false,
+                    "message": "json payload must not suppress typed retryability"
+                }),
+            )),
+            message: "provider overloaded".to_string(),
+        };
+
+        let schedule = policy
+            .schedule_retry(&error, 0, None)
+            .expect("typed retryable provider error should be scheduled");
+        assert_eq!(
+            schedule.failure.kind,
+            LlmRetryFailureKind::RetryableProviderError
+        );
+    }
+
+    #[test]
+    fn retry_schedule_ignores_json_only_provider_retryability() {
+        let policy = RetryPolicy::default().with_max_retries(3);
+        let error = AgentError::Llm {
+            provider: "test",
+            reason: LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::InvalidRequest,
+                serde_json::json!({
+                    "retryable": true,
+                    "message": "json payload must not admit retries"
+                }),
+            )),
+            message: "invalid request".to_string(),
         };
 
         assert!(policy.schedule_retry(&error, 0, None).is_none());

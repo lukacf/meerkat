@@ -107,6 +107,12 @@
           {
             "properties": {
               "provider_error": true,
+              "provider_error_kind": {
+                "$ref": "#/$defs/LlmProviderErrorKind"
+              },
+              "provider_error_retryability": {
+                "$ref": "#/$defs/LlmProviderErrorRetryability"
+              },
               "reason_type": {
                 "const": "llm_provider_error",
                 "type": "string"
@@ -114,6 +120,8 @@
             },
             "required": [
               "reason_type",
+              "provider_error_kind",
+              "provider_error_retryability",
               "provider_error"
             ],
             "type": "object"
@@ -704,6 +712,26 @@
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "LlmProviderErrorKind": {
+        "enum": [
+          "invalid_request",
+          "content_filtered",
+          "server_error",
+          "server_overloaded",
+          "connection_reset",
+          "unknown",
+          "stream_parse_error",
+          "incomplete_response"
+        ],
+        "type": "string"
+      },
+      "LlmProviderErrorRetryability": {
+        "enum": [
+          "retryable",
+          "non_retryable"
+        ],
         "type": "string"
       },
       "LlmRetryFailure": {
@@ -2295,6 +2323,12 @@
           {
             "properties": {
               "provider_error": true,
+              "provider_error_kind": {
+                "$ref": "#/$defs/LlmProviderErrorKind"
+              },
+              "provider_error_retryability": {
+                "$ref": "#/$defs/LlmProviderErrorRetryability"
+              },
               "reason_type": {
                 "const": "llm_provider_error",
                 "type": "string"
@@ -2302,6 +2336,8 @@
             },
             "required": [
               "reason_type",
+              "provider_error_kind",
+              "provider_error_retryability",
               "provider_error"
             ],
             "type": "object"
@@ -3746,6 +3782,26 @@
       },
       "InteractionId": {
         "description": "Unique identifier for an interaction.",
+        "type": "string"
+      },
+      "LlmProviderErrorKind": {
+        "enum": [
+          "invalid_request",
+          "content_filtered",
+          "server_error",
+          "server_overloaded",
+          "connection_reset",
+          "unknown",
+          "stream_parse_error",
+          "incomplete_response"
+        ],
+        "type": "string"
+      },
+      "LlmProviderErrorRetryability": {
+        "enum": [
+          "retryable",
+          "non_retryable"
+        ],
         "type": "string"
       },
       "LlmRetryFailure": {

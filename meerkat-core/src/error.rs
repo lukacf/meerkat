@@ -3,6 +3,7 @@
 use crate::hooks::{HookPoint, HookReasonCode};
 use crate::tool_catalog::ToolUnavailableReason;
 use crate::types::SessionId;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -16,7 +17,7 @@ pub enum LlmFailureReason {
     },
     AuthError,
     InvalidModel(String),
-    ProviderError(serde_json::Value),
+    ProviderError(LlmProviderError),
     /// Provider/client-native network timeout (owned by client layer)
     NetworkTimeout {
         duration_ms: u64,
@@ -25,6 +26,69 @@ pub enum LlmFailureReason {
     CallTimeout {
         duration_ms: u64,
     },
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmProviderErrorKind {
+    InvalidRequest,
+    ContentFiltered,
+    ServerError,
+    ServerOverloaded,
+    ConnectionReset,
+    Unknown,
+    StreamParseError,
+    IncompleteResponse,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmProviderErrorRetryability {
+    Retryable,
+    NonRetryable,
+}
+
+impl LlmProviderErrorRetryability {
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::Retryable)
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LlmProviderError {
+    pub kind: LlmProviderErrorKind,
+    pub retryability: LlmProviderErrorRetryability,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub details: serde_json::Value,
+}
+
+impl LlmProviderError {
+    pub fn new(
+        kind: LlmProviderErrorKind,
+        retryability: LlmProviderErrorRetryability,
+        details: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind,
+            retryability,
+            details,
+        }
+    }
+
+    pub fn retryable(kind: LlmProviderErrorKind, details: serde_json::Value) -> Self {
+        Self::new(kind, LlmProviderErrorRetryability::Retryable, details)
+    }
+
+    pub fn non_retryable(kind: LlmProviderErrorKind, details: serde_json::Value) -> Self {
+        Self::new(kind, LlmProviderErrorRetryability::NonRetryable, details)
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        self.retryability.is_retryable()
+    }
 }
 
 /// Errors that can occur during tool validation
@@ -344,9 +408,7 @@ impl AgentError {
                 LlmFailureReason::RateLimited { .. } => true,
                 LlmFailureReason::NetworkTimeout { .. } => true,
                 LlmFailureReason::CallTimeout { .. } => true,
-                LlmFailureReason::ProviderError(value) => {
-                    value.get("retryable").and_then(serde_json::Value::as_bool) == Some(true)
-                }
+                LlmFailureReason::ProviderError(provider_error) => provider_error.is_retryable(),
                 _ => false,
             },
             _ => false,
@@ -424,6 +486,40 @@ mod tests {
     #[test]
     fn test_auth_error_not_recoverable() {
         let err = AgentError::llm("anthropic", LlmFailureReason::AuthError, "bad key");
+        assert!(!err.is_recoverable());
+    }
+
+    #[test]
+    fn provider_error_uses_typed_retryability_for_recovery() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::ProviderError(LlmProviderError::retryable(
+                LlmProviderErrorKind::ServerOverloaded,
+                serde_json::json!({
+                    "message": "provider overloaded"
+                }),
+            )),
+            "provider overloaded",
+        );
+
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn provider_error_fails_closed_when_json_claims_retryable() {
+        let err = AgentError::llm(
+            "anthropic",
+            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::InvalidRequest,
+                serde_json::json!({
+                    "kind": "server_overloaded",
+                    "retryable": true,
+                    "message": "json payload must not control retryability"
+                }),
+            )),
+            "invalid request",
+        );
+
         assert!(!err.is_recoverable());
     }
 

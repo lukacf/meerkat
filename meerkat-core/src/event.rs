@@ -2,7 +2,9 @@
 //!
 //! These events form the streaming API for consumers.
 
-use crate::error::{AgentError, LlmFailureReason};
+use crate::error::{
+    AgentError, LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability,
+};
 use crate::hooks::{HookPatch, HookPatchEnvelope, HookPoint, HookReasonCode};
 use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
 use crate::retry::LlmRetrySchedule;
@@ -125,6 +127,8 @@ pub enum AgentErrorReason {
         model: String,
     },
     LlmProviderError {
+        provider_error_kind: LlmProviderErrorKind,
+        provider_error_retryability: LlmProviderErrorRetryability,
         provider_error: Value,
     },
     LlmNetworkTimeout {
@@ -181,8 +185,10 @@ impl AgentErrorReason {
             LlmFailureReason::InvalidModel(model) => Self::LlmInvalidModel {
                 model: model.clone(),
             },
-            LlmFailureReason::ProviderError(value) => Self::LlmProviderError {
-                provider_error: value.clone(),
+            LlmFailureReason::ProviderError(provider_error) => Self::LlmProviderError {
+                provider_error_kind: provider_error.kind,
+                provider_error_retryability: provider_error.retryability,
+                provider_error: provider_error.details.clone(),
             },
             LlmFailureReason::NetworkTimeout { duration_ms } => Self::LlmNetworkTimeout {
                 duration_ms: *duration_ms,
@@ -2108,6 +2114,34 @@ mod tests {
             })
         );
         assert_eq!(report.message, error.to_string());
+    }
+
+    #[test]
+    fn agent_error_report_carries_typed_provider_error_reason() {
+        let error = crate::error::AgentError::llm(
+            "anthropic",
+            LlmFailureReason::ProviderError(crate::error::LlmProviderError::retryable(
+                LlmProviderErrorKind::ServerOverloaded,
+                serde_json::json!({
+                    "message": "provider overloaded"
+                }),
+            )),
+            "provider overloaded",
+        );
+
+        let report = AgentErrorReport::from_agent_error(&error);
+
+        assert_eq!(report.class, AgentErrorClass::Llm);
+        assert_eq!(
+            report.reason,
+            Some(AgentErrorReason::LlmProviderError {
+                provider_error_kind: LlmProviderErrorKind::ServerOverloaded,
+                provider_error_retryability: LlmProviderErrorRetryability::Retryable,
+                provider_error: serde_json::json!({
+                    "message": "provider overloaded"
+                }),
+            })
+        );
     }
 
     #[test]

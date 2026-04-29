@@ -18,7 +18,7 @@ pub fn extract_obligations(
         .filter_map(|effect| match effect {
             AuthMachineEffect::EmitLifecycleEvent { new_state } => {
                 Some(AuthLeaseLifecyclePublicationObligation {
-                    new_state: new_state.clone(),
+                    new_state: *new_state,
                 })
             }
             _ => None,

@@ -3,8 +3,10 @@ use crate::MobRuntimeMode;
 use crate::machines::mob_machine as mob_dsl;
 use crate::mob_machine::{MobMachineCommand, MobMachineCommandResult};
 use crate::roster::MobMemberKickoffSnapshot;
+use crate::run::{MobMachineFlowRunCommand, flow_run};
 #[cfg(test)]
 use crate::runtime::MobLifecycleSnapshot;
+use crate::runtime::flow_frame_engine::FlowFrameLoopStorePlan;
 #[cfg(test)]
 use crate::runtime::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus,
@@ -13,6 +15,7 @@ use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
     ReconcileStage,
 };
+use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTarget};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
@@ -3559,6 +3562,53 @@ impl MobHandle {
     ) -> Result<crate::machines::mob_machine::MobMachineState, MobError> {
         self.send_actor_command(|reply_tx| MobCommand::ProjectMachineInput {
             input: Box::new(input),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(super) async fn commit_flow_run_command(
+        &self,
+        run_id: &RunId,
+        command: MobMachineFlowRunCommand,
+        context: &'static str,
+    ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CommitFlowRunCommand {
+            run_id: run_id.clone(),
+            command: Box::new(command),
+            context,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(super) async fn commit_flow_terminalization(
+        &self,
+        run_id: RunId,
+        flow_id: FlowId,
+        target: TerminalizationTarget,
+        command: MobMachineFlowRunCommand,
+        context: &'static str,
+    ) -> Result<TerminalizationOutcome, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CommitFlowTerminalization {
+            run_id,
+            flow_id,
+            target,
+            command: Box::new(command),
+            context,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(super) async fn commit_flow_frame_store_plan(
+        &self,
+        run_id: &RunId,
+        plan: FlowFrameLoopStorePlan,
+    ) -> Result<bool, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CommitFlowFrameStorePlan {
+            run_id: run_id.clone(),
+            plan: Box::new(plan),
             reply_tx,
         })
         .await?

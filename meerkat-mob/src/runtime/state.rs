@@ -1,6 +1,8 @@
+use super::flow_frame_engine::FlowFrameLoopStorePlan;
+use super::terminalization::{TerminalizationOutcome, TerminalizationTarget};
 use super::*;
 use crate::machines::mob_machine as mob_dsl;
-use crate::run::MobRun;
+use crate::run::{MobMachineFlowRunCommand, MobRun, flow_run};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 
@@ -230,6 +232,25 @@ pub(super) enum MobCommand {
     FlowStatus {
         run_id: RunId,
         reply_tx: oneshot::Sender<Result<Option<MobRun>, MobError>>,
+    },
+    CommitFlowRunCommand {
+        run_id: RunId,
+        command: Box<MobMachineFlowRunCommand>,
+        context: &'static str,
+        reply_tx: oneshot::Sender<Result<Option<Vec<flow_run::Effect>>, MobError>>,
+    },
+    CommitFlowTerminalization {
+        run_id: RunId,
+        flow_id: FlowId,
+        target: TerminalizationTarget,
+        command: Box<MobMachineFlowRunCommand>,
+        context: &'static str,
+        reply_tx: oneshot::Sender<Result<TerminalizationOutcome, MobError>>,
+    },
+    CommitFlowFrameStorePlan {
+        run_id: RunId,
+        plan: Box<FlowFrameLoopStorePlan>,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
     },
     ProjectMachineInput {
         input: Box<mob_dsl::MobMachineInput>,

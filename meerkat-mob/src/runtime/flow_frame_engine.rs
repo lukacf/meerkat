@@ -178,6 +178,177 @@ pub enum FlowFrameLoopStorePlan {
     },
 }
 
+impl FlowFrameLoopStorePlan {
+    pub(super) fn machine_inputs(&self) -> &[mob_dsl::MobMachineInput] {
+        match self {
+            Self::GrantNodeSlot { machine_inputs, .. }
+            | Self::StartLoop { machine_inputs, .. }
+            | Self::GrantBodyFrameStart { machine_inputs, .. }
+            | Self::RunStateOnly { machine_inputs, .. }
+            | Self::SealFrame { machine_inputs, .. }
+            | Self::CompleteBodyFrame { machine_inputs, .. }
+            | Self::LoopRequestBodyFrame { machine_inputs, .. }
+            | Self::CompleteLoop { machine_inputs, .. } => machine_inputs,
+        }
+    }
+
+    pub(super) async fn apply_to_store(
+        &self,
+        run_store: &Arc<dyn MobRunStore>,
+        run_id: &RunId,
+    ) -> Result<bool, MobError> {
+        match self {
+            Self::GrantNodeSlot {
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => run_store
+                .cas_grant_node_slot(
+                    run_id,
+                    expected_run_state,
+                    next_run_state.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                )
+                .await
+                .map_err(MobError::from),
+            Self::StartLoop {
+                loop_instance_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                initial_loop,
+                ..
+            } => run_store
+                .cas_start_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_run_state,
+                    next_run_state.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    initial_loop.clone(),
+                )
+                .await
+                .map_err(MobError::from),
+            Self::GrantBodyFrameStart {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                initial_frame,
+                ledger_entry,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => run_store
+                .cas_grant_body_frame_start(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    initial_frame.clone(),
+                    ledger_entry.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from),
+            Self::RunStateOnly {
+                expected_run_state,
+                next_run_state,
+                ..
+            } => run_store
+                .cas_flow_state(run_id, expected_run_state, next_run_state)
+                .await
+                .map_err(MobError::from),
+            Self::SealFrame {
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => run_store
+                .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
+                .await
+                .map_err(MobError::from),
+            Self::CompleteBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => run_store
+                .cas_complete_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from),
+            Self::LoopRequestBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => run_store
+                .cas_loop_request_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from),
+            Self::CompleteLoop {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => run_store
+                .cas_complete_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum FlowFrameLoopWork {
     SpawnStep {
@@ -1827,185 +1998,10 @@ impl FlowFrameEngine {
         run_id: &RunId,
         plan: &FlowFrameLoopStorePlan,
     ) -> Result<bool, MobError> {
-        let (won, machine_inputs) = match plan {
-            FlowFrameLoopStorePlan::GrantNodeSlot {
-                machine_inputs,
-                expected_run_state,
-                next_run_state,
-                frame_id,
-                expected_frame,
-                next_frame,
-            } => (
-                self.run_store
-                    .cas_grant_node_slot(
-                        run_id,
-                        expected_run_state,
-                        next_run_state.clone(),
-                        frame_id,
-                        expected_frame,
-                        next_frame.clone(),
-                    )
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-            FlowFrameLoopStorePlan::StartLoop {
-                machine_inputs,
-                loop_instance_id,
-                expected_run_state,
-                next_run_state,
-                frame_id,
-                expected_frame,
-                next_frame,
-                initial_loop,
-            } => (
-                self.run_store
-                    .cas_start_loop(
-                        run_id,
-                        loop_instance_id,
-                        expected_run_state,
-                        next_run_state.clone(),
-                        frame_id,
-                        expected_frame,
-                        next_frame.clone(),
-                        initial_loop.clone(),
-                    )
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-            FlowFrameLoopStorePlan::GrantBodyFrameStart {
-                machine_inputs,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                frame_id,
-                initial_frame,
-                ledger_entry,
-                expected_run_state,
-                next_run_state,
-            } => (
-                self.run_store
-                    .cas_grant_body_frame_start(
-                        run_id,
-                        loop_instance_id,
-                        expected_loop,
-                        next_loop.clone(),
-                        frame_id,
-                        initial_frame.clone(),
-                        ledger_entry.clone(),
-                        expected_run_state,
-                        next_run_state.clone(),
-                    )
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-            FlowFrameLoopStorePlan::RunStateOnly {
-                machine_inputs,
-                expected_run_state,
-                next_run_state,
-            } => (
-                self.run_store
-                    .cas_flow_state(run_id, expected_run_state, next_run_state)
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-            FlowFrameLoopStorePlan::SealFrame {
-                machine_inputs,
-                frame_id,
-                expected_frame,
-                next_frame,
-            } => (
-                self.run_store
-                    .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-            FlowFrameLoopStorePlan::CompleteBodyFrame {
-                machine_inputs,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                frame_id,
-                expected_frame,
-                next_frame,
-                expected_run_state,
-                next_run_state,
-            } => (
-                self.run_store
-                    .cas_complete_body_frame(
-                        run_id,
-                        loop_instance_id,
-                        expected_loop,
-                        next_loop.clone(),
-                        frame_id,
-                        expected_frame,
-                        next_frame.clone(),
-                        expected_run_state,
-                        next_run_state.clone(),
-                    )
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-            FlowFrameLoopStorePlan::LoopRequestBodyFrame {
-                machine_inputs,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                expected_run_state,
-                next_run_state,
-            } => (
-                self.run_store
-                    .cas_loop_request_body_frame(
-                        run_id,
-                        loop_instance_id,
-                        expected_loop,
-                        next_loop.clone(),
-                        expected_run_state,
-                        next_run_state.clone(),
-                    )
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-            FlowFrameLoopStorePlan::CompleteLoop {
-                machine_inputs,
-                loop_instance_id,
-                expected_loop,
-                next_loop,
-                frame_id,
-                expected_frame,
-                next_frame,
-                expected_run_state,
-                next_run_state,
-            } => (
-                self.run_store
-                    .cas_complete_loop(
-                        run_id,
-                        loop_instance_id,
-                        expected_loop,
-                        next_loop.clone(),
-                        frame_id,
-                        expected_frame,
-                        next_frame.clone(),
-                        expected_run_state,
-                        next_run_state.clone(),
-                    )
-                    .await
-                    .map_err(MobError::from)?,
-                machine_inputs,
-            ),
-        };
-        if won {
-            self.frame_kernel
-                .commit_mob_machine_inputs(machine_inputs)
-                .await?;
-        }
-        Ok(won)
+        self.frame_kernel
+            .projector
+            .commit_flow_frame_store_plan(run_id, plan.clone())
+            .await
     }
 
     async fn project_store_plan(

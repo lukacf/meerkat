@@ -1624,6 +1624,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
 
 struct RecordingRunStore {
     inner: InMemoryMobRunStore,
+    fail_create_run_once: AtomicBool,
     cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
     snapshot_cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
 }
@@ -1632,9 +1633,14 @@ impl RecordingRunStore {
     fn new() -> Self {
         Self {
             inner: InMemoryMobRunStore::new(),
+            fail_create_run_once: AtomicBool::new(false),
             cas_history: RwLock::new(Vec::new()),
             snapshot_cas_history: RwLock::new(Vec::new()),
         }
+    }
+
+    fn fail_next_create_run(&self) {
+        self.fail_create_run_once.store(true, Ordering::Relaxed);
     }
 
     async fn snapshot_cas_history(&self) -> Vec<(RunId, MobRunStatus, MobRunStatus)> {
@@ -1645,6 +1651,11 @@ impl RecordingRunStore {
 #[async_trait]
 impl MobRunStore for RecordingRunStore {
     async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
+        if self.fail_create_run_once.swap(false, Ordering::Relaxed) {
+            return Err(MobStoreError::Internal(
+                "fault-injected create_run failure".to_string(),
+            ));
+        }
         self.inner.create_run(run).await
     }
 
@@ -15180,6 +15191,113 @@ async fn test_destroy_cancels_inflight_flow_run() {
         .expect("read run after destroy")
         .expect("run should remain queryable in run store after destroy");
     assert_eq!(terminal.status, MobRunStatus::Canceled);
+}
+
+#[tokio::test]
+async fn test_run_flow_store_admission_failure_does_not_commit_mob_machine_authority() {
+    let run_store = Arc::new(RecordingRunStore::new());
+    let definition = sample_definition_with_single_step_flow(60_000, 8);
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_run_store(definition, run_store.clone()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker before flow admission");
+
+    run_store.fail_next_create_run();
+    let error = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect_err("fault-injected create_run failure should fail RunFlow admission");
+    assert!(
+        error
+            .to_string()
+            .contains("fault-injected create_run failure"),
+        "admission error should surface run-store failure, got: {error}"
+    );
+
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after failed admission");
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "RunFlow store failure must not leave MobMachine active_run_count advanced"
+    );
+    assert!(
+        machine_state.run_status.is_empty(),
+        "RunFlow store failure must not leave MobMachine run projections behind"
+    );
+    let persisted_runs = run_store
+        .list_runs(&mob_id, Some(&FlowId::from("demo")))
+        .await
+        .expect("list persisted runs");
+    assert!(
+        persisted_runs.is_empty(),
+        "fault-injected admission failure must not persist a run"
+    );
+}
+
+#[test]
+fn test_flow_cleanup_uses_terminal_projection_not_authority_clone_probe() {
+    let source = include_str!("actor.rs");
+    let start = source
+        .find("async fn handle_flow_cleanup")
+        .expect("handle_flow_cleanup exists");
+    let end = source[start..]
+        .find("async fn handle_cancel_flow")
+        .expect("handle_cancel_flow follows cleanup");
+    let body = &source[start..start + end];
+    assert!(
+        !body.contains("MobMachineAuthority::from_state(self.dsl_authority.state.clone())"),
+        "flow cleanup must use run terminality and live authority state directly, not clone-probe MobMachine"
+    );
+    assert!(
+        !body.contains("authorities_expect_completion"),
+        "flow cleanup must not infer terminality by probing whether authority signals would be accepted"
+    );
+}
+
+#[test]
+fn test_flow_frame_store_plan_commits_authority_with_store_in_actor() {
+    let source = include_str!("flow_frame_engine.rs");
+    let start = source
+        .find("async fn execute_store_plan")
+        .expect("execute_store_plan exists");
+    let end = source[start..]
+        .find("async fn project_store_plan")
+        .expect("project_store_plan follows execute_store_plan");
+    let body = &source[start..start + end];
+    assert!(
+        body.contains("commit_flow_frame_store_plan"),
+        "frame loop store plans must be committed through the actor authority/store seam"
+    );
+    assert!(
+        !body.contains("commit_mob_machine_inputs(machine_inputs)"),
+        "frame loop store plans must not persist store state before separately committing MobMachine inputs"
+    );
+}
+
+#[test]
+fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
+    let source = include_str!("actor.rs");
+    let start = source
+        .find("async fn install_supervisor_private_trust_for_session")
+        .expect("install_supervisor_private_trust_for_session exists");
+    let end = source[start..]
+        .find("async fn cleanup_supervisor_private_trust_for_session")
+        .expect("cleanup helper follows install helper");
+    let body = &source[start..start + end];
+    assert!(
+        body.contains("protocol_supervisor_trust_publish::extract_obligations"),
+        "supervisor private trust publication must realize the generated supervisor_trust_publish handoff obligation"
+    );
+    assert!(
+        !body.contains(
+            "stage_supervisor_trust_published(session_id, next_peer_id.clone(), next_epoch)"
+        ),
+        "publish feedback must use the generated obligation fields, not locally reconstructed peer/epoch atoms"
+    );
 }
 
 #[tokio::test]

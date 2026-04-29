@@ -1,0 +1,10 @@
+// Hand-maintained aggregator for files written by xtask codegen passes.
+// Each sibling module is emitted by either `xtask machine-codegen` or
+// `xtask protocol-codegen` — see each file's own header for provenance.
+// This aggregator is not itself a codegen output: it is a stable
+// `pub mod` index, and `xtask audit-generated-headers` forbids the
+// codegen marker here to keep that honest.
+
+pub mod protocol_auth_lease_lifecycle_publication;
+pub mod protocol_supervisor_trust_publish;
+pub mod protocol_supervisor_trust_revoke;

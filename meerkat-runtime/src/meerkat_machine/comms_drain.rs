@@ -671,7 +671,8 @@ impl MeerkatMachine {
         peer_id: String,
         address: String,
         epoch: u64,
-    ) -> Result<(), SupervisorBindingStageError> {
+    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .get_mut(session_id)
@@ -680,7 +681,7 @@ impl MeerkatMachine {
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut *authority,
             crate::meerkat_machine::dsl::MeerkatMachineInput::BindSupervisor {
                 name,
@@ -690,7 +691,7 @@ impl MeerkatMachine {
             },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(())
+        Ok(transition.effects)
     }
 
     /// Stage a DSL `AuthorizeSupervisor` input (Wave 3 D Row 21).
@@ -705,7 +706,8 @@ impl MeerkatMachine {
         peer_id: String,
         address: String,
         epoch: u64,
-    ) -> Result<(), SupervisorBindingStageError> {
+    ) -> Result<Vec<crate::meerkat_machine::dsl::MeerkatMachineEffect>, SupervisorBindingStageError>
+    {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .get_mut(session_id)
@@ -714,7 +716,7 @@ impl MeerkatMachine {
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
             &mut *authority,
             crate::meerkat_machine::dsl::MeerkatMachineInput::AuthorizeSupervisor {
                 name,
@@ -724,7 +726,7 @@ impl MeerkatMachine {
             },
         )
         .map_err(SupervisorBindingStageError::Dsl)?;
-        Ok(())
+        Ok(transition.effects)
     }
 
     /// Stage a DSL `RevokeSupervisor` input (Wave 3 D Row 21).

@@ -2105,9 +2105,15 @@ impl MobMcpDispatcher {
                                             "properties":{
                                                 "name":{"type":"string"},
                                                 "peer_id":{"type":"string"},
-                                                "address":{"type":"string"}
+                                                "address":{"type":"string"},
+                                                "pubkey":{
+                                                    "type":"array",
+                                                    "items":{"type":"integer","minimum":0,"maximum":255},
+                                                    "minItems":32,
+                                                    "maxItems":32
+                                                }
                                             },
-                                            "required":["name","peer_id","address"]
+                                            "required":["name","peer_id","address","pubkey"]
                                         }
                                     },
                                     "required":["external"]
@@ -2284,6 +2290,32 @@ struct WireActionArgs {
     action: String,
 }
 
+fn trusted_peer_descriptor_from_wire_spec(
+    spec: meerkat_contracts::WireTrustedPeerSpec,
+) -> Result<TrustedPeerDescriptor, String> {
+    let name = meerkat_core::comms::PeerName::new(spec.name.clone())
+        .map_err(|e| format!("invalid peer name '{}': {e}", spec.name))?;
+    let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id)
+        .map_err(|e| format!("invalid peer_id '{}': {e}", spec.peer_id))?;
+    if spec.pubkey == [0u8; 32] {
+        return Err("external peer pubkey must be non-zero".to_string());
+    }
+    let derived_peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&spec.pubkey);
+    if peer_id != derived_peer_id {
+        return Err(format!(
+            "external peer_id '{}' does not match pubkey-derived peer_id '{}'",
+            peer_id, derived_peer_id
+        ));
+    }
+    let address = parse_wire_peer_address(&spec.address)?;
+    Ok(TrustedPeerDescriptor {
+        name,
+        peer_id,
+        address,
+        pubkey: spec.pubkey,
+    })
+}
+
 impl WireActionArgs {
     fn resolve(self) -> Result<(String, AgentIdentity, meerkat_mob::PeerTarget, String), String> {
         Ok((
@@ -2292,17 +2324,7 @@ impl WireActionArgs {
             match self.peer {
                 MobPeerTarget::Local(member_id) => meerkat_mob::PeerTarget::Local(member_id.into()),
                 MobPeerTarget::External(spec) => {
-                    let name = meerkat_core::comms::PeerName::new(spec.name.clone())
-                        .map_err(|e| format!("invalid peer name '{}': {e}", spec.name))?;
-                    let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id)
-                        .map_err(|e| format!("invalid peer_id '{}': {e}", spec.peer_id))?;
-                    let address = parse_wire_peer_address(&spec.address)?;
-                    meerkat_mob::PeerTarget::External(TrustedPeerDescriptor {
-                        name,
-                        peer_id,
-                        address,
-                        pubkey: spec.pubkey,
-                    })
+                    meerkat_mob::PeerTarget::External(trusted_peer_descriptor_from_wire_spec(spec)?)
                 }
             },
             self.action,
@@ -2892,6 +2914,56 @@ mod tests {
     use std::time::SystemTime;
     use tokio::sync::Notify;
     use tokio::time::{Duration, Instant, sleep};
+
+    fn external_peer_target(peer_id: String, pubkey: [u8; 32]) -> MobPeerTarget {
+        MobPeerTarget::External(meerkat_contracts::WireTrustedPeerSpec {
+            name: "external-worker".to_string(),
+            peer_id,
+            address: "inproc://external-worker".to_string(),
+            pubkey,
+        })
+    }
+
+    #[test]
+    fn wire_action_args_rejects_external_peer_zero_pubkey() {
+        let err = WireActionArgs {
+            mob_id: "mob".to_string(),
+            agent_identity: "worker".to_string(),
+            peer: external_peer_target(meerkat_core::comms::PeerId::new().to_string(), [0u8; 32]),
+            action: "wire".to_string(),
+        }
+        .resolve()
+        .expect_err("zero pubkey external peers must be rejected");
+
+        assert!(
+            err.contains("pubkey"),
+            "expected pubkey validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_action_args_rejects_external_peer_pubkey_peer_id_mismatch() {
+        let pubkey = [7u8; 32];
+        let mismatched_peer_id = meerkat_core::comms::PeerId::new().to_string();
+        assert_ne!(
+            mismatched_peer_id,
+            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey).to_string()
+        );
+
+        let err = WireActionArgs {
+            mob_id: "mob".to_string(),
+            agent_identity: "worker".to_string(),
+            peer: external_peer_target(mismatched_peer_id, pubkey),
+            action: "wire".to_string(),
+        }
+        .resolve()
+        .expect_err("external peer_id must match the supplied pubkey");
+
+        assert!(
+            err.contains("peer_id") && err.contains("pubkey"),
+            "expected peer_id/pubkey validation error, got: {err}"
+        );
+    }
 
     struct MockComms {
         key: String,

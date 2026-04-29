@@ -670,6 +670,7 @@ async fn rollback_authorize_after_trust_publication_failure(
             previous.epoch,
         )
         .await
+        .map(|_| ())
 }
 
 /// Gate decision for `BindMember` when a supervisor is already bound.

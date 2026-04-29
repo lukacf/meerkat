@@ -19421,6 +19421,31 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         )
     }
 
+    async fn apply_runtime_system_context_for_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        for append in appends {
+            self.append_system_context(
+                session_id,
+                AppendSystemContextRequest {
+                    text: append.text,
+                    source: append.source,
+                    idempotency_key: append.idempotency_key,
+                },
+            )
+            .await
+            .map_err(|err| match err {
+                SessionControlError::Session(err) => err,
+                err => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    err.to_string(),
+                )),
+            })?;
+        }
+        Ok(())
+    }
+
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.sessions.write().await.remove(session_id);
         self.keep_alive_notifiers.write().await.remove(session_id);
@@ -20232,10 +20257,19 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         Some(meerkat_runtime::InputLifecycleState::Consumed),
         "terminal peer response should be applied and consumed: {requester_snapshot:?}"
     );
+    let requester_prompts_after_response = service.applied_runtime_prompts(&sid_requester).await;
     assert_eq!(
-        service.applied_runtime_prompts(&sid_requester).await.len(),
-        requester_prompt_baseline,
-        "terminal peer response should apply as runtime system context without requiring a user prompt turn"
+        requester_prompts_after_response.len(),
+        requester_prompt_baseline + 1,
+        "terminal peer response should append runtime system context and kick a requester reaction turn"
+    );
+    assert_eq!(
+        requester_prompts_after_response
+            .last()
+            .map(ContentInput::text_content)
+            .unwrap_or_default(),
+        "",
+        "terminal peer response reaction should be system-triggered, not a new user prompt"
     );
 
     let duplicate = meerkat_runtime::peer_response_terminal_input(

@@ -8,6 +8,7 @@
 mod agent_tools;
 mod public_definition;
 mod public_mcp;
+#[cfg(not(target_arch = "wasm32"))]
 mod schedule_host;
 mod surface;
 pub use agent_tools::{
@@ -17,6 +18,7 @@ pub use public_definition::decode_public_mob_definition;
 pub use public_mcp::{
     handle_public_tools_call, public_tool_names, public_tools_list, wrap_public_tool_payload,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use schedule_host::MobMcpScheduleHost;
 pub use surface::wire_mob_tools;
 

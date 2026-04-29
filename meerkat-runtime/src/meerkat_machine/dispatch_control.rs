@@ -445,9 +445,13 @@ impl MeerkatMachine {
                 };
                 drop(drv);
 
-                self.apply_session_dsl_input(&session_id, destroy_input, "Destroy")
-                    .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                let apply_result = self
+                    .apply_session_dsl_input_preserving_committed_state(
+                        &session_id,
+                        destroy_input,
+                        "Destroy",
+                    )
+                    .await;
                 driver
                     .lock()
                     .await
@@ -455,6 +459,9 @@ impl MeerkatMachine {
 
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime destroyed");
+                if let Err(reason) = apply_result {
+                    return Err(RuntimeControlPlaneError::Internal(reason));
+                }
                 Ok(MeerkatMachineCommandResult::DestroyReport(report))
             }
             MeerkatMachineCommand::RuntimeState { runtime_id } => {

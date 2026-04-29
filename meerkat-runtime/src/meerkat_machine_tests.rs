@@ -283,6 +283,31 @@ async fn authoritative_dsl_apply_rolls_back_state_when_effect_dispatch_fails() {
 }
 
 #[tokio::test]
+async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatch_fails() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare bindings before destroy");
+    install_rejecting_meerkat_signal_dispatcher(&machine);
+
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let err = crate::traits::RuntimeControlPlane::destroy(&machine, &runtime_id)
+        .await
+        .expect_err("signal dispatch failure should surface");
+    assert!(
+        err.to_string().contains("injected signal commit failure"),
+        "{err}"
+    );
+    assert_eq!(
+        machine.existing_session_runtime_state(&session_id).await,
+        Some(RuntimeState::Destroyed),
+        "irreversible shell destroy must not roll DSL authority back to an earlier phase"
+    );
+}
+
+#[tokio::test]
 async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();

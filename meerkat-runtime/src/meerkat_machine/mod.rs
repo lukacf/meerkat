@@ -161,6 +161,12 @@ struct StagedSessionDslInput {
     effects: Vec<dsl::MeerkatMachineEffect>,
 }
 
+#[derive(Clone, Copy)]
+enum CommittedEffectDispatchFailure {
+    PreserveCommittedDslState,
+    RestorePreviousDslState,
+}
+
 /// Per-session state: driver + registration phase.
 struct RuntimeSessionEntry {
     /// Per-session mutation gate.
@@ -446,6 +452,49 @@ impl MeerkatMachine {
         ),
         String,
     > {
+        self.apply_session_dsl_input_with_dispatch_failure(
+            session_id,
+            input,
+            context,
+            CommittedEffectDispatchFailure::RestorePreviousDslState,
+        )
+        .await
+    }
+
+    async fn apply_session_dsl_input_preserving_committed_state(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<
+        (
+            Box<dsl::MeerkatMachineState>,
+            Vec<dsl::MeerkatMachineEffect>,
+        ),
+        String,
+    > {
+        self.apply_session_dsl_input_with_dispatch_failure(
+            session_id,
+            input,
+            context,
+            CommittedEffectDispatchFailure::PreserveCommittedDslState,
+        )
+        .await
+    }
+
+    async fn apply_session_dsl_input_with_dispatch_failure(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+        dispatch_failure: CommittedEffectDispatchFailure,
+    ) -> Result<
+        (
+            Box<dsl::MeerkatMachineState>,
+            Vec<dsl::MeerkatMachineEffect>,
+        ),
+        String,
+    > {
         let authority = self.session_dsl_authority(session_id).await?;
         let (previous_state, effects) = {
             let mut authority = authority
@@ -458,8 +507,13 @@ impl MeerkatMachine {
             (previous_state, effects)
         };
         if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
-            self.restore_session_dsl_state(session_id, previous_state)
-                .await;
+            match dispatch_failure {
+                CommittedEffectDispatchFailure::PreserveCommittedDslState => {}
+                CommittedEffectDispatchFailure::RestorePreviousDslState => {
+                    self.restore_session_dsl_state(session_id, previous_state)
+                        .await;
+                }
+            }
             return Err(format!(
                 "DSL authority ({context}): committed effect dispatch failed: {error}"
             ));

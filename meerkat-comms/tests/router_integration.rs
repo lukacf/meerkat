@@ -462,7 +462,9 @@ async fn integration_real_send() {
 
 #[tokio::test]
 #[ignore = "integration-real: socket integration + timing behavior"]
-async fn integration_real_send_request() {
+async fn integration_real_router_transport_only_send_request_frame() {
+    // Transport-only: verifies the router can frame a Request on the wire.
+    // Agent-facing semantic request dispatch is owned by the runtime tool path.
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -531,7 +533,9 @@ async fn integration_real_send_request() {
 
 #[tokio::test]
 #[ignore = "integration-real: socket integration + timing behavior"]
-async fn integration_real_send_response() {
+async fn integration_real_router_transport_only_send_response_frame() {
+    // Transport-only: verifies the router can frame a Response on the wire.
+    // It must not be used as proof that agent-facing send_response semantics ran.
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -595,7 +599,8 @@ async fn integration_real_send_response() {
 
 #[tokio::test]
 #[ignore = "integration-real: socket integration + timing behavior"]
-async fn integration_real_send_response_no_ack_wait() {
+async fn integration_real_router_transport_only_send_response_frame_no_ack_wait() {
+    // Transport-only: response frames do not wait for ACKs at the router layer.
     let tmp = TempDir::new().unwrap();
     let sock_path = tmp.path().join("peer.sock");
 
@@ -769,7 +774,9 @@ async fn integration_real_router_inproc_peer_not_found() {
 
 #[tokio::test]
 #[ignore = "integration-real: socket integration + timing behavior"]
-async fn integration_real_router_inproc_request_response() {
+async fn integration_real_router_inproc_transport_only_request_frame() {
+    // Transport-only: verifies inproc Request framing, not semantic peer
+    // request/response lifecycle ownership.
     use meerkat_comms::{Inbox, InprocRegistry};
 
     let _lock = INPROC_REGISTRY_LOCK.lock().await;

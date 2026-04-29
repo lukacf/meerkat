@@ -14088,7 +14088,7 @@ supports_reasoning = true
         // Create CommsToolDispatcher with no inner dispatcher
         let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
 
-        // Verify comms tools are available
+        // Runtime-less dispatchers expose transport-only comms tools.
         let tools = dispatcher.tools();
         let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_ref()).collect();
 
@@ -14097,12 +14097,12 @@ supports_reasoning = true
             "expected send_message tool, got: {tool_names:?}"
         );
         assert!(
-            tool_names.contains(&"send_request"),
-            "expected send_request tool, got: {tool_names:?}"
+            !tool_names.contains(&"send_request"),
+            "send_request requires runtime command authority, got: {tool_names:?}"
         );
         assert!(
-            tool_names.contains(&"send_response"),
-            "expected send_response tool, got: {tool_names:?}"
+            !tool_names.contains(&"send_response"),
+            "send_response requires runtime command authority, got: {tool_names:?}"
         );
         assert!(tool_names.contains(&"peers"));
     }

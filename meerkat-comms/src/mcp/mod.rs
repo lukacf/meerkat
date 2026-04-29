@@ -2,4 +2,6 @@
 
 pub mod tools;
 
-pub use tools::{PeersInput, ToolContext, handle_tools_call, tools_list};
+pub use tools::{
+    PeersInput, RuntimeCommsCommandHandle, ToolContext, handle_tools_call, tools_list,
+};

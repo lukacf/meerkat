@@ -156,6 +156,11 @@ pub use comms_drain::{
 pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 
+struct StagedSessionDslInput {
+    previous_state: Box<dsl::MeerkatMachineState>,
+    effects: Vec<dsl::MeerkatMachineEffect>,
+}
+
 /// Per-session state: driver + registration phase.
 struct RuntimeSessionEntry {
     /// Per-session mutation gate.
@@ -404,9 +409,29 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<Box<dsl::MeerkatMachineState>, String> {
-        self.apply_session_dsl_input(session_id, input, context)
+        self.stage_session_dsl_transition(session_id, input, context)
             .await
-            .map(|(previous_state, _)| previous_state)
+            .map(|staged| staged.previous_state)
+    }
+
+    async fn stage_session_dsl_transition(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, String> {
+        let authority = self.session_dsl_authority(session_id).await?;
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_state = Box::new(authority.state.clone());
+        let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+            .map(|transition| transition.effects)
+            .map_err(|err| dsl_authority::map_error(err, context))?;
+        Ok(StagedSessionDslInput {
+            previous_state,
+            effects,
+        })
     }
 
     async fn apply_session_dsl_input(
@@ -432,8 +457,33 @@ impl MeerkatMachine {
                 .map_err(|err| dsl_authority::map_error(err, context))?;
             (previous_state, effects)
         };
-        self.dispatch_routed_signals_from_effects(&effects).await?;
+        if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
+            self.restore_session_dsl_state(session_id, previous_state)
+                .await;
+            return Err(format!(
+                "DSL authority ({context}): committed effect dispatch failed: {error}"
+            ));
+        }
         Ok((previous_state, effects))
+    }
+
+    async fn commit_session_dsl_transition(
+        &self,
+        session_id: &SessionId,
+        staged: StagedSessionDslInput,
+        context: &str,
+    ) -> Result<(), String> {
+        if let Err(error) = self
+            .dispatch_routed_signals_from_effects(&staged.effects)
+            .await
+        {
+            self.restore_session_dsl_state(session_id, staged.previous_state)
+                .await;
+            return Err(format!(
+                "DSL authority ({context}): committed effect dispatch failed: {error}"
+            ));
+        }
+        Ok(())
     }
 
     async fn dispatch_routed_signals_from_effects(
@@ -632,15 +682,24 @@ impl MeerkatMachine {
         let authority = Arc::clone(&entry.dsl_authority);
         drop(sessions);
 
-        let effects = {
+        let (previous_state, effects) = {
             let mut guard = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            dsl::MeerkatMachineMutator::apply(&mut *guard, input)
+            let previous_state = Box::new(guard.state.clone());
+            let effects = dsl::MeerkatMachineMutator::apply(&mut *guard, input)
                 .map(|transition| transition.effects)
-                .map_err(|err| format!("{err}"))?
+                .map_err(|err| format!("{err}"))?;
+            (previous_state, effects)
         };
-        self.dispatch_routed_signals_from_effects(&effects).await
+        if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
+            self.restore_session_dsl_state(session_id, previous_state)
+                .await;
+            return Err(format!(
+                "routed MeerkatMachine input committed effect dispatch failed: {error}"
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]

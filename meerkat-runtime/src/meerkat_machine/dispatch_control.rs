@@ -178,7 +178,7 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Destroyed | RuntimeState::Stopped) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                let previous_dsl_state = if state == RuntimeState::Retired {
+                let staged_dsl = if state == RuntimeState::Retired {
                     // The DSL Retire transition is intentionally not
                     // self-looping. Command-level idempotence belongs here,
                     // after reading the DSL-authoritative phase, while the
@@ -186,7 +186,7 @@ impl MeerkatMachine {
                     None
                 } else {
                     Some(
-                        self.stage_session_dsl_input(
+                        self.stage_session_dsl_transition(
                             &session_id,
                             crate::meerkat_machine::dsl::MeerkatMachineInput::Retire {
                                 session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
@@ -205,14 +205,26 @@ impl MeerkatMachine {
                     Ok(report) => report,
                     Err(err) => {
                         drop(drv);
-                        if let Some(previous_dsl_state) = previous_dsl_state {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        if let Some(staged_dsl) = staged_dsl {
+                            self.restore_session_dsl_state(&session_id, staged_dsl.previous_state)
                                 .await;
                         }
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }
                 };
                 drop(drv);
+
+                if let Some(staged_dsl) = staged_dsl
+                    && let Err(reason) = self
+                        .commit_session_dsl_transition(&session_id, staged_dsl, "Retire")
+                        .await
+                {
+                    driver
+                        .lock()
+                        .await
+                        .sync_control_projection_from_dsl_authority();
+                    return Err(RuntimeControlPlaneError::Internal(reason));
+                }
 
                 if report.inputs_pending_drain > 0 {
                     if let Some(ref tx) = wake_tx

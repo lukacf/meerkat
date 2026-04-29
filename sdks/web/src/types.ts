@@ -297,8 +297,6 @@ export interface ToolConfig {
   mob_tasks?: boolean;
   /** MCP server names this profile connects to. */
   mcp?: string[];
-  /** Named Rust tool bundles (re-registered at mob construction time). */
-  rust_bundles?: string[];
 }
 
 /** Wiring rules controlling automatic peer connections. */

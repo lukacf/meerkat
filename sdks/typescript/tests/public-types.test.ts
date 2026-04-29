@@ -1,4 +1,8 @@
-import type { SpawnSpec } from "../src/index.js";
+import type { MobCreateOptions, MobDefinition, SpawnManySpec, SpawnSpec } from "../src/index.js";
+import type {
+  MobSpawnParams as PublicMobSpawnParams,
+  MobSpawnSpecParams as PublicMobSpawnSpecParams,
+} from "../src/index.js";
 import type {
   MobCreateParams,
   MobDefinitionInput,
@@ -48,6 +52,107 @@ const spawnSpecWithGeneration: SpawnSpec = {
 
 void spawnSpecWithGeneration;
 
+const publicMobDefinition: MobDefinition = {
+  id: "mob-1",
+  profiles: {
+    worker: { model: "claude-sonnet-4-6", tools: { shell: true } },
+    reviewer: { realm_profile: "reviewer-default" },
+  },
+  mcp_servers: {
+    browser: {
+      command: ["npx", "@modelcontextprotocol/server-browser"],
+      env: { NODE_ENV: "test" },
+    },
+  },
+  flows: {
+    kickoff: {
+      steps: {
+        start: {
+          role: "worker",
+          message: "start",
+        },
+      },
+    },
+  },
+  backend: { default: "session" },
+  wiring: { auto_wire_orchestrator: true },
+};
+
+const publicMobCreateOptions: MobCreateOptions = { definition: publicMobDefinition };
+
+void publicMobDefinition;
+void publicMobCreateOptions;
+
+const publicMobDefinitionWithBadFlow: MobDefinition = {
+  id: "mob-bad-flow",
+  profiles: { worker: { model: "claude-sonnet-4-6" } },
+  flows: {
+    kickoff: {
+      steps: {
+        // @ts-expect-error flow steps must use the typed mob flow contract.
+        start: { role: "worker" },
+      },
+    },
+  },
+};
+
+void publicMobDefinitionWithBadFlow;
+
+const publicMobDefinitionWithBadMcpEnv: MobDefinition = {
+  id: "mob-bad-mcp",
+  profiles: { worker: { model: "claude-sonnet-4-6" } },
+  mcp_servers: {
+    browser: {
+      // @ts-expect-error MCP server env values are strings in the public contract.
+      env: { NODE_ENV: 1 },
+    },
+  },
+};
+
+void publicMobDefinitionWithBadMcpEnv;
+
+const publicSpawnSpecWithAdvancedFields: SpawnSpec = {
+  profile: "worker",
+  agentIdentity: "worker-advanced",
+  initialMessage: [{ type: "text", text: "hello" }],
+  runtimeMode: "autonomous_host",
+  backend: "session",
+  labels: { role: "worker" },
+  context: { ticket: "LUC-134" },
+  additionalInstructions: ["stay focused"],
+  binding: { kind: "session" },
+  shellEnv: { TEST_MODE: "1" },
+  autoWireParent: true,
+  launchMode: { mode: "fresh" },
+  toolAccessPolicy: { type: "allow_list", value: ["grep"] },
+  budgetSplitPolicy: { type: "remaining" },
+  inheritedToolFilter: { Allow: ["grep"] },
+  overrideProfile: {
+    model: "claude-sonnet-4-6",
+    tools: { shell: true },
+  },
+  connectionRef: { realm: "dev", binding: "default_anthropic" },
+};
+
+void publicSpawnSpecWithAdvancedFields;
+
+const publicSpawnManySpec: SpawnManySpec = {
+  profile: "worker",
+  agentIdentity: "worker-many",
+  connectionRef: { realm: "dev", binding: "default_anthropic" },
+};
+
+void publicSpawnManySpec;
+
+const publicSpawnManySpecWithSingleSpawnOnlyField: SpawnManySpec = {
+  profile: "worker",
+  agentIdentity: "worker-many-bad",
+  // @ts-expect-error launchMode is only supported by the single-member mob/spawn contract.
+  launchMode: { mode: "fresh" },
+};
+
+void publicSpawnManySpecWithSingleSpawnOnlyField;
+
 const generatedMobSpawn: MobSpawnParams = {
   mob_id: "mob-1",
   profile: "worker",
@@ -55,6 +160,15 @@ const generatedMobSpawn: MobSpawnParams = {
 };
 
 void generatedMobSpawn;
+
+const publicIndexedMobSpawnParams: PublicMobSpawnParams = generatedMobSpawn;
+const publicIndexedMobSpawnSpecParams: PublicMobSpawnSpecParams = {
+  profile: "worker",
+  agent_identity: "worker-indexed",
+};
+
+void publicIndexedMobSpawnParams;
+void publicIndexedMobSpawnSpecParams;
 
 const generatedMobSpawnWithAdvancedJsonSlot: MobSpawnParams = {
   mob_id: "mob-1",

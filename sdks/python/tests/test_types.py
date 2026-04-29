@@ -1665,6 +1665,24 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob-1",
         profile="planner",
         agent_identity="agent-a",
+        initial_message=[{"type": "text", "text": "hello"}],
+        runtime_mode="autonomous_host",
+        backend="session",
+        labels={"role": "planner"},
+        context={"ticket": "LUC-134"},
+        additional_instructions=["stay focused"],
+        binding={"kind": "session"},
+        shell_env={"TEST_MODE": "1"},
+        auto_wire_parent=True,
+        launch_mode={"mode": "fresh"},
+        tool_access_policy={"type": "allow_list", "value": ["grep"]},
+        budget_split_policy={"type": "remaining"},
+        inherited_tool_filter={"Allow": ["grep"]},
+        override_profile={
+            "model": "claude-sonnet-4-6",
+            "tools": {"shell": True},
+        },
+        connection_ref={"realm": "dev", "binding": "default_anthropic"},
     )
     assert spawn_receipt == {
         "mob_id": "mob-1",
@@ -1778,7 +1796,29 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "timeout_ms": 1234,
     }
     assert calls[13][1] == {"mob_id": "mob-1", "timeout_ms": 99}
-    assert calls[4][1]["agent_identity"] == "agent-a"
+    assert calls[4][1] == {
+        "mob_id": "mob-1",
+        "profile": "planner",
+        "agent_identity": "agent-a",
+        "initial_message": [{"type": "text", "text": "hello"}],
+        "runtime_mode": "autonomous_host",
+        "backend": "session",
+        "labels": {"role": "planner"},
+        "context": {"ticket": "LUC-134"},
+        "additional_instructions": ["stay focused"],
+        "binding": {"kind": "session"},
+        "shell_env": {"TEST_MODE": "1"},
+        "auto_wire_parent": True,
+        "launch_mode": {"mode": "fresh"},
+        "tool_access_policy": {"type": "allow_list", "value": ["grep"]},
+        "budget_split_policy": {"type": "remaining"},
+        "inherited_tool_filter": {"Allow": ["grep"]},
+        "override_profile": {
+            "model": "claude-sonnet-4-6",
+            "tools": {"shell": True},
+        },
+        "connection_ref": {"realm": "dev", "binding": "default_anthropic"},
+    }
 
 
 @pytest.mark.asyncio

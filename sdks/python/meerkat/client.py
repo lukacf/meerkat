@@ -37,6 +37,7 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    MobDefinitionInput,
     RealtimeCapabilitiesResult,
     RealtimeOpenInfo,
     RealtimeOpenRequest,
@@ -46,8 +47,18 @@ from .generated.types import (
     RuntimeResetResult,
     RuntimeRetireResult,
     RuntimeStateResult,
+    WireBudgetSplitPolicy,
+    WireConnectionRef,
+    WireContentInput,
     WireInputState,
     WireInputStateHistoryEntry,
+    WireMemberLaunchMode,
+    WireMobBackendKind,
+    WireMobProfile,
+    WireMobRuntimeMode,
+    WireRuntimeBinding,
+    WireToolAccessPolicy,
+    WireToolFilter,
 )
 from .mob import (
     Mob,
@@ -129,10 +140,26 @@ RenderMetadata = TypedDict(
 )
 
 
-def _wire_params(value: Any) -> dict[str, Any]:
+def _wire_value(value: Any) -> Any:
     if is_dataclass(value):
-        return {key: item for key, item in asdict(value).items() if item is not None}
-    return dict(value)
+        return {
+            key: _wire_value(item)
+            for key, item in asdict(value).items()
+            if item is not None
+        }
+    if isinstance(value, dict):
+        return {
+            key: _wire_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_wire_value(item) for item in value]
+    return value
+
+
+def _wire_params(value: Any) -> dict[str, Any]:
+    converted = _wire_value(value)
+    return converted if isinstance(converted, dict) else dict(converted)
 
 
 def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
@@ -1045,10 +1072,10 @@ class MeerkatClient:
     async def create_mob(
         self,
         *,
-        definition: dict[str, Any],
+        definition: MobDefinitionInput | dict[str, Any],
     ) -> Mob:
         self.require_capability("mob")
-        result = await self._request("mob/create", {"definition": definition})
+        result = await self._request("mob/create", {"definition": _wire_params(definition)})
         return Mob(self, str(result.get("mob_id", "")))
 
     def mob(self, mob_id: str) -> Mob:
@@ -1210,24 +1237,46 @@ class MeerkatClient:
         *,
         profile: str,
         agent_identity: str,
-        initial_message: str | list[dict] | None = None,
-        runtime_mode: str | None = None,
-        backend: str | None = None,
+        initial_message: WireContentInput | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+        backend: WireMobBackendKind | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
+        binding: WireRuntimeBinding | dict[str, Any] | None = None,
+        shell_env: dict[str, str] | None = None,
+        auto_wire_parent: bool | None = None,
+        launch_mode: WireMemberLaunchMode | dict[str, Any] | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
+        budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
+        inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
+        override_profile: WireMobProfile | dict[str, Any] | None = None,
+        connection_ref: WireConnectionRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
         params: dict[str, Any] = {
             "mob_id": mob_id,
             "profile": profile,
             "agent_identity": agent_identity,
-            "initial_message": initial_message,
+            "initial_message": _wire_value(initial_message),
             "runtime_mode": runtime_mode,
             "backend": backend,
-            "labels": labels,
-            "context": context,
-            "additional_instructions": additional_instructions,
+            "labels": _wire_value(labels),
+            "context": _wire_value(context),
+            "additional_instructions": _wire_value(additional_instructions),
         }
+        for key, value in {
+            "binding": binding,
+            "shell_env": shell_env,
+            "auto_wire_parent": auto_wire_parent,
+            "launch_mode": launch_mode,
+            "tool_access_policy": tool_access_policy,
+            "budget_split_policy": budget_split_policy,
+            "inherited_tool_filter": inherited_tool_filter,
+            "override_profile": override_profile,
+            "connection_ref": connection_ref,
+        }.items():
+            if value is not None:
+                params[key] = _wire_value(value)
         result = await self._request("mob/spawn", params)
         resolved_identity = result.get("agent_identity")
         if not isinstance(resolved_identity, str) or not resolved_identity:
@@ -1255,7 +1304,7 @@ class MeerkatClient:
     ) -> list[MobSpawnResult]:
         params: dict[str, Any] = {
             "mob_id": mob_id,
-            "specs": specs,
+            "specs": _wire_value(specs),
         }
         result = await self._request("mob/spawn_many", params)
         entries = result.get("results", [])

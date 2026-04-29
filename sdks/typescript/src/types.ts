@@ -4,6 +4,30 @@
  * These replace the `Wire*` prefixed generated types.
  */
 
+import type {
+  MobBackendConfigInput,
+  MobEventRouterConfigInput,
+  MobFlowSpecInput,
+  MobLimitsSpecInput,
+  MobMcpServerConfigInput,
+  MobOrchestratorInput,
+  MobSkillSourceInput,
+  MobSpawnPolicyInput,
+  MobSupervisorSpecInput,
+  MobToolConfigInput,
+  MobTopologySpecInput,
+  MobWiringRulesInput,
+  WireBudgetSplitPolicy,
+  WireConnectionRef,
+  WireContentInput,
+  WireMemberLaunchMode,
+  WireMobBackendKind,
+  WireMobProfile,
+  WireMobRuntimeMode,
+  WireRuntimeBinding,
+  WireToolAccessPolicy,
+  WireToolFilter,
+} from "./generated/types.js";
 import type { Usage } from "./events.js";
 
 export type { Usage } from "./events.js";
@@ -219,16 +243,7 @@ export interface AttributedEvent {
 }
 
 /** Public mob definition input for host-side `mob/create`. */
-export interface MobToolConfig {
-  readonly builtins?: boolean;
-  readonly shell?: boolean;
-  readonly comms?: boolean;
-  readonly memory?: boolean;
-  readonly mob?: boolean;
-  readonly mob_tasks?: boolean;
-  readonly schedule?: boolean;
-  readonly mcp?: readonly string[];
-}
+export type MobToolConfig = MobToolConfigInput;
 
 export interface MobProfile {
   readonly model: string;
@@ -236,40 +251,52 @@ export interface MobProfile {
   readonly tools?: MobToolConfig;
   readonly peer_description?: string;
   readonly external_addressable?: boolean;
-  readonly backend?: "session" | "external";
-  readonly runtime_mode?: "autonomous_host" | "turn_driven";
+  readonly backend?: WireMobBackendKind;
+  readonly runtime_mode?: WireMobRuntimeMode;
   readonly max_inline_peer_notifications?: number;
-  readonly output_schema?: Record<string, unknown>;
-  readonly provider_params?: Record<string, unknown>;
+  readonly output_schema?: unknown;
+  readonly provider_params?: unknown;
 }
 
 export type MobProfileBinding = MobProfile | { readonly realm_profile: string };
 
 export interface MobDefinition {
   readonly id: string;
-  readonly orchestrator?: { readonly profile: string };
+  readonly orchestrator?: MobOrchestratorInput;
   readonly profiles: Readonly<Record<string, MobProfileBinding>>;
-  readonly mcp_servers?: Readonly<Record<string, Record<string, unknown>>>;
-  readonly wiring?: Record<string, unknown>;
-  readonly flows?: Record<string, unknown>;
-  readonly skills?: Record<string, unknown>;
-  readonly backend?: Record<string, unknown>;
-  readonly topology?: Record<string, unknown>;
-  readonly supervisor?: Record<string, unknown>;
-  readonly limits?: Record<string, unknown>;
-  readonly spawn_policy?: Record<string, unknown>;
-  readonly event_router?: Record<string, unknown>;
+  readonly mcp_servers?: Readonly<Record<string, MobMcpServerConfigInput>>;
+  readonly wiring?: MobWiringRulesInput;
+  readonly flows?: Readonly<Record<string, MobFlowSpecInput>>;
+  readonly skills?: Readonly<Record<string, MobSkillSourceInput>>;
+  readonly backend?: MobBackendConfigInput;
+  readonly topology?: MobTopologySpecInput;
+  readonly supervisor?: MobSupervisorSpecInput;
+  readonly limits?: MobLimitsSpecInput;
+  readonly spawn_policy?: MobSpawnPolicyInput;
+  readonly event_router?: MobEventRouterConfigInput;
 }
 
-export interface SpawnSpec {
+export interface SpawnManySpec {
   readonly profile: string;
   readonly agentIdentity: string;
-  readonly initialMessage?: string | ContentBlock[];
-  readonly runtimeMode?: "turn_driven" | "autonomous_host";
-  readonly backend?: "session" | "external";
+  readonly initialMessage?: WireContentInput;
+  readonly runtimeMode?: WireMobRuntimeMode;
+  readonly backend?: WireMobBackendKind;
   readonly labels?: Record<string, string>;
-  readonly context?: Record<string, unknown>;
+  readonly context?: unknown;
   readonly additionalInstructions?: string[];
+  readonly connectionRef?: WireConnectionRef;
+}
+
+export interface SpawnSpec extends SpawnManySpec {
+  readonly binding?: WireRuntimeBinding;
+  readonly shellEnv?: Readonly<Record<string, string>>;
+  readonly autoWireParent?: boolean;
+  readonly launchMode?: WireMemberLaunchMode;
+  readonly toolAccessPolicy?: WireToolAccessPolicy;
+  readonly budgetSplitPolicy?: WireBudgetSplitPolicy;
+  readonly inheritedToolFilter?: WireToolFilter;
+  readonly overrideProfile?: WireMobProfile;
 }
 
 export interface MobSpawnResult {

@@ -119,6 +119,7 @@ import type {
   SkillKey,
   SkillRef,
   SkillRuntimeDiagnostics,
+  SpawnManySpec,
   SpawnSpec,
   UpdateScheduleRequest,
   TurnOptions,
@@ -175,6 +176,51 @@ function normalizeSkillRef(ref: SkillRef): { source_uuid: string; skill_name: st
 function skillRefsToWire(refs: SkillRef[] | undefined): Array<{ source_uuid: string; skill_name: string }> | undefined {
   if (!refs) return undefined;
   return refs.map(normalizeSkillRef);
+}
+
+function setIfDefined(payload: Record<string, unknown>, key: string, value: unknown): void {
+  if (value !== undefined) {
+    payload[key] = value;
+  }
+}
+
+function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    mob_id: mobId,
+    profile: spec.profile,
+    agent_identity: spec.agentIdentity,
+  };
+  setIfDefined(payload, "initial_message", spec.initialMessage);
+  setIfDefined(payload, "runtime_mode", spec.runtimeMode);
+  setIfDefined(payload, "backend", spec.backend);
+  setIfDefined(payload, "labels", spec.labels);
+  setIfDefined(payload, "context", spec.context);
+  setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
+  setIfDefined(payload, "binding", spec.binding);
+  setIfDefined(payload, "shell_env", spec.shellEnv);
+  setIfDefined(payload, "auto_wire_parent", spec.autoWireParent);
+  setIfDefined(payload, "launch_mode", spec.launchMode);
+  setIfDefined(payload, "tool_access_policy", spec.toolAccessPolicy);
+  setIfDefined(payload, "budget_split_policy", spec.budgetSplitPolicy);
+  setIfDefined(payload, "inherited_tool_filter", spec.inheritedToolFilter);
+  setIfDefined(payload, "override_profile", spec.overrideProfile);
+  setIfDefined(payload, "connection_ref", spec.connectionRef);
+  return payload;
+}
+
+function mobSpawnManySpecPayload(spec: SpawnManySpec): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    profile: spec.profile,
+    agent_identity: spec.agentIdentity,
+  };
+  setIfDefined(payload, "initial_message", spec.initialMessage);
+  setIfDefined(payload, "runtime_mode", spec.runtimeMode);
+  setIfDefined(payload, "backend", spec.backend);
+  setIfDefined(payload, "labels", spec.labels);
+  setIfDefined(payload, "context", spec.context);
+  setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
+  setIfDefined(payload, "connection_ref", spec.connectionRef);
+  return payload;
 }
 
 export class MeerkatClient {
@@ -916,17 +962,7 @@ export class MeerkatClient {
     mobId: string,
     options: SpawnSpec,
   ): Promise<MobSpawnResult> {
-    const result = await this.request("mob/spawn", {
-      mob_id: mobId,
-      profile: options.profile,
-      agent_identity: options.agentIdentity,
-      initial_message: options.initialMessage,
-      runtime_mode: options.runtimeMode,
-      backend: options.backend,
-      labels: options.labels,
-      context: options.context,
-      additional_instructions: options.additionalInstructions,
-    });
+    const result = await this.request("mob/spawn", mobSpawnPayload(mobId, options));
     const memberRef =
       typeof result.member_ref === "string" && result.member_ref.length > 0
         ? result.member_ref
@@ -949,20 +985,11 @@ export class MeerkatClient {
 
   async spawnMobMembers(
     mobId: string,
-    specs: SpawnSpec[],
+    specs: SpawnManySpec[],
   ): Promise<MobSpawnManyResultEntry[]> {
     const result = await this.request("mob/spawn_many", {
       mob_id: mobId,
-      specs: specs.map((spec) => ({
-        profile: spec.profile,
-        agent_identity: spec.agentIdentity,
-        initial_message: spec.initialMessage,
-        runtime_mode: spec.runtimeMode,
-        backend: spec.backend,
-        labels: spec.labels,
-        context: spec.context,
-        additional_instructions: spec.additionalInstructions,
-      })),
+      specs: specs.map(mobSpawnManySpecPayload),
     });
     const entries = Array.isArray(result.results)
       ? (result.results as Array<Record<string, unknown>>)

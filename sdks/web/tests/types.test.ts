@@ -179,6 +179,21 @@ const mobDef: MobDefinition = {
   },
 };
 
+const mobDefWithInternalToolBundle: MobDefinition = {
+  id: 'test-mob-internal-tools',
+  profiles: {
+    worker: {
+      model: 'claude-sonnet-4-5',
+      tools: {
+        // @ts-expect-error rust_bundles is runtime-internal and not a public web contract field.
+        rust_bundles: ['internal-only'],
+      },
+    },
+  },
+};
+
+void mobDefWithInternalToolBundle;
+
 // ─── SpawnSpec ───────────────────────────────────────────────────
 
 const spawnSpec: SpawnSpec = {

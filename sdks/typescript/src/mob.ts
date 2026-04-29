@@ -12,6 +12,7 @@ import type {
   MobSpawnResult,
   MobSpawnManyResultEntry,
   MobStatus,
+  SpawnManySpec,
   SpawnSpec,
 } from "./types.js";
 import type { MeerkatClient } from "./client.js";
@@ -151,7 +152,7 @@ export class Mob {
     return this.client.spawnMobMember(this.mobId, spec);
   }
 
-  async spawnMany(specs: SpawnSpec[]): Promise<MobSpawnManyResultEntry[]> {
+  async spawnMany(specs: SpawnManySpec[]): Promise<MobSpawnManyResultEntry[]> {
     return this.client.spawnMobMembers(this.mobId, specs);
   }
 

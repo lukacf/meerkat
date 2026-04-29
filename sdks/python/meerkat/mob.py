@@ -2,6 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
+from .generated.types import (
+    WireBudgetSplitPolicy,
+    WireConnectionRef,
+    WireContentInput,
+    WireMemberLaunchMode,
+    WireMobBackendKind,
+    WireMobProfile,
+    WireMobRuntimeMode,
+    WireRuntimeBinding,
+    WireToolAccessPolicy,
+    WireToolFilter,
+)
 from .streaming import EventSubscription
 
 MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
@@ -162,12 +174,13 @@ MobSpawnSpec = TypedDict(
     {
         "profile": str,
         "agent_identity": str,
-        "initial_message": NotRequired[str | list[dict[str, Any]] | None],
-        "runtime_mode": NotRequired[str | None],
-        "backend": NotRequired[str | None],
+        "initial_message": NotRequired[WireContentInput | None],
+        "runtime_mode": NotRequired[WireMobRuntimeMode | None],
+        "backend": NotRequired[WireMobBackendKind | None],
         "labels": NotRequired[dict[str, str] | None],
         "context": NotRequired[dict[str, Any] | None],
         "additional_instructions": NotRequired[list[str] | None],
+        "connection_ref": NotRequired[WireConnectionRef | dict[str, str] | None],
     },
 )
 
@@ -216,12 +229,21 @@ class Mob:
         *,
         profile: str,
         agent_identity: str,
-        initial_message: str | list[dict[str, Any]] | None = None,
-        runtime_mode: str | None = None,
-        backend: str | None = None,
+        initial_message: WireContentInput | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+        backend: WireMobBackendKind | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
         additional_instructions: list[str] | None = None,
+        binding: WireRuntimeBinding | dict[str, Any] | None = None,
+        shell_env: dict[str, str] | None = None,
+        auto_wire_parent: bool | None = None,
+        launch_mode: WireMemberLaunchMode | dict[str, Any] | None = None,
+        tool_access_policy: WireToolAccessPolicy | dict[str, Any] | None = None,
+        budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
+        inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
+        override_profile: WireMobProfile | dict[str, Any] | None = None,
+        connection_ref: WireConnectionRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
         return await self._client.spawn_mob_member(
             self.id,
@@ -233,6 +255,15 @@ class Mob:
             labels=labels,
             context=context,
             additional_instructions=additional_instructions,
+            binding=binding,
+            shell_env=shell_env,
+            auto_wire_parent=auto_wire_parent,
+            launch_mode=launch_mode,
+            tool_access_policy=tool_access_policy,
+            budget_split_policy=budget_split_policy,
+            inherited_tool_filter=inherited_tool_filter,
+            override_profile=override_profile,
+            connection_ref=connection_ref,
         )
 
     async def spawn_many(

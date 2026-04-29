@@ -442,7 +442,6 @@ rust_test(
     ],
     size = "small",
     data = [
-        ":package_runfiles",
         "//meerkat:package_runfiles",
     ],
     env = {

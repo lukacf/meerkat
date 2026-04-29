@@ -940,6 +940,8 @@ where
     /// `TerminalFailure`. This is ephemeral, consumed once, and non-authoritative
     /// for terminal phase/classification.
     pub(crate) pending_fatal_diagnostic: Option<AgentError>,
+    /// True once the current run has accepted `RunCompleted` hooks.
+    pub(crate) run_completed_hooks_applied: bool,
     /// Comms intents that should be silently injected into the session
     /// without triggering an LLM turn. Matched against `InteractionContent::Request.intent`.
     #[allow(dead_code)] // Used by comms_impl when comms feature is enabled

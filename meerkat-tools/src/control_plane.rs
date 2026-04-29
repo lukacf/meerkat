@@ -114,6 +114,30 @@ impl CatalogControlDispatcher {
         Some(self.session_dispatcher.tool_catalog())
     }
 
+    fn request_witness_matches_entry(
+        witness: Option<&ToolVisibilityWitness>,
+        stable_owner_key: &str,
+        tool: &ToolDef,
+    ) -> bool {
+        let Some(witness) = witness else {
+            return false;
+        };
+        if !witness.has_identity_witness() {
+            return false;
+        }
+        if let Some(expected_owner) = witness.stable_owner_key.as_deref()
+            && expected_owner != stable_owner_key
+        {
+            return false;
+        }
+        if let Some(expected_provenance) = witness.last_seen_provenance.as_ref()
+            && tool.provenance.as_ref() != Some(expected_provenance)
+        {
+            return false;
+        }
+        true
+    }
+
     fn search_results(&self, args: SearchArgs) -> SearchResponse {
         let Some(catalog) = self.exact_session_catalog() else {
             return SearchResponse {
@@ -238,10 +262,20 @@ impl CatalogControlDispatcher {
                     });
                 }
                 ToolCatalogDeferredEligibility::DeferredEligible { stable_owner_key } => {
-                    let already_requested = visibility_state
+                    let staged_or_accepted = visibility_state
                         .staged_requested_deferred_names
                         .contains(&name)
                         || accepted_names.contains(&name);
+                    let already_requested = staged_or_accepted
+                        && (Self::request_witness_matches_entry(
+                            visibility_state.requested_witnesses.get(&name),
+                            stable_owner_key,
+                            &entry.tool,
+                        ) || Self::request_witness_matches_entry(
+                            witnesses.get(&name),
+                            stable_owner_key,
+                            &entry.tool,
+                        ));
                     let already_visible = visible_tool_names.contains(&name);
                     if already_requested || already_visible {
                         noop_names.insert(name.clone());
@@ -688,6 +722,15 @@ mod tests {
                 staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
                     .into_iter()
                     .collect(),
+                requested_witnesses: [(
+                    "deferred_mcp_tool".to_string(),
+                    ToolVisibilityWitness {
+                        stable_owner_key: Some("callback:test".to_string()),
+                        last_seen_provenance: deferred.provenance.clone(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 ..Default::default()
             })
             .unwrap();
@@ -730,6 +773,79 @@ mod tests {
             ]
         );
         assert!(outcome.session_effects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_repairs_already_requested_names_missing_witnesses() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                "callback:test".to_string(),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&deferred)].into(),
+            std::collections::HashSet::new(),
+            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+        );
+        scope
+            .set_visibility_state(SessionToolVisibilityState {
+                staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            })
+            .unwrap();
+        visibility_provider.set_scope(scope);
+
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+        let response: LoadResponse = serde_json::from_str(&outcome.result.text_content()).unwrap();
+
+        assert!(response.catalog_exact);
+        assert_eq!(
+            response.accepted_names,
+            vec!["deferred_mcp_tool".to_string()]
+        );
+        assert!(response.noop_names.is_empty());
+        assert_eq!(
+            response.resolutions,
+            vec![ToolCatalogLoadResolution {
+                name: "deferred_mcp_tool".into(),
+                accepted: true,
+                accepted_noop: false,
+                rejected_reason: None,
+            }]
+        );
+        assert_eq!(outcome.session_effects.len(), 1);
+        let SessionEffect::RequestDeferredTools { names, witnesses } = &outcome.session_effects[0]
+        else {
+            panic!("expected RequestDeferredTools session effect");
+        };
+        assert_eq!(
+            names,
+            &["deferred_mcp_tool".to_string()].into_iter().collect()
+        );
+        assert_eq!(
+            witnesses.get("deferred_mcp_tool"),
+            Some(&ToolVisibilityWitness {
+                stable_owner_key: Some("callback:test".to_string()),
+                last_seen_provenance: deferred.provenance.clone(),
+            })
+        );
     }
 
     #[tokio::test]

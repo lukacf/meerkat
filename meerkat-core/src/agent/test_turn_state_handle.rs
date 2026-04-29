@@ -30,7 +30,10 @@
 //! live surface.
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{
+    Mutex, MutexGuard,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use crate::lifecycle::RunId;
@@ -582,12 +585,16 @@ fn active_run_or_err(state: &LocalState, context: &str) -> Result<RunId, DslTran
 #[derive(Debug)]
 pub struct TestTurnStateHandle {
     state: Mutex<LocalState>,
+    run_completed_effects: AtomicUsize,
+    run_failed_effects: AtomicUsize,
 }
 
 impl TestTurnStateHandle {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(LocalState::new()),
+            run_completed_effects: AtomicUsize::new(0),
+            run_failed_effects: AtomicUsize::new(0),
         }
     }
 
@@ -598,6 +605,14 @@ impl TestTurnStateHandle {
                 "state mutex poisoned".to_string(),
             )
         })
+    }
+
+    pub fn run_completed_effect_count(&self) -> usize {
+        self.run_completed_effects.load(Ordering::SeqCst)
+    }
+
+    pub fn run_failed_effect_count(&self) -> usize {
+        self.run_failed_effects.load(Ordering::SeqCst)
     }
 }
 
@@ -862,6 +877,7 @@ impl TurnStateHandle for TestTurnStateHandle {
     }
 
     fn run_completed(&self, _run_id: RunId) -> Result<(), DslTransitionError> {
+        self.run_completed_effects.fetch_add(1, Ordering::SeqCst);
         // The deleted `LocalTurnExecutionState` folded run_completed into
         // the terminal transitions; accept at any terminal phase.
         Ok(())
@@ -872,6 +888,7 @@ impl TurnStateHandle for TestTurnStateHandle {
         _run_id: RunId,
         _reason: TurnFailureReason,
     ) -> Result<(), DslTransitionError> {
+        self.run_failed_effects.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

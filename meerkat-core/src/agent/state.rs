@@ -984,6 +984,24 @@ where
         Ok(())
     }
 
+    async fn run_completed_hooks_before_terminal(
+        &mut self,
+        result: &mut RunResult,
+        run_id: &RunId,
+        turn_count: u32,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<(), AgentError> {
+        if self.run_completed_hooks_applied {
+            return Ok(());
+        }
+        if let Err(error) = self.run_completed_hooks(result, event_tx.as_ref()).await {
+            self.terminalize_fatal_error(run_id, turn_count, event_tx, &error)
+                .await?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// The main agent loop
     #[allow(unused_assignments)]
     pub(super) async fn run_loop(
@@ -2145,6 +2163,24 @@ where
                             }
                         }
 
+                        let mut result = RunResult {
+                            text: self.session.last_assistant_text().unwrap_or_default(),
+                            session_id: self.session.id().clone(),
+                            usage: self.session.total_usage(),
+                            turns: turn_count + 1,
+                            tool_calls: tool_call_count,
+                            structured_output: self.extraction_state.take_result(),
+                            schema_warnings: self.extraction_state.take_schema_warnings(),
+                            skill_diagnostics: None,
+                        };
+                        self.run_completed_hooks_before_terminal(
+                            &mut result,
+                            &run_id,
+                            turn_count,
+                            &event_tx,
+                        )
+                        .await?;
+
                         // Validation passed — complete via authority
                         let t = self.apply_turn_input(
                             TurnExecutionInput::ExtractionValidationPassed {
@@ -2155,16 +2191,7 @@ where
                         if let Err(e) = self.store.save(&self.session).await {
                             tracing::warn!("Failed to save session: {}", e);
                         }
-                        return Ok(RunResult {
-                            text: self.session.last_assistant_text().unwrap_or_default(),
-                            session_id: self.session.id().clone(),
-                            usage: self.session.total_usage(),
-                            turns: turn_count + 1,
-                            tool_calls: tool_call_count,
-                            structured_output: self.extraction_state.take_result(),
-                            schema_warnings: self.extraction_state.take_schema_warnings(),
-                            skill_diagnostics: None,
-                        });
+                        return Ok(result);
                     } else {
                         // No tool calls - we're done with the agentic loop
                         let final_text = assistant_text.clone();
@@ -2183,14 +2210,14 @@ where
                         }
                         self.observe_cancel_after_boundary_request(&run_id)?;
 
-                        // Emit turn completed only after turn-boundary hooks
-                        // accept and boundary side effects are committed.
-                        emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
-
                         // Check if we need to perform extraction turn for structured output
                         if let Some(output_schema) = self.config.output_schema.as_ref()
                             && !self.turn_in_extraction_flow()?
                         {
+                            // The model turn is complete, but the run is not
+                            // complete until the extraction turn validates.
+                            emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
+
                             // Enter extraction mode via authority
                             self.extraction_state.reset();
 
@@ -2222,6 +2249,28 @@ where
                             continue;
                         }
 
+                        let mut result = RunResult {
+                            text: final_text,
+                            session_id: self.session.id().clone(),
+                            usage: self.session.total_usage(),
+                            turns: turn_count + 1,
+                            tool_calls: tool_call_count,
+                            structured_output: None,
+                            schema_warnings: None,
+                            skill_diagnostics: self.collect_skill_diagnostics().await,
+                        };
+                        self.run_completed_hooks_before_terminal(
+                            &mut result,
+                            &run_id,
+                            turn_count,
+                            &event_tx,
+                        )
+                        .await?;
+
+                        // Emit turn completed only after all terminal hooks accept
+                        // and boundary side effects are committed.
+                        emit_event!(AgentEvent::TurnCompleted { stop_reason, usage });
+
                         // No extraction needed - complete normally
                         let t = self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
                             run_id: run_id.clone(),
@@ -2233,16 +2282,7 @@ where
                             tracing::warn!("Failed to save session: {}", e);
                         }
 
-                        return Ok(RunResult {
-                            text: final_text,
-                            session_id: self.session.id().clone(),
-                            usage: self.session.total_usage(),
-                            turns: turn_count + 1,
-                            tool_calls: tool_call_count,
-                            structured_output: None,
-                            schema_warnings: None,
-                            skill_diagnostics: self.collect_skill_diagnostics().await,
-                        });
+                        return Ok(result);
                     }
                 }
                 TurnPhase::WaitingForOps => {
@@ -4030,7 +4070,10 @@ mod tests {
             }
         }
 
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
             .with_hook_engine(Arc::new(DenyRunCompletedHook))
             .build(
                 Arc::new(StaticLlmClient),
@@ -4054,8 +4097,10 @@ mod tests {
 
         let mut saw_run_failed = false;
         let mut saw_run_completed = false;
+        let mut saw_turn_completed = false;
         while let Ok(event) = rx.try_recv() {
             match event {
+                crate::event::AgentEvent::TurnCompleted { .. } => saw_turn_completed = true,
                 crate::event::AgentEvent::RunFailed { .. } => saw_run_failed = true,
                 crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
                 _ => {}
@@ -4068,6 +4113,29 @@ mod tests {
         assert!(
             !saw_run_completed,
             "hook-denied completion should not also emit RunCompleted"
+        );
+        assert!(
+            !saw_turn_completed,
+            "hook-denied completion should not publish a completed turn event"
+        );
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            0,
+            "hook-denied completion should not publish a completed authority effect"
+        );
+        assert_eq!(
+            turn_handle.run_failed_effect_count(),
+            1,
+            "hook-denied completion should terminalize through failed authority"
+        );
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed,
+            "RunCompleted hook denial should leave the canonical turn snapshot failed"
         );
     }
 

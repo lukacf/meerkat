@@ -11,7 +11,7 @@
 //! 6. Dispatcher-provided tool usage instructions (appended last).
 
 use meerkat_core::{Config, SystemPromptConfig, prompt::normalize_agents_md_content};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Assemble the final system prompt. Single canonical path.
 ///
@@ -51,8 +51,7 @@ pub async fn assemble_system_prompt(
 
     // AGENTS.md is resolved only from explicit context roots.
     if let Some(context) = context_root
-        && let Some(project_agents) = find_project_agents_md_in(context)
-        && let Some(content) = load_agents_md_file(&project_agents).await
+        && let Some(content) = load_project_agents_md_in(context).await
     {
         spc = spc.with_project_agents_md_content(content);
     }
@@ -77,10 +76,13 @@ pub async fn assemble_system_prompt(
     )
 }
 
-fn find_project_agents_md_in(dir: &Path) -> Option<PathBuf> {
-    [dir.join("AGENTS.md"), dir.join(".rkat/AGENTS.md")]
-        .into_iter()
-        .find(|candidate| candidate.exists())
+async fn load_project_agents_md_in(dir: &Path) -> Option<String> {
+    for candidate in [dir.join("AGENTS.md"), dir.join(".rkat/AGENTS.md")] {
+        if let Some(content) = load_agents_md_file(&candidate).await {
+            return Some(content);
+        }
+    }
+    None
 }
 
 async fn load_agents_md_file(path: &Path) -> Option<String> {
@@ -261,6 +263,22 @@ mod tests {
         let agents_section_start = result.find("# Project Instructions").unwrap();
         let agents_content = &result[agents_section_start..];
         assert!(agents_content.len() <= AGENTS_MD_MAX_BYTES + 100);
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_falls_back_when_root_file_is_unusable() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join("AGENTS.md");
+        tokio::fs::write(&agents_path, [0xff, 0xfe]).await.unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        tokio::fs::create_dir_all(&rkat_dir).await.unwrap();
+        tokio::fs::write(rkat_dir.join("AGENTS.md"), "Fallback instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "").await;
+        assert!(result.contains("Fallback instructions"));
     }
 
     // --- Precedence level 4: default prompt ---

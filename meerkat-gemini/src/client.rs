@@ -454,15 +454,53 @@ impl GeminiClient {
     }
 
     fn gemini_error_terminal(status_code: u16, text: &str) -> ImageOperationTerminalClass {
-        let lower = text.to_ascii_lowercase();
-        if lower.contains("safety") || lower.contains("blocked") {
-            ImageOperationTerminalClass::SafetyFiltered
-        } else if lower.contains("refusal") || lower.contains("refused") {
-            ImageOperationTerminalClass::RefusedByProvider
-        } else if status_code == 408 || status_code == 504 {
+        if status_code == 408 || status_code == 504 {
             ImageOperationTerminalClass::Timeout
+        } else if let Ok(value) = serde_json::from_str::<Value>(text) {
+            Self::gemini_structured_error_terminal(&value)
+                .unwrap_or(ImageOperationTerminalClass::Failed)
         } else {
             ImageOperationTerminalClass::Failed
+        }
+    }
+
+    fn gemini_structured_error_terminal(value: &Value) -> Option<ImageOperationTerminalClass> {
+        let error = value.get("error").unwrap_or(value);
+        if let Some(terminal) = error
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(Self::gemini_structured_error_code_terminal)
+        {
+            return Some(terminal);
+        }
+        if let Some(terminal) = error
+            .get("reason")
+            .and_then(Value::as_str)
+            .and_then(Self::gemini_structured_error_code_terminal)
+        {
+            return Some(terminal);
+        }
+        error
+            .get("details")
+            .and_then(Value::as_array)
+            .and_then(|details| {
+                details.iter().find_map(|detail| {
+                    detail
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .or_else(|| detail.get("status").and_then(Value::as_str))
+                        .and_then(Self::gemini_structured_error_code_terminal)
+                })
+            })
+    }
+
+    fn gemini_structured_error_code_terminal(code: &str) -> Option<ImageOperationTerminalClass> {
+        match code {
+            "BLOCKLIST" | "IMAGE_SAFETY" | "PROHIBITED_CONTENT" | "RECITATION" | "SAFETY"
+            | "SPII" => Some(ImageOperationTerminalClass::SafetyFiltered),
+            "MODEL_REFUSAL" => Some(ImageOperationTerminalClass::RefusedByProvider),
+            "DEADLINE_EXCEEDED" => Some(ImageOperationTerminalClass::Timeout),
+            _ => None,
         }
     }
 
@@ -529,9 +567,18 @@ impl GeminiClient {
             }
         }
         let terminal = if images.is_empty() {
-            match finish_reason.as_deref() {
-                Some("SAFETY" | "RECITATION") => ImageOperationTerminalClass::SafetyFiltered,
-                _ => ImageOperationTerminalClass::EmptyResult {
+            let prompt_block_reason = parsed
+                .prompt_feedback
+                .as_ref()
+                .and_then(|feedback| feedback.block_reason.as_deref());
+            match finish_reason
+                .as_deref()
+                .and_then(Self::gemini_structured_error_code_terminal)
+                .or_else(|| {
+                    prompt_block_reason.and_then(Self::gemini_structured_error_code_terminal)
+                }) {
+                Some(terminal) => terminal,
+                None => ImageOperationTerminalClass::EmptyResult {
                     provider_text: if provider_text.is_empty() {
                         ProviderTextDisposition::NotEmitted
                     } else {
@@ -1277,6 +1324,13 @@ struct GenerateContentResponse {
     candidates: Option<Vec<Candidate>>,
     usage_metadata: Option<GeminiUsage>,
     response_id: Option<String>,
+    prompt_feedback: Option<PromptFeedback>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptFeedback {
+    block_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1448,6 +1502,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gemini_image_error_terminal_uses_structured_error_reason() {
+        let safety = serde_json::json!({
+            "error": {
+                "code": 400,
+                "status": "INVALID_ARGUMENT",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "SAFETY",
+                    "domain": "generativelanguage.googleapis.com"
+                }]
+            }
+        });
+
+        assert_eq!(
+            GeminiClient::gemini_error_terminal(400, &safety.to_string()),
+            ImageOperationTerminalClass::SafetyFiltered
+        );
+
+        let refusal = serde_json::json!({
+            "error": {
+                "code": 400,
+                "status": "FAILED_PRECONDITION",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "MODEL_REFUSAL",
+                    "domain": "generativelanguage.googleapis.com"
+                }]
+            }
+        });
+
+        assert_eq!(
+            GeminiClient::gemini_error_terminal(400, &refusal.to_string()),
+            ImageOperationTerminalClass::RefusedByProvider
+        );
+    }
+
+    #[test]
+    fn gemini_image_error_terminal_does_not_parse_message_text() {
+        let message_only = serde_json::json!({
+            "error": {
+                "code": 400,
+                "status": "INVALID_ARGUMENT",
+                "message": "diagnostic text mentions blocked, safety, refusal, and refused"
+            }
+        });
+
+        assert_eq!(
+            GeminiClient::gemini_error_terminal(400, &message_only.to_string()),
+            ImageOperationTerminalClass::Failed
+        );
+        assert_eq!(
+            GeminiClient::gemini_error_terminal(
+                503,
+                r#"{"error":{"status":"UNAVAILABLE","message":"safety backend unavailable"}}"#
+            ),
+            ImageOperationTerminalClass::Failed
+        );
+    }
+
+    #[test]
+    fn gemini_image_error_terminal_uses_transport_status_for_timeout() {
+        assert_eq!(
+            GeminiClient::gemini_error_terminal(408, "request timed out"),
+            ImageOperationTerminalClass::Timeout
+        );
+        assert_eq!(
+            GeminiClient::gemini_error_terminal(504, "gateway timeout"),
+            ImageOperationTerminalClass::Timeout
+        );
+    }
+
     #[tokio::test]
     async fn gemini_native_image_executor_requests_text_and_image_modalities()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1515,6 +1641,30 @@ mod tests {
             body["contents"][0]["parts"][0]["text"],
             "draw a small blue boat"
         );
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gemini_native_image_executor_maps_prompt_feedback_safety()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let response = serde_json::json!({
+            "responseId": "gem_resp_blocked",
+            "promptFeedback": {
+                "blockReason": "SAFETY"
+            }
+        });
+        let (base_url, handle) = spawn_gemini_image_stub(response, seen).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url);
+
+        let output = client
+            .execute_image_generation(gemini_image_executor_request_json())
+            .await?;
+
+        assert_eq!(output.terminal, ImageOperationTerminalClass::SafetyFiltered);
+        assert!(output.images.is_empty());
 
         handle.abort();
         Ok(())

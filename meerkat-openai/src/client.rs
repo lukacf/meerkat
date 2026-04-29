@@ -423,17 +423,39 @@ impl OpenAiClient {
     }
 
     fn openai_error_terminal(status_code: u16, text: &str) -> ImageOperationTerminalClass {
-        let lower = text.to_ascii_lowercase();
-        if lower.contains("safety") || lower.contains("content_filter") {
-            ImageOperationTerminalClass::SafetyFiltered
-        } else if lower.contains("refusal") || lower.contains("refused") {
-            ImageOperationTerminalClass::RefusedByProvider
-        } else if status_code == 408 || status_code == 504 {
+        if status_code == 408 || status_code == 504 {
             ImageOperationTerminalClass::Timeout
         } else if status_code == 499 {
             ImageOperationTerminalClass::Cancelled
+        } else if let Ok(value) = serde_json::from_str::<Value>(text) {
+            Self::openai_structured_error_terminal(&value)
+                .unwrap_or(ImageOperationTerminalClass::Failed)
         } else {
             ImageOperationTerminalClass::Failed
+        }
+    }
+
+    fn openai_structured_error_terminal(value: &Value) -> Option<ImageOperationTerminalClass> {
+        let error = value.get("error").unwrap_or(value);
+        ["code", "type"].into_iter().find_map(|field| {
+            error
+                .get(field)
+                .and_then(Value::as_str)
+                .and_then(Self::openai_structured_error_code_terminal)
+        })
+    }
+
+    fn openai_structured_error_code_terminal(code: &str) -> Option<ImageOperationTerminalClass> {
+        match code {
+            "content_filter"
+            | "content_filtered"
+            | "content_policy_violation"
+            | "moderation_blocked"
+            | "safety_violation" => Some(ImageOperationTerminalClass::SafetyFiltered),
+            "model_refusal" | "refusal" | "refused_by_model" => {
+                Some(ImageOperationTerminalClass::RefusedByProvider)
+            }
+            _ => None,
         }
     }
 
@@ -1441,6 +1463,73 @@ mod tests {
     // =========================================================================
     // Responses API Request Format Tests
     // =========================================================================
+
+    #[test]
+    fn openai_image_error_terminal_uses_structured_error_codes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let safety = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "content_policy_violation",
+                "message": "Request rejected by policy."
+            }
+        });
+        assert_eq!(
+            OpenAiClient::openai_error_terminal(400, &safety.to_string()),
+            ImageOperationTerminalClass::SafetyFiltered
+        );
+
+        let refusal = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "model_refusal",
+                "message": "The model declined the request."
+            }
+        });
+        assert_eq!(
+            OpenAiClient::openai_error_terminal(400, &refusal.to_string()),
+            ImageOperationTerminalClass::RefusedByProvider
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn openai_image_error_terminal_does_not_parse_message_text() {
+        let message_only = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "message": "diagnostic text mentions safety, content_filter, refusal, and refused"
+            }
+        });
+
+        assert_eq!(
+            OpenAiClient::openai_error_terminal(400, &message_only.to_string()),
+            ImageOperationTerminalClass::Failed
+        );
+        assert_eq!(
+            OpenAiClient::openai_error_terminal(
+                503,
+                "provider overloaded while checking safety filters"
+            ),
+            ImageOperationTerminalClass::Failed
+        );
+    }
+
+    #[test]
+    fn openai_image_error_terminal_uses_transport_status_for_timeout_and_cancelled() {
+        assert_eq!(
+            OpenAiClient::openai_error_terminal(408, "request timed out"),
+            ImageOperationTerminalClass::Timeout
+        );
+        assert_eq!(
+            OpenAiClient::openai_error_terminal(504, "gateway timeout"),
+            ImageOperationTerminalClass::Timeout
+        );
+        assert_eq!(
+            OpenAiClient::openai_error_terminal(499, "client closed request"),
+            ImageOperationTerminalClass::Cancelled
+        );
+    }
 
     #[tokio::test]
     async fn openai_hosted_image_executor_normalizes_fake_response()

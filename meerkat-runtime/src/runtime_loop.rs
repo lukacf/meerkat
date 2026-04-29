@@ -324,12 +324,9 @@ fn fallback_batch_peer_response_terminal_apply_intent(
     inputs: &[(InputId, Input)],
     _boundary: RunApplyBoundary,
 ) -> Option<PeerResponseTerminalApplyIntent> {
-    inputs
-        .iter()
-        .filter_map(|(_, input)| {
-            fallback_unadmitted_semantics(input).peer_response_terminal_apply_intent
-        })
-        .next()
+    inputs.iter().find_map(|(_, input)| {
+        fallback_unadmitted_semantics(input).peer_response_terminal_apply_intent
+    })
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.

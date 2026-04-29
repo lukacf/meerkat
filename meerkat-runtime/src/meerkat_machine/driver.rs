@@ -826,8 +826,7 @@ pub(crate) fn machine_batch_peer_response_terminal_apply_intent(
 ) -> Option<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent> {
     work_ids
         .iter()
-        .filter_map(|id| machine_input_peer_response_terminal_apply_intent(driver, id))
-        .next()
+        .find_map(|id| machine_input_peer_response_terminal_apply_intent(driver, id))
 }
 
 pub(crate) fn machine_batch_primitive_projections(

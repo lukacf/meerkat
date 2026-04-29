@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use meerkat_core::memory::{
-    MemoryIndexReceipt, MemoryIndexRequest, MemoryResult, MemorySearchScope, MemoryStore,
+    MemoryIndexBatch, MemoryIndexReceipt, MemoryResult, MemorySearchScope, MemoryStore,
     MemoryStoreError,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -137,59 +137,114 @@ impl HnswMemoryStore {
 
 #[async_trait]
 impl MemoryStore for HnswMemoryStore {
-    async fn index_scoped(
+    async fn index_scoped_batch(
         &self,
-        request: MemoryIndexRequest,
+        batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
-        let (scope, content, metadata) = request.into_parts();
-        let receipt_scope = scope.clone();
-        let meta_json = serde_json::to_vec(&metadata)
-            .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
+        let (receipt_scope, requests) = batch.into_parts();
+        let indexed_entries = requests.len();
+        if requests.is_empty() {
+            return Ok(MemoryIndexReceipt {
+                scope: receipt_scope,
+                indexed_entries: 0,
+            });
+        }
+
+        let mut entries = Vec::with_capacity(indexed_entries);
+        for request in requests {
+            let (_scope, content, metadata) = request.into_parts();
+            let meta_json = serde_json::to_vec(&metadata)
+                .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
+            let embedding = text_to_embedding(&content);
+            entries.push((content, meta_json, embedding));
+        }
+
         let db_path = self.db_path.clone();
         let index = Arc::clone(&self.index);
 
         // Keep point ID allocation coupled to a successful write.
         let _guard = self.insert_lock.lock().await;
         let point_id = self.next_id.load(Ordering::Acquire);
-        let point_id_i64 = i64::try_from(point_id)
-            .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
+        let next_id = point_id
+            .checked_add(indexed_entries)
+            .ok_or_else(|| MemoryStoreError::Index("point ID overflow".to_string()))?;
+        let point_ids: Vec<i64> = (point_id..next_id)
+            .map(|id| {
+                i64::try_from(id)
+                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))
+            })
+            .collect::<Result<_, _>>()?;
 
-        tokio::task::spawn_blocking(move || {
-            let embedding = text_to_embedding(&content);
+        let insert_result = tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&db_path)?;
             let tx = conn
                 .transaction()
                 .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            tx.execute(
-                "INSERT INTO memory_metadata (point_id, metadata_json) VALUES (?1, ?2)",
-                params![point_id_i64, meta_json],
-            )
-            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
-            tx.execute(
-                "INSERT INTO memory_text (point_id, content) VALUES (?1, ?2)",
-                params![point_id_i64, content.as_bytes()],
-            )
-            .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            for (point_id_i64, (content, meta_json, _embedding)) in point_ids.iter().zip(&entries) {
+                tx.execute(
+                    "INSERT INTO memory_metadata (point_id, metadata_json) VALUES (?1, ?2)",
+                    params![point_id_i64, meta_json],
+                )
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                tx.execute(
+                    "INSERT INTO memory_text (point_id, content) VALUES (?1, ?2)",
+                    params![point_id_i64, content.as_bytes()],
+                )
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            }
             tx.commit()
                 .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
 
-            let index = index
-                .write()
-                .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
-            index.insert((&embedding, point_id));
+            let index_result = (|| {
+                let index = index
+                    .write()
+                    .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
+                for (point_id, (_content, _meta_json, embedding)) in point_ids.iter().zip(&entries)
+                {
+                    let point_id = usize::try_from(*point_id).map_err(|_| {
+                        MemoryStoreError::Index("point ID out of range".to_string())
+                    })?;
+                    index.insert((embedding, point_id));
+                }
+                Ok::<(), MemoryStoreError>(())
+            })();
+
+            if let Err(error) = index_result {
+                let mut cleanup = open_connection(&db_path)?;
+                let tx = cleanup
+                    .transaction()
+                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                for point_id_i64 in &point_ids {
+                    tx.execute(
+                        "DELETE FROM memory_metadata WHERE point_id = ?1",
+                        params![point_id_i64],
+                    )
+                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                    tx.execute(
+                        "DELETE FROM memory_text WHERE point_id = ?1",
+                        params![point_id_i64],
+                    )
+                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                }
+                tx.commit()
+                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                return Err(error);
+            }
 
             Ok::<(), MemoryStoreError>(())
         })
         .await
-        .map_err(|e| MemoryStoreError::Index(format!("index task join failed: {e}")))??;
+        .map_err(|e| MemoryStoreError::Index(format!("index task join failed: {e}")))?;
 
-        let next_id = point_id
-            .checked_add(1)
-            .ok_or_else(|| MemoryStoreError::Index("point ID overflow".to_string()))?;
+        if let Err(error) = insert_result {
+            self.next_id.store(next_id, Ordering::Release);
+            return Err(error);
+        }
+
         self.next_id.store(next_id, Ordering::Release);
         Ok(MemoryIndexReceipt {
             scope: receipt_scope,
-            indexed_entries: 1,
+            indexed_entries,
         })
     }
 
@@ -205,68 +260,53 @@ impl MemoryStore for HnswMemoryStore {
         let query = query.to_owned();
         let scope = scope.clone();
         let db_path = self.db_path.clone();
-        let index = Arc::clone(&self.index);
 
         tokio::task::spawn_blocking(move || {
-            let embedding = text_to_embedding(&query);
-            let candidate_limit = limit.saturating_mul(8).max(limit).max(1);
-            let ef_search = candidate_limit.max(EF_CONSTRUCTION);
-            let neighbors = {
-                let index = index
-                    .read()
-                    .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
-                index.search(&embedding, candidate_limit, ef_search)
-            };
-
+            let query_embedding = text_to_embedding(&query);
             let conn = open_connection(&db_path)?;
-            let mut results = Vec::with_capacity(neighbors.len());
-            for neighbor in &neighbors {
-                let point_id = i64::try_from(neighbor.d_id)
-                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT t.content, m.metadata_json \
+                     FROM memory_text t \
+                     JOIN memory_metadata m ON m.point_id = t.point_id",
+                )
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
 
-                let content = match conn
-                    .query_row(
-                        "SELECT content FROM memory_text WHERE point_id = ?1",
-                        params![point_id],
-                        |row| row.get::<_, Vec<u8>>(0),
-                    )
-                    .optional()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?
-                {
-                    Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    None => continue,
-                };
-
-                let metadata = match conn
-                    .query_row(
-                        "SELECT metadata_json FROM memory_metadata WHERE point_id = ?1",
-                        params![point_id],
-                        |row| row.get::<_, Vec<u8>>(0),
-                    )
-                    .optional()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?
-                {
-                    Some(bytes) => serde_json::from_slice(&bytes)
-                        .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?,
-                    None => continue,
-                };
+            let mut results = Vec::new();
+            for row in rows {
+                let (content, metadata_json) =
+                    row.map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                let metadata = serde_json::from_slice(&metadata_json)
+                    .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
                 if !scope.includes(&metadata) {
                     continue;
                 }
 
-                // HNSW distance is cosine distance (0 = identical, 2 = opposite).
-                // Convert to a 0..1 similarity score.
-                let score = 1.0 - (neighbor.distance / 2.0);
+                let content = String::from_utf8_lossy(&content).into_owned();
+                let content_embedding = text_to_embedding(&content);
+                let score = embedding_similarity(&query_embedding, &content_embedding);
+                if score <= 0.0 {
+                    continue;
+                }
 
                 results.push(MemoryResult {
                     content,
                     metadata,
                     score,
                 });
-                if results.len() >= limit {
-                    break;
-                }
             }
+
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(limit);
 
             Ok::<Vec<MemoryResult>, MemoryStoreError>(results)
         })
@@ -303,11 +343,19 @@ fn text_to_embedding(text: &str) -> [f32; VOCAB_DIM] {
     vec
 }
 
+fn embedding_similarity(left: &[f32; VOCAB_DIM], right: &[f32; VOCAB_DIM]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(l, r)| l * r)
+        .sum::<f32>()
+        .clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::{MemoryIndexScope, MemoryMetadata};
+    use meerkat_core::memory::{MemoryIndexRequest, MemoryIndexScope, MemoryMetadata};
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
     use tempfile::TempDir;
@@ -405,6 +453,41 @@ mod tests {
 
         let results = store.search(&scope, "test", 3).await.unwrap();
         assert!(results.len() <= 3);
+    }
+
+    #[tokio::test]
+    async fn test_hnsw_search_scopes_before_candidate_selection() {
+        let dir = TempDir::new().unwrap();
+        let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        for _ in 0..32 {
+            let other_session_id = SessionId::new();
+            store
+                .index_scoped(request(
+                    "needle recall exact global candidate",
+                    &other_session_id,
+                ))
+                .await
+                .unwrap();
+        }
+        store
+            .index_scoped(request("needle recall scoped survivor", &session_id))
+            .await
+            .unwrap();
+
+        let results = store
+            .search(&scope, "needle recall exact global candidate", 1)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].metadata.session_id, session_id);
+        assert!(
+            results[0].content.contains("scoped survivor"),
+            "scoped candidates must be ranked before the limit is applied"
+        );
     }
 
     #[tokio::test]

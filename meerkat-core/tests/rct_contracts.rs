@@ -383,12 +383,8 @@ fn test_tool_category_override_resolution() {
 
 #[tokio::test]
 async fn test_inv_005_agents_md_injected() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let agents_path = dir.path().join("AGENTS.md");
-    std::fs::write(&agents_path, "custom instructions")?;
-
     let prompt = SystemPromptConfig::new()
-        .with_project_agents_md(&agents_path)
+        .with_project_agents_md_content("custom instructions")
         .compose()
         .await;
 

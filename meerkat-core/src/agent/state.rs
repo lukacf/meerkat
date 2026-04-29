@@ -898,8 +898,7 @@ where
         let Some(memory_store) = self.memory_store.as_ref() else {
             return crate::memory::MemoryIndexDelivery::NoStore { scope };
         };
-        let mut indexed_entries = 0;
-        let mut attempted_entries = 0;
+        let mut requests = Vec::new();
         for message in discarded {
             let content = message.as_indexable_text();
             if content.is_empty() {
@@ -914,6 +913,7 @@ where
                 match crate::memory::MemoryIndexRequest::new(scope.clone(), content, metadata) {
                     Ok(request) => request,
                     Err(error) => {
+                        let attempted_entries = requests.len() + 1;
                         return crate::memory::MemoryIndexDelivery::Rejected {
                             scope,
                             attempted_entries,
@@ -921,24 +921,37 @@ where
                         };
                     }
                 };
-            attempted_entries += 1;
-            match memory_store.index_scoped(request).await {
-                Ok(receipt) => {
-                    indexed_entries += receipt.indexed_entries;
-                }
-                Err(error) => {
-                    return crate::memory::MemoryIndexDelivery::Rejected {
-                        scope,
-                        attempted_entries,
-                        error,
-                    };
-                }
-            }
+            requests.push(request);
         }
-        crate::memory::MemoryIndexDelivery::Delivered(crate::memory::MemoryIndexReceipt {
-            scope,
-            indexed_entries,
-        })
+
+        let attempted_entries = requests.len();
+        if attempted_entries == 0 {
+            return crate::memory::MemoryIndexDelivery::Delivered(
+                crate::memory::MemoryIndexReceipt {
+                    scope,
+                    indexed_entries: 0,
+                },
+            );
+        }
+
+        let batch = match crate::memory::MemoryIndexBatch::new(scope.clone(), requests) {
+            Ok(batch) => batch,
+            Err(error) => {
+                return crate::memory::MemoryIndexDelivery::Rejected {
+                    scope,
+                    attempted_entries,
+                    error,
+                };
+            }
+        };
+        match memory_store.index_scoped_batch(batch).await {
+            Ok(receipt) => crate::memory::MemoryIndexDelivery::Delivered(receipt),
+            Err(error) => crate::memory::MemoryIndexDelivery::Rejected {
+                scope,
+                attempted_entries,
+                error,
+            },
+        }
     }
 
     fn observe_cancel_after_boundary_request(&mut self, run_id: &RunId) -> Result<(), AgentError> {
@@ -2093,95 +2106,60 @@ where
                             max_retries: self.config.structured_output_retries,
                         })?;
 
-                        // Validate extraction response
-                        let content = assistant_text.trim();
-                        let json_content = super::extraction::strip_code_fences(content);
+                        let output_schema =
+                            self.config.output_schema.as_ref().ok_or_else(|| {
+                                AgentError::InternalError(
+                                    "extraction flow without output_schema".into(),
+                                )
+                            })?;
+                        let compiled = self
+                            .client
+                            .compile_schema(output_schema)
+                            .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
+                        let validation = super::extraction::validate_response_text(
+                            &assistant_text,
+                            output_schema,
+                            &compiled.schema,
+                        )?;
 
-                        let validation_error =
-                            match serde_json::from_str::<serde_json::Value>(json_content) {
-                                Ok(parsed) => {
-                                    let output_schema =
-                                        self.config.output_schema.as_ref().ok_or_else(|| {
-                                            AgentError::InternalError(
-                                                "extraction flow without output_schema".into(),
-                                            )
-                                        })?;
-                                    let normalized = super::extraction::unwrap_named_object_wrapper(
-                                        parsed,
-                                        output_schema,
-                                    );
+                        match validation {
+                            super::extraction::ExtractionValidation::Failed {
+                                error,
+                                retry_prompt,
+                            } => {
+                                // Validation failed — authority decides retry vs exhaust
+                                let t = self.apply_turn_input(
+                                    TurnExecutionInput::ExtractionValidationFailed {
+                                        run_id: run_id.clone(),
+                                        error: error.clone(),
+                                    },
+                                )?;
 
-                                    // Validate against schema (when jsonschema feature is available)
-                                    let schema_error: Option<String>;
-                                    #[cfg(feature = "jsonschema")]
-                                    {
-                                        let compiled =
-                                            self.client.compile_schema(output_schema).map_err(
-                                                |e| AgentError::InvalidOutputSchema(e.to_string()),
-                                            )?;
-                                        let validator =
-                                            jsonschema::Validator::new(&compiled.schema).map_err(
-                                                |e| AgentError::InvalidOutputSchema(e.to_string()),
-                                            )?;
-                                        schema_error =
-                                            if let Err(error) = validator.validate(&normalized) {
-                                                Some(format!("Schema validation failed: {error}"))
-                                            } else {
-                                                None
-                                            };
-                                    }
-                                    #[cfg(not(feature = "jsonschema"))]
-                                    {
-                                        tracing::warn!(
-                                            "Structured output schema validation unavailable \
-                                        (jsonschema feature disabled). Accepting parsed \
-                                        JSON without schema validation."
-                                        );
-                                        schema_error = None;
-                                    }
-
-                                    if schema_error.is_none() {
-                                        // Validation passed — store result
-                                        self.extraction_result = Some(normalized);
-                                    }
-                                    schema_error
+                                if !self.turn_phase()?.is_terminal() {
+                                    // Authority decided to retry — push retry prompt
+                                    self.session
+                                        .push(Message::User(UserMessage::text(retry_prompt)));
+                                    self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                                    turn_count += 1;
+                                    continue;
                                 }
-                                Err(e) => Some(format!("Invalid JSON: {e}")),
-                            };
 
-                        if let Some(error) = validation_error {
-                            // Validation failed — authority decides retry vs exhaust
-                            self.extraction_last_error = Some(error.clone());
-                            let t = self.apply_turn_input(
-                                TurnExecutionInput::ExtractionValidationFailed {
-                                    run_id: run_id.clone(),
-                                    error: error.clone(),
-                                },
-                            )?;
-
-                            if !self.turn_phase()?.is_terminal() {
-                                // Authority decided to retry — push retry prompt
-                                let retry_prompt = format!(
-                                    "The previous output was invalid: {error}. \
-                                    Please provide valid JSON matching the schema. \
-                                    Output ONLY the JSON, no additional text."
-                                );
-                                self.session
-                                    .push(Message::User(UserMessage::text(retry_prompt)));
-                                self.execute_turn_effects(&t, turn_count, &event_tx).await;
-                                turn_count += 1;
-                                continue;
+                                // Authority decided retries exhausted
+                                if let Err(e) = self.store.save(&self.session).await {
+                                    tracing::warn!("Failed to save session: {}", e);
+                                }
+                                return Err(AgentError::StructuredOutputValidationFailed {
+                                    attempts: self.turn_extraction_attempts()?,
+                                    reason: error,
+                                    last_output: self
+                                        .session
+                                        .last_assistant_text()
+                                        .unwrap_or_default(),
+                                });
                             }
-
-                            // Authority decided retries exhausted
-                            if let Err(e) = self.store.save(&self.session).await {
-                                tracing::warn!("Failed to save session: {}", e);
+                            super::extraction::ExtractionValidation::Passed(normalized) => {
+                                self.extraction_state.record_success(normalized);
                             }
-                            return Err(AgentError::StructuredOutputValidationFailed {
-                                attempts: self.turn_extraction_attempts()?,
-                                reason: error,
-                                last_output: self.session.last_assistant_text().unwrap_or_default(),
-                            });
                         }
 
                         // Validation passed — complete via authority
@@ -2200,8 +2178,8 @@ where
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
                             tool_calls: tool_call_count,
-                            structured_output: self.extraction_result.take(),
-                            schema_warnings: self.extraction_schema_warnings.take(),
+                            structured_output: self.extraction_state.take_result(),
+                            schema_warnings: self.extraction_state.take_schema_warnings(),
                             skill_diagnostics: None,
                         });
                     } else {
@@ -2225,19 +2203,15 @@ where
                             && !self.turn_in_extraction_flow()?
                         {
                             // Enter extraction mode via authority
-                            self.extraction_result = None;
-                            self.extraction_last_error = None;
+                            self.extraction_state.reset();
 
                             // Compile schema and capture warnings
                             let compiled = self
                                 .client
                                 .compile_schema(output_schema)
                                 .map_err(|e| AgentError::InvalidOutputSchema(e.to_string()))?;
-                            self.extraction_schema_warnings = if compiled.warnings.is_empty() {
-                                None
-                            } else {
-                                Some(compiled.warnings.clone())
-                            };
+                            self.extraction_state
+                                .set_schema_warnings(compiled.warnings.clone());
 
                             // Push extraction prompt as user message
                             let prompt =
@@ -2485,7 +2459,7 @@ mod tests {
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
     use crate::memory::{
-        MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryResult,
+        MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexScope, MemoryMetadata, MemoryResult,
         MemorySearchScope, MemoryStore, MemoryStoreError,
     };
     use crate::retry::select_retry_delay;
@@ -3040,6 +3014,7 @@ mod tests {
     struct RecordingMemoryStore {
         entries: Mutex<Vec<(MemoryIndexScope, String, MemoryMetadata)>>,
         fail_indexing: bool,
+        fail_after_successful_entries: Option<usize>,
     }
 
     impl RecordingMemoryStore {
@@ -3047,6 +3022,7 @@ mod tests {
             Self {
                 entries: Mutex::new(Vec::new()),
                 fail_indexing: false,
+                fail_after_successful_entries: None,
             }
         }
 
@@ -3054,6 +3030,15 @@ mod tests {
             Self {
                 entries: Mutex::new(Vec::new()),
                 fail_indexing: true,
+                fail_after_successful_entries: None,
+            }
+        }
+
+        fn failing_after(successful_entries: usize) -> Self {
+            Self {
+                entries: Mutex::new(Vec::new()),
+                fail_indexing: false,
+                fail_after_successful_entries: Some(successful_entries),
             }
         }
 
@@ -3078,22 +3063,29 @@ mod tests {
 
     #[async_trait]
     impl MemoryStore for RecordingMemoryStore {
-        async fn index_scoped(
+        async fn index_scoped_batch(
             &self,
-            request: MemoryIndexRequest,
+            batch: MemoryIndexBatch,
         ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
             if self.fail_indexing {
                 return Err(MemoryStoreError::Index("injected failure".to_string()));
             }
-            let (scope, content, metadata) = request.into_parts();
-            let receipt_scope = scope.clone();
-            self.entries
-                .lock()
-                .unwrap()
-                .push((scope, content, metadata));
+            let (receipt_scope, requests) = batch.into_parts();
+            let indexed_entries = requests.len();
+            let mut entries = self.entries.lock().unwrap();
+            if self
+                .fail_after_successful_entries
+                .is_some_and(|successful_entries| indexed_entries > successful_entries)
+            {
+                return Err(MemoryStoreError::Index("injected failure".to_string()));
+            }
+            for request in requests {
+                let (scope, content, metadata) = request.into_parts();
+                entries.push((scope, content, metadata));
+            }
             Ok(MemoryIndexReceipt {
                 scope: receipt_scope,
-                indexed_entries: 1,
+                indexed_entries,
             })
         }
 
@@ -3913,6 +3905,37 @@ mod tests {
         assert!(
             !saw_completed,
             "compaction must not complete when memory indexing rejects discarded history"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_partial_memory_index_failure_leaves_no_projection() {
+        let client = Arc::new(CompactionAwareLlmClient::new());
+        let compactor = Arc::new(DiscardingCompactor::new(1));
+        let memory_store = Arc::new(RecordingMemoryStore::failing_after(1));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .compactor(compactor)
+            .memory_store(memory_store.clone())
+            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        agent.run("first".into()).await.unwrap();
+        agent
+            .run("second".into())
+            .await
+            .expect("indexing failure should preserve history and continue the turn");
+
+        assert!(
+            memory_store.contents().is_empty(),
+            "failed compaction indexing must not leave a partial memory projection"
+        );
+        assert!(
+            agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| message.as_indexable_text().contains("first")),
+            "failed indexing must preserve the authoritative source history"
         );
     }
 

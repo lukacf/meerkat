@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use meerkat_core::memory::{
-    MemoryIndexReceipt, MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryResult,
+    MemoryIndexBatch, MemoryIndexReceipt, MemoryIndexScope, MemoryMetadata, MemoryResult,
     MemorySearchScope, MemoryStore, MemoryStoreError,
 };
 use tokio::sync::RwLock;
@@ -44,21 +44,24 @@ impl Default for SimpleMemoryStore {
 
 #[async_trait]
 impl MemoryStore for SimpleMemoryStore {
-    async fn index_scoped(
+    async fn index_scoped_batch(
         &self,
-        request: MemoryIndexRequest,
+        batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
-        let (scope, content, metadata) = request.into_parts();
-        let receipt_scope = scope.clone();
+        let (receipt_scope, requests) = batch.into_parts();
+        let indexed_entries = requests.len();
         let mut entries = self.entries.write().await;
-        entries.push(MemoryEntry {
-            scope,
-            content,
-            metadata,
-        });
+        for request in requests {
+            let (scope, content, metadata) = request.into_parts();
+            entries.push(MemoryEntry {
+                scope,
+                content,
+                metadata,
+            });
+        }
         Ok(MemoryIndexReceipt {
             scope: receipt_scope,
-            indexed_entries: 1,
+            indexed_entries,
         })
     }
 
@@ -112,6 +115,7 @@ impl MemoryStore for SimpleMemoryStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use meerkat_core::memory::MemoryIndexRequest;
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
 

@@ -5,12 +5,106 @@
 //! extraction path: markdown code-fence stripping and named object wrapper
 //! unwrapping.
 
+use crate::error::AgentError;
+use crate::schema::SchemaWarning;
 use crate::types::OutputSchema;
 use serde_json::Value;
 
 /// Default prompt for the structured output extraction turn.
 pub const DEFAULT_EXTRACTION_PROMPT: &str = "Provide the final output as valid JSON matching \
     the required schema. Output ONLY the JSON, no additional text or markdown formatting.";
+
+#[derive(Debug, Default)]
+pub(crate) struct ExtractionState {
+    result: Option<Value>,
+    schema_warnings: Option<Vec<SchemaWarning>>,
+}
+
+impl ExtractionState {
+    pub(super) fn reset(&mut self) {
+        self.result = None;
+        self.schema_warnings = None;
+    }
+
+    pub(super) fn set_schema_warnings(&mut self, warnings: Vec<SchemaWarning>) {
+        self.schema_warnings = if warnings.is_empty() {
+            None
+        } else {
+            Some(warnings)
+        };
+    }
+
+    pub(super) fn record_success(&mut self, value: Value) {
+        self.result = Some(value);
+    }
+
+    pub(super) fn take_result(&mut self) -> Option<Value> {
+        self.result.take()
+    }
+
+    pub(super) fn take_schema_warnings(&mut self) -> Option<Vec<SchemaWarning>> {
+        self.schema_warnings.take()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ExtractionValidation {
+    Passed(Value),
+    Failed { error: String, retry_prompt: String },
+}
+
+pub(super) fn validate_response_text(
+    content: &str,
+    output_schema: &OutputSchema,
+    compiled_schema: &Value,
+) -> Result<ExtractionValidation, AgentError> {
+    let json_content = strip_code_fences(content.trim());
+    let parsed = match serde_json::from_str::<Value>(json_content) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Ok(invalid_validation(format!("Invalid JSON: {error}")));
+        }
+    };
+
+    let normalized = unwrap_named_object_wrapper(parsed, output_schema);
+
+    #[cfg(feature = "jsonschema")]
+    {
+        let validator = jsonschema::Validator::new(compiled_schema)
+            .map_err(|error| AgentError::InvalidOutputSchema(error.to_string()))?;
+        if let Err(error) = validator.validate(&normalized) {
+            return Ok(invalid_validation(format!(
+                "Schema validation failed: {error}"
+            )));
+        }
+    }
+    #[cfg(not(feature = "jsonschema"))]
+    {
+        let _ = compiled_schema;
+        tracing::warn!(
+            "Structured output schema validation unavailable \
+            (jsonschema feature disabled). Accepting parsed JSON without schema validation."
+        );
+    }
+
+    Ok(ExtractionValidation::Passed(normalized))
+}
+
+fn invalid_validation(error: String) -> ExtractionValidation {
+    let retry_prompt = retry_prompt_for_error(&error);
+    ExtractionValidation::Failed {
+        error,
+        retry_prompt,
+    }
+}
+
+pub(super) fn retry_prompt_for_error(error: &str) -> String {
+    format!(
+        "The previous output was invalid: {error}. \
+        Please provide valid JSON matching the schema. \
+        Output ONLY the JSON, no additional text."
+    )
+}
 
 /// Strip markdown code fences from JSON content.
 ///
@@ -173,6 +267,79 @@ mod tests {
 
         let normalized = unwrap_named_object_wrapper(parsed.clone(), &schema);
         assert_eq!(normalized, parsed);
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_response_text_returns_retry_prompt_for_invalid_json()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }))?;
+
+        let result = validate_response_text("not json {{{", &schema, schema.schema.as_value())?;
+
+        match result {
+            ExtractionValidation::Failed {
+                error,
+                retry_prompt,
+            } => {
+                assert!(error.contains("Invalid JSON"));
+                assert!(retry_prompt.contains(&error));
+                assert!(retry_prompt.contains("Output ONLY the JSON"));
+            }
+            ExtractionValidation::Passed(value) => {
+                panic!("expected invalid JSON failure, got {value:?}")
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_response_text_rejects_schema_mismatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": { "count": { "type": "integer" } },
+            "required": ["count"]
+        }))?;
+
+        let result =
+            validate_response_text(r#"{"count":"wrong"}"#, &schema, schema.schema.as_value())?;
+
+        match result {
+            ExtractionValidation::Failed { error, .. } => {
+                assert!(error.contains("Schema validation failed"));
+            }
+            ExtractionValidation::Passed(value) => {
+                panic!("expected schema failure, got {value:?}")
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_response_text_accepts_unwrapped_schema_match()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": { "response": { "type": "string" } },
+            "required": ["response"]
+        }))?
+        .with_name("advisor");
+
+        let result = validate_response_text(
+            r#"{"advisor":{"response":"hello"}}"#,
+            &schema,
+            schema.schema.as_value(),
+        )?;
+
+        assert_eq!(
+            result,
+            ExtractionValidation::Passed(json!({"response": "hello"}))
+        );
         Ok(())
     }
 }

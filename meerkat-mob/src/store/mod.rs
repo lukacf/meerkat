@@ -136,7 +136,7 @@ impl SupervisorAuthorityRecord {
     }
 }
 
-/// Normalization status for a legacy external binding overlay.
+/// Reconciliation status for legacy external binding metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExternalBindingOverlayStatus {
     /// The legacy external binding was normalized to a peer-only member ref.
@@ -145,7 +145,11 @@ pub enum ExternalBindingOverlayStatus {
     Failed { reason: String },
 }
 
-/// Authoritative runtime metadata for an external binding overlay.
+/// Runtime reconciliation metadata for a legacy external binding.
+///
+/// This record never creates roster membership. Resume first rebuilds the
+/// roster from `MemberSpawned`/`MemberRetired` events, then applies this
+/// generation-scoped record to the matching member's effective runtime binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalBindingOverlayRecord {
     /// Stable member identity.
@@ -225,7 +229,7 @@ pub trait MobRuntimeMetadataStore: Send + Sync {
     /// Delete the mob-owned supervisor authority record.
     async fn delete_supervisor_authority(&self, mob_id: &MobId) -> Result<(), MobStoreError>;
 
-    /// List all authoritative external binding overlays for a mob.
+    /// List all external binding reconciliation records for a mob.
     async fn list_external_binding_overlays(
         &self,
         mob_id: &MobId,

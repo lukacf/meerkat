@@ -2,8 +2,7 @@ use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
 use super::mob_member_lifecycle_projection::{
-    CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
-    MobMemberLifecycleInput, MobMemberLifecycleProjection,
+    CanonicalMemberSnapshotMaterial, MobMemberLifecycleInput, MobMemberLifecycleProjection,
 };
 use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
 use super::provision_guard::PendingProvision;
@@ -983,6 +982,20 @@ impl MobActor {
         crate::ids::FenceToken::new(val)
     }
 
+    fn next_fence_token_preview(&self) -> crate::ids::FenceToken {
+        crate::ids::FenceToken::new(
+            self.next_fence_token
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn invalid_transition_to(&self, target: MobState) -> MobError {
+        MobError::InvalidTransition {
+            from: self.state(),
+            to: target,
+        }
+    }
+
     async fn restore_failure_for(
         &self,
         agent_identity: &MeerkatId,
@@ -1250,24 +1263,17 @@ impl MobActor {
         };
         let domain_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
         let machine_projection = self.machine_projection_for_identity(&domain_identity);
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
         let machine_bridge_session_id = machine_projection
             .bound_session_id
             .as_ref()
             .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
         let current_bridge_session_id = current_bridge_session_id.or(machine_bridge_session_id);
         let member_present = roster_entry.is_some();
-        let mut machine_status = MobMemberLifecycleProjection::machine_status(
-            member_present,
-            machine_projection.runtime_id.is_some(),
-            machine_projection.state_marker,
-            machine_projection.live_runtime,
-        );
-        if roster_entry
-            .as_ref()
-            .is_some_and(|entry| entry.state == crate::roster::MemberState::Retiring)
-        {
-            machine_status = CanonicalMemberStatus::Retiring;
-        }
+        let machine_lifecycle = self
+            .dsl_authority
+            .state
+            .member_lifecycle_for_identity(&dsl_identity, member_present);
 
         let restore_failure = {
             self.restore_diagnostics
@@ -1279,8 +1285,7 @@ impl MobActor {
         if let Some(diag) = restore_failure {
             return MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
                 member_present,
-                machine_status,
-                session_observation: CanonicalSessionObservation::Missing,
+                machine_lifecycle,
                 restore_failure: Some(diag.reason),
                 output_preview: None,
                 tokens_used: 0,
@@ -1304,42 +1309,24 @@ impl MobActor {
             });
         }
 
-        let (output_preview, tokens_used, session_observation) =
-            match current_bridge_session_id.as_ref() {
-                None => {
-                    let session_observation =
-                        match roster_entry.as_ref().map(|entry| &entry.member_ref) {
-                            Some(MemberRef::BackendPeer {
-                                session_id: None, ..
-                            }) => CanonicalSessionObservation::Unknown,
-                            _ => CanonicalSessionObservation::Missing,
-                        };
-                    (None, 0, session_observation)
+        let (output_preview, tokens_used) = match current_bridge_session_id.as_ref() {
+            None => (None, 0),
+            Some(bridge_session_id) if include_session_details => {
+                match self.session_service.read(bridge_session_id).await {
+                    Ok(view) => (
+                        view.state.last_assistant_text.clone(),
+                        view.billing.total_tokens,
+                    ),
+                    Err(meerkat_core::service::SessionError::NotFound { .. }) => (None, 0),
+                    Err(_) => (None, 0),
                 }
-                Some(bridge_session_id) if include_session_details => {
-                    match self.session_service.read(bridge_session_id).await {
-                        Ok(view) => (
-                            view.state.last_assistant_text.clone(),
-                            view.billing.total_tokens,
-                            if view.state.is_active {
-                                CanonicalSessionObservation::Active
-                            } else {
-                                CanonicalSessionObservation::Inactive
-                            },
-                        ),
-                        Err(meerkat_core::service::SessionError::NotFound { .. }) => {
-                            (None, 0, CanonicalSessionObservation::Missing)
-                        }
-                        Err(_) => (None, 0, CanonicalSessionObservation::Unknown),
-                    }
-                }
-                Some(_) => (None, 0, CanonicalSessionObservation::Unknown),
-            };
+            }
+            Some(_) => (None, 0),
+        };
 
         MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present,
-            machine_status,
-            session_observation,
+            machine_lifecycle,
             restore_failure: None,
             output_preview,
             tokens_used,
@@ -1707,12 +1694,6 @@ impl MobActor {
         })
     }
 
-    fn machine_coordinator_bound(&self) -> bool {
-        // Plain mobs (no orchestrator) are always considered coordinator-bound
-        // for the purposes of spawn/run-flow admission checks.
-        !self.has_orchestrator || self.dsl_authority.state.coordinator_bound
-    }
-
     /// Probe a DSL input against a clone of current state — returns
     /// `InvalidTransition` if the DSL rejects the input, without
     /// mutating the live authority. Used as the pre-admission gate for
@@ -1982,6 +1963,39 @@ impl MobActor {
             )?;
         }
         Ok(())
+    }
+
+    fn preview_spawn_admission(
+        &self,
+        agent_identity: &MeerkatId,
+        external_addressable: bool,
+        bridge_session_id: &SessionId,
+    ) -> Result<(), MobError> {
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let replacing = self
+            .dsl_authority
+            .state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned();
+
+        self.preview_dsl_input(
+            mob_dsl::MobMachineInput::Spawn {
+                agent_identity: dsl_identity,
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                    &crate::ids::AgentRuntimeId::initial(domain_identity),
+                ),
+                fence_token: mob_dsl::FenceToken::from_domain(self.next_fence_token_preview()),
+                generation: mob_dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
+                external_addressable,
+                bridge_session_id: mob_dsl::SessionId::from_domain(bridge_session_id),
+                replacing,
+            },
+            "spawn_command_admission",
+        )
+        .map(|_| ())
+        .map_err(|_| self.invalid_transition_to(MobState::Running))
     }
 
     fn complete_orchestrator_spawn(
@@ -2742,13 +2756,6 @@ impl MobActor {
                     ops_registry,
                     reply_tx,
                 } => {
-                    if self.state() != MobState::Running || !self.machine_coordinator_bound() {
-                        let _ = reply_tx.send(Err(MobError::InvalidTransition {
-                            from: self.state(),
-                            to: MobState::Running,
-                        }));
-                        continue;
-                    }
                     Box::pin(self.enqueue_spawn(
                         *spec,
                         owner_bridge_session_id,
@@ -2815,16 +2822,7 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let result =
-                        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
-                            Err(super::handle::MobRespawnError::from(
-                                MobError::InvalidTransition {
-                                    from: self.state(),
-                                    to: MobState::Running,
-                                },
-                            ))
-                        } else {
-                            Box::pin(self.handle_respawn(agent_identity, initial_message)).await
-                        };
+                        Box::pin(self.handle_respawn(agent_identity, initial_message)).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
@@ -2835,10 +2833,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SubmitWork { payload, reply_tx } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => Box::pin(self.handle_submit_work(payload)).await,
-                        Err(error) => Err(error),
-                    };
+                    let result = Box::pin(self.handle_submit_work(payload)).await;
                     let _ = reply_tx.send(result);
                 }
                 #[cfg(feature = "runtime-adapter")]
@@ -2863,16 +2858,9 @@ impl MobActor {
                     scoped_event_tx,
                     reply_tx,
                 } => {
-                    let result =
-                        if self.state() != MobState::Running || !self.machine_coordinator_bound() {
-                            Err(MobError::InvalidTransition {
-                                from: self.state(),
-                                to: MobState::Running,
-                            })
-                        } else {
-                            self.handle_run_flow(flow_id, activation_params, scoped_event_tx)
-                                .await
-                        };
+                    let result = self
+                        .handle_run_flow(flow_id, activation_params, scoped_event_tx)
+                        .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::CancelFlow { run_id, reply_tx } => {
@@ -3766,6 +3754,7 @@ impl MobActor {
             };
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
+            let profile_external_addressable = profile.external_addressable;
 
             // ---------- Resume bridge-session fast-path ----------
             // When resume_bridge_session_id is set, skip provisioning and go
@@ -3819,6 +3808,7 @@ impl MobActor {
                         agent_identity,
                         prompt,
                         selected_runtime_mode,
+                        profile_external_addressable,
                         resolved_labels,
                         Some(member_ref),
                         None,
@@ -3895,6 +3885,7 @@ impl MobActor {
                         agent_identity,
                         prompt,
                         selected_runtime_mode,
+                        profile_external_addressable,
                         resolved_labels,
                         None::<MemberRef>,
                         Some(provision_request),
@@ -4034,6 +4025,7 @@ impl MobActor {
                 agent_identity,
                 prompt,
                 selected_runtime_mode,
+                profile_external_addressable,
                 resolved_labels,
                 None::<MemberRef>,
                 Some(provision_request),
@@ -4049,6 +4041,7 @@ impl MobActor {
             agent_identity,
             prompt,
             selected_runtime_mode,
+            external_addressable,
             resolved_labels,
             resume_member_ref,
             maybe_provision_request,
@@ -4065,6 +4058,20 @@ impl MobActor {
 
         // ---------- Resume fast-path: skip async provisioning ----------
         if let Some(member_ref) = resume_member_ref {
+            let Some(bridge_session_id) = member_ref.bridge_session_id().cloned() else {
+                let _ = reply_tx.send(Err(MobError::Internal(format!(
+                    "resumed member '{agent_identity}' has no bridge session id"
+                ))));
+                return;
+            };
+            if let Err(error) = self.preview_spawn_admission(
+                &agent_identity,
+                external_addressable,
+                &bridge_session_id,
+            ) {
+                let _ = reply_tx.send(Err(error));
+                return;
+            }
             if let (Some(owner_bridge_session_id), Some(ops_registry)) =
                 (owner_bridge_session_id.clone(), ops_registry.clone())
                 && let Err(error) = self
@@ -4126,6 +4133,15 @@ impl MobActor {
         };
         let admitted_bridge_session_id =
             admit_bridge_session_for_spawn(&mut provision_request.create_session);
+
+        if let Err(error) = self.preview_spawn_admission(
+            &agent_identity,
+            external_addressable,
+            &admitted_bridge_session_id,
+        ) {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
 
         let spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
@@ -4986,46 +5002,29 @@ impl MobActor {
             }
         }
 
-        // D31 restore: re-fire peer wiring captured from the prior generation
-        // on respawn. The pre-DSL respawn path ran this fan-out imperatively;
-        // wave-A removed the call sites alongside the shell-authority wire
-        // symbols. For local peers we re-use `handle_wire` so the canonical
-        // `MembersWired` event + DSL `WireMembers` input + roster projection
-        // all line up with a fresh spawn. For external peers (whose
-        // `handle_wire` path was deleted in `0ad584cde` and is pending the
-        // d-external-peer-wire agent's restoration), we install comms trust
-        // directly and restore the `external_peer_specs` + `wired_to`
-        // projection so member_status/get_member surfaces the edge.
-        // Failures are accumulated in `failed_restore_peer_ids` so
-        // `handle_respawn` can surface `TopologyRestoreFailed` without
-        // tearing down the replacement member.
+        // Respawn restore: re-fire topology captured from MobMachine, not
+        // from roster projection fields. `handle_wire` repairs live comms and
+        // read-model projection after MobMachine admits or already owns the
+        // edge, so respawn never writes roster wiring directly.
         let mut failed_restore_peer_ids: Vec<MeerkatId> = Vec::new();
         if let Some(plan) = restore_wiring {
-            let local_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
             for peer_identity in plan.local_peers {
                 if peer_identity == *agent_identity {
                     continue;
                 }
-                // Re-project the edge into the roster. The DSL `wiring_edges`
-                // set survived retire (Retire does not clear it), so
-                // `handle_wire` would hit the `edge_not_already_wired` guard
-                // rejection's idempotent-success path and never emit a
-                // `MembersWired` event — leaving the fresh `RosterEntry` for
-                // the replacement member with an empty `wired_to`. Direct
-                // projection restores the bidirectional edge so
-                // `get_member` / `member_status` surface the wiring again
-                // without duplicating the canonical event in the log.
                 let peer_agent_identity = crate::ids::AgentIdentity::from(peer_identity.as_str());
-                let projected = self
-                    .roster
-                    .write()
+                if let Err(error) = self
+                    .handle_wire(
+                        agent_identity.clone(),
+                        super::handle::PeerTarget::Local(peer_agent_identity),
+                    )
                     .await
-                    .restore_local_peer_edge(&local_identity, &peer_agent_identity);
-                if !projected {
+                {
                     tracing::warn!(
                         agent_identity = %agent_identity,
                         peer = %peer_identity,
-                        "respawn: local peer missing from roster while restoring wiring projection"
+                        %error,
+                        "respawn: failed to restore machine-owned local peer edge"
                     );
                     failed_restore_peer_ids.push(peer_identity);
                 }
@@ -5033,34 +5032,19 @@ impl MobActor {
             for peer_spec in plan.external_peers {
                 let peer_name_id = MeerkatId::from(peer_spec.name.as_str());
                 if let Err(error) = self
-                    .restore_external_peer_trust(agent_identity, &member_ref, peer_spec.clone())
+                    .handle_wire(
+                        agent_identity.clone(),
+                        super::handle::PeerTarget::External(peer_spec.clone()),
+                    )
                     .await
                 {
                     tracing::warn!(
                         agent_identity = %agent_identity,
                         peer = %peer_spec.name,
                         %error,
-                        "respawn: failed to restore external peer trust"
+                        "respawn: failed to restore machine-owned external peer edge"
                     );
                     failed_restore_peer_ids.push(peer_name_id);
-                    continue;
-                }
-                // Preserve the roster projection of the external edge so
-                // `member_status`/`get_member` callers observe the restored
-                // `wired_to` + `external_peer_specs` without relying on a
-                // replayed `ExternalPeerWired` event (that event variant is
-                // pending the d-external-peer-wire agent's restoration).
-                let local_identity = crate::ids::AgentIdentity::from(agent_identity.as_str());
-                let inserted = self
-                    .roster
-                    .write()
-                    .await
-                    .restore_external_peer_edge(&local_identity, peer_spec);
-                if !inserted {
-                    tracing::warn!(
-                        agent_identity = %agent_identity,
-                        "respawn: roster entry missing while restoring external peer edge"
-                    );
                 }
             }
         }
@@ -6832,15 +6816,6 @@ impl MobActor {
             entry
         };
 
-        // Append retire event (event-first for crash recovery).
-        let retire_event_already_present = self
-            .retire_event_exists(agent_identity, &entry.member_ref)
-            .await?;
-        if !retire_event_already_present {
-            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
-                .await?;
-        }
-
         // Mark as Retiring in the DSL (blocks re-spawn with same ID).
         // Shell roster does not carry authoritative state; `member_state_markers`
         // in the DSL is the source of truth and overlays the read-only projection
@@ -6873,16 +6848,30 @@ impl MobActor {
                     .cloned()
             })
             .unwrap_or_else(mob_dsl::SessionId::default);
-        let effects = self.apply_dsl_input_collect_effects(
-            mob_dsl::MobMachineInput::Retire {
-                mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
-                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
-                agent_identity: dsl_identity,
-                releasing,
-                session_id: session_id_for_route,
-            },
-            "handle_retire_inner_mark_retiring",
-        )?;
+        let retire_input = mob_dsl::MobMachineInput::Retire {
+            mob_id: mob_dsl::MobId::from_domain(&self.definition.id),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
+            agent_identity: dsl_identity,
+            releasing,
+            session_id: session_id_for_route,
+        };
+
+        // MobMachine admits the command before the event projection records
+        // retirement. The actual transition is still applied after the durable
+        // event append so crash recovery keeps its event-first ordering.
+        self.preview_dsl_input(retire_input.clone(), "handle_retire_inner_admission")?;
+
+        // Append retire event (event-first for crash recovery).
+        let retire_event_already_present = self
+            .retire_event_exists(agent_identity, &entry.member_ref)
+            .await?;
+        if !retire_event_already_present {
+            self.append_retire_event(agent_identity, &entry.role, &entry.member_ref)
+                .await?;
+        }
+
+        let effects = self
+            .apply_dsl_input_collect_effects(retire_input, "handle_retire_inner_mark_retiring")?;
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
                 &effects,
@@ -6997,7 +6986,10 @@ impl MobActor {
             );
         }
 
-        // 1. Snapshot all replacement inputs before retiring.
+        // 1. Snapshot all replacement inputs before retiring. Topology comes
+        // from the MobMachine authority; the roster is only the read model
+        // that supplies profile/runtime binding details for the old member.
+        let restore_wiring = self.machine_restore_wiring_plan(&agent_identity)?;
         let snapshot = {
             let roster = self.roster.read().await;
             let entry = roster
@@ -7025,22 +7017,19 @@ impl MobActor {
                 old_runtime_id: entry.agent_runtime_id.clone(),
                 old_fence_token: entry.fence_token,
                 generation: entry.generation,
-                restore_wiring: RestoreWiringPlan {
-                    local_peers: entry
-                        .wired_to
-                        .iter()
-                        .filter_map(|peer_id| {
-                            roster
-                                .get_by_identity(peer_id)
-                                .map(|e| e.agent_identity.clone())
-                        })
-                        .collect(),
-                    external_peers: entry.external_peer_specs.values().cloned().collect(),
-                },
+                restore_wiring,
                 binding,
                 effective_profile_override: entry.effective_profile_override,
             }
         };
+
+        self.preview_dsl_input(
+            mob_dsl::MobMachineInput::Respawn {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&snapshot.old_runtime_id),
+            },
+            "handle_respawn_admission",
+        )
+        .map_err(|_| MobRespawnError::from(self.invalid_transition_to(MobState::Running)))?;
 
         let replacement_generation = snapshot.generation.next();
 
@@ -8562,19 +8551,47 @@ impl MobActor {
         // legality: `SubmitWorkRunningExternal` / `SubmitWorkRunningInternal`
         // encode the origin + addressability + live-runtime + phase guards.
         // A rejection is a state-legality violation, not a freshness issue.
-        let transition = mob_dsl::MobMachineMutator::apply(
+        let transition = match mob_dsl::MobMachineMutator::apply(
             &mut self.dsl_authority,
             mob_dsl::MobMachineInput::SubmitWork {
-                agent_runtime_id: dsl_runtime_id,
+                agent_runtime_id: dsl_runtime_id.clone(),
                 fence_token: dsl_fence_token,
                 work_id: dsl_work_id,
                 origin: dsl_origin,
             },
-        )
-        .map_err(|_| match origin {
-            WorkOrigin::External => MobError::NotExternallyAddressable(agent_identity.clone()),
-            WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
-        })?;
+        ) {
+            Ok(transition) => transition,
+            Err(_) if self.state() != MobState::Running => {
+                return Err(self.invalid_transition_to(MobState::Running));
+            }
+            Err(_)
+                if !self
+                    .dsl_authority
+                    .state
+                    .live_runtime_ids
+                    .contains(&dsl_runtime_id) =>
+            {
+                return Err(MobError::MemberNotFound(agent_identity.clone()));
+            }
+            Err(_)
+                if matches!(origin, WorkOrigin::External)
+                    && !self
+                        .dsl_authority
+                        .state
+                        .externally_addressable_runtime_ids
+                        .contains(&dsl_runtime_id) =>
+            {
+                return Err(MobError::NotExternallyAddressable(agent_identity.clone()));
+            }
+            Err(_) => {
+                return Err(match origin {
+                    WorkOrigin::External => {
+                        MobError::NotExternallyAddressable(agent_identity.clone())
+                    }
+                    WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
+                });
+            }
+        };
         if transition.from_phase != transition.to_phase {
             self.dsl_authority.state.lifecycle_phase = transition.to_phase;
             let _ = self.phase_watch_tx.send(self.state());
@@ -8723,11 +8740,7 @@ impl MobActor {
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;
         debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));
         self.apply_dsl_input(run_flow, "run_flow")
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "canonical RunFlow transition failed during flow admission: {error}"
-                ))
-            })?;
+            .map_err(|_| self.invalid_transition_to(MobState::Running))?;
         self.create_pending_run(
             run_id.clone(),
             &config,
@@ -9468,29 +9481,64 @@ impl MobActor {
         self.provisioner.comms_runtime(member_ref).await
     }
 
-    /// Install comms trust for a restored external peer edge.
-    ///
-    /// Used by the D31 respawn restore loop in `finalize_spawn_from_pending`
-    /// to re-establish the comms trust that was dropped when the prior
-    /// generation of the member was retired. The corresponding `wired_to` +
-    /// `external_peer_specs` roster projection is restored separately via
-    /// [`RosterAuthority::restore_external_peer_edge`].
-    async fn restore_external_peer_trust(
+    fn trusted_peer_descriptor_from_machine_endpoint(
+        endpoint: &mob_dsl::ExternalPeerEndpoint,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            endpoint.name.0.clone(),
+            &endpoint.peer_id.0,
+            endpoint.signing_key.0,
+            &endpoint.address.0,
+        )
+        .map_err(|error| {
+            MobError::WiringError(format!(
+                "MobMachine external peer edge has invalid descriptor '{}': {error}",
+                endpoint.name.0
+            ))
+        })
+    }
+
+    fn machine_restore_wiring_plan(
         &self,
         agent_identity: &MeerkatId,
-        member_ref: &MemberRef,
-        spec: TrustedPeerDescriptor,
-    ) -> Result<(), MobError> {
-        let comms = self.provisioner_comms(member_ref).await.ok_or_else(|| {
-            MobError::WiringError(format!(
-                "respawn cannot restore external peer trust for '{agent_identity}': \
-                 comms runtime unavailable"
-            ))
-        })?;
-        comms.add_trusted_peer(spec).await.map_err(|error| {
-            MobError::WiringError(format!(
-                "respawn failed to restore external peer trust for '{agent_identity}': {error}"
-            ))
+    ) -> Result<RestoreWiringPlan, MobError> {
+        let local =
+            mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
+        let mut local_peers = Vec::new();
+        for edge in &self.dsl_authority.state.wiring_edges {
+            let peer = if edge.a == local {
+                Some(&edge.b)
+            } else if edge.b == local {
+                Some(&edge.a)
+            } else {
+                None
+            };
+            if let Some(peer) = peer {
+                local_peers.push(MeerkatId::from(peer.0.as_str()));
+            }
+        }
+        local_peers.sort();
+        local_peers.dedup();
+
+        let mut external_peers = Vec::new();
+        for edge in &self.dsl_authority.state.external_peer_edges {
+            if edge.local == local {
+                external_peers.push(Self::trusted_peer_descriptor_from_machine_endpoint(
+                    &edge.endpoint,
+                )?);
+            }
+        }
+        external_peers.sort_by(|a, b| {
+            a.name
+                .as_str()
+                .cmp(b.name.as_str())
+                .then_with(|| a.peer_id.to_string().cmp(&b.peer_id.to_string()))
+        });
+        external_peers.dedup_by(|a, b| a.name == b.name && a.peer_id == b.peer_id);
+
+        Ok(RestoreWiringPlan {
+            local_peers,
+            external_peers,
         })
     }
 

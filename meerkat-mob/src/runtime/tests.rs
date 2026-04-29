@@ -5292,6 +5292,74 @@ async fn test_stop_persists_all_state_and_rejects_mutations() {
         .await
         .expect_err("spawn must be rejected while stopped");
     assert!(matches!(err, MobError::InvalidTransition { .. }));
+    assert_eq!(
+        service.active_session_count().await,
+        1,
+        "MobMachine spawn admission must reject before provisioning a stopped mob"
+    );
+}
+
+#[tokio::test]
+async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker");
+    let entry = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("member exists");
+
+    handle.stop().await.expect("stop");
+
+    let submit = handle
+        .submit_work(
+            entry.agent_runtime_id.clone(),
+            entry.fence_token,
+            WorkRef::new(),
+            WorkSpec::new("queued while stopped".to_string(), WorkOrigin::Internal),
+        )
+        .await;
+    assert!(
+        matches!(
+            submit,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "SubmitWork must surface the MobMachine stopped-phase rejection: {submit:?}"
+    );
+
+    let run_flow = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await;
+    assert!(
+        matches!(
+            run_flow,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "RunFlow must surface the MobMachine stopped-phase rejection: {run_flow:?}"
+    );
+
+    let respawn = handle.respawn(AgentIdentity::from("w-1"), None).await;
+    assert!(
+        matches!(
+            respawn,
+            Err(crate::runtime::handle::MobRespawnError::Mob(
+                MobError::InvalidTransition {
+                    from: MobState::Stopped,
+                    to: MobState::Running,
+                }
+            ))
+        ),
+        "Respawn must surface the MobMachine stopped-phase rejection: {respawn:?}"
+    );
 }
 
 #[tokio::test]
@@ -5848,6 +5916,79 @@ async fn test_respawn_success_restores_existing_peer_wiring() {
     assert_eq!(
         left_entry.agent_runtime_id, receipt.agent_runtime_id,
         "respawn receipt must align with the replacement member's canonical session binding"
+    );
+}
+
+#[tokio::test]
+async fn test_respawn_restores_local_wiring_from_mob_machine_edge() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let left = MeerkatId::from("respawn-machine-left");
+    let right = MeerkatId::from("respawn-machine-right");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            left.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn left");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            right.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn right");
+
+    let edge = crate::machines::mob_machine::WiringEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from(left.as_str()),
+        crate::machines::mob_machine::AgentIdentity::from(right.as_str()),
+    );
+    handle
+        .project_machine_input(crate::machines::mob_machine::MobMachineInput::WireMembers { edge })
+        .await
+        .expect("seed machine-owned edge without roster projection");
+    let left_before = handle
+        .get_member(&AgentIdentity::from(left.as_str()))
+        .await
+        .expect("left before respawn");
+    assert!(
+        !left_before
+            .wired_to
+            .contains(&AgentIdentity::from(right.as_str())),
+        "test setup must leave roster projection empty so MobMachine is the only topology source"
+    );
+
+    handle
+        .respawn(
+            AgentIdentity::from(left.as_str()),
+            Some("restore machine edge".into()),
+        )
+        .await
+        .expect("respawn succeeds");
+
+    let left_after = handle
+        .get_member(&AgentIdentity::from(left.as_str()))
+        .await
+        .expect("left after respawn");
+    let right_after = handle
+        .get_member(&AgentIdentity::from(right.as_str()))
+        .await
+        .expect("right after respawn");
+    assert!(
+        left_after
+            .wired_to
+            .contains(&AgentIdentity::from(right.as_str()))
+    );
+    assert!(
+        right_after
+            .wired_to
+            .contains(&AgentIdentity::from(left.as_str()))
     );
 }
 
@@ -8033,7 +8174,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
 }
 
 #[tokio::test]
-async fn test_resume_applies_normalized_external_binding_overlay_before_projection() {
+async fn test_resume_reconciles_normalized_external_binding_overlay_after_event_projection() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let definition = sample_definition_with_external_backend();
@@ -8116,10 +8257,10 @@ async fn test_resume_applies_normalized_external_binding_overlay_before_projecti
             assert_eq!(address, old_address, "overlay must preserve peer address");
             assert_eq!(
                 session_id, None,
-                "normalized overlay must remove the legacy bridge session from replay"
+                "normalized overlay must remove the legacy bridge session from the effective binding"
             );
         }
-        other => panic!("expected backend peer after overlay replay, got {other:?}"),
+        other => panic!("expected backend peer after overlay reconciliation, got {other:?}"),
     }
 
     let snapshot = resumed
@@ -8255,7 +8396,7 @@ async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
                 "failed normalization should still strip the legacy bridge session from replay"
             );
         }
-        other => panic!("expected backend peer after failed overlay replay, got {other:?}"),
+        other => panic!("expected backend peer after failed overlay reconciliation, got {other:?}"),
     }
 
     let snapshot = resumed
@@ -10248,6 +10389,79 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
 }
 
 #[tokio::test]
+async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let old_sid = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-machine"),
+            None,
+        )
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+        "remote-mob/worker/machine-agent",
+        meerkat_core::comms::PeerId::new(),
+        "inproc://remote-mob/worker/machine-agent",
+    )
+    .expect("valid external peer");
+    let machine_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-machine"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    handle
+        .project_machine_input(
+            crate::machines::mob_machine::MobMachineInput::WireExternalPeer { edge: machine_edge },
+        )
+        .await
+        .expect("seed machine-owned external edge without roster projection");
+    let entry_before = handle
+        .get_member(&AgentIdentity::from("l-machine"))
+        .await
+        .expect("member before respawn");
+    assert!(
+        !entry_before
+            .external_peer_specs
+            .contains_key(&AgentIdentity::from(external.name.as_str())),
+        "test setup must leave roster projection empty so MobMachine is the only topology source"
+    );
+
+    let receipt = handle
+        .respawn(AgentIdentity::from("l-machine"), Some("resume".into()))
+        .await
+        .expect("respawn");
+    let entry = handle
+        .get_member(&AgentIdentity::from("l-machine"))
+        .await
+        .expect("member should exist");
+    let new_sid = entry
+        .member_ref
+        .bridge_session_id()
+        .cloned()
+        .expect("respawn should produce replacement session");
+    assert_ne!(new_sid, old_sid, "respawn should replace the session");
+
+    let trusted = service.trusted_peer_names(&new_sid).await;
+    assert!(
+        trusted.iter().any(|n| n == external.name.as_str()),
+        "respawn should restore external trust from MobMachine topology"
+    );
+    assert_eq!(
+        entry
+            .external_peer_specs
+            .get(&MeerkatId::from(external.name.as_str()))
+            .cloned(),
+        Some(external)
+    );
+    assert_eq!(entry.agent_runtime_id, receipt.agent_runtime_id);
+    assert_eq!(entry.fence_token, receipt.fence_token);
+}
+
+#[tokio::test]
 async fn test_unwire_external_removes_trust_and_projection() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let sid_l = handle
@@ -10317,6 +10531,81 @@ async fn test_unwire_external_removes_trust_and_projection() {
             .iter()
             .all(|edge| edge.a.0 != external.name.as_str() && edge.b.0 != external.name.as_str()),
         "external unwire should not touch member wiring_edges"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_seeds_mob_machine_topology_from_event_projection() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = sample_definition();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-resume"), None)
+        .await
+        .expect("spawn lead");
+    handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-resume"),
+            None,
+        )
+        .await
+        .expect("spawn worker");
+    handle
+        .wire(AgentIdentity::from("l-resume"), MeerkatId::from("w-resume"))
+        .await
+        .expect("wire local peers");
+    let external = TrustedPeerDescriptor::test_only_unsigned_typed(
+        "remote-mob/worker/resume-agent",
+        meerkat_core::comms::PeerId::new(),
+        "inproc://remote-mob/worker/resume-agent",
+    )
+    .expect("valid external peer");
+    handle
+        .wire(
+            AgentIdentity::from("l-resume"),
+            PeerTarget::External(external.clone()),
+        )
+        .await
+        .expect("wire external peer");
+    handle.stop().await.expect("stop before resume");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume mob");
+
+    let dsl = resumed
+        .debug_dsl_t2_snapshot()
+        .await
+        .expect("debug dsl snapshot");
+    let local_edge = crate::machines::mob_machine::WiringEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-resume"),
+        crate::machines::mob_machine::AgentIdentity::from("w-resume"),
+    );
+    assert!(
+        dsl.wiring_edges.contains(&local_edge),
+        "resume must seed machine-owned local topology from event projection"
+    );
+    let external_edge = crate::machines::mob_machine::ExternalPeerEdge::new(
+        crate::machines::mob_machine::AgentIdentity::from("l-resume"),
+        crate::machines::mob_machine::ExternalPeerEndpoint::from(&external),
+    );
+    assert!(
+        dsl.external_peer_edges.contains(&external_edge),
+        "resume must seed machine-owned external topology from event projection"
     );
 }
 

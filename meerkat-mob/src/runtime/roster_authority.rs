@@ -1,7 +1,6 @@
 use crate::event::MobEvent;
 use crate::ids::{AgentIdentity, Generation, MeerkatId, ProfileName};
 use crate::roster::{MobMemberKickoffSnapshot, Roster, RosterAddEntry, RosterEntry};
-use meerkat_core::comms::TrustedPeerDescriptor;
 
 mod sealed {
     pub trait Sealed {}
@@ -84,57 +83,6 @@ impl RosterAuthority {
     /// path's `Roster::apply` — same match arms, same mutations.
     pub(crate) fn apply_event(&mut self, event: &MobEvent) {
         self.roster.apply(event);
-    }
-
-    /// Restore a bidirectional local peer-wiring edge on the roster projection.
-    ///
-    /// Used by respawn wire-restoration: after a retire+spawn cycle the DSL
-    /// `wiring_edges` set still carries the edge (Retire does not clear it)
-    /// but the new `RosterEntry` for the replacement member starts with an
-    /// empty `wired_to` set. This helper re-projects the edge into both
-    /// endpoints without re-emitting `MembersWired` (the event is already in
-    /// the log from the original wire).
-    ///
-    /// Returns `true` if both endpoints were present and projected; `false`
-    /// if either endpoint was missing from the roster.
-    pub(crate) fn restore_local_peer_edge(&mut self, a: &AgentIdentity, b: &AgentIdentity) -> bool {
-        let a_present = self.roster.get_by_identity(a).is_some();
-        let b_present = self.roster.get_by_identity(b).is_some();
-        if !a_present || !b_present {
-            return false;
-        }
-        if let Some(entry_a) = self.roster.get_mut(a) {
-            entry_a.wired_to.insert(b.clone());
-        }
-        if let Some(entry_b) = self.roster.get_mut(b) {
-            entry_b.wired_to.insert(a.clone());
-        }
-        true
-    }
-
-    /// Restore an external peer-wiring edge on the roster projection.
-    ///
-    /// Mirrors what the (wave-A-deleted) `ExternalPeerWired` event projection
-    /// used to do: inserts the peer name into the local member's `wired_to`
-    /// set and records the `TrustedPeerDescriptor` in `external_peer_specs`.
-    /// Returns `true` if the local entry was present and mutated.
-    ///
-    /// Used by respawn/resume wire-restoration paths which must preserve
-    /// `RosterEntry.external_peer_specs` and `wired_to` across member
-    /// replacement (D31 restore).
-    pub(crate) fn restore_external_peer_edge(
-        &mut self,
-        local: &AgentIdentity,
-        spec: TrustedPeerDescriptor,
-    ) -> bool {
-        let peer_name = AgentIdentity::from(spec.name.as_str());
-        if let Some(entry) = self.roster.get_mut(local) {
-            entry.wired_to.insert(peer_name.clone());
-            entry.external_peer_specs.insert(peer_name, spec);
-            true
-        } else {
-            false
-        }
     }
 
     /// Flip a roster entry to `Retiring` state. Mirrors

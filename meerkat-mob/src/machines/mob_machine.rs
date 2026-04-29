@@ -830,6 +830,79 @@ impl From<[u8; 32]> for PeerSigningKey {
 
 meerkat_machine_schema::mob_catalog_machine_dsl!("meerkat-mob", "machines::mob_machine");
 
+// ---------------------------------------------------------------------------
+// MobMachine-owned projection helpers
+// ---------------------------------------------------------------------------
+
+/// Machine-owned lifecycle status for a mob member.
+///
+/// Runtime projections may map this into public handle DTOs, but the decision
+/// itself is derived from `MobMachineState` so projection code does not invent
+/// terminal/member truth from roster or session observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobMemberLifecycleStatus {
+    Unknown,
+    Active,
+    Retiring,
+    Completed,
+}
+
+/// Machine-owned terminal classification for a mob member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobMemberTerminalClass {
+    Running,
+    TerminalFailure,
+    TerminalUnknown,
+    TerminalCompleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MobMemberLifecycleMaterial {
+    pub status: MobMemberLifecycleStatus,
+    pub terminal_class: MobMemberTerminalClass,
+}
+
+impl MobMemberLifecycleStatus {
+    pub const fn terminal_class(self) -> MobMemberTerminalClass {
+        match self {
+            Self::Active | Self::Retiring => MobMemberTerminalClass::Running,
+            Self::Completed => MobMemberTerminalClass::TerminalCompleted,
+            Self::Unknown => MobMemberTerminalClass::TerminalUnknown,
+        }
+    }
+}
+
+impl MobMachineState {
+    /// Project lifecycle truth for an identity from the machine's membership
+    /// maps. `member_present` is the roster/event-projection presence bit; it
+    /// only tells the machine whether a public member row exists for this
+    /// identity, not what lifecycle state that row should report.
+    pub fn member_lifecycle_for_identity(
+        &self,
+        agent_identity: &AgentIdentity,
+        member_present: bool,
+    ) -> MobMemberLifecycleMaterial {
+        let status = if !member_present {
+            MobMemberLifecycleStatus::Unknown
+        } else if let Some(runtime_id) = self.identity_to_runtime.get(agent_identity) {
+            if self.member_state_markers.get(runtime_id) == Some(&MobMemberState::Retiring) {
+                MobMemberLifecycleStatus::Retiring
+            } else if self.live_runtime_ids.contains(runtime_id) {
+                MobMemberLifecycleStatus::Active
+            } else {
+                MobMemberLifecycleStatus::Completed
+            }
+        } else {
+            MobMemberLifecycleStatus::Unknown
+        };
+
+        MobMemberLifecycleMaterial {
+            status,
+            terminal_class: status.terminal_class(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1200,5 +1273,61 @@ mod tests {
                 .contains_key(&runtime_id)
         );
         assert_eq!(authority.state.active_run_count, 0);
+    }
+
+    #[test]
+    fn member_lifecycle_projection_is_derived_from_machine_membership() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::from("worker:1");
+
+        assert_eq!(
+            authority
+                .state
+                .member_lifecycle_for_identity(&identity, true),
+            MobMemberLifecycleMaterial {
+                status: MobMemberLifecycleStatus::Unknown,
+                terminal_class: MobMemberTerminalClass::TerminalUnknown,
+            }
+        );
+
+        authority
+            .state
+            .identity_to_runtime
+            .insert(identity.clone(), runtime_id.clone());
+        authority.state.live_runtime_ids.insert(runtime_id.clone());
+        assert_eq!(
+            authority
+                .state
+                .member_lifecycle_for_identity(&identity, true)
+                .status,
+            MobMemberLifecycleStatus::Active
+        );
+
+        authority
+            .state
+            .member_state_markers
+            .insert(runtime_id.clone(), MobMemberState::Retiring);
+        assert_eq!(
+            authority
+                .state
+                .member_lifecycle_for_identity(&identity, true),
+            MobMemberLifecycleMaterial {
+                status: MobMemberLifecycleStatus::Retiring,
+                terminal_class: MobMemberTerminalClass::Running,
+            }
+        );
+
+        authority.state.member_state_markers.remove(&runtime_id);
+        authority.state.live_runtime_ids.remove(&runtime_id);
+        assert_eq!(
+            authority
+                .state
+                .member_lifecycle_for_identity(&identity, true),
+            MobMemberLifecycleMaterial {
+                status: MobMemberLifecycleStatus::Completed,
+                terminal_class: MobMemberTerminalClass::TerminalCompleted,
+            }
+        );
     }
 }

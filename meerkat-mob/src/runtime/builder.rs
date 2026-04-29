@@ -77,10 +77,13 @@ fn seed_mob_authority(
 /// This helper replays every live roster entry into the DSL exactly as a
 /// fresh spawn would have done, populating `live_runtime_ids`,
 /// `runtime_fence_tokens`, `externally_addressable_runtime_ids`, and
-/// `identity_to_runtime`. `external_addressable` is resolved from the
-/// definition's inline profile (realm-profile overrides are resolved
-/// asynchronously elsewhere; callers that need realm overrides can re-feed
-/// spawn events through the live pipeline).
+/// `identity_to_runtime`. It also rehydrates machine-owned local and external
+/// wiring edges from the event-projected roster so respawn/reconcile restore
+/// logic can read topology from MobMachine instead of using roster fields as
+/// authority. `external_addressable` is resolved from the definition's inline
+/// profile (realm-profile overrides are resolved asynchronously elsewhere;
+/// callers that need realm overrides can re-feed spawn events through the live
+/// pipeline).
 fn seed_mob_authority_sync_from_roster(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     roster: &Roster,
@@ -121,6 +124,27 @@ fn seed_mob_authority_sync_from_roster(
             .state
             .identity_to_runtime
             .insert(dsl_identity, dsl_runtime_id);
+
+        for peer_identity in &entry.wired_to {
+            if let Some(peer_entry) = roster.get_by_identity(peer_identity) {
+                authority
+                    .state
+                    .wiring_edges
+                    .insert(mob_dsl::WiringEdge::new(
+                        mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                        mob_dsl::AgentIdentity::from_domain(&peer_entry.agent_identity),
+                    ));
+            }
+        }
+        for spec in entry.external_peer_specs.values() {
+            authority
+                .state
+                .external_peer_edges
+                .insert(mob_dsl::ExternalPeerEdge::new(
+                    mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                    mob_dsl::ExternalPeerEndpoint::from(spec),
+                ));
+        }
     }
 }
 
@@ -520,10 +544,10 @@ impl MobBuilder {
             .into_iter()
             .filter(|event| event.mob_id == definition.id)
             .collect();
-        // Runtime metadata is authoritative for supervisor and external-binding
-        // normalization state. Older mobs created before bridge metadata
-        // existed will not have a supervisor record yet, so resume must seed
-        // one before treating absence as corruption.
+        // Runtime metadata owns supervisor authority and carries
+        // external-binding reconciliation facts. Roster membership still
+        // comes from the event log, then MobMachine is seeded from that
+        // reconciled projection.
         Self::ensure_supervisor_authority(storage.runtime_metadata.clone(), definition.id.clone())
             .await?;
         let supervisor_authority = storage
@@ -540,19 +564,19 @@ impl MobBuilder {
             &definition.id,
             supervisor_authority,
         )?);
+        let mut roster = Roster::project(&mob_events);
+        #[cfg(not(target_arch = "wasm32"))]
+        Self::normalize_sessionless_backend_runtime_modes(&mut roster);
         #[cfg(not(target_arch = "wasm32"))]
         let seeded_restore_diagnostics = {
             let binding_overlays = storage
                 .runtime_metadata
                 .list_external_binding_overlays(&definition.id)
                 .await?;
-            Self::apply_external_binding_overlays(&mut mob_events, &binding_overlays)
+            Self::reconcile_external_binding_overlays(&mut roster, &binding_overlays)
         };
         #[cfg(target_arch = "wasm32")]
         let seeded_restore_diagnostics = HashMap::new();
-        #[cfg(not(target_arch = "wasm32"))]
-        Self::normalize_sessionless_backend_runtime_modes(&mut mob_events);
-        let mut roster = Roster::project(&mob_events);
         let task_board = TaskBoard::project(&mob_events);
         // Determine resumed state from events in the current epoch (after the
         // last MobReset, or all events if no reset has occurred).
@@ -707,8 +731,8 @@ impl MobBuilder {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn apply_external_binding_overlays(
-        mob_events: &mut [crate::event::MobEvent],
+    fn reconcile_external_binding_overlays(
+        roster: &mut Roster,
         overlays: &[crate::store::ExternalBindingOverlayRecord],
     ) -> HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic> {
         let overlay_index = overlays
@@ -722,57 +746,58 @@ impl MobBuilder {
             .collect::<HashMap<_, _>>();
         let mut diagnostics = HashMap::new();
 
-        for event in mob_events {
-            let Some(member_spawned) = event.kind.member_spawned_mut() else {
+        let identities = roster
+            .list_all()
+            .map(|entry| entry.agent_identity.clone())
+            .collect::<Vec<_>>();
+        for identity in identities {
+            let Some(entry) = roster.get_by_identity_mut(&identity) else {
                 continue;
             };
-            let Some(overlay) = overlay_index.get(&(
-                member_spawned.agent_identity.clone(),
-                member_spawned.generation,
-            )) else {
+            let Some(overlay) =
+                overlay_index.get(&(entry.agent_identity.clone(), entry.generation))
+            else {
+                entry.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
+                    entry.runtime_mode,
+                    Some(&entry.member_ref),
+                );
                 continue;
             };
 
-            let original_member_ref = member_spawned.bridge_member_ref.clone();
+            let original_member_ref = entry.member_ref.clone();
             match &overlay.status {
                 crate::store::ExternalBindingOverlayStatus::Normalized => {
                     if let Some(normalized_member_ref) = overlay.normalized_member_ref.clone() {
-                        member_spawned.bridge_member_ref =
-                            Some(Self::member_ref_with_bootstrap_token(
-                                normalized_member_ref,
-                                overlay.bootstrap_token.clone(),
-                            ));
+                        entry.member_ref = Self::member_ref_with_bootstrap_token(
+                            normalized_member_ref,
+                            overlay.bootstrap_token.clone(),
+                        );
                     }
                 }
                 crate::store::ExternalBindingOverlayStatus::Failed { reason } => {
-                    let normalized_member_ref =
-                        overlay.normalized_member_ref.clone().or_else(|| {
-                            original_member_ref
-                                .as_ref()
-                                .and_then(Self::sessionless_member_ref)
-                        });
-                    member_spawned.bridge_member_ref = normalized_member_ref.map(|member_ref| {
-                        Self::member_ref_with_bootstrap_token(
-                            member_ref,
+                    let normalized_member_ref = overlay
+                        .normalized_member_ref
+                        .clone()
+                        .or_else(|| Self::sessionless_member_ref(&original_member_ref));
+                    if let Some(normalized_member_ref) = normalized_member_ref {
+                        entry.member_ref = Self::member_ref_with_bootstrap_token(
+                            normalized_member_ref,
                             overlay.bootstrap_token.clone(),
-                        )
-                    });
+                        );
+                    }
                     diagnostics.insert(
-                        MeerkatId::from(member_spawned.agent_identity.as_str()),
+                        MeerkatId::from(entry.agent_identity.as_str()),
                         super::handle::RestoreFailureDiagnostic {
-                            bridge_session_id: original_member_ref
-                                .as_ref()
-                                .and_then(crate::event::MemberRef::bridge_session_id)
-                                .cloned(),
+                            bridge_session_id: original_member_ref.bridge_session_id().cloned(),
                             reason: reason.clone(),
                         },
                     );
                 }
             }
 
-            member_spawned.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
-                member_spawned.runtime_mode,
-                member_spawned.bridge_member_ref.as_ref(),
+            entry.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
+                entry.runtime_mode,
+                Some(&entry.member_ref),
             );
         }
 
@@ -780,15 +805,18 @@ impl MobBuilder {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn normalize_sessionless_backend_runtime_modes(mob_events: &mut [crate::event::MobEvent]) {
-        for event in mob_events {
-            let Some(member_spawned) = event.kind.member_spawned_mut() else {
-                continue;
-            };
-            member_spawned.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
-                member_spawned.runtime_mode,
-                member_spawned.bridge_member_ref.as_ref(),
-            );
+    fn normalize_sessionless_backend_runtime_modes(roster: &mut Roster) {
+        let identities = roster
+            .list_all()
+            .map(|entry| entry.agent_identity.clone())
+            .collect::<Vec<_>>();
+        for identity in identities {
+            if let Some(entry) = roster.get_by_identity_mut(&identity) {
+                entry.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
+                    entry.runtime_mode,
+                    Some(&entry.member_ref),
+                );
+            }
         }
     }
 

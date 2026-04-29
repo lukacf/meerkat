@@ -7,7 +7,7 @@ use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime::MobLifecycleSnapshot;
 #[cfg(test)]
 use crate::runtime::mob_member_lifecycle_projection::{
-    CanonicalMemberSnapshotMaterial, CanonicalMemberStatus, CanonicalSessionObservation,
+    CanonicalMemberSnapshotMaterial, CanonicalMemberStatus,
 };
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
@@ -3765,7 +3765,7 @@ mod tests {
         let snapshot = CanonicalMemberSnapshotMaterial {
             member_present: true,
             status: CanonicalMemberStatus::Active,
-            session_observation: CanonicalSessionObservation::Active,
+            terminal_class: mob_dsl::MobMemberTerminalClass::Running,
             error: None,
             output_preview: None,
             tokens_used: 0,

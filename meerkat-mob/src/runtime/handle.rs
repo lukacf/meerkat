@@ -1069,7 +1069,16 @@ impl MobEventsView {
         let explicit_after_cursor = config.after_cursor.is_some();
         let source_rx = self.handle.events.subscribe().map_err(MobError::from)?;
         let after_cursor = match config.after_cursor {
-            Some(cursor) => cursor,
+            Some(cursor) => {
+                let latest_cursor = self.latest_cursor().await?;
+                if cursor > latest_cursor {
+                    return Err(MobError::StaleEventCursor {
+                        after_cursor: cursor,
+                        latest_cursor,
+                    });
+                }
+                cursor
+            }
             None => self.latest_cursor().await?,
         };
         Ok(spawn_structural_event_subscription(

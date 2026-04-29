@@ -22,14 +22,19 @@ use crate::run::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use notify::{RecursiveMode, Watcher};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::thread;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
+const EVENT_WATCH_CATCH_UP_LIMIT: usize = 1024;
 
 const CREATE_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS mob_events (
@@ -110,6 +115,51 @@ fn begin_immediate(conn: &mut Connection) -> Result<Transaction<'_>, MobStoreErr
         .map_err(se)
 }
 
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn latest_event_cursor_sync(path: &Path) -> Result<u64, MobStoreError> {
+    let conn = open_connection(path)?;
+    let cursor: Option<i64> = conn
+        .query_row("SELECT MAX(cursor) FROM mob_events", [], |row| row.get(0))
+        .optional()
+        .map_err(se)?
+        .flatten();
+    Ok(cursor.map_or(0, i64_to_cursor))
+}
+
+fn poll_events_sync(
+    path: &Path,
+    after_cursor: u64,
+    limit: usize,
+) -> Result<Vec<MobEvent>, MobStoreError> {
+    let conn = open_connection(path)?;
+    let mut stmt = conn
+        .prepare("SELECT event_json FROM mob_events WHERE cursor > ?1 ORDER BY cursor LIMIT ?2")
+        .map_err(se)?;
+    let rows = stmt
+        .query_map(
+            params![
+                cursor_to_i64(after_cursor)?,
+                i64::try_from(limit).map_err(|_| se("limit exceeds i64::MAX"))?
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .map_err(se)?;
+    let mut result = Vec::new();
+    for row in rows {
+        let bytes = row.map_err(se)?;
+        result.push(
+            decode_stored_mob_event(&bytes)
+                .map_err(|e| MobStoreError::Serialization(e.to_string()))?,
+        );
+    }
+    Ok(result)
+}
+
 fn load_run_bytes(tx: &Transaction<'_>, key: &str) -> Result<Option<Vec<u8>>, MobStoreError> {
     tx.query_row(
         "SELECT run_json FROM mob_runs WHERE run_id = ?1",
@@ -155,11 +205,234 @@ where
 // SqliteMobStores — unified handle (stores only the path)
 // ---------------------------------------------------------------------------
 
+static SQLITE_EVENT_BUSES: OnceLock<Mutex<HashMap<PathBuf, Weak<SqliteMobEventBus>>>> =
+    OnceLock::new();
+
+fn sqlite_event_buses() -> &'static Mutex<HashMap<PathBuf, Weak<SqliteMobEventBus>>> {
+    SQLITE_EVENT_BUSES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn sqlite_event_bus_for_path(path: PathBuf) -> Result<Arc<SqliteMobEventBus>, MobStoreError> {
+    let mut buses = lock_unpoisoned(sqlite_event_buses());
+    if let Some(bus) = buses.get(&path).and_then(Weak::upgrade) {
+        return Ok(bus);
+    }
+
+    let bus = SqliteMobEventBus::new(path.clone())?;
+    buses.insert(path, Arc::downgrade(&bus));
+    Ok(bus)
+}
+
+struct SqliteMobEventBus {
+    path: PathBuf,
+    event_tx: broadcast::Sender<MobEvent>,
+    latest_broadcast_cursor: Mutex<u64>,
+    catch_up_lock: Mutex<()>,
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
+}
+
+impl std::fmt::Debug for SqliteMobEventBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteMobEventBus")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl SqliteMobEventBus {
+    fn new(path: PathBuf) -> Result<Arc<Self>, MobStoreError> {
+        let latest_cursor = latest_event_cursor_sync(&path)?;
+        let (event_tx, _event_rx) = broadcast::channel(EVENT_SUBSCRIPTION_CHANNEL_CAPACITY);
+        let bus = Arc::new(Self {
+            path,
+            event_tx,
+            latest_broadcast_cursor: Mutex::new(latest_cursor),
+            catch_up_lock: Mutex::new(()),
+            watcher: Mutex::new(None),
+        });
+        bus.start_external_watch();
+        Ok(bus)
+    }
+
+    fn subscribe(&self) -> super::MobEventReceiver {
+        self.event_tx.subscribe()
+    }
+
+    fn publish_committed(&self, event: MobEvent) {
+        self.publish_committed_batch(std::slice::from_ref(&event));
+    }
+
+    fn publish_committed_batch(&self, events: &[MobEvent]) {
+        let current_cursor = *lock_unpoisoned(&self.latest_broadcast_cursor);
+        let mut expected_cursor = current_cursor.saturating_add(1);
+        let mut has_gap = false;
+        for event in events.iter().filter(|event| event.cursor > current_cursor) {
+            if event.cursor > expected_cursor {
+                has_gap = true;
+                break;
+            }
+            expected_cursor = event.cursor.saturating_add(1);
+        }
+        if has_gap {
+            if let Err(error) = self.publish_available_from_storage() {
+                tracing::warn!(
+                    error = %error,
+                    path = %self.path.display(),
+                    "sqlite mob event gap catch-up failed before direct publish",
+                );
+            }
+        }
+        self.publish_committed_batch_unchecked(events);
+    }
+
+    fn publish_committed_batch_unchecked(&self, events: &[MobEvent]) {
+        let mut cursor = lock_unpoisoned(&self.latest_broadcast_cursor);
+        for event in events {
+            if event.cursor <= *cursor {
+                continue;
+            }
+            *cursor = event.cursor;
+            let _ = self.event_tx.send(event.clone());
+        }
+    }
+
+    fn publish_available_from_storage(&self) -> Result<(), MobStoreError> {
+        let _catch_up_guard = lock_unpoisoned(&self.catch_up_lock);
+        loop {
+            let after_cursor = *lock_unpoisoned(&self.latest_broadcast_cursor);
+            let batch = poll_events_sync(&self.path, after_cursor, EVENT_WATCH_CATCH_UP_LIMIT)?;
+            if batch.is_empty() {
+                return Ok(());
+            }
+            let is_complete = batch.len() < EVENT_WATCH_CATCH_UP_LIMIT;
+            self.publish_committed_batch_unchecked(&batch);
+            if is_complete {
+                return Ok(());
+            }
+        }
+    }
+
+    fn start_external_watch(self: &Arc<Self>) {
+        let Some(parent) = self.path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let watched_paths = sqlite_watch_paths(&self.path);
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+        let thread_bus = Arc::downgrade(self);
+        let thread_builder = thread::Builder::new().name("sqlite-mob-event-watch".to_string());
+        if let Err(error) = thread_builder.spawn(move || {
+            while wake_rx.recv().is_ok() {
+                thread::sleep(Duration::from_millis(10));
+                while wake_rx.try_recv().is_ok() {}
+                let Some(bus) = thread_bus.upgrade() else {
+                    break;
+                };
+                if let Err(error) = bus.publish_available_from_storage() {
+                    tracing::warn!(
+                        error = %error,
+                        path = %bus.path.display(),
+                        "sqlite mob event watch catch-up failed",
+                    );
+                }
+            }
+        }) {
+            tracing::warn!(
+                error = %error,
+                path = %self.path.display(),
+                "failed to start sqlite mob event watch thread",
+            );
+            return;
+        }
+
+        let callback_wake_tx = wake_tx.clone();
+        let callback_parent = parent.clone();
+        let mut watcher =
+            match notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                match result {
+                    Ok(event)
+                        if sqlite_watch_event_relevant(
+                            &event,
+                            &callback_parent,
+                            &watched_paths,
+                        ) =>
+                    {
+                        let _ = callback_wake_tx.send(());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "sqlite mob event filesystem watch reported an error",
+                        );
+                    }
+                }
+            }) {
+                Ok(watcher) => watcher,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        path = %self.path.display(),
+                        "failed to create sqlite mob event filesystem watcher",
+                    );
+                    return;
+                }
+            };
+
+        if let Err(error) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
+            tracing::warn!(
+                error = %error,
+                path = %parent.display(),
+                "failed to watch sqlite mob event directory",
+            );
+            return;
+        }
+
+        *lock_unpoisoned(&self.watcher) = Some(watcher);
+    }
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn sqlite_watch_paths(path: &Path) -> Vec<PathBuf> {
+    vec![
+        path.to_path_buf(),
+        sqlite_sidecar_path(path, "-wal"),
+        sqlite_sidecar_path(path, "-shm"),
+    ]
+}
+
+fn sqlite_watch_event_relevant(
+    event: &notify::Event,
+    parent: &Path,
+    watched_paths: &[PathBuf],
+) -> bool {
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return false;
+    }
+
+    if event.paths.is_empty() {
+        return true;
+    }
+
+    event.paths.iter().any(|path| {
+        path == parent
+            || watched_paths.iter().any(|watched| {
+                path == watched
+                    || (path.parent() == watched.parent()
+                        && path.file_name() == watched.file_name())
+            })
+    })
+}
+
 /// Shared bundle that produces event/run/spec stores all pointing to the same db file.
 #[derive(Debug, Clone)]
 pub struct SqliteMobStores {
     path: PathBuf,
-    event_tx: broadcast::Sender<MobEvent>,
+    event_bus: Arc<SqliteMobEventBus>,
 }
 
 impl SqliteMobStores {
@@ -167,14 +440,15 @@ impl SqliteMobStores {
         let path = path.as_ref().to_path_buf();
         // Validate the path works by opening and immediately closing.
         let _conn = open_connection(&path)?;
-        let (event_tx, _event_rx) = broadcast::channel(EVENT_SUBSCRIPTION_CHANNEL_CAPACITY);
-        Ok(Self { path, event_tx })
+        let path = std::fs::canonicalize(&path).map_err(se)?;
+        let event_bus = sqlite_event_bus_for_path(path.clone())?;
+        Ok(Self { path, event_bus })
     }
 
     pub fn event_store(&self) -> SqliteMobEventStore {
         SqliteMobEventStore {
             path: self.path.clone(),
-            event_tx: self.event_tx.clone(),
+            event_bus: Arc::clone(&self.event_bus),
         }
     }
 
@@ -464,7 +738,7 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
 #[derive(Clone)]
 pub struct SqliteMobEventStore {
     path: PathBuf,
-    event_tx: broadcast::Sender<MobEvent>,
+    event_bus: Arc<SqliteMobEventBus>,
 }
 
 impl std::fmt::Debug for SqliteMobEventStore {
@@ -503,7 +777,7 @@ impl MobEventStore for SqliteMobEventStore {
             Ok(stored)
         })
         .await?;
-        let _ = self.event_tx.send(stored.clone());
+        self.event_bus.publish_committed(stored.clone());
         Ok(stored)
     }
 
@@ -536,41 +810,13 @@ impl MobEventStore for SqliteMobEventStore {
             Ok(results)
         })
         .await?;
-        for event in &stored {
-            let _ = self.event_tx.send(event.clone());
-        }
+        self.event_bus.publish_committed_batch(&stored);
         Ok(stored)
     }
 
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
         let path = self.path.clone();
-        run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT event_json FROM mob_events WHERE cursor > ?1 ORDER BY cursor LIMIT ?2",
-                )
-                .map_err(se)?;
-            let rows = stmt
-                .query_map(
-                    params![
-                        cursor_to_i64(after_cursor)?,
-                        i64::try_from(limit).map_err(|_| se("limit exceeds i64::MAX"))?
-                    ],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .map_err(se)?;
-            let mut result = Vec::new();
-            for row in rows {
-                let bytes = row.map_err(se)?;
-                result.push(
-                    decode_stored_mob_event(&bytes)
-                        .map_err(|e| MobStoreError::Serialization(e.to_string()))?,
-                );
-            }
-            Ok(result)
-        })
-        .await
+        run_sqlite_task(move || poll_events_sync(&path, after_cursor, limit)).await
     }
 
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
@@ -598,20 +844,11 @@ impl MobEventStore for SqliteMobEventStore {
 
     async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
         let path = self.path.clone();
-        run_sqlite_task(move || {
-            let conn = open_connection(&path)?;
-            let cursor: Option<i64> = conn
-                .query_row("SELECT MAX(cursor) FROM mob_events", [], |row| row.get(0))
-                .optional()
-                .map_err(se)?
-                .flatten();
-            Ok(cursor.map_or(0, i64_to_cursor))
-        })
-        .await
+        run_sqlite_task(move || latest_event_cursor_sync(&path)).await
     }
 
     fn subscribe(&self) -> Result<super::MobEventReceiver, MobStoreError> {
-        Ok(self.event_tx.subscribe())
+        Ok(self.event_bus.subscribe())
     }
 
     async fn clear(&self) -> Result<(), MobStoreError> {
@@ -2091,6 +2328,69 @@ mod tests {
             .expect("subscription should stay open");
 
         assert_eq!(observed.cursor, stored.cursor);
+        assert!(matches!(observed.kind, MobEventKind::MobCompleted));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_event_store_subscribe_receives_appends_from_separate_open() {
+        let (_dir, path) = temp_db_path();
+        let subscriber_store = SqliteMobStores::open(&path).unwrap().event_store();
+        let writer_store = SqliteMobStores::open(&path).unwrap().event_store();
+        let mut rx = subscriber_store.subscribe().expect("subscribe");
+
+        let stored = writer_store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("subscription should receive event from separately opened writer")
+            .expect("subscription should stay open");
+
+        assert_eq!(observed.cursor, stored.cursor);
+        assert!(matches!(observed.kind, MobEventKind::MobCompleted));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_event_store_subscribe_receives_raw_sqlite_append() {
+        let (_dir, path) = temp_db_path();
+        let subscriber_store = SqliteMobStores::open(&path).unwrap().event_store();
+        let mut rx = subscriber_store.subscribe().expect("subscribe");
+        let stored = MobEvent {
+            cursor: 1,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("mob"),
+            kind: MobEventKind::MobCompleted,
+        };
+        let encoded = encode_stored_mob_event(&stored).unwrap();
+        let writer_path = path.clone();
+
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&writer_path)?;
+            let tx = begin_immediate(&mut conn)?;
+            tx.execute(
+                "INSERT INTO mob_events (cursor, event_json) VALUES (?1, ?2)",
+                params![cursor_to_i64(stored.cursor)?, encoded],
+            )
+            .map_err(se)?;
+            set_next_cursor(&tx, stored.cursor.saturating_add(1))?;
+            tx.commit().map_err(se)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("subscription should receive raw sqlite append")
+            .expect("subscription should stay open");
+
+        assert_eq!(observed.cursor, 1);
         assert!(matches!(observed.kind, MobEventKind::MobCompleted));
     }
 

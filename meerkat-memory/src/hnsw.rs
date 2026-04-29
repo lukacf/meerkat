@@ -42,8 +42,8 @@ const MAX_NB_CONNECTION: usize = 16;
 const MAX_LAYER: usize = 16;
 /// Construction-time exploration factor.
 const EF_CONSTRUCTION: usize = 200;
-/// Default max elements hint.
-const DEFAULT_MAX_ELEMENTS: usize = 100_000;
+/// Minimum max-elements hint for an allocated HNSW index.
+const MIN_INDEX_ELEMENTS_HINT: usize = 1;
 
 fn open_connection(path: &Path) -> Result<Connection, MemoryStoreError> {
     if let Some(parent) = path.parent() {
@@ -61,14 +61,41 @@ fn open_connection(path: &Path) -> Result<Connection, MemoryStoreError> {
     Ok(conn)
 }
 
-fn new_hnsw_index() -> Hnsw<'static, f32, DistCosine> {
+type MemoryHnswIndex = Hnsw<'static, f32, DistCosine>;
+
+fn bounded_index_elements_hint(entries: usize) -> usize {
+    entries.max(MIN_INDEX_ELEMENTS_HINT)
+}
+
+fn new_hnsw_index(max_elements_hint: usize) -> MemoryHnswIndex {
     Hnsw::<'static, f32, DistCosine>::new(
         MAX_NB_CONNECTION,
-        DEFAULT_MAX_ELEMENTS,
+        bounded_index_elements_hint(max_elements_hint),
         MAX_LAYER,
         EF_CONSTRUCTION,
         DistCosine {},
     )
+}
+
+struct ScopedHnswIndex {
+    index: MemoryHnswIndex,
+    #[cfg(test)]
+    max_elements_hint: usize,
+}
+
+impl ScopedHnswIndex {
+    fn new(max_elements_hint: usize) -> Self {
+        let max_elements_hint = bounded_index_elements_hint(max_elements_hint);
+        Self {
+            index: new_hnsw_index(max_elements_hint),
+            #[cfg(test)]
+            max_elements_hint,
+        }
+    }
+
+    fn insert(&self, embedding: &[f32], point_id: usize) {
+        self.index.insert((embedding, point_id));
+    }
 }
 
 /// HNSW-backed memory store with SQLite metadata persistence.
@@ -76,7 +103,7 @@ pub struct HnswMemoryStore {
     // SAFETY NOTE: we use `'static` because `hnsw_rs` 0.3 copies inserted vectors
     // into owned internal storage. If a future `hnsw_rs` release changes this to
     // borrow caller memory, this type must be revisited before upgrading.
-    indices: Arc<std::sync::RwLock<HashMap<SessionId, Hnsw<'static, f32, DistCosine>>>>,
+    indices: Arc<std::sync::RwLock<HashMap<SessionId, ScopedHnswIndex>>>,
     db_path: PathBuf,
     next_id: AtomicUsize,
     insert_lock: Mutex<()>,
@@ -107,7 +134,24 @@ impl HnswMemoryStore {
             }
         };
 
-        let mut indices = HashMap::<SessionId, Hnsw<'static, f32, DistCosine>>::new();
+        let mut session_counts = HashMap::<SessionId, usize>::new();
+        {
+            let mut count_stmt = conn
+                .prepare("SELECT metadata_json FROM memory_metadata")
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            let metadata_rows = count_stmt
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            for metadata_json in metadata_rows {
+                let metadata_json =
+                    metadata_json.map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                let metadata: MemoryMetadata = serde_json::from_slice(&metadata_json)
+                    .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
+                *session_counts.entry(metadata.session_id).or_default() += 1;
+            }
+        }
+
+        let mut indices = HashMap::<SessionId, ScopedHnswIndex>::new();
 
         let mut stmt = conn
             .prepare(
@@ -135,10 +179,13 @@ impl HnswMemoryStore {
                 .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
             let text = String::from_utf8_lossy(&text);
             let embedding = text_to_embedding(&text);
+            let max_elements_hint = *session_counts
+                .get(&metadata.session_id)
+                .unwrap_or(&MIN_INDEX_ELEMENTS_HINT);
             indices
                 .entry(metadata.session_id)
-                .or_insert_with(new_hnsw_index)
-                .insert((&embedding, point_id));
+                .or_insert_with(|| ScopedHnswIndex::new(max_elements_hint))
+                .insert(&embedding, point_id);
         }
 
         Ok(Self {
@@ -153,6 +200,31 @@ impl HnswMemoryStore {
     /// Get the storage directory path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    #[cfg(test)]
+    fn hnsw_index_count(&self) -> usize {
+        self.indices.read().unwrap().len()
+    }
+
+    #[cfg(test)]
+    fn hnsw_point_count(&self) -> usize {
+        self.indices
+            .read()
+            .unwrap()
+            .values()
+            .map(|index| index.index.get_nb_point())
+            .sum()
+    }
+
+    #[cfg(test)]
+    fn hnsw_index_hints(&self) -> Vec<usize> {
+        self.indices
+            .read()
+            .unwrap()
+            .values()
+            .map(|index| index.max_elements_hint)
+            .collect()
     }
 }
 
@@ -221,13 +293,15 @@ impl MemoryStore for HnswMemoryStore {
                 let mut indices = indices
                     .write()
                     .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
-                let index = indices.entry(session_id).or_insert_with(new_hnsw_index);
+                let index = indices
+                    .entry(session_id)
+                    .or_insert_with(|| ScopedHnswIndex::new(indexed_entries));
                 for (point_id, (_content, _meta_json, embedding)) in point_ids.iter().zip(&entries)
                 {
                     let point_id = usize::try_from(*point_id).map_err(|_| {
                         MemoryStoreError::Index("point ID out of range".to_string())
                     })?;
-                    index.insert((embedding, point_id));
+                    index.insert(embedding, point_id);
                 }
                 Ok::<(), MemoryStoreError>(())
             })();
@@ -294,7 +368,9 @@ impl MemoryStore for HnswMemoryStore {
                 let Some(index) = indices.get(scope.session_id()) else {
                     return Ok(Vec::new());
                 };
-                index.search(&embedding, limit, limit.max(EF_CONSTRUCTION))
+                index
+                    .index
+                    .search(&embedding, limit, limit.max(EF_CONSTRUCTION))
             };
 
             let conn = open_connection(&db_path)?;
@@ -516,6 +592,71 @@ mod tests {
             results[0].content.contains("scoped survivor"),
             "scoped candidates must be ranked before the limit is applied"
         );
+    }
+
+    #[tokio::test]
+    async fn test_hnsw_many_small_scopes_use_bounded_index_hints_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        let memory_dir = dir.path().join("memory");
+        let mut session_ids = Vec::new();
+
+        {
+            let store = HnswMemoryStore::open(&memory_dir).unwrap();
+            for i in 0..48 {
+                let session_id = SessionId::new();
+                store
+                    .index_scoped(request(
+                        format!("single scoped memory entry {i}"),
+                        &session_id,
+                    ))
+                    .await
+                    .unwrap();
+                session_ids.push(session_id);
+            }
+
+            assert_eq!(
+                store.hnsw_index_count(),
+                session_ids.len(),
+                "one-entry scopes keep separate scoped indexes for recall"
+            );
+            assert!(
+                store
+                    .hnsw_index_hints()
+                    .iter()
+                    .all(|hint| *hint == MIN_INDEX_ELEMENTS_HINT),
+                "many one-entry scopes must not allocate oversized HNSW indexes"
+            );
+            assert_eq!(store.hnsw_point_count(), session_ids.len());
+        }
+
+        {
+            let store = HnswMemoryStore::open(&memory_dir).unwrap();
+            assert_eq!(
+                store.hnsw_index_count(),
+                session_ids.len(),
+                "reopen keeps scoped indexes for recall"
+            );
+            assert!(
+                store
+                    .hnsw_index_hints()
+                    .iter()
+                    .all(|hint| *hint == MIN_INDEX_ELEMENTS_HINT),
+                "reopen must rebuild one-entry scoped indexes with bounded hints"
+            );
+            assert_eq!(store.hnsw_point_count(), session_ids.len());
+
+            let last_session = session_ids.last().unwrap();
+            let results = store
+                .search(
+                    &MemorySearchScope::for_session(last_session.clone()),
+                    "single scoped memory entry 47",
+                    1,
+                )
+                .await
+                .unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].metadata.session_id, *last_session);
+        }
     }
 
     #[tokio::test]

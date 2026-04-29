@@ -1518,15 +1518,20 @@ impl MobSessionService for MockSessionService {
 
 struct FaultInjectedMobEventStore {
     events: RwLock<Vec<MobEvent>>,
+    event_tx: tokio::sync::broadcast::Sender<MobEvent>,
     fail_on_kind: RwLock<HashSet<&'static str>>,
+    poll_calls: AtomicU64,
     replay_calls: AtomicU64,
 }
 
 impl FaultInjectedMobEventStore {
     fn new() -> Self {
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(4096);
         Self {
             events: RwLock::new(Vec::new()),
+            event_tx,
             fail_on_kind: RwLock::new(HashSet::new()),
+            poll_calls: AtomicU64::new(0),
             replay_calls: AtomicU64::new(0),
         }
     }
@@ -1537,6 +1542,10 @@ impl FaultInjectedMobEventStore {
 
     fn replay_calls(&self) -> u64 {
         self.replay_calls.load(Ordering::Relaxed)
+    }
+
+    fn poll_calls(&self) -> u64 {
+        self.poll_calls.load(Ordering::Relaxed)
     }
 
     fn kind_label(kind: &MobEventKind) -> &'static str {
@@ -1590,10 +1599,13 @@ impl MobEventStore for FaultInjectedMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
+        drop(events);
+        let _ = self.event_tx.send(stored.clone());
         Ok(stored)
     }
 
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
+        self.poll_calls.fetch_add(1, Ordering::Relaxed);
         let events = self.events.read().await;
         Ok(events
             .iter()
@@ -1606,6 +1618,19 @@ impl MobEventStore for FaultInjectedMobEventStore {
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         self.replay_calls.fetch_add(1, Ordering::Relaxed);
         Ok(self.events.read().await.clone())
+    }
+
+    async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+        Ok(self
+            .events
+            .read()
+            .await
+            .last()
+            .map_or(0, |event| event.cursor))
+    }
+
+    fn subscribe(&self) -> Result<crate::store::MobEventReceiver, MobStoreError> {
+        Ok(self.event_tx.subscribe())
     }
 
     async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
@@ -19349,6 +19374,135 @@ async fn test_mob_events_view_round_trips_through_machine_command_surface() {
         !direct_polled.is_empty(),
         "direct handle poll_events should also round-trip through the machine command surface"
     );
+}
+
+#[tokio::test]
+async fn test_mob_events_view_latest_cursor_uses_store_cursor_without_replay() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let replay_calls_before = events.replay_calls();
+    let cursor = handle
+        .events()
+        .latest_cursor()
+        .await
+        .expect("latest cursor");
+
+    assert!(cursor > 0, "latest cursor should reflect stored events");
+    assert_eq!(
+        events.replay_calls(),
+        replay_calls_before,
+        "latest_cursor should not replay the full event log"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_events_view_subscribe_streams_structural_events() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+    let poll_calls_before = events.poll_calls();
+    let mut subscription = handle
+        .events()
+        .subscribe_with_config(MobEventsSubscriptionConfig {
+            batch_limit: 16,
+            channel_capacity: 16,
+            ..MobEventsSubscriptionConfig::default()
+        })
+        .await
+        .expect("subscribe to structural mob events");
+    assert_eq!(
+        events.poll_calls(),
+        poll_calls_before,
+        "live structural subscription should not poll to start at the latest cursor"
+    );
+
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead");
+
+    let observed = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(event) = subscription.event_rx.recv().await {
+            if matches!(event.kind, MobEventKind::MemberSpawned(..)) {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await
+    .expect("subscription should receive a structural mob event")
+    .expect("subscription stream should remain open until the spawn event arrives");
+
+    assert!(observed.cursor > 0);
+    assert_eq!(
+        events.poll_calls(),
+        poll_calls_before,
+        "live structural subscription should receive append notifications without polling"
+    );
+}
+
+#[tokio::test]
+async fn test_mob_events_view_subscribe_after_rejects_future_cursor() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events).await;
+    let latest_cursor = handle
+        .events()
+        .latest_cursor()
+        .await
+        .expect("latest cursor");
+    let after_cursor = latest_cursor.saturating_add(10);
+
+    match handle.events().subscribe_after(after_cursor).await {
+        Err(MobError::StaleEventCursor {
+            after_cursor: observed_after_cursor,
+            latest_cursor: observed_latest_cursor,
+        }) => {
+            assert_eq!(observed_after_cursor, after_cursor);
+            assert_eq!(observed_latest_cursor, latest_cursor);
+        }
+        Err(error) => panic!("expected stale cursor error, got {error:?}"),
+        Ok(_) => panic!("future cursor subscription should fail"),
+    }
+}
+
+#[tokio::test]
+async fn test_mob_handle_list_runs_reads_public_run_listing() {
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let definition = sample_definition();
+    let mob_id = definition.id.clone();
+    let alpha_flow = FlowId::from("alpha");
+    let beta_flow = FlowId::from("beta");
+    let alpha_run = MobRun::pending(
+        mob_id.clone(),
+        alpha_flow.clone(),
+        crate::run::flow_run::initial_state(),
+        serde_json::json!({"flow": "alpha"}),
+    );
+    let alpha_run_id = alpha_run.run_id.clone();
+    let beta_run = MobRun::pending(
+        mob_id,
+        beta_flow,
+        crate::run::flow_run::initial_state(),
+        serde_json::json!({"flow": "beta"}),
+    );
+
+    store.create_run(alpha_run).await.expect("create alpha run");
+    store.create_run(beta_run).await.expect("create beta run");
+    let (handle, _service) = create_test_mob_with_run_store(definition, store).await;
+
+    let all_runs = handle.list_runs(None).await.expect("list all runs");
+    assert_eq!(all_runs.len(), 2);
+
+    let filtered = handle
+        .list_runs(Some(&alpha_flow))
+        .await
+        .expect("list runs by flow");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].run_id, alpha_run_id);
 }
 
 #[tokio::test]

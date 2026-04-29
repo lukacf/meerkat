@@ -52,6 +52,7 @@ sha2 = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 rusqlite = { workspace = true }
+notify = { workspace = true }
 meerkat-session = { workspace = true, features = ["session-store"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

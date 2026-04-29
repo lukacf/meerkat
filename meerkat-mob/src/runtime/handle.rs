@@ -700,6 +700,7 @@ pub struct MobHandle {
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
     pub(super) definition: Arc<MobDefinition>,
     pub(super) events: Arc<dyn MobEventStore>,
+    pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) flow_streams:
         Arc<tokio::sync::Mutex<BTreeMap<RunId, mpsc::Sender<meerkat_core::ScopedAgentEvent>>>>,
     pub(super) session_service: Arc<dyn MobSessionService>,
@@ -981,11 +982,16 @@ impl SpawnMemberSpec {
 
 impl MobEventsView {
     pub async fn latest_cursor(&self) -> Result<u64, MobError> {
-        Ok(self
-            .replay_all()
-            .await?
-            .last()
-            .map_or(0, |event| event.cursor))
+        self.handle
+            .events
+            .latest_cursor()
+            .await
+            .map_err(MobError::from)
+    }
+
+    /// Subscribe to structural mob events appended after this call.
+    pub fn subscribe(&self) -> crate::store::MobEventSubscription {
+        self.handle.events.subscribe()
     }
 
     pub async fn poll(
@@ -1985,6 +1991,14 @@ impl MobHandle {
                 "unexpected command result variant".into(),
             )),
         }
+    }
+
+    /// List persisted flow runs for this mob, optionally scoped to a flow.
+    pub async fn list_runs(&self, flow_id: Option<&FlowId>) -> Result<Vec<MobRun>, MobError> {
+        self.run_store
+            .list_runs(&self.definition.id, flow_id)
+            .await
+            .map_err(MobError::from)
     }
 
     /// List all configured flow IDs in this mob definition.

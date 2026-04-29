@@ -25,9 +25,12 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
+const MOB_EVENT_SUBSCRIPTION_BUFFER: usize = 1024;
 
 const CREATE_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS mob_events (
@@ -157,6 +160,7 @@ where
 #[derive(Debug, Clone)]
 pub struct SqliteMobStores {
     path: PathBuf,
+    event_tx: Arc<broadcast::Sender<MobEvent>>,
 }
 
 impl SqliteMobStores {
@@ -164,12 +168,17 @@ impl SqliteMobStores {
         let path = path.as_ref().to_path_buf();
         // Validate the path works by opening and immediately closing.
         let _conn = open_connection(&path)?;
-        Ok(Self { path })
+        let (event_tx, _) = broadcast::channel(MOB_EVENT_SUBSCRIPTION_BUFFER);
+        Ok(Self {
+            path,
+            event_tx: Arc::new(event_tx),
+        })
     }
 
     pub fn event_store(&self) -> SqliteMobEventStore {
         SqliteMobEventStore {
             path: self.path.clone(),
+            event_tx: self.event_tx.clone(),
         }
     }
 
@@ -459,6 +468,7 @@ impl MobRuntimeMetadataStore for SqliteMobRuntimeMetadataStore {
 #[derive(Clone)]
 pub struct SqliteMobEventStore {
     path: PathBuf,
+    event_tx: Arc<broadcast::Sender<MobEvent>>,
 }
 
 impl std::fmt::Debug for SqliteMobEventStore {
@@ -475,7 +485,7 @@ const EVENT_CURSOR_KEY: &str = "next_cursor";
 impl MobEventStore for SqliteMobEventStore {
     async fn append(&self, event: NewMobEvent) -> Result<MobEvent, MobStoreError> {
         let path = self.path.clone();
-        run_sqlite_task(move || {
+        let stored = run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let cursor = next_event_cursor(&tx)?;
@@ -496,12 +506,14 @@ impl MobEventStore for SqliteMobEventStore {
             tx.commit().map_err(se)?;
             Ok(stored)
         })
-        .await
+        .await?;
+        let _ = self.event_tx.send(stored.clone());
+        Ok(stored)
     }
 
     async fn append_batch(&self, batch: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         let path = self.path.clone();
-        run_sqlite_task(move || {
+        let results = run_sqlite_task(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate(&mut conn)?;
             let mut cursor = get_next_cursor(&tx)?;
@@ -527,7 +539,11 @@ impl MobEventStore for SqliteMobEventStore {
             tx.commit().map_err(se)?;
             Ok(results)
         })
-        .await
+        .await?;
+        for event in &results {
+            let _ = self.event_tx.send(event.clone());
+        }
+        Ok(results)
     }
 
     async fn poll(&self, after_cursor: u64, limit: usize) -> Result<Vec<MobEvent>, MobStoreError> {
@@ -582,6 +598,24 @@ impl MobEventStore for SqliteMobEventStore {
             Ok(result)
         })
         .await
+    }
+
+    async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+        let path = self.path.clone();
+        run_sqlite_task(move || {
+            let conn = open_connection(&path)?;
+            let cursor: Option<i64> = conn
+                .query_row("SELECT MAX(cursor) FROM mob_events", [], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })
+                .map_err(se)?;
+            Ok(cursor.map_or(0, i64_to_cursor))
+        })
+        .await
+    }
+
+    fn subscribe(&self) -> super::MobEventSubscription {
+        self.event_tx.subscribe()
     }
 
     async fn clear(&self) -> Result<(), MobStoreError> {
@@ -2038,6 +2072,52 @@ mod tests {
 
         let replayed = store.replay_all().await.unwrap();
         assert_eq!(replayed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_event_store_latest_cursor() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().event_store();
+
+        assert_eq!(store.latest_cursor().await.unwrap(), 0);
+        store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+        store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobReset,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(store.latest_cursor().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_event_store_subscribe_receives_structural_events() {
+        let (_dir, path) = temp_db_path();
+        let store = SqliteMobStores::open(&path).unwrap().event_store();
+        let mut subscription = store.subscribe();
+
+        let stored = store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+
+        let received = subscription.recv().await.unwrap();
+        assert_eq!(received.cursor, stored.cursor);
+        assert!(matches!(received.kind, MobEventKind::MobCompleted));
     }
 
     #[tokio::test]

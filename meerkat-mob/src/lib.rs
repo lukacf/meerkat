@@ -140,8 +140,9 @@ pub use storage::MobStorage;
 pub use store::{
     ExternalBindingOverlayRecord, ExternalBindingOverlayStatus, InMemoryMobEventStore,
     InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore, InMemoryMobSpecStore,
-    InMemoryRealmProfileStore, MobEventStore, MobRunStore, MobRuntimeMetadataStore, MobSpecStore,
-    MobStoreError, RealmProfileStore, StoredRealmProfile, SupervisorAuthorityRecord,
+    InMemoryRealmProfileStore, MobEventStore, MobEventSubscription, MobRunStore,
+    MobRuntimeMetadataStore, MobSpecStore, MobStoreError, RealmProfileStore, StoredRealmProfile,
+    SupervisorAuthorityRecord,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{

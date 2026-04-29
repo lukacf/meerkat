@@ -23,17 +23,30 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
+
+const MOB_EVENT_SUBSCRIPTION_BUFFER: usize = 1024;
 
 /// In-memory event store for tests and ephemeral mobs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InMemoryMobEventStore {
     events: Arc<RwLock<Vec<MobEvent>>>,
+    event_tx: broadcast::Sender<MobEvent>,
+}
+
+impl Default for InMemoryMobEventStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InMemoryMobEventStore {
     pub fn new() -> Self {
-        Self::default()
+        let (event_tx, _) = broadcast::channel(MOB_EVENT_SUBSCRIPTION_BUFFER);
+        Self {
+            events: Arc::new(RwLock::new(Vec::new())),
+            event_tx,
+        }
     }
 }
 
@@ -180,6 +193,7 @@ impl MobEventStore for InMemoryMobEventStore {
             kind: event.kind,
         };
         events.push(stored.clone());
+        let _ = self.event_tx.send(stored.clone());
         Ok(stored)
     }
 
@@ -195,6 +209,7 @@ impl MobEventStore for InMemoryMobEventStore {
                 kind: event.kind,
             };
             events.push(stored.clone());
+            let _ = self.event_tx.send(stored.clone());
             results.push(stored);
         }
         Ok(results)
@@ -212,6 +227,19 @@ impl MobEventStore for InMemoryMobEventStore {
 
     async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
         Ok(self.events.read().await.clone())
+    }
+
+    async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+        Ok(self
+            .events
+            .read()
+            .await
+            .last()
+            .map_or(0, |event| event.cursor))
+    }
+
+    fn subscribe(&self) -> super::MobEventSubscription {
+        self.event_tx.subscribe()
     }
 
     async fn clear(&self) -> Result<(), MobStoreError> {
@@ -957,6 +985,50 @@ mod tests {
             .unwrap();
         assert_eq!(removed, 1);
         assert_eq!(store.replay_all().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_event_store_latest_cursor_without_replay() {
+        let store = InMemoryMobEventStore::new();
+        assert_eq!(store.latest_cursor().await.unwrap(), 0);
+
+        store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+        store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobReset,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(store.latest_cursor().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_event_store_subscribe_receives_structural_events() {
+        let store = InMemoryMobEventStore::new();
+        let mut subscription = store.subscribe();
+
+        let stored = store
+            .append(NewMobEvent {
+                mob_id: MobId::from("mob"),
+                timestamp: None,
+                kind: MobEventKind::MobCompleted,
+            })
+            .await
+            .unwrap();
+
+        let received = subscription.recv().await.unwrap();
+        assert_eq!(received.cursor, stored.cursor);
+        assert!(matches!(received.kind, MobEventKind::MobCompleted));
     }
 
     #[tokio::test]

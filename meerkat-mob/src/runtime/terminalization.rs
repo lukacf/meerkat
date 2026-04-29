@@ -152,7 +152,7 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashSet;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
+    use tokio::sync::{RwLock, broadcast};
 
     struct RecordingRunStore {
         inner: InMemoryMobRunStore,
@@ -507,6 +507,20 @@ mod tests {
 
         async fn replay_all(&self) -> Result<Vec<MobEvent>, MobStoreError> {
             Ok(self.events.read().await.clone())
+        }
+
+        async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+            Ok(self
+                .events
+                .read()
+                .await
+                .last()
+                .map_or(0, |event| event.cursor))
+        }
+
+        fn subscribe(&self) -> crate::store::MobEventSubscription {
+            let (_tx, rx) = broadcast::channel(1);
+            rx
         }
 
         async fn append_batch(

@@ -1608,6 +1608,20 @@ impl MobEventStore for FaultInjectedMobEventStore {
         Ok(self.events.read().await.clone())
     }
 
+    async fn latest_cursor(&self) -> Result<u64, MobStoreError> {
+        Ok(self
+            .events
+            .read()
+            .await
+            .last()
+            .map_or(0, |event| event.cursor))
+    }
+
+    fn subscribe(&self) -> crate::store::MobEventSubscription {
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        rx
+    }
+
     async fn append_batch(&self, events: Vec<NewMobEvent>) -> Result<Vec<MobEvent>, MobStoreError> {
         let mut results = Vec::with_capacity(events.len());
         for event in events {
@@ -9622,6 +9636,67 @@ async fn test_retire_path_does_not_replay_full_event_log() {
         0,
         "retire idempotency check should not replay full event log per request"
     );
+}
+
+#[tokio::test]
+async fn test_events_latest_cursor_does_not_replay_full_event_log() {
+    let events = Arc::new(FaultInjectedMobEventStore::new());
+    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
+
+    assert_eq!(events.replay_calls(), 0, "setup should not replay events");
+    assert_eq!(handle.events().latest_cursor().await.unwrap(), 1);
+    assert_eq!(
+        events.replay_calls(),
+        0,
+        "latest_cursor should use the store cursor projection"
+    );
+}
+
+#[tokio::test]
+async fn test_events_subscribe_receives_structural_mob_events() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let mut subscription = handle.events().subscribe();
+
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn");
+
+    let event = tokio::time::timeout(Duration::from_secs(2), subscription.recv())
+        .await
+        .expect("structural event")
+        .expect("subscription open");
+    assert!(matches!(event.kind, MobEventKind::MemberSpawned(_)));
+}
+
+#[tokio::test]
+async fn test_list_runs_exposes_persisted_runs_for_mob() {
+    let definition = sample_definition();
+    let run_store = Arc::new(InMemoryMobRunStore::new());
+    let flow_a = FlowId::from("flow-a");
+    let flow_b = FlowId::from("flow-b");
+    let run_a = MobRun::pending(
+        definition.id.clone(),
+        flow_a.clone(),
+        MobRun::flow_state_for_steps([StepId::from("step-a")]).unwrap(),
+        serde_json::json!({"flow":"a"}),
+    );
+    let run_b = MobRun::pending(
+        definition.id.clone(),
+        flow_b.clone(),
+        MobRun::flow_state_for_steps([StepId::from("step-b")]).unwrap(),
+        serde_json::json!({"flow":"b"}),
+    );
+    run_store.create_run(run_a.clone()).await.unwrap();
+    run_store.create_run(run_b.clone()).await.unwrap();
+
+    let (handle, _service) = create_test_mob_with_run_store(definition, run_store).await;
+
+    let all = handle.list_runs(None).await.unwrap();
+    assert_eq!(all.len(), 2);
+    let only_a = handle.list_runs(Some(&flow_a)).await.unwrap();
+    assert_eq!(only_a.len(), 1);
+    assert_eq!(only_a[0].run_id, run_a.run_id);
 }
 
 #[tokio::test]

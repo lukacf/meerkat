@@ -1,4 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
+use crate::contracts::RealtimeProtocolVersion;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::contracts::{
     RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeClientFrame, RealtimeOpenInfo,
     RealtimeServerFrame,
@@ -7,8 +9,6 @@ use crate::contracts::{
     RealtimeChannelRole, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeReconnectPolicy,
     RealtimeTurningMode,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::contracts::RealtimeProtocolVersion;
 
 #[cfg(not(target_arch = "wasm32"))]
 use futures::stream::{SplitSink, SplitStream};

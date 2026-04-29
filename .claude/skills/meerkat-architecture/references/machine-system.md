@@ -12,7 +12,7 @@ The final system has exactly five canonical machines:
 - **OccurrenceLifecycleMachine** — perimeter occurrence lifecycle
 - **AuthMachine** — auth/session authorization lifecycle
 
-Plus four composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`.
+Plus five canonical composition schemas at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`.
 
 Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these five machine DSLs.
 
@@ -186,12 +186,13 @@ MobMachine in-crate access: `MobActor.dsl_authority: MobMachineAuthority` is dir
 
 ## Compositions
 
-Compositions live in `meerkat-machine-schema/src/catalog/compositions.rs`. Four canonical ones:
+Compositions live in `meerkat-machine-schema/src/catalog/compositions.rs`. Five canonical ones are exposed by `canonical_composition_schemas()`:
 
 - `meerkat_mob_seam_composition` — MeerkatMachine ↔ MobMachine handoff
 - `schedule_bundle_composition` — schedule + occurrence + delivery
 - `schedule_runtime_bundle_composition` — schedule + runtime boundary
 - `schedule_mob_bundle_composition` — schedule + mob boundary
+- `auth_lease_bundle_composition` — AuthMachine ↔ runtime/provider auth lease publication
 
 Compositions express effect-disposition rules: which effects emitted by one machine are consumed as inputs by another, which obligations must be realized before a terminal, and which protocol helpers get codegen'd.
 
@@ -209,7 +210,7 @@ Per `docs/architecture/meerkat-runtime-dogma.md`:
 ## What the workspace looks like in the target state
 
 - Exactly 5 canonical machine DSL files in `meerkat-machine-schema/src/catalog/dsl/` — one per machine. Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
-- Exactly 4 compositions in `meerkat-machine-schema/src/catalog/compositions.rs`.
+- Exactly 5 canonical compositions in `meerkat-machine-schema/src/catalog/compositions.rs`, registered by `canonical_composition_schemas()`.
 - Zero `*_authority.rs` files containing handwritten match-table state machines. Files named `dsl_authority.rs` are runtime adapter plumbing (not state machines); other authority-named helpers must be projections, planners, or sealed mutators with no semantic transition table.
 - Runtime shell holds only: per-session `Arc<Mutex<MeerkatMachineAuthority>>` + `Arc<Mutex<MobMachineAuthority>>`, handle trait impls that route through the shared authorities, IO mechanics (channels, handles, wall-clock timestamps), and observability projections (history logs, diagnostic snapshots).
 - Handle traits in `meerkat-core/src/handles.rs` (`TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`) give cross-crate access to MeerkatMachine transitions. Mob-internal callers use `MobActor.dsl_authority` directly.

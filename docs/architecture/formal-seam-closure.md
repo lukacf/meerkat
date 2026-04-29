@@ -243,8 +243,10 @@ actors from `actors.iter().map(|a| a.name)`. The `MachineInstance.actor` field
 still exists and must reference a `Machine`-kind actor. This means existing
 compositions must add `actors: vec![...]` declarations.
 
-**Migration**: All 8 canonical compositions get `actors` declarations matching
-their current implicit actor sets, all with `ActorKind::Machine`.
+**Migration**: Every composition exposed by `canonical_composition_schemas()`
+gets `actors` declarations matching its current implicit actor set, using
+`ActorKind::Machine` for machine authorities. Compatibility-only helper bundles
+are not counted as canonical unless the registry exposes them.
 
 ### Step 7: `EffectHandoffProtocol` on `CompositionSchema`
 
@@ -338,8 +340,8 @@ pub struct CompositionSchema {
 9. `TerminalClosure` requires the producer machine to have at least one terminal
    phase (in `validate_against()`).
 
-**Migration**: All 8 canonical compositions get `handoff_protocols: vec![]`
-initially (no protocols until step 12).
+**Migration**: Every composition exposed by `canonical_composition_schemas()`
+gets `handoff_protocols: vec![]` initially (no protocols until step 12).
 
 ### Step 8: Closed-World Obligation Validation
 

@@ -43,7 +43,7 @@ graph TD
     subgraph rt["Runtime (meerkat-runtime)"]
         DRAIN["comms_drain"]
         BRIDGE["comms_bridge"]
-        INGRESS["RuntimeIngressAuthority"]
+        INGRESS["MeerkatMachine input admission"]
         POLICY["PolicyTable (Queue/Steer)"]
     end
 

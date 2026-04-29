@@ -107,7 +107,7 @@ Exactly five canonical machines, each with a DSL source in `meerkat-machine-sche
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
 - **AuthMachine** — auth/session authorization state that must remain machine-owned.
 
-Plus four composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`.
+Plus five composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`.
 
 **Primary semantic authority lives in the catalog-generated machines.** Production modules are bridge shells around catalog-owned DSL bodies and crate-local bridging types. Handwritten `*_authority.rs` helpers that still exist are adapter mechanics, projections, planners, or sealed mutators, not competing semantic owners.
 

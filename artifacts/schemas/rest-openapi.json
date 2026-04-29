@@ -50,10 +50,10 @@
     },
     "/auth/profiles": {
       "get": {
-        "summary": "List auth profiles"
+        "summary": "List realm auth profiles, backend profiles, and bindings"
       },
       "post": {
-        "summary": "Create an auth profile"
+        "summary": "Store binding-scoped credentials"
       }
     },
     "/capabilities": {

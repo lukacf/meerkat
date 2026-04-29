@@ -345,8 +345,11 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
         RestPathDescriptor::new(
             "/auth/profiles",
             vec![
-                RestOperationDescriptor::new("get", "List auth profiles"),
-                RestOperationDescriptor::new("post", "Create an auth profile"),
+                RestOperationDescriptor::new(
+                    "get",
+                    "List realm auth profiles, backend profiles, and bindings",
+                ),
+                RestOperationDescriptor::new("post", "Store binding-scoped credentials"),
             ],
         ),
         RestPathDescriptor::new(

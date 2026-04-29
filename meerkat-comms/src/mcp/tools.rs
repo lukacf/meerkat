@@ -209,7 +209,7 @@ pub async fn handle_tools_call(
                 intent: input.intent,
                 params: input.params.unwrap_or_else(|| json!({})),
                 handling_mode: input.handling_mode,
-                stream: InputStreamMode::None,
+                stream: InputStreamMode::ReserveInteraction,
             };
             dispatch(ctx, command).await
         }
@@ -557,11 +557,11 @@ mod tests {
             cmd: CommsCommand,
         ) -> Result<meerkat_core::comms::SendReceipt, meerkat_core::comms::SendError> {
             let receipt = match &cmd {
-                CommsCommand::PeerRequest { .. } => {
+                CommsCommand::PeerRequest { stream, .. } => {
                     meerkat_core::comms::SendReceipt::PeerRequestSent {
                         envelope_id: uuid::Uuid::from_u128(1),
                         interaction_id: InteractionId(uuid::Uuid::from_u128(2)),
-                        stream_reserved: false,
+                        stream_reserved: *stream == InputStreamMode::ReserveInteraction,
                     }
                 }
                 CommsCommand::PeerResponse { in_reply_to, .. } => {
@@ -797,6 +797,27 @@ mod tests {
         assert_eq!(in_reply_to.0, request_id);
         assert_eq!(*status, ResponseStatus::Completed);
         assert_eq!(result["pong"], true);
+    }
+
+    #[test]
+    fn test_send_response_input_accepts_completed_steer_terminal_shape() {
+        let peer_id = PeerId::new();
+        let request_id = uuid::Uuid::new_v4();
+
+        let input: SendResponseInput = serde_json::from_value(json!({
+            "peer_id": peer_id,
+            "in_reply_to": request_id.to_string(),
+            "status": "completed",
+            "result": {"ok": true},
+            "handling_mode": "steer"
+        }))
+        .expect("valid completed terminal response should deserialize");
+
+        assert_eq!(input.peer_id, peer_id);
+        assert_eq!(input.in_reply_to, request_id.to_string());
+        assert_eq!(input.status, ResponseStatus::Completed);
+        assert_eq!(input.handling_mode, Some(HandlingMode::Steer));
+        assert_eq!(input.result, Some(json!({"ok": true})));
     }
 
     #[tokio::test]
@@ -1036,7 +1057,7 @@ mod tests {
             result["receipt"]["interaction_id"],
             uuid::Uuid::from_u128(2).to_string()
         );
-        assert_eq!(result["receipt"]["stream_reserved"], false);
+        assert_eq!(result["receipt"]["stream_reserved"], true);
     }
 
     #[tokio::test]

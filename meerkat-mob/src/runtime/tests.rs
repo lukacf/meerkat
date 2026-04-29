@@ -41,7 +41,7 @@ use meerkat_core::types::{
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     AppendSystemContextStatus, EventInjector, EventInjectorError, LlmStreamResult,
-    PlainEventSource,
+    PendingSystemContextAppend, PlainEventSource,
     event_injector::{InteractionSubscription, SubscribableInjector},
 };
 use meerkat_core::{
@@ -19375,6 +19375,52 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         })
     }
 
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        // Canonical owner: MobSessionService::apply_runtime_context_appends.
+        // Peer response terminals are context-only runtime inputs; the harness
+        // must exercise the same owner boundary as persistent session services.
+        if !self.sessions.read().await.contains_key(session_id) {
+            return Err(SessionError::NotFound {
+                id: session_id.clone(),
+            });
+        }
+
+        self.applied_runtime_context_appends
+            .write()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .extend(
+                appends
+                    .into_iter()
+                    .map(|append| AppendSystemContextRequest {
+                        text: append.text,
+                        source: append.source,
+                        idempotency_key: append.idempotency_key,
+                    }),
+            );
+
+        Ok(
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::without_terminal(
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
+                    contributing_input_ids,
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                None,
+            ),
+        )
+    }
+
     async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
         self.sessions.write().await.remove(session_id);
         self.keep_alive_notifiers.write().await.remove(session_id);
@@ -19407,6 +19453,70 @@ async fn create_test_mob_with_runtime_backed_real_comms(
         .expect("create mob");
 
     (handle, service)
+}
+
+fn mcp_tool_context_for(comms: &Arc<meerkat_comms::CommsRuntime>) -> meerkat_comms::ToolContext {
+    let runtime: Arc<dyn CoreCommsRuntime> = comms.clone();
+    meerkat_comms::ToolContext {
+        router: comms.router_arc(),
+        trusted_peers: comms.trusted_peers_shared(),
+        runtime: Some(meerkat_comms::RuntimeCommsCommandHandle::new(runtime)),
+    }
+}
+
+async fn mcp_peer_id_for(comms: &Arc<meerkat_comms::CommsRuntime>, name: &str) -> String {
+    let ctx = mcp_tool_context_for(comms);
+    let peers = meerkat_comms::handle_tools_call(&ctx, "peers", &serde_json::json!({}))
+        .await
+        .expect("peers tool should succeed");
+    let peer = peers["peers"]
+        .as_array()
+        .expect("peers should be an array")
+        .iter()
+        .find(|peer| peer["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("MCP peer not found for {name}; peers={peers}"));
+    peer["peer_id"]
+        .as_str()
+        .expect("peer_id should be a string")
+        .to_string()
+}
+
+fn peer_request_notice_request_id(text: &str) -> uuid::Uuid {
+    let request_id = text
+        .split("Request ID: ")
+        .nth(1)
+        .and_then(|tail| tail.split('.').next())
+        .expect("peer request notice should include a Request ID");
+    uuid::Uuid::parse_str(request_id).expect("request ID should be a UUID")
+}
+
+fn assert_peer_response_terminal_consumed(
+    snapshot: &meerkat_runtime::MeerkatMachineSpineSnapshot,
+    expected_handling_mode: HandlingMode,
+) {
+    let terminal = snapshot
+        .inputs
+        .admission_order
+        .iter()
+        .find(|entry| {
+            entry
+                .content_shape
+                .as_ref()
+                .is_some_and(|shape| shape.0 == "peer_response_terminal")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "requester snapshot should include peer_response_terminal admission: {snapshot:?}"
+            )
+        });
+    assert_eq!(terminal.handling_mode, Some(expected_handling_mode));
+    assert!(
+        matches!(
+            terminal.lifecycle,
+            Some(meerkat_runtime::input_state::InputLifecycleState::Consumed)
+        ),
+        "peer_response_terminal should be consumed after the runtime context append apply: {terminal:?}"
+    );
 }
 
 #[tokio::test]
@@ -20048,13 +20158,17 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
                 .skip(requester_context_baseline)
                 .any(|append| {
                     let text = append.text.as_str();
+                    let source = append.source.as_deref().unwrap_or_default();
+                    let idempotency_key = append.idempotency_key.as_deref().unwrap_or_default();
                     text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
                         && text.contains("from test-mob/worker/w-responder")
                         && text.contains("lighthouse")
-                        && append.source.as_deref().is_some_and(|source| {
-                            source
-                                .starts_with("peer_response_terminal:test-mob/worker/w-responder:")
-                        })
+                        && text.contains(&format!("Request ID: {request_id}"))
+                        && source
+                            == format!(
+                                "peer_response_terminal:test-mob/worker/w-responder:{request_id}"
+                            )
+                        && idempotency_key == source
                 })
             {
                 break;
@@ -20064,17 +20178,22 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     })
     .await;
 
+    let requester_snapshot = service
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&sid_requester)
+        .await
+        .expect("requester snapshot should exist");
+
+    if requester_response_delivery.is_ok() {
+        assert_peer_response_terminal_consumed(&requester_snapshot, HandlingMode::Queue);
+    }
+
     tokio::time::timeout(Duration::from_secs(2), handle.stop())
         .await
         .expect("stop timeout after peer response assertion")
         .expect("stop after peer response assertion");
 
     if requester_response_delivery.is_err() {
-        let snapshot = service
-            .runtime_adapter
-            .meerkat_machine_spine_snapshot(&sid_requester)
-            .await
-            .expect("requester snapshot should still exist");
         let has_executor = service
             .runtime_adapter
             .session_has_executor(&sid_requester)
@@ -20084,7 +20203,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
             .session_has_comms(&sid_requester)
             .await;
         panic!(
-            "requester should receive the terminal peer response; has_executor={has_executor} has_comms={has_comms} snapshot={snapshot:?}"
+            "requester should apply the terminal peer response as runtime-owned context; has_executor={has_executor} has_comms={has_comms} snapshot={requester_snapshot:?}"
         );
     }
 
@@ -20170,6 +20289,187 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         requester_context_baseline + 1,
         "duplicate terminal response should not append duplicate runtime system context"
     );
+}
+
+#[tokio::test]
+async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_requester = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-mcp-requester"),
+            None,
+        )
+        .await
+        .expect("spawn requester")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_responder = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-mcp-responder"),
+            None,
+        )
+        .await
+        .expect("spawn responder")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(
+            AgentIdentity::from("l-mcp-requester"),
+            MeerkatId::from("w-mcp-responder"),
+        )
+        .await
+        .expect("wire requester↔responder");
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("wait_for_ready should resolve");
+
+    let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
+    let requester_context_baseline = service
+        .applied_runtime_context_appends(&sid_requester)
+        .await
+        .len();
+
+    let requester_comms = service
+        .real_comms(&sid_requester)
+        .await
+        .expect("requester comms");
+    let responder_comms = service
+        .real_comms(&sid_responder)
+        .await
+        .expect("responder comms");
+    let responder_peer_id = mcp_peer_id_for(
+        &requester_comms,
+        &test_comms_name("worker", "w-mcp-responder"),
+    )
+    .await;
+    let requester_peer_id = mcp_peer_id_for(
+        &responder_comms,
+        &test_comms_name("lead", "l-mcp-requester"),
+    )
+    .await;
+
+    let requester_ctx = mcp_tool_context_for(&requester_comms);
+    let request_result = meerkat_comms::handle_tools_call(
+        &requester_ctx,
+        "send_request",
+        &serde_json::json!({
+            "peer_id": responder_peer_id,
+            "intent": "checksum_token",
+            "params": {"subject": "alpha beta gamma"},
+            "handling_mode": "steer"
+        }),
+    )
+    .await
+    .expect("send_request tool should succeed");
+    assert_eq!(request_result["kind"], "peer_request");
+    assert_eq!(request_result["status"], "sent");
+
+    let responder_request_prompt = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_responder).await;
+            if let Some(prompt) = prompts
+                .iter()
+                .skip(responder_baseline)
+                .find(|prompt| {
+                    let text = prompt.text_content();
+                    text.contains("[SYSTEM NOTICE][PEER_REQUEST]")
+                        && text.contains("Intent: checksum_token")
+                        && text.contains("Request ID: ")
+                })
+                .cloned()
+            {
+                break prompt;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("responder should receive actionable MCP peer request");
+    let request_notice = responder_request_prompt.text_content();
+    let request_id = peer_request_notice_request_id(&request_notice);
+
+    let responder_ctx = mcp_tool_context_for(&responder_comms);
+    let response_result = meerkat_comms::handle_tools_call(
+        &responder_ctx,
+        "send_response",
+        &serde_json::json!({
+            "peer_id": requester_peer_id,
+            "in_reply_to": request_id.to_string(),
+            "status": "completed",
+            "result": {
+                "request_intent": "checksum_token",
+                "token": "birch seventeen"
+            },
+            "handling_mode": "steer"
+        }),
+    )
+    .await
+    .expect("send_response tool should succeed");
+    assert_eq!(response_result["kind"], "peer_response");
+    assert_eq!(response_result["status"], "sent");
+
+    let requester_terminal_context = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let appends = service
+                .applied_runtime_context_appends(&sid_requester)
+                .await;
+            if let Some(append) = appends
+                .iter()
+                .skip(requester_context_baseline)
+                .find(|append| {
+                    append
+                        .text
+                        .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                        && append.text.contains("from test-mob/worker/w-mcp-responder")
+                        && append.text.contains(&format!("Request ID: {request_id}"))
+                        && append.text.contains("Status: completed")
+                        && append
+                            .text
+                            .contains("\"request_intent\": \"checksum_token\"")
+                        && append.text.contains("\"token\": \"birch seventeen\"")
+                })
+                .cloned()
+            {
+                break append;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("requester should apply terminal peer response context after sent tool result");
+
+    let expected_context_key =
+        format!("peer_response_terminal:test-mob/worker/w-mcp-responder:{request_id}");
+    assert_eq!(
+        requester_terminal_context.source.as_deref(),
+        Some(expected_context_key.as_str())
+    );
+    assert_eq!(
+        requester_terminal_context.idempotency_key.as_deref(),
+        Some(expected_context_key.as_str())
+    );
+
+    let requester_snapshot = service
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&sid_requester)
+        .await
+        .expect("requester snapshot should exist");
+    assert_peer_response_terminal_consumed(&requester_snapshot, HandlingMode::Steer);
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after MCP peer response assertion")
+        .expect("stop after MCP peer response assertion");
 }
 
 #[tokio::test]

@@ -165,8 +165,9 @@ pub use gateway::{DynamicToolComposite, ToolGateway, ToolGatewayBuilder};
 pub use handles::{
     AuthLeasePhase, CommsDrainHandle, DrainExitReason, DrainMode, DslRejectionKind,
     DslTransitionError, ExternalToolSurfaceHandle, McpServerLifecycleHandle, PeerCommsHandle,
-    PeerConversationProjection, PeerResponseProgressProjectionPhase,
-    PeerResponseTerminalProjectionStatus, RealtimeProductTurnHandle, RealtimeProductTurnPhase,
+    PeerConversationProjection, PeerResponseProgressProjectionPhase, PeerResponseTerminalFact,
+    PeerResponseTerminalFactError, PeerResponseTerminalProjectionStatus,
+    PeerResponseTerminalSource, RealtimeProductTurnHandle, RealtimeProductTurnPhase,
     SessionAdmissionHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot, TurnStateHandle,
     TurnStateSnapshot,
 };

@@ -23,6 +23,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_comms::runtime::comms_runtime::CommsRuntime;
+use meerkat_core::PeerInputClass;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute, SendReceipt};
 use meerkat_core::{
@@ -115,6 +116,11 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
         response_at_a.len(),
         1,
         "A should observe exactly one response",
+    );
+    assert_eq!(
+        response_at_a[0].class,
+        PeerInputClass::ResponseTerminal,
+        "terminal response class must be machine-owned at ingress"
     );
     let response = &response_at_a[0].interaction;
     match &response.content {

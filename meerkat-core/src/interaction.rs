@@ -280,8 +280,10 @@ pub enum PeerInputClass {
     ActionableMessage,
     /// A peer request that should route through canonical runtime admission.
     ActionableRequest,
-    /// A response to a previous outbound request (non-interrupting context).
-    Response,
+    /// A non-terminal response to a previous outbound request.
+    ResponseProgress,
+    /// A terminal response to a previous outbound request.
+    ResponseTerminal,
     /// Peer added lifecycle event.
     PeerLifecycleAdded,
     /// Peer retired lifecycle event.
@@ -307,7 +309,8 @@ impl PeerInputClass {
             self,
             Self::ActionableMessage
                 | Self::ActionableRequest
-                | Self::Response
+                | Self::ResponseProgress
+                | Self::ResponseTerminal
                 | Self::PlainEvent
                 | Self::PeerLifecycleKickoffFailed
                 | Self::PeerLifecycleKickoffCancelled
@@ -448,8 +451,12 @@ impl PeerIngressMachinePolicy {
         PeerIngressClassification::lifecycle(kind)
     }
 
-    pub fn classify_response(&self, _status: ResponseStatus) -> PeerIngressClassification {
-        PeerIngressClassification::required(PeerInputClass::Response, PeerIngressKind::Response)
+    pub fn classify_response(&self, status: ResponseStatus) -> PeerIngressClassification {
+        let class = match classify_response_terminality(status) {
+            TerminalityClass::Progress => PeerInputClass::ResponseProgress,
+            TerminalityClass::Terminal { .. } => PeerInputClass::ResponseTerminal,
+        };
+        PeerIngressClassification::required(class, PeerIngressKind::Response)
     }
 
     pub fn classify_ack(&self) -> PeerIngressClassification {
@@ -745,6 +752,24 @@ mod tests {
             TerminalityClass::Terminal {
                 disposition: TerminalDisposition::Failed
             }
+        );
+    }
+
+    #[test]
+    fn peer_ingress_policy_owns_response_terminal_classification() {
+        let policy = PeerIngressMachinePolicy::default();
+
+        assert_eq!(
+            policy.classify_response(ResponseStatus::Accepted).class,
+            PeerInputClass::ResponseProgress
+        );
+        assert_eq!(
+            policy.classify_response(ResponseStatus::Completed).class,
+            PeerInputClass::ResponseTerminal
+        );
+        assert_eq!(
+            policy.classify_response(ResponseStatus::Failed).class,
+            PeerInputClass::ResponseTerminal
         );
     }
 

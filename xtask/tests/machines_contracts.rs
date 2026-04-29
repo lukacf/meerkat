@@ -174,6 +174,46 @@ fn authority_language_check_reports_live_docs_outside_retired_architecture_scope
 }
 
 #[test]
+fn peer_response_terminal_projection_ratchet_rejects_runtime_boundary_projection() {
+    let dir = tempdir().expect("tempdir");
+    let runtime = dir.path().join("meerkat-runtime/src");
+    fs::create_dir_all(&runtime).expect("create runtime dir");
+    fs::write(
+        runtime.join("input.rs"),
+        r#"
+fn bad() {
+    let _ = PeerConversationProjection::ResponseTerminal { fact };
+    let _ = "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]";
+    let _ = peer_response_terminal_context_key("peer", "req");
+}
+
+#[cfg(test)]
+mod tests {
+    fn allowed_test_fixture() {
+        let _ = "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]";
+    }
+}
+"#,
+    )
+    .expect("write boundary file");
+
+    let mismatches = collect_peer_response_terminal_projection_mismatches(dir.path())
+        .expect("peer response terminal projection mismatches");
+    assert_eq!(
+        mismatches.len(),
+        3,
+        "expected production boundary projection violations only, got {mismatches:#?}"
+    );
+    assert!(
+        mismatches.iter().all(|mismatch| {
+            mismatch.contains("meerkat-runtime/src/input.rs")
+                && !mismatch.contains("allowed_test_fixture")
+        }),
+        "expected mismatches to point at production boundary lines, got {mismatches:#?}"
+    );
+}
+
+#[test]
 fn canonical_machine_inventory_matches_docs_and_artifact_bundle() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");

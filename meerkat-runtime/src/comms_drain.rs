@@ -147,17 +147,11 @@ pub fn spawn_comms_drain(
                             "comms_drain: consumed silent peer lifecycle notice"
                         );
                     }
-                    PeerInputClass::Response => {
-                        // Distinguish progress responses from terminal responses
-                        // via the canonical classifier in meerkat-core. Raw
-                        // `ResponseStatus` matching here is forbidden — all
-                        // consumers must read `TerminalityClass` so "terminal"
-                        // stays lock-stepped across the codebase.
-                        //
-                        // W1-A also needs to route terminal status → the DSL
-                        // peer-interaction handle's `PeerTerminalDisposition`.
-                        // Compute both from the single classifier call so the
-                        // "terminal" and "disposition" facts never drift.
+                    PeerInputClass::ResponseProgress | PeerInputClass::ResponseTerminal => {
+                        // Terminal-vs-progress class is fixed at peer ingress
+                        // by `PeerIngressMachinePolicy`; the drain only maps a
+                        // terminal response's already-typed status into the
+                        // peer-interaction DSL disposition companion.
                         let terminal_status = match &candidate.interaction.content {
                             meerkat_core::interaction::InteractionContent::Response {
                                 status,
@@ -181,13 +175,15 @@ pub fn spawn_comms_drain(
                             },
                             _ => None,
                         };
-                        let is_terminal = terminal_status.is_some();
+                        let is_terminal =
+                            matches!(candidate.class, PeerInputClass::ResponseTerminal);
 
                         if is_terminal {
                             // Terminal response — single admission with
                             // completion tracking. The PeerInput already
                             // carries ResponseTerminal convention which the
-                            // policy table maps to WakeIfIdle/Steer as needed.
+                            // policy table maps to the machine-owned WakeIfIdle
+                            // terminal policy.
                             // No synthetic Continuation required.
                             let interaction_id = match &candidate.interaction.content {
                                 meerkat_core::interaction::InteractionContent::Response {
@@ -549,6 +545,11 @@ fn bridge_delivery_rejection_cause(
         }
         crate::accept::RejectReason::PeerHandlingModeInvalid { detail } => {
             BridgeDeliveryRejectionCause::PeerHandlingModeInvalid {
+                detail: detail.clone(),
+            }
+        }
+        crate::accept::RejectReason::PeerResponseTerminalInvalid { detail } => {
+            BridgeDeliveryRejectionCause::Internal {
                 detail: detail.clone(),
             }
         }

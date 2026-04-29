@@ -828,6 +828,265 @@ async fn accept_with_executor_triggers_loop() {
     assert!(active.is_empty(), "All inputs should be consumed");
 }
 
+#[tokio::test]
+async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
+    use meerkat_comms::runtime::comms_runtime::CommsRuntime as InprocCommsRuntime;
+    use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
+    use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute, SendReceipt};
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_control::RunControlCommand;
+    use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_core::{HandlingMode, InteractionContent, InteractionId, ResponseStatus};
+    use meerkat_runtime::PeerConvention;
+    use tokio::sync::Notify;
+    use uuid::Uuid;
+
+    struct BlockingRecordingExecutor {
+        calls: Arc<AtomicUsize>,
+        first_apply_started: Arc<Notify>,
+        release_first_apply: Arc<Notify>,
+        terminal_applied: Arc<Notify>,
+        terminal_context_keys: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingRecordingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 1 {
+                self.first_apply_started.notify_waiters();
+                self.release_first_apply.notified().await;
+            }
+
+            let boundary = match &primitive {
+                RunPrimitive::StagedInput(staged) => {
+                    for append in &staged.context_appends {
+                        if append.key.starts_with("peer_response_terminal:") {
+                            self.terminal_context_keys
+                                .lock()
+                                .expect("terminal_context_keys mutex")
+                                .push(append.key.clone());
+                            self.terminal_applied.notify_waiters();
+                        }
+                    }
+                    staged.boundary
+                }
+                RunPrimitive::ImmediateAppend(_) => RunApplyBoundary::Immediate,
+                _ => RunApplyBoundary::RunStart,
+            };
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: call as u64,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    async fn drain_until_nonempty(
+        runtime: &InprocCommsRuntime,
+    ) -> Vec<meerkat_core::ClassifiedInboxInteraction> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let batch = CoreCommsRuntime::drain_classified_inbox_interactions(runtime)
+                    .await
+                    .unwrap_or_default();
+                if !batch.is_empty() {
+                    return batch;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("classified inbox should receive request")
+    }
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let name_a = format!("runtime-requester-{suffix}");
+    let name_b = format!("runtime-responder-{suffix}");
+    let (requester_comms, responder_comms) =
+        InprocCommsRuntime::inproc_pair_with_mutual_trust(&name_a, &name_b)
+            .await
+            .expect("inproc comms pair");
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let sid = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(sid.clone())
+        .await
+        .expect("prepare runtime bindings");
+    requester_comms.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
+    requester_comms.install_peer_interaction_handle(
+        bindings
+            .peer_interaction
+            .clone()
+            .expect("runtime bindings include peer interaction handle"),
+    );
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_apply_started = Arc::new(Notify::new());
+    let release_first_apply = Arc::new(Notify::new());
+    let terminal_applied = Arc::new(Notify::new());
+    let terminal_context_keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+    adapter
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(BlockingRecordingExecutor {
+                calls: Arc::clone(&calls),
+                first_apply_started: Arc::clone(&first_apply_started),
+                release_first_apply: Arc::clone(&release_first_apply),
+                terminal_applied: Arc::clone(&terminal_applied),
+                terminal_context_keys: Arc::clone(&terminal_context_keys),
+            }),
+        )
+        .await;
+
+    let requester_for_drain: Arc<dyn CoreCommsRuntime> = requester_comms.clone();
+    assert!(
+        adapter
+            .update_peer_ingress_context(&sid, true, Some(requester_for_drain))
+            .await,
+        "host-mode requester should spawn comms drain"
+    );
+
+    adapter
+        .accept_input(&sid, make_prompt("keep requester busy"))
+        .await
+        .expect("accept blocking prompt");
+    tokio::time::timeout(Duration::from_secs(2), first_apply_started.notified())
+        .await
+        .expect("first apply should start");
+
+    let receipt = CoreCommsRuntime::send(
+        requester_comms.as_ref(),
+        CommsCommand::PeerRequest {
+            to: PeerRoute::with_display_name(
+                responder_comms.public_key().to_peer_id(),
+                PeerName::new(name_b.clone()).expect("responder peer name"),
+            ),
+            intent: "terminal-wake-probe".to_string(),
+            params: serde_json::json!({"probe": true}),
+            handling_mode: HandlingMode::Queue,
+            stream: InputStreamMode::ReserveInteraction,
+        },
+    )
+    .await
+    .expect("send request");
+    let request_id = match receipt {
+        SendReceipt::PeerRequestSent { envelope_id, .. } => envelope_id,
+        other => panic!("expected PeerRequestSent, got {other:?}"),
+    };
+
+    let request_at_responder = drain_until_nonempty(responder_comms.as_ref()).await;
+    assert!(matches!(
+        request_at_responder[0].interaction.content,
+        InteractionContent::Request { .. }
+    ));
+
+    CoreCommsRuntime::send(
+        responder_comms.as_ref(),
+        CommsCommand::PeerResponse {
+            to: PeerRoute::with_display_name(
+                requester_comms.public_key().to_peer_id(),
+                PeerName::new(name_a.clone()).expect("requester peer name"),
+            ),
+            in_reply_to: InteractionId(request_id),
+            status: ResponseStatus::Completed,
+            result: serde_json::json!({"probe_reply": true}),
+            handling_mode: Some(HandlingMode::Steer),
+        },
+    )
+    .await
+    .expect("send terminal response");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let active_ids = adapter
+                .list_active_inputs(&sid)
+                .await
+                .expect("active inputs");
+            for input_id in active_ids {
+                if let Some(state) = adapter
+                    .input_state(&sid, &input_id)
+                    .await
+                    .expect("input state")
+                    && matches!(
+                        state.state.persisted_input.as_ref(),
+                        Some(Input::Peer(meerkat_runtime::PeerInput {
+                            convention: Some(PeerConvention::ResponseTerminal { .. }),
+                            ..
+                        }))
+                    )
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("terminal response should queue while requester is running");
+
+    release_first_apply.notify_waiters();
+    tokio::time::timeout(Duration::from_secs(2), terminal_applied.notified())
+        .await
+        .expect("WakeLoop should drain queued peer_response_terminal");
+
+    let keys = terminal_context_keys
+        .lock()
+        .expect("terminal_context_keys mutex")
+        .clone();
+    assert_eq!(
+        keys,
+        vec![format!("peer_response_terminal:{name_b}:{request_id}")],
+        "terminal response should render through typed context append"
+    );
+    let active_ids = adapter
+        .list_active_inputs(&sid)
+        .await
+        .expect("active inputs after drain");
+    for input_id in active_ids {
+        let state = adapter
+            .input_state(&sid, &input_id)
+            .await
+            .expect("input state")
+            .expect("active input state");
+        assert!(
+            !matches!(
+                state.state.persisted_input.as_ref(),
+                Some(Input::Peer(meerkat_runtime::PeerInput {
+                    convention: Some(PeerConvention::ResponseTerminal { .. }),
+                    ..
+                }))
+            ),
+            "queued peer_response_terminal must not remain stuck after WakeLoop: {state:?}"
+        );
+    }
+    assert!(
+        calls.load(Ordering::SeqCst) >= 2,
+        "requester executor should run once for prompt and once for terminal response"
+    );
+}
+
 /// Test that a failed executor never strands the input in APC.
 #[tokio::test]
 async fn failed_executor_does_not_strand_input_in_apc() {

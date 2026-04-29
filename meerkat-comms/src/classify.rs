@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_response_as_response() {
+    fn classify_completed_response_as_terminal_response() {
         let sender = make_keypair();
         let trusted = make_trusted_peers("sender-agent", &sender.public_key());
         let ctx = make_context(true, trusted, vec![]);
@@ -499,7 +499,7 @@ mod tests {
         );
         let item = InboxItem::External { envelope };
         let result = ctx.classify(&item).expect("should classify");
-        assert_eq!(result.class, PeerInputClass::Response);
+        assert_eq!(result.class, PeerInputClass::ResponseTerminal);
     }
 
     #[test]

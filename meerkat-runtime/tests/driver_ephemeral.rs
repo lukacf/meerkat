@@ -811,7 +811,7 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
 }
 
 #[tokio::test]
-async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
+async fn accept_peer_response_terminal_with_handling_mode_returns_rejected() {
     let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
     let input = Input::Peer(PeerInput {
         header: InputHeader {
@@ -838,8 +838,41 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
     });
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(
-        outcome.is_accepted(),
-        "ResponseTerminal with handling_mode=Steer must be accepted"
+        outcome.is_rejected(),
+        "ResponseTerminal with handling_mode=Steer must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    let input = Input::Peer(PeerInput {
+        header: InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: InputOrigin::Peer {
+                peer_id: "peer-1".into(),
+                runtime_id: None,
+            },
+            durability: InputDurability::Durable,
+            visibility: InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(PeerConvention::ResponseTerminal {
+            request_id: " ".into(),
+            status: ResponseTerminalStatus::Completed,
+        }),
+        body: "done".into(),
+        payload: Some(serde_json::json!({"ok": true})),
+        blocks: None,
+        handling_mode: None,
+    });
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(
+        outcome.is_rejected(),
+        "ResponseTerminal with empty request_id must fail closed at admission"
     );
 }
 

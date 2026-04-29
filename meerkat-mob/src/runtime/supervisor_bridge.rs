@@ -295,7 +295,7 @@ impl BridgeRequestDeadline {
 mod tests {
     use super::*;
 
-    use meerkat_core::PeerInputClass;
+    use meerkat_core::PeerIngressMachinePolicy;
     use meerkat_core::interaction::{InboxInteraction, InteractionId, ResponseStatus};
 
     fn response_candidate(
@@ -316,7 +316,9 @@ mod tests {
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
             },
-            class: PeerInputClass::Response,
+            class: PeerIngressMachinePolicy::default()
+                .classify_response(status)
+                .class,
             auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
             from_peer_id: None,
             lifecycle_peer: None,

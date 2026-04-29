@@ -85,6 +85,11 @@ pub enum RejectReason {
         /// Description of the violation.
         detail: String,
     },
+    /// Peer response terminal fact failed typed validation.
+    PeerResponseTerminalInvalid {
+        /// Description of the violation.
+        detail: String,
+    },
 }
 
 impl fmt::Display for RejectReason {
@@ -95,6 +100,7 @@ impl fmt::Display for RejectReason {
             }
             Self::DurabilityViolation { detail } => write!(f, "{detail}"),
             Self::PeerHandlingModeInvalid { detail } => write!(f, "{detail}"),
+            Self::PeerResponseTerminalInvalid { detail } => write!(f, "{detail}"),
         }
     }
 }
@@ -395,6 +401,11 @@ mod tests {
             peer.to_string(),
             "handling_mode is forbidden on ResponseProgress peer inputs"
         );
+
+        let terminal = RejectReason::PeerResponseTerminalInvalid {
+            detail: "correlation id cannot be empty".into(),
+        };
+        assert_eq!(terminal.to_string(), "correlation id cannot be empty");
     }
 
     #[test]
@@ -408,6 +419,9 @@ mod tests {
             },
             RejectReason::PeerHandlingModeInvalid {
                 detail: "forbidden".into(),
+            },
+            RejectReason::PeerResponseTerminalInvalid {
+                detail: "bad terminal".into(),
             },
         ];
         for reason in reasons {

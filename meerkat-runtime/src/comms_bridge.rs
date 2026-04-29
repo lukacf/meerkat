@@ -5,8 +5,6 @@
 
 use chrono::Utc;
 use meerkat_core::comms::PeerId;
-#[cfg(test)]
-use meerkat_core::interaction::ResponseStatus;
 use meerkat_core::interaction::{
     InboxInteraction, InteractionContent, PeerInputCandidate, PeerInputClass,
 };
@@ -56,10 +54,11 @@ pub fn classified_interaction_to_runtime_input(
         });
     }
 
-    interaction_to_peer_input_with_source_peer_id(
+    interaction_to_peer_input_with_authority(
         interaction,
         runtime_id,
         classified.source_peer_id,
+        classified.from_peer_id,
     )
 }
 
@@ -76,18 +75,21 @@ pub fn interaction_to_peer_input(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
 ) -> Input {
-    interaction_to_peer_input_with_source_peer_id(interaction, runtime_id, None)
+    interaction_to_peer_input_with_authority(interaction, runtime_id, None, None)
 }
 
-fn interaction_to_peer_input_with_source_peer_id(
+fn interaction_to_peer_input_with_authority(
     interaction: &InboxInteraction,
     runtime_id: &LogicalRuntimeId,
     source_peer_id: Option<PeerId>,
+    terminal_route_peer_id: Option<PeerId>,
 ) -> Input {
     let convention = map_convention(interaction);
     let durability = map_durability(&convention);
-    let source_peer = match (&interaction.content, source_peer_id) {
-        (InteractionContent::Request { .. }, Some(peer_id)) => peer_id.to_string(),
+    let source_peer = match (&convention, source_peer_id, terminal_route_peer_id) {
+        (PeerConvention::ResponseTerminal { .. }, _, Some(peer_id)) => peer_id.to_string(),
+        (PeerConvention::ResponseTerminal { .. }, _, None) => String::new(),
+        (PeerConvention::Request { .. }, Some(peer_id), _) => peer_id.to_string(),
         _ => interaction.from.clone(),
     };
 
@@ -97,6 +99,7 @@ fn interaction_to_peer_input_with_source_peer_id(
             timestamp: Utc::now(),
             source: InputOrigin::Peer {
                 peer_id: source_peer,
+                display_identity: Some(interaction.from.clone()),
                 runtime_id: Some(runtime_id.clone()),
             },
             durability,
@@ -112,11 +115,18 @@ fn interaction_to_peer_input_with_source_peer_id(
         body: peer_rendered_body(interaction),
         payload: peer_payload(interaction),
         blocks: peer_blocks(interaction),
-        handling_mode: match interaction.handling_mode {
-            meerkat_core::types::HandlingMode::Queue => None,
-            mode => Some(mode),
-        },
+        handling_mode: peer_handling_mode(interaction),
     })
+}
+
+fn peer_handling_mode(interaction: &InboxInteraction) -> Option<meerkat_core::types::HandlingMode> {
+    if matches!(&interaction.content, InteractionContent::Response { .. }) {
+        return None;
+    }
+    match interaction.handling_mode {
+        meerkat_core::types::HandlingMode::Queue => None,
+        mode => Some(mode),
+    }
 }
 
 fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
@@ -133,7 +143,7 @@ fn map_convention(interaction: &InboxInteraction) -> PeerConvention {
         } => {
             // Single source of truth for response terminality: meerkat-core's
             // `classify_response_terminality`. No raw `ResponseStatus`
-            // matching here — the inbox classifier and comms drain delegate
+            // matching here -- the inbox classifier and comms drain delegate
             // to the same call.
             let request_id = in_reply_to.to_string();
             match meerkat_core::interaction::classify_response_terminality(*status) {
@@ -636,6 +646,42 @@ mod tests {
                 p.payload,
                 Some(serde_json::json!({"ok": true})),
                 "terminal response result must remain structured on PeerInput so runtime prompt projection stays runtime-owned"
+            );
+        } else {
+            panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn classified_response_uses_ingress_terminal_class() {
+        let in_reply_to = make_interaction_id();
+        let classified = PeerInputCandidate {
+            class: PeerInputClass::ResponseProgress,
+            auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
+            lifecycle_peer: None,
+            interaction: InboxInteraction {
+                from: "peer-1".into(),
+                content: InteractionContent::Response {
+                    status: ResponseStatus::Completed,
+                    result: serde_json::json!({"ok": true}),
+                    in_reply_to,
+                },
+                id: make_interaction_id(),
+                rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: None,
+            },
+        };
+
+        let input =
+            classified_interaction_to_runtime_input(&classified, &LogicalRuntimeId::new("test"));
+        if let Input::Peer(peer) = input {
+            assert!(
+                matches!(
+                    peer.convention,
+                    Some(PeerConvention::ResponseProgress { .. })
+                ),
+                "classified bridge must consume ingress-owned response class"
             );
         } else {
             panic!("Expected PeerInput");

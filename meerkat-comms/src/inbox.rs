@@ -280,7 +280,12 @@ impl ClassifiedInboxQueue {
             .count();
         let response_count = queued_entries
             .iter()
-            .filter(|entry| entry.class == PeerInputClass::Response)
+            .filter(|entry| {
+                matches!(
+                    entry.class,
+                    PeerInputClass::ResponseProgress | PeerInputClass::ResponseTerminal
+                )
+            })
             .count();
         let lifecycle_count = queued_entries
             .iter()

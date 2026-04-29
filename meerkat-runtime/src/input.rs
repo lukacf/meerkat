@@ -14,8 +14,8 @@ use meerkat_core::ops::{OpEvent, OperationId};
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{
     BlobStore, BlobStoreError, MissingBlobBehavior, PeerConversationProjection,
-    PeerResponseProgressProjectionPhase, PeerResponseTerminalProjectionStatus,
-    externalize_content_blocks, hydrate_content_blocks,
+    PeerResponseProgressProjectionPhase, PeerResponseTerminalFact, PeerResponseTerminalFactError,
+    PeerResponseTerminalProjectionStatus, externalize_content_blocks, hydrate_content_blocks,
 };
 use serde::{Deserialize, Serialize};
 
@@ -532,9 +532,8 @@ pub struct OperationInput {
 
 /// Build the core-owned peer conversation projection for a runtime peer input.
 ///
-/// The runtime loop consumes this classification but does not own the peer
-/// response semantic mapping. That mapping belongs at the input boundary,
-/// where typed peer convention/status fields are still present.
+/// The runtime loop consumes this typed projection instead of reconstructing
+/// peer-response terminal render/context semantics from strings.
 pub(crate) fn peer_projection_from_peer_input(
     peer: &PeerInput,
 ) -> Option<PeerConversationProjection> {
@@ -574,16 +573,46 @@ pub(crate) fn peer_projection_from_peer_input(
                 payload: peer.payload.clone(),
             })
         }
-        Some(PeerConvention::ResponseTerminal { request_id, status }) => {
-            Some(PeerConversationProjection::ResponseTerminal {
-                peer_id: peer_id.clone(),
-                request_id: request_id.clone(),
-                status: *status,
-                payload: peer.payload.clone(),
-            })
-        }
+        Some(PeerConvention::ResponseTerminal { .. }) => peer_response_terminal_fact(peer)
+            .ok()
+            .flatten()
+            .map(PeerConversationProjection::response_terminal),
         None => None,
     }
+}
+
+pub(crate) fn peer_response_terminal_fact(
+    peer: &PeerInput,
+) -> Result<Option<PeerResponseTerminalFact>, PeerResponseTerminalFactError> {
+    let InputOrigin::Peer {
+        peer_id,
+        runtime_id,
+    } = &peer.header.source
+    else {
+        return Ok(None);
+    };
+    let Some(PeerConvention::ResponseTerminal { request_id, status }) = &peer.convention else {
+        return Ok(None);
+    };
+
+    PeerResponseTerminalFact::new(
+        runtime_id.as_ref().map(ToString::to_string),
+        peer_id.clone(),
+        peer_id.clone(),
+        request_id.clone(),
+        *status,
+        peer.payload.clone(),
+    )
+    .map(Some)
+}
+
+pub(crate) fn validate_peer_response_terminal_fact(
+    input: &Input,
+) -> Result<(), PeerResponseTerminalFactError> {
+    let Input::Peer(peer) = input else {
+        return Ok(());
+    };
+    peer_response_terminal_fact(peer).map(|_| ())
 }
 
 /// Lift an [`Input`] to its core peer projection when it is a peer input with a

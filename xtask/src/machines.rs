@@ -280,6 +280,7 @@ pub fn machine_check_drift(args: SelectionArgs) -> Result<()> {
     mismatches.extend(collect_phase1_production_body_mismatches(&root)?);
     mismatches.extend(collect_authority_language_mismatches(&root)?);
     mismatches.extend(collect_stale_cfg_mismatches(&root)?);
+    mismatches.extend(collect_peer_response_terminal_projection_mismatches(&root)?);
     mismatches.extend(collect_direct_flow_reducer_transition_mismatches(&root)?);
     mismatches.extend(collect_mob_runtime_catalog_command_gate_mismatches(&root)?);
 
@@ -498,6 +499,7 @@ fn ensure_no_drift(root: &Path, selection: &Selection) -> Result<()> {
     mismatches.extend(collect_phase1_production_body_mismatches(root)?);
     mismatches.extend(collect_authority_language_mismatches(root)?);
     mismatches.extend(collect_stale_cfg_mismatches(root)?);
+    mismatches.extend(collect_peer_response_terminal_projection_mismatches(root)?);
     mismatches.extend(collect_direct_flow_reducer_transition_mismatches(root)?);
     mismatches.extend(collect_mob_runtime_catalog_command_gate_mismatches(root)?);
 
@@ -641,6 +643,59 @@ pub fn collect_authority_language_mismatches(root: &Path) -> Result<Vec<String>>
                     "stale authority language `{token}` present in {}",
                     path.display()
                 ));
+            }
+        }
+    }
+
+    Ok(mismatches)
+}
+
+pub fn collect_peer_response_terminal_projection_mismatches(root: &Path) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let boundary_files = [
+        "meerkat-runtime/src/accept.rs",
+        "meerkat-runtime/src/input.rs",
+        "meerkat-runtime/src/runtime_loop.rs",
+    ];
+    let banned = [
+        (
+            "PeerConversationProjection::ResponseTerminal",
+            "direct terminal projection construction",
+        ),
+        (
+            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]",
+            "handwritten terminal render text",
+        ),
+        (
+            "peer_response_terminal_context_key(",
+            "handwritten terminal context key projection",
+        ),
+    ];
+
+    for rel in boundary_files {
+        let path = root.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "read peer-response terminal boundary file {}",
+                path.display()
+            )
+        })?;
+        let production = contents
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap_or(contents.as_str());
+
+        for (line_idx, line) in production.lines().enumerate() {
+            for (token, reason) in banned {
+                if line.contains(token) {
+                    mismatches.push(format!(
+                        "{rel}:{}: {reason} `{token}` must route through typed core peer-response terminal facts",
+                        line_idx + 1
+                    ));
+                }
             }
         }
     }

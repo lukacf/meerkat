@@ -744,7 +744,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // P2: Policy table refuses to honor handling_mode for response conventions
+    // P2: Policy table refuses to honor handling_mode for response progress
     // -----------------------------------------------------------------------
 
     #[test]
@@ -796,7 +796,7 @@ mod tests {
             }),
             Some(HandlingMode::Queue),
         );
-        let decision = DefaultPolicyTable::resolve(&input, true);
+        let decision = DefaultPolicyTable::resolve(&input, false);
         assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);

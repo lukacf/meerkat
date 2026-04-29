@@ -623,7 +623,7 @@ async fn drain_terminal_response_produces_exactly_one_peer_input() {
 // §14: Terminal response + Steer handling_mode while running
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn terminal_response_with_steer_policy_while_running() {
+async fn terminal_response_drops_steer_handling_mode_while_running() {
     // Build a terminal response with Steer handling_mode.
     let in_reply_to = iid();
     let interaction = InboxInteraction {
@@ -639,18 +639,20 @@ async fn terminal_response_with_steer_policy_while_running() {
         render_metadata: None,
     };
     let input = interaction_to_peer_input(&interaction, &rid());
+    if let Input::Peer(peer) = &input {
+        assert_eq!(
+            peer.handling_mode, None,
+            "peer response terminal handling policy must be machine-owned"
+        );
+    }
 
-    // While running: explicit steer uses cooperative interrupt semantics at the
-    // policy layer, and ingress still requests immediate processing via the
-    // typed steer signal.
+    // While running: terminal responses ignore shell-supplied handling mode
+    // and keep the machine-owned WakeIfIdle terminal policy.
     let policy = DefaultPolicyTable::resolve(&input, false);
-    assert_eq!(
-        policy.wake_mode,
-        meerkat_runtime::WakeMode::InterruptYielding
-    );
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
     assert_eq!(
         policy.routing_disposition,
-        meerkat_runtime::RoutingDisposition::Steer
+        meerkat_runtime::RoutingDisposition::Queue
     );
 
     // Verify driver behavior while running.
@@ -658,14 +660,10 @@ async fn terminal_response_with_steer_policy_while_running() {
     bind_running(&mut driver);
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(
-        &outcome,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
-        PostAdmissionSignal::None
+        PostAdmissionSignal::WakeLoop
     );
 }
 
@@ -674,7 +672,7 @@ async fn terminal_response_with_steer_policy_while_running() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn terminal_response_with_steer_policy_while_idle() {
+async fn terminal_response_drops_steer_handling_mode_while_idle() {
     // Build a terminal response with Steer handling_mode.
     let in_reply_to = iid();
     let interaction = InboxInteraction {
@@ -690,24 +688,26 @@ async fn terminal_response_with_steer_policy_while_idle() {
         render_metadata: None,
     };
     let input = interaction_to_peer_input(&interaction, &rid());
+    if let Input::Peer(peer) = &input {
+        assert_eq!(
+            peer.handling_mode, None,
+            "peer response terminal handling policy must be machine-owned"
+        );
+    }
 
-    // While idle: should get WakeIfIdle + Steer.
+    // While idle: should get machine-owned WakeIfIdle + Queue.
     let policy = DefaultPolicyTable::resolve(&input, true);
     assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
     assert_eq!(
         policy.routing_disposition,
-        meerkat_runtime::RoutingDisposition::Steer
+        meerkat_runtime::RoutingDisposition::Queue
     );
 
     // Verify driver behavior while idle.
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
-    assert_machine_owned_admission_signal(
-        &outcome,
-        true,
-        PostAdmissionSignal::RequestImmediateProcessing,
-    );
+    assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::WakeLoop);
     assert_eq!(
         driver.take_post_admission_signal(),
         PostAdmissionSignal::None

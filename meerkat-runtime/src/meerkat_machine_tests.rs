@@ -186,6 +186,38 @@ fn legacy_run_handler_does_not_restore_dsl_snapshots_by_hand() {
     );
 }
 
+#[test]
+fn legacy_run_handler_does_not_preflight_run_dsl_from_shell() {
+    let source = include_str!("meerkat_machine/dispatch_ingress.rs");
+    let start = source
+        .find("pub(super) async fn execute_meerkat_machine_legacy_run_command")
+        .expect("legacy run handler should exist");
+    let legacy_run_handler = &source[start..];
+
+    assert!(
+        !legacy_run_handler.contains("preview_session_dsl_input"),
+        "legacy run prepare must let the machine-owned run transition decide authority",
+    );
+}
+
+#[test]
+fn legacy_run_handler_does_not_string_match_commit_unregister_policy() {
+    let source = include_str!("meerkat_machine/dispatch_ingress.rs");
+    let start = source
+        .find("pub(super) async fn execute_meerkat_machine_legacy_run_command")
+        .expect("legacy run handler should exist");
+    let legacy_run_handler = &source[start..];
+
+    assert!(
+        !legacy_run_handler.contains("to_string().contains"),
+        "legacy run unregister policy must use typed machine-owned semantics",
+    );
+    assert!(
+        !legacy_run_handler.contains("runtime boundary commit failed"),
+        "legacy run unregister policy must not key off boundary failure text",
+    );
+}
+
 #[tokio::test]
 async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_apply() {
     let machine = MeerkatMachine::ephemeral();
@@ -11515,6 +11547,43 @@ async fn accept_input_with_completion_rejects_destroyed_session() {
 // A5: Legacy run command guards (TLA+ RunningHasActiveRunInvariant)
 // ---------------------------------------------------------------
 
+async fn prepare_legacy_run_for_authority_test(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    text: &str,
+) -> MeerkatMachineRunPrepared {
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Prepare {
+                session_id: session_id.clone(),
+                input: make_prompt(text),
+            },
+        )
+        .await
+        .expect("legacy run prepare should succeed");
+    match result {
+        MeerkatMachineCommandResult::Prepared(prepared) => prepared,
+        other => panic!("unexpected prepare result: {other:?}"),
+    }
+}
+
+fn legacy_run_test_output(run_id: RunId, input_id: InputId) -> CoreApplyOutput {
+    CoreApplyOutput {
+        receipt: RunBoundaryReceipt {
+            run_id,
+            boundary: RunApplyBoundary::RunStart,
+            contributing_input_ids: vec![input_id],
+            conversation_digest: None,
+            message_count: 0,
+            sequence: 0,
+        },
+        session_snapshot: None,
+        terminal: None,
+        run_result: None,
+    }
+}
+
 #[tokio::test]
 async fn legacy_run_prepare_rejects_retired_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -11567,6 +11636,133 @@ async fn legacy_run_prepare_rejects_destroyed_session() {
     assert!(
         matches!(err, RuntimeDriverError::Destroyed),
         "expected Destroyed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn legacy_run_commit_rejection_preserves_registered_running_session() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let prepared =
+        prepare_legacy_run_for_authority_test(&adapter, &session_id, "commit rejection").await;
+    let rejected_run_id = RunId::new();
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Commit {
+                session_id: session_id.clone(),
+                input_id: prepared.input_id.clone(),
+                run_id: rejected_run_id.clone(),
+                output: legacy_run_test_output(rejected_run_id, prepared.input_id.clone()),
+            },
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "commit with a non-active run id should be rejected"
+    );
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "typed commit rejection must not unregister the session"
+    );
+    assert_eq!(
+        adapter.runtime_state(&session_id).await.unwrap(),
+        RuntimeState::Running,
+        "rejected commit must leave canonical DSL lifecycle on the active run"
+    );
+    let input_state = adapter
+        .input_state(&session_id, &prepared.input_id)
+        .await
+        .expect("input state read should succeed")
+        .expect("prepared input should remain visible");
+    assert_eq!(
+        input_state.seed.phase,
+        crate::input_state::InputLifecycleState::Staged,
+        "rejected commit must not fake input completion"
+    );
+}
+
+#[tokio::test]
+async fn legacy_run_fail_rejection_preserves_registered_running_session() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let prepared =
+        prepare_legacy_run_for_authority_test(&adapter, &session_id, "fail rejection").await;
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Fail {
+                session_id: session_id.clone(),
+                run_id: RunId::new(),
+                error: "reject the wrong run".to_string(),
+            },
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "fail with a non-active run id should be rejected"
+    );
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "typed fail rejection must not unregister the session"
+    );
+    assert_eq!(
+        adapter.runtime_state(&session_id).await.unwrap(),
+        RuntimeState::Running,
+        "rejected fail must leave canonical DSL lifecycle on the active run"
+    );
+    let input_state = adapter
+        .input_state(&session_id, &prepared.input_id)
+        .await
+        .expect("input state read should succeed")
+        .expect("prepared input should remain visible");
+    assert_eq!(
+        input_state.seed.phase,
+        crate::input_state::InputLifecycleState::Staged,
+        "rejected fail must not roll back the active input from shell policy"
+    );
+}
+
+#[tokio::test]
+async fn legacy_run_fail_terminalizes_through_machine_authority() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let prepared =
+        prepare_legacy_run_for_authority_test(&adapter, &session_id, "fail terminalization").await;
+    adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Fail {
+                session_id: session_id.clone(),
+                run_id: prepared.run_id.clone(),
+                error: "executor failed".to_string(),
+            },
+        )
+        .await
+        .expect("active fail should terminalize the run");
+
+    assert!(adapter.contains_session(&session_id).await);
+    assert_eq!(
+        adapter.runtime_state(&session_id).await.unwrap(),
+        RuntimeState::Idle
+    );
+    let input_state = adapter
+        .input_state(&session_id, &prepared.input_id)
+        .await
+        .expect("input state read should succeed")
+        .expect("prepared input should remain visible");
+    assert_eq!(
+        input_state.seed.phase,
+        crate::input_state::InputLifecycleState::Queued,
+        "machine fail should roll the recoverable input back for retry"
     );
 }
 

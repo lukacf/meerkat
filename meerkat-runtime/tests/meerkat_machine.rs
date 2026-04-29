@@ -1551,6 +1551,10 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
         err.to_string().contains("runtime boundary commit failed"),
         "unexpected error: {err}"
     );
+    assert!(
+        adapter.contains_session(&sid).await,
+        "boundary commit rollback should preserve the registered session"
+    );
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Idle

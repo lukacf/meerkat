@@ -731,7 +731,6 @@ impl InboxSender {
             auth: result.auth,
             kind,
             from_peer: result.from_peer,
-            from_peer_id: result.from_peer_id,
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
             admission_diagnostic: decision.admission_diagnostic,

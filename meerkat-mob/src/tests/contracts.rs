@@ -109,6 +109,15 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     );
     let request_interaction = &interactions[0];
     assert_eq!(request_interaction.from, sender_name);
+    assert!(request_interaction.rendered_text.contains(&format!(
+        "\"peer_id\":\"{}\"",
+        sender.peer_id().expect("sender peer id")
+    )));
+    assert!(
+        request_interaction
+            .rendered_text
+            .contains(&format!("display_name: {sender_name}"))
+    );
 
     let request_id = match &request_interaction.content {
         meerkat_core::InteractionContent::Request { intent, params } => {

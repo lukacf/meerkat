@@ -820,14 +820,7 @@ impl CoreCommsRuntime for CommsRuntime {
         Ok(classified_entries
             .into_iter()
             .filter_map(|entry| {
-                let from_display_name = entry.from_peer.unwrap_or_else(|| "unknown".to_string());
-                let from_peer = match &entry.item {
-                    crate::types::InboxItem::External { envelope } => entry
-                        .from_peer_id
-                        .clone()
-                        .unwrap_or_else(|| envelope.from.to_peer_id().to_string()),
-                    crate::types::InboxItem::PlainEvent { .. } => from_display_name.clone(),
-                };
+                let from_peer = entry.from_peer.unwrap_or_else(|| "unknown".to_string());
                 let rendered_text = entry.text_projection.clone();
 
                 match entry.item {
@@ -4105,10 +4098,7 @@ mod tests {
 
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
         assert_eq!(interactions.len(), 1);
-        assert_eq!(
-            interactions[0].from,
-            sender.peer_id().expect("sender peer id").to_string()
-        );
+        assert_eq!(interactions[0].from, sender_name);
         assert!(matches!(
             &interactions[0].content,
             meerkat_core::InteractionContent::Message { body, .. } if body == "hello without trusted"

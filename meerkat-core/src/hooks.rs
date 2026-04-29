@@ -2,7 +2,7 @@
 
 use crate::error::AgentError;
 use crate::event::{AgentErrorClass, AgentErrorReport};
-use crate::types::{ContentInput, SessionId, StopReason, Usage};
+use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, ToolResult, Usage};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -217,22 +217,44 @@ pub struct HookToolCall {
 
 /// Tool result view exposed to hooks.
 ///
-/// The `content` field is always the text projection of the tool result.
-/// When `ToolResult.content` migrates to `Vec<ContentBlock>`, this will
-/// contain the concatenated text and `has_images` will signal the presence
-/// of non-text blocks.
+/// `content_blocks` is the canonical typed tool-result content. `content` is
+/// retained as a legacy display projection for existing hook consumers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct HookToolResult {
     pub tool_use_id: String,
     pub name: String,
+    /// Legacy text projection retained for existing hooks.
     pub content: String,
+    /// Canonical typed tool-result content exposed to hooks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_blocks: Vec<ContentBlock>,
     pub is_error: bool,
-    /// Whether the original tool result contains image blocks.
-    /// Hooks always see the text projection; this flag signals that
-    /// non-text content exists so hook authors can make informed decisions.
-    #[serde(default)]
+    /// Legacy side flag retained for Rust compatibility. New hook payloads
+    /// carry `content_blocks` instead of serializing this projection hint.
+    #[serde(default, skip_serializing)]
     pub has_images: bool,
+}
+
+impl HookToolResult {
+    pub fn from_tool_result(name: impl Into<String>, result: &ToolResult) -> Self {
+        Self::from_tool_result_with_id(result.tool_use_id.clone(), name, result)
+    }
+
+    pub fn from_tool_result_with_id(
+        tool_use_id: impl Into<String>,
+        name: impl Into<String>,
+        result: &ToolResult,
+    ) -> Self {
+        Self {
+            tool_use_id: tool_use_id.into(),
+            name: name.into(),
+            content: result.text_content(),
+            content_blocks: result.content.clone(),
+            is_error: result.is_error,
+            has_images: result.has_images(),
+        }
+    }
 }
 
 /// Full invocation payload passed into the hook engine.
@@ -357,27 +379,25 @@ pub fn default_failure_policy(capability: HookCapability) -> HookFailurePolicy {
     }
 }
 
-/// Apply a `HookPatch::ToolResult` to a `ToolResult`, preserving image blocks.
+/// Apply a `HookPatch::ToolResult` to a `ToolResult`, preserving non-text blocks.
 ///
 /// Deterministic rebuild rule:
 /// 1. Strip all `ContentBlock::Text` blocks from the original vec.
 /// 2. Prepend a single `ContentBlock::Text { text: patched_text }` at position 0.
-/// 3. Append all image blocks in their original relative order.
+/// 3. Append all non-text blocks in their original relative order.
 pub fn apply_tool_result_patch(
-    tool_result: &mut crate::types::ToolResult,
+    tool_result: &mut ToolResult,
     patched_text: String,
     is_error: Option<bool>,
 ) {
-    use crate::types::ContentBlock;
-
-    let image_blocks: Vec<ContentBlock> = tool_result
+    let non_text_blocks: Vec<ContentBlock> = tool_result
         .content
         .iter()
-        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+        .filter(|b| !matches!(b, ContentBlock::Text { .. }))
         .cloned()
         .collect();
     let mut new_content = vec![ContentBlock::Text { text: patched_text }];
-    new_content.extend(image_blocks);
+    new_content.extend(non_text_blocks);
     tool_result.content = new_content;
     if let Some(value) = is_error {
         tool_result.is_error = value;
@@ -452,6 +472,7 @@ mod tests {
             tool_use_id: tr.tool_use_id.clone(),
             name: "test_tool".into(),
             content: tr.text_content(),
+            content_blocks: tr.content.clone(),
             is_error: tr.is_error,
             has_images: tr.has_images(),
         };
@@ -467,11 +488,87 @@ mod tests {
             tool_use_id: tr.tool_use_id.clone(),
             name: "test_tool".into(),
             content: tr.text_content(),
+            content_blocks: tr.content.clone(),
             is_error: tr.is_error,
             has_images: tr.has_images(),
         };
         assert_eq!(hook_result.content, "just text");
+        assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
         assert!(!hook_result.has_images);
+    }
+
+    #[test]
+    fn hook_result_text_only_serializes_typed_content_blocks() {
+        let tr = ToolResult::new("tc_1".into(), "just text".into(), false);
+        let hook_result = HookToolResult::from_tool_result("test_tool", &tr);
+
+        assert_eq!(hook_result.content, "just text");
+        assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
+
+        let json = serde_json::to_value(&hook_result).expect("serialize hook tool result");
+        assert_eq!(
+            json["content_blocks"],
+            serde_json::json!([{"type": "text", "text": "just text"}])
+        );
+        assert!(
+            json.get("has_images").is_none(),
+            "typed content blocks should replace the image side flag on the hook surface"
+        );
+    }
+
+    #[test]
+    fn hook_result_image_only_serializes_typed_content_blocks() {
+        let tr =
+            ToolResult::with_blocks("tc_1".into(), vec![image_block("image/png", "AAAA")], false);
+        let hook_result = HookToolResult::from_tool_result("view_image", &tr);
+
+        assert_eq!(hook_result.content, "[image: image/png]");
+        assert_eq!(
+            hook_result.content_blocks,
+            vec![image_block("image/png", "AAAA")]
+        );
+
+        let json = serde_json::to_value(&hook_result).expect("serialize hook tool result");
+        assert_eq!(
+            json["content_blocks"],
+            serde_json::json!([{
+                "type": "image",
+                "media_type": "image/png",
+                "source": "inline",
+                "data": "AAAA"
+            }])
+        );
+        assert!(
+            json.get("has_images").is_none(),
+            "typed content blocks should replace the image side flag on the hook surface"
+        );
+    }
+
+    #[test]
+    fn hook_result_mixed_content_preserves_block_order() {
+        let tr = ToolResult::with_blocks(
+            "tc_1".into(),
+            vec![
+                text_block("before"),
+                image_block("image/png", "AAAA"),
+                text_block("after"),
+            ],
+            false,
+        );
+        let hook_result = HookToolResult::from_tool_result("mixed_tool", &tr);
+
+        assert_eq!(hook_result.content, "before\n[image: image/png]\nafter");
+        assert_eq!(hook_result.content_blocks, tr.content);
+    }
+
+    #[test]
+    fn hook_result_can_use_authoritative_tool_call_id() {
+        let tr = ToolResult::new("stale_tool_id".into(), "ok".into(), false);
+        let hook_result =
+            HookToolResult::from_tool_result_with_id("active_tool_id", "test_tool", &tr);
+
+        assert_eq!(hook_result.tool_use_id, "active_tool_id");
+        assert_eq!(hook_result.content_blocks, vec![text_block("ok")]);
     }
 
     #[test]
@@ -582,16 +679,30 @@ mod tests {
     }
 
     #[test]
-    fn hook_tool_result_has_images_roundtrip() {
+    fn hook_tool_result_has_images_is_deserialize_only_legacy_flag() {
         let result = HookToolResult {
             tool_use_id: "tc_1".into(),
             name: "tool".into(),
             content: "text".into(),
+            content_blocks: vec![text_block("text")],
             is_error: false,
             has_images: true,
         };
-        let json = serde_json::to_string(&result).expect("should serialize");
-        let decoded: HookToolResult = serde_json::from_str(&json).expect("should deserialize");
+        let json = serde_json::to_value(&result).expect("should serialize");
+        assert!(
+            json.get("has_images").is_none(),
+            "new hook payloads carry content_blocks instead of has_images"
+        );
+
+        let decoded: HookToolResult = serde_json::from_value(serde_json::json!({
+            "tool_use_id": "tc_1",
+            "name": "tool",
+            "content": "text",
+            "content_blocks": [{"type": "text", "text": "text"}],
+            "is_error": false,
+            "has_images": true
+        }))
+        .expect("should deserialize");
         assert!(decoded.has_images);
     }
 }

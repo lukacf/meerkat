@@ -32,7 +32,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     from .types import SkillKey
 
-ContentInput = str | list[dict[str, Any]]
+ContentBlock = dict[str, Any]
+ContentInput = str | list[ContentBlock]
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,7 @@ class ToolResultReceived(Event):
 
     id: str = ""
     name: str = ""
+    content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
 
 
@@ -162,6 +164,7 @@ class ToolExecutionCompleted(Event):
     id: str = ""
     name: str = ""
     result: str = ""
+    content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
     duration_ms: int | None = None
 
@@ -682,6 +685,16 @@ def _require_bool(raw: dict[str, Any], field_name: str) -> bool:
     return value
 
 
+def _parse_content_blocks(raw: Any, legacy_text: Any = None) -> list[ContentBlock]:
+    if isinstance(raw, list) and all(isinstance(block, dict) for block in raw):
+        return cast(list[ContentBlock], raw)
+    if raw is not None:
+        raise ValueError("content must be a content block list")
+    if isinstance(legacy_text, str) and legacy_text:
+        return [{"type": "text", "text": legacy_text}]
+    return []
+
+
 _STRING_FIELDS = {
     "session_id",
     "result",
@@ -844,6 +857,11 @@ def parse_event(raw: dict[str, Any]) -> Event:
         for f in cls.__dataclass_fields__:
             if f == "usage":
                 kwargs["usage"] = _parse_usage(raw.get("usage"))
+            elif f == "content" and cls in {ToolResultReceived, ToolExecutionCompleted}:
+                kwargs["content"] = _parse_content_blocks(
+                    raw.get("content"),
+                    raw.get("result") if cls is ToolExecutionCompleted else None,
+                )
             elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
             elif f == "duration_ms" and cls is ToolExecutionCompleted:

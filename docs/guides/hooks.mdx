@@ -217,10 +217,10 @@ Hooks receive a `HookInvocation` struct containing contextual data. Fields are p
 - **`HookLlmRequest`**: `max_tokens`, `temperature`, `provider_params`, `message_count`
 - **`HookLlmResponse`**: `assistant_text`, `tool_call_names`, `stop_reason`, `usage`
 - **`HookToolCall`**: `tool_use_id`, `name`, `args`
-- **`HookToolResult`**: `tool_use_id`, `name`, `content`, `is_error`, `has_images`
+- **`HookToolResult`**: `tool_use_id`, `name`, `content`, `content_blocks`, `is_error`
 </Accordion>
 
-`HookToolResult.content` is always the text projection of the tool result. If the original result also contains image blocks, `has_images` is set so hook authors know multimodal content exists. A `HookPatch::ToolResult` rewrite preserves those image blocks and replaces only the text projection plus optional `is_error`.
+`HookToolResult.content_blocks` carries the typed tool-result blocks, including image blocks, in original order. `HookToolResult.content` remains as a legacy text projection for existing hooks. A `HookPatch::ToolResult` rewrite preserves non-text blocks and replaces only the text projection plus optional `is_error`.
 
 ## Priority ordering and deny short-circuiting
 

@@ -236,6 +236,10 @@ describe("Typed Events", () => {
       id: "t1",
       name: "search",
       result: "found it",
+      content: [
+        { type: "text", text: "found it" },
+        { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
+      ],
       is_error: false,
       duration_ms: 42,
     });
@@ -244,6 +248,42 @@ describe("Typed Events", () => {
       assert.equal(event.name, "search");
       assert.equal(event.durationMs, 42);
       assert.equal(event.isError, false);
+      assert.deepEqual(event.content, [
+        { type: "text", text: "found it" },
+        { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
+      ]);
+    }
+  });
+
+  it("should parse tool_result_received content blocks", () => {
+    const event = parseEvent({
+      type: "tool_result_received",
+      id: "t1",
+      name: "search",
+      content: [{ type: "text", text: "found it" }],
+      is_error: false,
+    });
+    assert.equal(event.type, "tool_result_received");
+    if (event.type === "tool_result_received") {
+      assert.deepEqual(event.content, [{ type: "text", text: "found it" }]);
+      assert.equal(event.isError, false);
+    }
+  });
+
+  it("should preserve malformed tool result content blocks", () => {
+    const event = parseEvent({
+      type: "tool_execution_completed",
+      id: "t1",
+      name: "search",
+      result: "found it",
+      content: "not blocks",
+      is_error: false,
+      duration_ms: 42,
+    });
+
+    assert.equal(event.type, "malformed_event");
+    if (event.type === "malformed_event") {
+      assert.equal(event.error, "content must be a content block array");
     }
   });
 
@@ -269,6 +309,8 @@ describe("Typed Events", () => {
       assert.equal(malformed.isError, undefined);
       assert.equal(missing.durationMs, undefined);
       assert.equal(malformed.durationMs, undefined);
+      assert.deepEqual(missing.content, [{ type: "text", text: "found it" }]);
+      assert.deepEqual(malformed.content, [{ type: "text", text: "found it" }]);
     }
   });
 

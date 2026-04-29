@@ -72,6 +72,7 @@ from meerkat.events import (
     TextDelta,
     ToolCallRequested,
     ToolExecutionCompleted,
+    ToolResultReceived,
     TurnCompleted,
     TurnStarted,
     UnknownEvent,
@@ -831,6 +832,10 @@ def test_parse_tool_execution_completed():
         "id": "t1",
         "name": "search",
         "result": "found it",
+        "content": [
+            {"type": "text", "text": "found it"},
+            {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
+        ],
         "is_error": False,
         "duration_ms": 42,
     }
@@ -839,6 +844,40 @@ def test_parse_tool_execution_completed():
     assert event.name == "search"
     assert event.duration_ms == 42
     assert event.is_error is False
+    assert event.content == [
+        {"type": "text", "text": "found it"},
+        {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
+    ]
+
+
+def test_parse_tool_result_received_content_blocks():
+    raw = {
+        "type": "tool_result_received",
+        "id": "t1",
+        "name": "search",
+        "content": [{"type": "text", "text": "found it"}],
+        "is_error": False,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, ToolResultReceived)
+    assert event.content == [{"type": "text", "text": "found it"}]
+    assert event.is_error is False
+
+
+def test_parse_tool_execution_completed_preserves_malformed_content_blocks():
+    raw = {
+        "type": "tool_execution_completed",
+        "id": "t1",
+        "name": "search",
+        "result": "found it",
+        "content": "not blocks",
+        "is_error": False,
+        "duration_ms": 42,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_error():
@@ -861,6 +900,8 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
     assert malformed.is_error is None
     assert missing.duration_ms is None
     assert malformed.duration_ms is None
+    assert missing.content == [{"type": "text", "text": "found it"}]
+    assert malformed.content == [{"type": "text", "text": "found it"}]
 
 
 def test_parse_unknown_event_type():

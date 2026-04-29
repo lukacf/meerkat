@@ -379,7 +379,7 @@ interface TurnStartedEvent        { type: "turn_started";         turnNumber: nu
 interface TextDeltaEvent          { type: "text_delta";            delta: string }
 interface TextCompleteEvent       { type: "text_complete";         content: string }
 interface ToolCallRequestedEvent  { type: "tool_call_requested";   id: string; name: string; args: unknown }
-interface ToolResultReceivedEvent { type: "tool_result_received";  id: string; name: string; isError: boolean }
+interface ToolResultReceivedEvent { type: "tool_result_received";  id: string; name: string; content: ContentBlock[]; isError: boolean }
 interface TurnCompletedEvent      { type: "turn_completed";        stopReason: StopReason; usage: Usage }
 ```
 
@@ -397,7 +397,7 @@ type StopReason =
 
 ```typescript
 interface ToolExecutionStartedEvent   { type: "tool_execution_started";    id: string; name: string }
-interface ToolExecutionCompletedEvent { type: "tool_execution_completed";   id: string; name: string; result: string; isError: boolean; durationMs: number }
+interface ToolExecutionCompletedEvent { type: "tool_execution_completed";   id: string; name: string; result: string; content: ContentBlock[]; isError: boolean; durationMs: number }
 interface ToolExecutionTimedOutEvent  { type: "tool_execution_timed_out";   id: string; name: string; timeoutMs: number }
 ```
 

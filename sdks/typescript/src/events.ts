@@ -26,7 +26,7 @@
  * ```
  */
 
-import type { ContentInput, SkillKey } from "./types.js";
+import type { ContentBlock, ContentInput, SkillKey } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Shared value types
@@ -139,6 +139,7 @@ export interface ToolResultReceivedEvent {
   readonly type: "tool_result_received";
   readonly id: string;
   readonly name: string;
+  readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
 }
 
@@ -163,6 +164,7 @@ export interface ToolExecutionCompletedEvent {
   readonly id: string;
   readonly name: string;
   readonly result: string;
+  readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
   readonly durationMs?: number;
 }
@@ -546,6 +548,15 @@ function parseContentInput(raw: unknown): ContentInput {
   return String(raw ?? "");
 }
 
+function parseContentBlocks(raw: unknown, legacyText?: unknown): readonly ContentBlock[] {
+  if (Array.isArray(raw)) return raw as readonly ContentBlock[];
+  if (raw != null) throw new Error("content must be a content block array");
+  if (typeof legacyText === "string" && legacyText.length > 0) {
+    return [{ type: "text", text: legacyText }];
+  }
+  return [];
+}
+
 function parseToolConfigChangeStatus(raw: unknown): ToolConfigChangeStatus | undefined {
   if (raw == null || typeof raw !== "object") {
     return undefined;
@@ -779,7 +790,13 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
     case "tool_call_requested":
       return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), args: raw.args };
     case "tool_result_received":
-      return { type, id: requireStringField(raw, "id"), name: requireStringField(raw, "name"), isError: requireBooleanField(raw, "is_error") };
+      return {
+        type,
+        id: requireStringField(raw, "id"),
+        name: requireStringField(raw, "name"),
+        content: parseContentBlocks(raw.content),
+        isError: requireBooleanField(raw, "is_error"),
+      };
     case "turn_completed":
       return {
         type,
@@ -800,6 +817,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         id: requireStringField(raw, "id"),
         name: requireStringField(raw, "name"),
         result: requireStringField(raw, "result"),
+        content: parseContentBlocks(raw.content, raw.result),
         ...(parseWireBoolean(raw.is_error) != null ? { isError: parseWireBoolean(raw.is_error) } : {}),
         ...(typeof raw.duration_ms === "number" && Number.isFinite(raw.duration_ms)
           ? { durationMs: raw.duration_ms }

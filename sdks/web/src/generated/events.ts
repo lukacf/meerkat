@@ -362,6 +362,7 @@ export interface ToolCallRequestedEvent {
 }
 
 export interface ToolResultReceivedEvent {
+  content?: ContentBlock[];
   id: string;
   is_error: boolean;
   name: string;
@@ -381,8 +382,8 @@ export interface ToolExecutionStartedEvent {
 }
 
 export interface ToolExecutionCompletedEvent {
+  content?: ContentBlock[];
   duration_ms: number;
-  has_images?: boolean;
   id: string;
   is_error: boolean;
   name: string;

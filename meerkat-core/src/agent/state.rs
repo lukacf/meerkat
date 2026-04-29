@@ -1919,13 +1919,13 @@ where
                                         llm_request: None,
                                         llm_response: None,
                                         tool_call: None,
-                                        tool_result: Some(HookToolResult {
-                                            tool_use_id: tc.id.clone(),
-                                            name: tc.name.clone(),
-                                            content: tool_result.text_content(),
-                                            is_error: tool_result.is_error,
-                                            has_images: tool_result.has_images(),
-                                        }),
+                                        tool_result: Some(
+                                            HookToolResult::from_tool_result_with_id(
+                                                tc.id.clone(),
+                                                tc.name.clone(),
+                                                &tool_result,
+                                            ),
+                                        ),
                                     },
                                     event_tx.as_ref(),
                                 )
@@ -1978,15 +1978,16 @@ where
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
                                 result: tool_result.text_content(),
+                                content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
                                 duration_ms,
-                                has_images: tool_result.has_images(),
                             });
 
                             // Emit result received
                             emit_event!(AgentEvent::ToolResultReceived {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
+                                content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
                             });
 

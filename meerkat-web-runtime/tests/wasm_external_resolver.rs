@@ -28,7 +28,8 @@ use meerkat_providers::{
     ExternalAuthResolverHandle, NormalizedAuthMethod, NormalizedBackendKind, ValidatedBinding,
 };
 use meerkat_web_runtime::external_auth::{
-    WasmExternalAuthResolver, has_external_auth_resolver, register_external_auth_resolver,
+    WASM_EXTERNAL_AUTH_RESOLVER_ID, WasmExternalAuthResolver, has_external_auth_resolver,
+    register_external_auth_resolver,
 };
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -288,4 +289,123 @@ async fn resolver_rejects_non_promise_js_results() {
         message.contains("must return a Promise"),
         "unexpected error: {message}"
     );
+}
+
+#[wasm_bindgen_test(async)]
+async fn self_hosted_connection_ref_uses_registered_wasm_external_resolver() {
+    register_external_auth_resolver(JsValue::NULL).expect("clear");
+    let cb = js_sys::eval(
+        r#"
+            (function (connectionRef) {
+                globalThis.__meerkat_self_hosted_external_ref =
+                    connectionRef.realm + ":" + connectionRef.binding;
+                return Promise.resolve("wasm-self-hosted-token");
+            })
+        "#,
+    )
+    .expect("eval callback")
+    .dyn_into::<Function>()
+    .expect("cast to Function");
+    register_external_auth_resolver(JsValue::from(cb)).expect("register");
+
+    let mut config = meerkat_core::Config::default();
+    config.agent.model = "gemma-4-e2b".to_string();
+    config.self_hosted.servers.insert(
+        "local".to_string(),
+        meerkat_core::SelfHostedServerConfig {
+            transport: meerkat_core::SelfHostedTransport::OpenAiCompatible,
+            base_url: "https://self-hosted.example/v1".to_string(),
+            api_style: meerkat_core::SelfHostedApiStyle::ChatCompletions,
+            bearer_token: None,
+            bearer_token_env: None,
+        },
+    );
+    config.self_hosted.models.insert(
+        "gemma-4-e2b".to_string(),
+        meerkat_core::SelfHostedModelConfig {
+            server: "local".to_string(),
+            remote_model: "gemma4:e2b".to_string(),
+            display_name: "Gemma 4 E2B".into(),
+            family: "gemma-4".to_string(),
+            tier: meerkat_models::ModelTier::Supported,
+            context_window: Some(128_000),
+            max_output_tokens: Some(8_192),
+            vision: true,
+            image_tool_results: true,
+            inline_video: false,
+            supports_temperature: true,
+            supports_thinking: true,
+            supports_reasoning: true,
+            supports_web_search: false,
+            call_timeout_secs: Some(600),
+        },
+    );
+
+    let mut realm = meerkat_core::RealmConfigSection {
+        default_binding: Some("local_binding".to_string()),
+        ..Default::default()
+    };
+    realm.backend.insert(
+        "local_backend".to_string(),
+        meerkat_core::BackendProfileConfig {
+            provider: "self_hosted".to_string(),
+            backend_kind: "self_hosted".to_string(),
+            base_url: Some("https://self-hosted.example/v1".to_string()),
+            options: serde_json::Value::Null,
+        },
+    );
+    realm.auth.insert(
+        "local_auth".to_string(),
+        meerkat_core::AuthProfileConfig {
+            provider: "self_hosted".to_string(),
+            auth_method: "static_bearer".to_string(),
+            source: meerkat_core::CredentialSourceSpec::ExternalResolver {
+                handle: WASM_EXTERNAL_AUTH_RESOLVER_ID.to_string(),
+            },
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        },
+    );
+    realm.binding.insert(
+        "local_binding".to_string(),
+        meerkat_core::ProviderBindingConfig {
+            backend_profile: "local_backend".to_string(),
+            auth_profile: "local_auth".to_string(),
+            default_model: Some("gemma4:e2b".to_string()),
+            policy: Default::default(),
+        },
+    );
+    config.realm.insert("default".to_string(), realm);
+
+    let connection_ref = meerkat_core::ConnectionRef {
+        realm: meerkat_core::connection::RealmId::parse("default").expect("realm"),
+        binding: meerkat_core::connection::BindingId::parse("local_binding").expect("binding"),
+        profile: None,
+    };
+    let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
+        WASM_EXTERNAL_AUTH_RESOLVER_ID,
+        Arc::new(WasmExternalAuthResolver),
+    );
+    let mut build = meerkat::AgentBuildConfig::new("gemma-4-e2b");
+    build.provider = Some(meerkat_core::Provider::SelfHosted);
+    build.connection_ref = Some(connection_ref.clone());
+    build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
+
+    let agent = factory
+        .build_agent(build, &config)
+        .await
+        .expect("self-hosted build should resolve through wasm external auth");
+
+    assert_eq!(
+        agent.session().session_metadata().unwrap().connection_ref,
+        Some(connection_ref)
+    );
+    let observed = js_sys::Reflect::get(
+        &js_sys::global(),
+        &JsValue::from_str("__meerkat_self_hosted_external_ref"),
+    )
+    .expect("read callback marker")
+    .as_string()
+    .expect("callback marker string");
+    assert_eq!(observed, "default:local_binding");
 }

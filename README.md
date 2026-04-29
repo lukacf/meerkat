@@ -108,7 +108,7 @@ rkat run -m gemma-4-31b "Explain the code in main.rs"
 rkat doctor  # validate server connectivity
 ```
 
-Credential resolution for self-hosted LLM calls uses the same connection/auth resolver as hosted providers. An explicit `connection_ref` realm binding takes precedence. Without one, legacy `[self_hosted.servers]` credentials are converted into a transient compatibility binding: `bearer_token` wins over `bearer_token_env`, a configured but missing env var fails closed, and a server with neither remains authless for local deployments.
+Credential resolution for self-hosted LLM calls uses the same connection/auth resolver as hosted providers. Precedence is: explicit `connection_ref`, selected realm `default_binding`, configured `default` realm binding, then legacy `[self_hosted.servers]` compatibility. A configured selected realm without a usable self-hosted binding fails closed instead of falling back to legacy credentials. In the legacy compatibility path, `bearer_token` wins over `bearer_token_env`, a configured but missing env var fails closed, and a server with neither remains authless for local deployments.
 
 Self-hosted models work across all surfaces -- CLI, REST, RPC, MCP, and SDKs. See the [self-hosted Gemma 4 guide](https://docs.rkat.ai/guides/self-hosted-gemma4) for Ollama, vLLM, and LM Studio recipes.
 

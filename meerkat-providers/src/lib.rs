@@ -14,7 +14,8 @@
 
 pub mod runtime {
     #[cfg(not(target_arch = "wasm32"))]
-    pub use meerkat_auth_core::resolver::{resolve_external_authorizer, resolve_simple_secret};
+    pub use meerkat_auth_core::resolver::resolve_external_authorizer;
+    pub use meerkat_auth_core::resolver::resolve_simple_secret;
     pub use meerkat_llm_core::provider_runtime::{
         AuthLease, DynamicLease, ExternalAuthResolverHandle, NormalizedAuthMethod,
         NormalizedBackendKind, ProviderAuthError, ProviderBindingError, ProviderClientError,

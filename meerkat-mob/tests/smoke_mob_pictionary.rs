@@ -32,6 +32,7 @@ use meerkat_mob::{
 };
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, StoreAdapter};
+use reqwest::header::ACCEPT_ENCODING;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -51,6 +52,30 @@ async fn generate_image(
     api_key: &str,
     prompt: &str,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut errors = Vec::new();
+    for attempt in 1..=3 {
+        match generate_image_once(api_key, prompt).await {
+            Ok(image) => return Ok(image),
+            Err(error) => {
+                errors.push(format!("attempt {attempt}: {error}"));
+                if attempt < 3 {
+                    sleep(Duration::from_millis(500 * attempt)).await;
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Gemini image generation failed after retries: {}",
+        errors.join("; ")
+    )
+    .into())
+}
+
+async fn generate_image_once(
+    api_key: &str,
+    prompt: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/\
@@ -64,13 +89,18 @@ async fn generate_image(
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
+        .header(ACCEPT_ENCODING, "identity")
         .json(&body)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(120))
         .send()
-        .await?;
+        .await
+        .map_err(|error| sanitize_gemini_key_error(api_key, error))?;
 
     let status = resp.status();
-    let text = resp.text().await?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|error| sanitize_gemini_key_error(api_key, error))?;
     if !status.is_success() {
         return Err(format!("Gemini API {status}: {text}").into());
     }
@@ -89,6 +119,10 @@ async fn generate_image(
         }
     }
     Err("no image in response".into())
+}
+
+fn sanitize_gemini_key_error(api_key: &str, error: reqwest::Error) -> String {
+    error.to_string().replace(api_key, "<redacted>")
 }
 
 fn comms_profile(model: &str, peer_desc: &str) -> Profile {
@@ -1069,7 +1103,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             &["guesser-a"],
             label,
             &image_blocks,
-            Duration::from_secs(30),
+            Duration::from_secs(90),
         )
         .await
         .unwrap_or_else(|e| panic!("artist image delivery failed: {e}"));

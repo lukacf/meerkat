@@ -151,11 +151,17 @@ fn seed_mob_authority_sync_from_roster(
 async fn seed_mob_authority_sync_from_flow_runs(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     run_store: Arc<dyn crate::store::MobRunStore>,
+    event_store: Arc<dyn crate::store::MobEventStore>,
     mob_id: &MobId,
 ) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
     use crate::run::MobRun;
 
+    let terminalization = super::terminalization::FlowTerminalizationAuthority::new(
+        run_store.clone(),
+        event_store,
+        mob_id.clone(),
+    );
     let mut runs = run_store.list_runs(mob_id, None).await?;
     runs.sort_by(|left, right| {
         left.created_at
@@ -179,8 +185,239 @@ async fn seed_mob_authority_sync_from_flow_runs(
             &format!("resume_flow_run_{}", run.run_id),
         )?;
         authority.state.lifecycle_phase = resumed_phase;
+        if flow_run_replayed_active_admission(&run) {
+            converge_recovered_active_flow_run(
+                authority,
+                run_store.clone(),
+                &terminalization,
+                run.run_id.clone(),
+            )
+            .await?;
+            authority.state.lifecycle_phase = resumed_phase;
+        }
     }
     authority.state.lifecycle_phase = resumed_phase;
+    Ok(())
+}
+
+fn flow_run_replayed_active_admission(run: &crate::run::MobRun) -> bool {
+    run.flow_authority_inputs
+        .iter()
+        .any(|record| matches!(record, crate::run::FlowAuthorityInputRecord::RunFlow(_)))
+}
+
+async fn converge_recovered_active_flow_run(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    run_store: Arc<dyn crate::store::MobRunStore>,
+    terminalization: &super::terminalization::FlowTerminalizationAuthority,
+    run_id: crate::ids::RunId,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+    use crate::run::{MobMachineFlowRunCommand, MobRunStatus, flow_run};
+
+    start_recovered_flow_run_if_pending(authority, run_store.clone(), &run_id).await?;
+    cancel_recovered_unfinished_steps(authority, run_store.clone(), &run_id).await?;
+
+    let before_terminal = run_store
+        .get_run(&run_id)
+        .await?
+        .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+    let transitioned = if before_terminal.status.is_terminal() {
+        false
+    } else {
+        commit_recovered_flow_run_command(
+            authority,
+            run_store.clone(),
+            &run_id,
+            MobMachineFlowRunCommand::TerminalizeCanceled(flow_run::inputs::TerminalizeCanceled {}),
+            Some(MobRunStatus::Canceled),
+            "resume_recovered_flow_terminalize_canceled",
+        )
+        .await?
+    };
+    if transitioned {
+        terminalization
+            .record_persisted_terminalization(
+                run_id.clone(),
+                before_terminal.flow_id,
+                super::terminalization::TerminalizationTarget::Canceled,
+            )
+            .await?;
+    }
+
+    apply_recovered_flow_signal(
+        authority,
+        mob_dsl::MobMachineSignal::CompleteFlow,
+        "resume_recovered_flow_complete",
+    )?;
+    apply_recovered_flow_signal(
+        authority,
+        mob_dsl::MobMachineSignal::FinishRun,
+        "resume_recovered_flow_finish",
+    )?;
+    Ok(())
+}
+
+async fn start_recovered_flow_run_if_pending(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    run_store: Arc<dyn crate::store::MobRunStore>,
+    run_id: &crate::ids::RunId,
+) -> Result<(), MobError> {
+    use crate::run::{MobMachineFlowRunCommand, MobRunStatus, flow_run};
+
+    let run = run_store
+        .get_run(run_id)
+        .await?
+        .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+    if run.status != MobRunStatus::Pending {
+        return Ok(());
+    }
+    let _ = commit_recovered_flow_run_command(
+        authority,
+        run_store,
+        run_id,
+        MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {}),
+        Some(MobRunStatus::Running),
+        "resume_recovered_flow_start",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn cancel_recovered_unfinished_steps(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    run_store: Arc<dyn crate::store::MobRunStore>,
+    run_id: &crate::ids::RunId,
+) -> Result<(), MobError> {
+    use crate::run::{MobMachineFlowRunCommand, flow_run};
+
+    let run = run_store
+        .get_run(run_id)
+        .await?
+        .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+    for step_id in run.ordered_steps()? {
+        let is_terminal = run
+            .flow_state
+            .step_status
+            .get(&step_id)
+            .and_then(|status| *status)
+            .is_some_and(|status| {
+                matches!(
+                    status,
+                    flow_run::StepRunStatus::Completed
+                        | flow_run::StepRunStatus::Failed
+                        | flow_run::StepRunStatus::Skipped
+                        | flow_run::StepRunStatus::Canceled
+                )
+            });
+        if is_terminal {
+            continue;
+        }
+        let _ = commit_recovered_flow_run_command(
+            authority,
+            run_store.clone(),
+            run_id,
+            MobMachineFlowRunCommand::CancelStep(flow_run::inputs::CancelStep { step_id }),
+            None,
+            "resume_recovered_flow_cancel_step",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn commit_recovered_flow_run_command(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    run_store: Arc<dyn crate::store::MobRunStore>,
+    run_id: &crate::ids::RunId,
+    command: crate::run::MobMachineFlowRunCommand,
+    next_status: Option<crate::run::MobRunStatus>,
+    context: &'static str,
+) -> Result<bool, MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+    use crate::run::{MobMachineFlowAuthorityToken, apply_mob_machine_flow_run_command};
+
+    let authority_input = command.authority_input(run_id);
+    for attempt in 0..5u32 {
+        let run = run_store
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+        if run.status.is_terminal() {
+            return Ok(false);
+        }
+
+        let mut prepared = mob_dsl::MobMachineAuthority::from_state(authority.state.clone());
+        let input_debug = format!("{authority_input:?}");
+        let transition =
+            mob_dsl::MobMachineMutator::apply(&mut prepared, authority_input.clone()).map_err(
+                |error| {
+                    MobError::Internal(format!(
+                        "MobMachine recovered flow authority ({context}) rejected {input_debug}: {error}"
+                    ))
+                },
+            )?;
+        if transition.from_phase != transition.to_phase {
+            prepared.state.lifecycle_phase = transition.to_phase;
+        }
+        let token =
+            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
+        let outcome = apply_mob_machine_flow_run_command(
+            &run.flow_state,
+            &prepared.state,
+            run_id,
+            command.clone(),
+            token,
+        )?;
+
+        let won = if let Some(next_status) = &next_status {
+            run_store
+                .cas_run_snapshot_with_authority(
+                    run_id,
+                    run.status.clone(),
+                    &run.flow_state,
+                    next_status.clone(),
+                    &outcome.next_state,
+                    vec![authority_input.clone()],
+                )
+                .await?
+        } else {
+            run_store
+                .cas_flow_state_with_authority(
+                    run_id,
+                    &run.flow_state,
+                    &outcome.next_state,
+                    vec![authority_input.clone()],
+                )
+                .await?
+        };
+        if won {
+            *authority = prepared;
+            return Ok(true);
+        }
+        if attempt < 4 {
+            tracing::debug!(attempt, context, "recovered flow CAS contention, retrying");
+        }
+    }
+    Err(MobError::Internal(format!(
+        "{context}: CAS contention after 5 attempts for recovered run {run_id}"
+    )))
+}
+
+fn apply_recovered_flow_signal(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    signal: crate::machines::mob_machine::MobMachineSignal,
+    context: &'static str,
+) -> Result<(), MobError> {
+    let signal_debug = format!("{signal:?}");
+    let transition = authority.apply_signal(signal).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine recovered flow signal ({context}) rejected {signal_debug}: {error}"
+        ))
+    })?;
+    if transition.from_phase != transition.to_phase {
+        authority.state.lifecycle_phase = transition.to_phase;
+    }
     Ok(())
 }
 
@@ -703,6 +940,7 @@ impl MobBuilder {
         seed_mob_authority_sync_from_flow_runs(
             &mut wiring.dsl_authority,
             storage.runs.clone(),
+            storage.events.clone(),
             &definition.id,
         )
         .await?;

@@ -15987,6 +15987,180 @@ fn assert_flow_authority_log_contains(run: &MobRun, needle: &str) {
     );
 }
 
+fn apply_authority_input_for_test(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    input: crate::machines::mob_machine::MobMachineInput,
+) {
+    let transition = crate::machines::mob_machine::MobMachineMutator::apply(authority, input)
+        .expect("test authority input should be accepted");
+    if transition.from_phase != transition.to_phase {
+        authority.state.lifecycle_phase = transition.to_phase;
+    }
+}
+
+fn authority_backed_root_frame_run(
+    include_loop_seed: bool,
+) -> (MobRun, crate::ids::FrameId, crate::ids::LoopInstanceId) {
+    use crate::ids::{FlowNodeId, LoopId, RunId};
+
+    let definition = sample_definition_with_single_step_flow(500, 8);
+    let config = crate::run::FlowRunConfig::from_definition(FlowId::from("demo"), &definition)
+        .expect("flow config");
+    let run_id = RunId::new();
+    let create_run = MobRun::create_run_seed_input(&run_id, &config).expect("create run seed");
+
+    let loop_node_id = FlowNodeId::from("loop-node");
+    let dependency_node_id = FlowNodeId::from("blocked-on");
+    let loop_id = LoopId::from("retry");
+    let frame_id = crate::ids::FrameId::from(format!("{run_id}-root").as_str());
+    let create_frame = crate::machines::mob_machine::MobMachineInput::CreateFrameSeed {
+        run_id: crate::machines::mob_machine::RunId::from(run_id.to_string()),
+        frame_id: crate::machines::mob_machine::FrameId::from(frame_id.as_str()),
+        frame_scope: crate::machines::mob_machine::FrameScope::Root,
+        loop_instance_id: None,
+        iteration: 0,
+        tracked_nodes: [crate::machines::mob_machine::FlowNodeId::from(
+            loop_node_id.as_str(),
+        )]
+        .into_iter()
+        .collect(),
+        ordered_nodes: vec![crate::machines::mob_machine::FlowNodeId::from(
+            loop_node_id.as_str(),
+        )],
+        node_kind: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::FlowNodeKind::Loop,
+        )]
+        .into_iter()
+        .collect(),
+        node_dependencies: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            vec![crate::machines::mob_machine::FlowNodeId::from(
+                dependency_node_id.as_str(),
+            )],
+        )]
+        .into_iter()
+        .collect(),
+        node_dependency_modes: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::DependencyMode::All,
+        )]
+        .into_iter()
+        .collect(),
+        node_branches: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            None,
+        )]
+        .into_iter()
+        .collect(),
+        node_step_ids: BTreeMap::new(),
+        node_loop_ids: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::LoopId::from(loop_id.as_str()),
+        )]
+        .into_iter()
+        .collect(),
+        node_status: [(
+            crate::machines::mob_machine::FlowNodeId::from(loop_node_id.as_str()),
+            crate::machines::mob_machine::NodeRunStatus::Pending,
+        )]
+        .into_iter()
+        .collect(),
+        ready_queue: Vec::new(),
+    };
+    let loop_instance_id =
+        crate::ids::LoopInstanceId::from(format!("{frame_id}::{loop_node_id}").as_str());
+    let create_loop = MobRun::create_loop_seed_input_for_start(
+        &loop_instance_id,
+        &frame_id,
+        &loop_node_id,
+        &loop_id,
+        1,
+        3,
+    );
+
+    let mut authority = crate::machines::mob_machine::MobMachineAuthority::new();
+    apply_authority_input_for_test(&mut authority, create_run.clone());
+    apply_authority_input_for_test(&mut authority, create_frame.clone());
+    if include_loop_seed {
+        apply_authority_input_for_test(&mut authority, create_loop.clone());
+    }
+
+    let mut run = MobRun::pending_with_run_id(
+        run_id.clone(),
+        definition.id.clone(),
+        FlowId::from("demo"),
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+            .expect("project flow state"),
+        serde_json::json!({}),
+    );
+    let mut inputs = vec![create_run, create_frame];
+    if include_loop_seed {
+        inputs.push(create_loop);
+    }
+    run.append_flow_authority_inputs(inputs)
+        .expect("append authority inputs");
+    run.frames.insert(
+        frame_id.clone(),
+        crate::run::FrameSnapshot {
+            kernel_state: crate::run::project_flow_frame_authority_state_from_machine(
+                &authority.state,
+                &frame_id,
+            )
+            .expect("project frame state"),
+        },
+    );
+
+    (run, frame_id, loop_instance_id)
+}
+
+fn running_authority_backed_run(definition: &MobDefinition) -> MobRun {
+    use crate::ids::RunId;
+    use crate::run::{
+        MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, apply_mob_machine_flow_run_command,
+        flow_run,
+    };
+
+    let flow_id = FlowId::from("demo");
+    let config = crate::run::FlowRunConfig::from_definition(flow_id.clone(), definition)
+        .expect("flow config");
+    let run_id = RunId::new();
+    let run_flow = MobRun::run_flow_input(&run_id, &config).expect("run flow input");
+    let mut authority = crate::machines::mob_machine::MobMachineAuthority::new();
+    apply_authority_input_for_test(&mut authority, run_flow.clone());
+
+    let mut run = MobRun::pending_with_run_id(
+        run_id.clone(),
+        definition.id.clone(),
+        flow_id,
+        MobRun::flow_state_for_config_with_authority(&run_id, &config, &authority.state)
+            .expect("project admitted flow state"),
+        serde_json::json!({}),
+    );
+    run.append_flow_authority_inputs(vec![run_flow])
+        .expect("append RunFlow authority input");
+
+    let start = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
+    let start_input = start.authority_input(&run_id);
+    apply_authority_input_for_test(&mut authority, start_input.clone());
+    let authority_token =
+        MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&start_input)
+            .expect("start authority token");
+    let outcome = apply_mob_machine_flow_run_command(
+        &run.flow_state,
+        &authority.state,
+        &run_id,
+        start,
+        authority_token,
+    )
+    .expect("project started flow state");
+    run.status = MobRunStatus::Running;
+    run.flow_state = outcome.next_state;
+    run.append_flow_authority_inputs(vec![start_input])
+        .expect("append StartRun authority input");
+    run
+}
+
 #[tokio::test]
 async fn test_flow_frame_store_plan_persists_authority_input_with_projection() {
     use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
@@ -16173,6 +16347,95 @@ async fn test_recovery_rejects_flow_authority_log_projection_divergence() {
         ),
         "unexpected recovery error: {error}"
     );
+}
+
+#[test]
+fn test_recovery_rejects_authority_created_frame_missing_from_projection() {
+    let (mut run, frame_id, _) = authority_backed_root_frame_run(false);
+    run.frames.remove(&frame_id);
+
+    let error = crate::runtime::recovery::reconcile_run_state(&mut run)
+        .expect_err("authority-created frame missing from persisted projections must fail");
+    assert!(
+        matches!(
+            error,
+            crate::runtime::recovery::RestoreIncompatible::FlowAuthorityProjectionMismatch { .. }
+        ),
+        "unexpected recovery error: {error}"
+    );
+}
+
+#[test]
+fn test_recovery_rejects_authority_created_loop_missing_from_projection() {
+    let (mut run, _, loop_instance_id) = authority_backed_root_frame_run(true);
+    assert!(
+        !run.loops.contains_key(&loop_instance_id),
+        "test fixture intentionally omits the authority-created loop projection"
+    );
+
+    let error = crate::runtime::recovery::reconcile_run_state(&mut run)
+        .expect_err("authority-created loop missing from persisted projections must fail");
+    assert!(
+        matches!(
+            error,
+            crate::runtime::recovery::RestoreIncompatible::FlowAuthorityProjectionMismatch { .. }
+        ),
+        "unexpected recovery error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_converges_untracked_active_flow_runs() {
+    let definition = sample_definition_with_single_step_flow(60_000, 8);
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runs = storage.runs.clone();
+    let specs = storage.specs.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition.clone(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.shutdown().await.expect("shutdown actor");
+
+    let active = running_authority_backed_run(&definition);
+    let run_id = active.run_id.clone();
+    runs.create_run(active)
+        .await
+        .expect("persist active run as crash residue");
+
+    let resumed = MobBuilder::for_resume(MobStorage::custom_with_runtime_metadata(
+        events,
+        runs.clone(),
+        specs,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume mob");
+
+    let terminal = wait_for_run_terminal(&resumed, &run_id, Duration::from_secs(2)).await;
+    assert_eq!(
+        terminal.status,
+        MobRunStatus::Canceled,
+        "resume must converge persisted active runs that have no actor trackers"
+    );
+    let machine_state = resumed
+        .query_machine_state()
+        .await
+        .expect("query machine state");
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "recovered active flow must not leave MobMachine active_run_count blocking stop"
+    );
+    resumed
+        .stop()
+        .await
+        .expect("stop should not be blocked by an untracked recovered flow");
 }
 
 #[test]

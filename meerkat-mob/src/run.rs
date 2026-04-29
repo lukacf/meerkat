@@ -3689,6 +3689,22 @@ impl MobRun {
             )));
         }
 
+        let run_key = mob_dsl::RunId::from(self.run_id.to_string());
+        let projected_frame_ids = authority
+            .state
+            .frame_run
+            .iter()
+            .filter(|(_, frame_run_id)| *frame_run_id == &run_key)
+            .map(|(frame_id, _)| project_frame_id(frame_id))
+            .collect::<BTreeSet<_>>();
+        let persisted_frame_ids = self.frames.keys().cloned().collect::<BTreeSet<_>>();
+        if projected_frame_ids != persisted_frame_ids {
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': frame keyset diverged",
+                self.run_id
+            )));
+        }
+
         for (frame_id, snapshot) in &self.frames {
             let projected =
                 project_flow_frame_authority_state_from_machine(&authority.state, frame_id)?;
@@ -3698,6 +3714,28 @@ impl MobRun {
                     self.run_id, frame_id
                 )));
             }
+        }
+
+        let projected_loop_ids = authority
+            .state
+            .loop_phase
+            .keys()
+            .filter(|loop_instance_id| {
+                authority
+                    .state
+                    .loop_parent_frame
+                    .get(*loop_instance_id)
+                    .and_then(|frame_id| authority.state.frame_run.get(frame_id))
+                    == Some(&run_key)
+            })
+            .map(project_loop_instance_id)
+            .collect::<BTreeSet<_>>();
+        let persisted_loop_ids = self.loops.keys().cloned().collect::<BTreeSet<_>>();
+        if projected_loop_ids != persisted_loop_ids {
+            return Err(MobError::Internal(format!(
+                "flow authority log projection mismatch for run '{}': loop keyset diverged",
+                self.run_id
+            )));
         }
 
         for (loop_instance_id, snapshot) in &self.loops {

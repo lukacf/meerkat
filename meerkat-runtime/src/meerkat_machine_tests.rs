@@ -11825,6 +11825,127 @@ async fn legacy_run_fail_terminalizes_through_machine_authority() {
     );
 }
 
+async fn staged_batch_commit_driver(
+    first: Input,
+    second: Input,
+) -> (SharedDriver, RunId, Vec<InputId>) {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let first = match adapter
+        .accept_input(&session_id, first)
+        .await
+        .expect("first input should queue")
+    {
+        AcceptOutcome::Accepted { input_id, .. } => input_id,
+        other => panic!("expected accepted first input, got {other:?}"),
+    };
+    let second = match adapter
+        .accept_input(&session_id, second)
+        .await
+        .expect("second input should queue")
+    {
+        AcceptOutcome::Accepted { input_id, .. } => input_id,
+        other => panic!("expected accepted second input, got {other:?}"),
+    };
+    let staged_ids = vec![first, second];
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("registered session should exist")
+                .driver,
+        )
+    };
+    let run_id = RunId::new();
+    prepare_runtime_loop_batch_start(&driver, run_id.clone(), &staged_ids)
+        .await
+        .expect("batch prepare should stage both inputs");
+    (driver, run_id, staged_ids)
+}
+
+fn batch_receipt(run_id: RunId, contributing_input_ids: Vec<InputId>) -> RunBoundaryReceipt {
+    RunBoundaryReceipt {
+        run_id,
+        boundary: RunApplyBoundary::RunStart,
+        contributing_input_ids,
+        conversation_digest: None,
+        message_count: 0,
+        sequence: 0,
+    }
+}
+
+async fn assert_commit_rejection_preserved_staged_batch(
+    driver: &SharedDriver,
+    run_id: &RunId,
+    staged_ids: &[InputId],
+) {
+    let entry = driver.lock().await;
+    assert_eq!(
+        entry.runtime_state(),
+        RuntimeState::Running,
+        "rejected commit must preserve the active run"
+    );
+    assert_eq!(
+        entry.current_run_id(),
+        Some(run_id.clone()),
+        "rejected commit must preserve the active run id"
+    );
+    for input_id in staged_ids {
+        assert_eq!(
+            entry.input_phase(input_id),
+            Some(crate::input_state::InputLifecycleState::Staged),
+            "rejected commit must leave every contributor staged"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_run_commit_rejects_receipt_run_id_mismatch_before_mutation() {
+    let (driver, run_id, staged_ids) =
+        staged_batch_commit_driver(make_prompt("first"), make_prompt("second")).await;
+
+    let result = commit_runtime_loop_run(
+        &driver,
+        run_id.clone(),
+        staged_ids.clone(),
+        batch_receipt(RunId::new(), staged_ids.clone()),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "receipt for a different run id must reject before commit mutation"
+    );
+    assert_commit_rejection_preserved_staged_batch(&driver, &run_id, &staged_ids).await;
+}
+
+#[tokio::test]
+async fn legacy_run_commit_rejects_reordered_receipt_contributors_before_mutation() {
+    let (driver, run_id, staged_ids) =
+        staged_batch_commit_driver(make_prompt("first"), make_prompt("second")).await;
+    let mut receipt_contributors = staged_ids.clone();
+    receipt_contributors.reverse();
+
+    let result = commit_runtime_loop_run(
+        &driver,
+        run_id.clone(),
+        staged_ids.clone(),
+        batch_receipt(run_id.clone(), receipt_contributors),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "receipt contributors must exactly match consumed input ids"
+    );
+    assert_commit_rejection_preserved_staged_batch(&driver, &run_id, &staged_ids).await;
+}
+
 // ---------------------------------------------------------------
 // A6: Deep invariant region validation via spine snapshot
 // ---------------------------------------------------------------

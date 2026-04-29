@@ -963,13 +963,9 @@ pub(crate) fn machine_validate_run_commit_receipt(
         )));
     }
 
-    let same_contributors = consumed_input_ids.len() == receipt.contributing_input_ids.len()
-        && consumed_input_ids
-            .iter()
-            .all(|input_id| receipt.contributing_input_ids.contains(input_id));
-    if !same_contributors {
+    if consumed_input_ids != receipt.contributing_input_ids.as_slice() {
         return Err(RuntimeDriverError::Internal(format!(
-            "run commit consumed inputs {:?} do not match receipt contributors {:?}",
+            "run commit consumed inputs {:?} do not exactly match receipt contributors {:?}",
             consumed_input_ids, receipt.contributing_input_ids
         )));
     }

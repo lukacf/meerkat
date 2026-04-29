@@ -24,8 +24,7 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
     BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec, BridgeRejectionCause, BridgeReply,
     BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
-    canonicalize_bridge_address, supervisor_bridge_default_protocol_version,
-    supervisor_bridge_protocol_version_supported, supervisor_bridge_supported_protocol_versions,
+    canonicalize_bridge_address, decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -395,14 +394,6 @@ fn sender_matches_bridge_peer(sender: Option<PeerId>, peer: &BridgePeerIdentity)
     sender.is_some_and(|sender| sender == peer.peer_id)
 }
 
-fn unsupported_bridge_protocol_version_message(context: &str, protocol_version: u32) -> String {
-    format!(
-        "{context}: unsupported bridge protocol version {protocol_version} (supported {:?}; default {})",
-        supervisor_bridge_supported_protocol_versions(),
-        supervisor_bridge_default_protocol_version()
-    )
-}
-
 /// Require the caller to be the currently authorized supervisor for the
 /// session. Shared validation gate for all post-bind bridge commands
 /// (`AuthorizeSupervisor` / `RevokeSupervisor` / `DeliverMemberInput` /
@@ -415,15 +406,6 @@ fn require_authorized_supervisor(
     payload: &BridgeSupervisorPayload,
     current: &SupervisorBinding,
 ) -> Result<BridgePeerIdentity, (BridgeRejectionCause, String)> {
-    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
-        return Err((
-            BridgeRejectionCause::UnsupportedProtocolVersion,
-            unsupported_bridge_protocol_version_message(
-                "supervisor bridge request",
-                payload.protocol_version,
-            ),
-        ));
-    }
     let SupervisorBinding::Bound {
         peer_id: current_peer_id,
         epoch: current_epoch,
@@ -576,15 +558,6 @@ fn validate_bind_request(
     sender: Option<PeerId>,
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
 ) -> Result<(TrustedPeerDescriptor, String), (BridgeRejectionCause, String)> {
-    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
-        return Err((
-            BridgeRejectionCause::UnsupportedProtocolVersion,
-            unsupported_bridge_protocol_version_message(
-                "bind member failed",
-                payload.protocol_version,
-            ),
-        ));
-    }
     let expected_bootstrap_token = advertised_bind_bootstrap_token(comms_runtime)?;
     let advertised_address = comms_runtime.advertised_address().ok_or_else(|| {
         (
@@ -733,15 +706,6 @@ fn validate_bind_request_against_state(
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
     current: &SupervisorBinding,
 ) -> Result<BindMemberGate, (BridgeRejectionCause, String)> {
-    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
-        return Err((
-            BridgeRejectionCause::UnsupportedProtocolVersion,
-            unsupported_bridge_protocol_version_message(
-                "bind member failed",
-                payload.protocol_version,
-            ),
-        ));
-    }
     let SupervisorBinding::Bound {
         peer_id: current_peer_id,
         epoch: current_epoch,
@@ -786,15 +750,6 @@ fn validate_authorize_supervisor_request(
     payload: &BridgeSupervisorPayload,
     current: &SupervisorBinding,
 ) -> Result<AuthorizeSupervisorGate, (BridgeRejectionCause, String)> {
-    if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
-        return Err((
-            BridgeRejectionCause::UnsupportedProtocolVersion,
-            unsupported_bridge_protocol_version_message(
-                "authorize supervisor failed",
-                payload.protocol_version,
-            ),
-        ));
-    }
     let supervisor = bridge_peer_identity(&payload.supervisor, "authorize supervisor failed")?;
     if let SupervisorBinding::Bound {
         peer_id: current_peer_id,
@@ -962,13 +917,21 @@ async fn try_handle_supervisor_bridge_command(
         return false;
     }
 
-    let command: BridgeCommand = match serde_json::from_value(params.clone()) {
+    let command: BridgeCommand = match decode_bridge_command(params.clone()) {
         Ok(cmd) => cmd,
         Err(error) => {
+            let cause = match &error {
+                meerkat_contracts::wire::supervisor_bridge::BridgeCommandDecodeError::UnsupportedProtocolVersion(_) => {
+                    BridgeRejectionCause::UnsupportedProtocolVersion
+                }
+                meerkat_contracts::wire::supervisor_bridge::BridgeCommandDecodeError::Invalid(_) => {
+                    BridgeRejectionCause::Unsupported
+                }
+            };
             send_bridge_failure(
                 comms_runtime,
                 candidate,
-                BridgeRejectionCause::Unsupported,
+                cause,
                 format!("invalid bridge command: {error}"),
             )
             .await;
@@ -2432,68 +2395,87 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_bind_request_rejects_protocol_version_mismatch() {
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
-            PEER_ID_RECEIVER,
-            "inproc://receiver",
-            Some("expected-token"),
-        ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
-        let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
-            supervisor: supervisor.clone(),
-            epoch: 0,
-            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1,
-            expected_peer_id: PEER_ID_RECEIVER.to_string(),
-            expected_address: runtime.advertised_address().unwrap(),
-            bootstrap_token: "expected-token".into(),
+    #[tokio::test]
+    async fn bridge_handler_rejects_unsupported_protocol_version_before_bind_validation() {
+        let sent: Arc<tokio::sync::Mutex<Vec<CommsCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(CapturingRuntime {
+            peer_id: PEER_ID_RECEIVER.to_string(),
+            advertised_address: Some("inproc://receiver".to_string()),
+            bootstrap_token: Some("expected-token".to_string()),
+            inbox_notify: Arc::new(tokio::sync::Notify::new()),
+            sent: sent.clone(),
+        });
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let params = json!({
+            "command": "bind_member",
+            "supervisor": {
+                "name": "mob/__mob_supervisor__",
+                "peer_id": PEER_ID_SUPERVISOR,
+                "address": "inproc://mob/__mob_supervisor__",
+                "pubkey": vec![0u8; 32],
+            },
+            "epoch": 0,
+            "protocol_version": 999,
+            "expected_peer_id": PEER_ID_RECEIVER,
+            "expected_address": "inproc://receiver",
+            "bootstrap_token": "expected-token",
+        });
+        let candidate = PeerInputCandidate {
+            interaction: InboxInteraction {
+                id: InteractionId(Uuid::new_v4()),
+                from_route: None,
+                from: PEER_ID_SUPERVISOR.to_string(),
+                content: InteractionContent::Request {
+                    intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
+                    params,
+                },
+                rendered_text: String::new(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+            },
+            class: PeerInputClass::ActionableRequest,
+            auth: Some(meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
+            )),
+            from_peer_id: Some(typed_peer_id(PEER_ID_SUPERVISOR)),
+            lifecycle_peer: None,
+            source_peer_id: None,
         };
 
-        let (cause, error) =
-            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
-                .expect_err("bind should reject unsupported protocol versions");
-        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
         assert!(
-            error.contains("unsupported bridge protocol version"),
-            "bind rejection should explain the protocol mismatch, got: {error}"
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await,
+            "bridge handler must own malformed supervisor bridge commands"
         );
-    }
 
-    #[test]
-    fn validate_bind_request_rejects_explicit_v1_protocol_under_v2() {
-        // Pin the v1→v2 upgrade contract: a v1 payload MUST be rejected by a
-        // v2 runtime at the protocol-version gate, *not* proceed with defaulted
-        // fields. Uses the literal `1` (not `SUPERVISOR_BRIDGE_PROTOCOL_VERSION
-        // - 1`) so that a future v3 bump re-confirms v1 stays rejected.
-        let runtime: Arc<dyn CommsRuntime> = Arc::new(bootstrap_runtime(
-            PEER_ID_RECEIVER,
-            "inproc://receiver",
-            Some("expected-token"),
+        let (result, status) = sent
+            .lock()
+            .await
+            .iter()
+            .find_map(|cmd| match cmd {
+                CommsCommand::PeerResponse { result, status, .. } => {
+                    Some((result.clone(), *status))
+                }
+                _ => None,
+            })
+            .expect("handler must send a typed rejection response");
+        assert!(matches!(
+            status,
+            meerkat_core::interaction::ResponseStatus::Failed
         ));
-        let supervisor = BridgePeerSpec {
-            name: "mob/__mob_supervisor__".to_string(),
-            peer_id: PEER_ID_SUPERVISOR.to_string(),
-            address: "inproc://mob/__mob_supervisor__".to_string(),
-            pubkey: [0u8; 32],
-        };
-        let payload = meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
-            supervisor: supervisor.clone(),
-            epoch: 0,
-            protocol_version: 1,
-            expected_peer_id: PEER_ID_RECEIVER.to_string(),
-            expected_address: runtime.advertised_address().unwrap(),
-            bootstrap_token: "expected-token".into(),
-        };
-
-        let (cause, _error) =
-            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
-                .expect_err("v1 bind must be rejected under v2+");
-        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
+        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        match reply {
+            BridgeReply::Rejected { cause, reason } => {
+                assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
+                assert!(
+                    reason.contains("unsupported supervisor bridge protocol version"),
+                    "rejection should explain the typed version failure, got: {reason}"
+                );
+            }
+            other => unreachable!("expected Rejected reply, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2684,27 +2666,6 @@ mod tests {
         )
         .expect("exact-match retry should be idempotent");
         assert!(matches!(gate, BindMemberGate::IdempotentAck));
-    }
-
-    #[test]
-    fn validate_bind_request_against_state_rejects_protocol_version_mismatch_even_when_bound() {
-        // A stale protocol version cannot coast on idempotent-ack — protocol
-        // version is checked before state to surface clear incompatibility.
-        let current_payload = sample_bind_payload();
-        let state = authorized_state_for(&current_payload);
-        let mut stale = sample_bind_payload();
-        stale.protocol_version = SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1;
-        let (cause, error) = validate_bind_request_against_state(
-            Some(typed_peer_id(&stale.supervisor.peer_id)),
-            &stale,
-            &state,
-        )
-        .expect_err("stale protocol version must be rejected");
-        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
-        assert!(
-            error.contains("unsupported bridge protocol version"),
-            "rejection should explain the protocol mismatch, got: {error}"
-        );
     }
 
     #[tokio::test]
@@ -3171,32 +3132,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_authorize_supervisor_rejects_protocol_version_mismatch() {
-        let payload = BridgeSupervisorPayload {
-            supervisor: BridgePeerSpec {
-                name: "mob/__mob_supervisor__".to_string(),
-                peer_id: PEER_ID_SUPERVISOR.to_string(),
-                address: "inproc://mob/__mob_supervisor__".to_string(),
-                pubkey: [0u8; 32],
-            },
-            epoch: 0,
-            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1,
-        };
-
-        let (cause, error) = validate_authorize_supervisor_request(
-            Some(typed_peer_id(&payload.supervisor.peer_id)),
-            &payload,
-            &SupervisorBinding::Unbound,
-        )
-        .expect_err("authorize should reject unsupported protocol versions");
-        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
-        assert!(
-            error.contains("unsupported bridge protocol version"),
-            "authorize rejection should explain the protocol mismatch, got: {error}"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // 18. Empty bootstrap token must be rejected with a typed cause.
     // -----------------------------------------------------------------------
@@ -3264,71 +3199,6 @@ mod tests {
             error.contains("typed bridge bootstrap token"),
             "runtime should explain that the typed token field is required, got: {error}"
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // 19. Protocol v1 downgrade: every command's handler must reject a v1
-    //     payload at the version check, never proceed with defaulted fields.
-    // -----------------------------------------------------------------------
-    //
-    // `validate_bind_request_rejects_explicit_v1_protocol_under_v2` already
-    // covers the bind path. Extend the contract to AuthorizeSupervisor
-    // (gating rotation) and the broader require_authorized_supervisor flow
-    // that backs revoke/observe/interrupt/retire/destroy/deliver and
-    // wire/unwire.
-
-    #[test]
-    fn validate_authorize_supervisor_rejects_explicit_v1_protocol_under_v2() {
-        let payload = BridgeSupervisorPayload {
-            supervisor: BridgePeerSpec {
-                name: "mob/__mob_supervisor__".to_string(),
-                peer_id: PEER_ID_SUPERVISOR.to_string(),
-                address: "inproc://mob/__mob_supervisor__".to_string(),
-                pubkey: [0u8; 32],
-            },
-            epoch: 0,
-            protocol_version: 1,
-        };
-        let (cause, _error) = validate_authorize_supervisor_request(
-            Some(typed_peer_id(&payload.supervisor.peer_id)),
-            &payload,
-            &SupervisorBinding::Unbound,
-        )
-        .expect_err("v1 authorize must be rejected under v2+");
-        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
-    }
-
-    #[test]
-    fn require_authorized_supervisor_rejects_explicit_v1_protocol_under_v2() {
-        // Back-stops every command that calls `require_authorized_supervisor`
-        // (revoke/observe/interrupt/retire/destroy/deliver/wire/unwire). A v1
-        // payload must not coast on idempotent-ack or sender-match.
-        let supervisor = TrustedPeerDescriptor::test_only_unsigned_typed(
-            "mob/__mob_supervisor__",
-            PeerId::new(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .expect("valid supervisor spec");
-        let state = SupervisorBinding::Bound {
-            name: supervisor.name.to_string(),
-            peer_id: supervisor.peer_id.as_str(),
-            address: supervisor.address.to_string(),
-            epoch: 3,
-        };
-        let payload = BridgeSupervisorPayload {
-            supervisor: BridgePeerSpec {
-                name: supervisor.name.to_string(),
-                peer_id: supervisor.peer_id.as_str(),
-                address: supervisor.address.to_string(),
-                pubkey: [0u8; 32],
-            },
-            epoch: 3,
-            protocol_version: 1,
-        };
-        let (cause, _error) =
-            require_authorized_supervisor(Some(supervisor.peer_id), &payload, &state)
-                .expect_err("v1 authorized-supervisor payload must be rejected");
-        assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
     }
 
     fn bridge_candidate(sender: &str, command: &BridgeCommand) -> PeerInputCandidate {

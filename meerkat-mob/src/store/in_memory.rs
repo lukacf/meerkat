@@ -1234,7 +1234,8 @@ mod tests {
     use futures::future::join_all;
     use std::collections::BTreeMap;
 
-    fn default_bridge_protocol_version() -> u32 {
+    fn default_bridge_protocol_version()
+    -> meerkat_contracts::wire::supervisor_bridge::BridgeProtocolVersion {
         meerkat_contracts::wire::supervisor_bridge::supervisor_bridge_default_protocol_version()
     }
 

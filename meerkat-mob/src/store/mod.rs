@@ -31,7 +31,7 @@ use crate::run::{
 use crate::tokio;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
+use meerkat_contracts::wire::supervisor_bridge::{BridgeBootstrapToken, BridgeProtocolVersion};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -122,12 +122,12 @@ pub struct SupervisorAuthorityRecord {
     /// Monotonic supervisor epoch for stale-authority rejection.
     pub epoch: u64,
     /// Protocol version carried on supervisor commands.
-    pub protocol_version: u32,
+    pub protocol_version: BridgeProtocolVersion,
 }
 
 impl SupervisorAuthorityRecord {
     /// Mint a fresh supervisor authority record.
-    pub fn generate(protocol_version: u32) -> Self {
+    pub fn generate(protocol_version: BridgeProtocolVersion) -> Self {
         let keypair = meerkat_comms::Keypair::generate();
         Self {
             secret_key: keypair.secret_bytes(),

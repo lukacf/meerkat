@@ -594,6 +594,58 @@ fn bridge_code_does_not_reinterpret_response_status() {
 }
 
 #[test]
+fn supervisor_bridge_protocol_version_checks_stay_in_typed_owner() {
+    let root = repo_root();
+    let owner = "meerkat-contracts/src/wire/supervisor_bridge.rs";
+    let source_roots = [
+        root.join("meerkat-contracts/src"),
+        root.join("meerkat-mob/src"),
+        root.join("meerkat-runtime/src"),
+    ];
+    let mut files = Vec::new();
+    for source_root in source_roots {
+        walk_files(&source_root, &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for path in files {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let rel = relative(&root, &path);
+        if rel == owner || rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+            continue;
+        }
+        let text = read(&path);
+        let mut in_test = false;
+        for (idx, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("mod tests") {
+                in_test = true;
+            }
+            if in_test || trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            let raw_field = line.contains("protocol_version: u32");
+            let raw_supported_check =
+                line.contains("supervisor_bridge_protocol_version_supported(");
+            let raw_ordering_check = line.contains("protocol_version <")
+                || line.contains("protocol_version >")
+                || line.contains("protocol_version ==")
+                || line.contains("protocol_version !=");
+            if raw_field || raw_supported_check || raw_ordering_check {
+                violations.push(format!("{rel}:{}: {line}", idx + 1));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "supervisor bridge protocol version checks must route through BridgeProtocolVersion in {owner}: {violations:?}"
+    );
+}
+
+#[test]
 fn generated_header_truthfulness_is_clean() {
     let root = repo_root();
     let emit_paths = xtask::audit_generated_headers::live_emit_paths();

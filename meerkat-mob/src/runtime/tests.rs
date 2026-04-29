@@ -2916,7 +2916,7 @@ struct LiveExternalPeerHarness {
     binding: crate::RuntimeBinding,
     runtime: Arc<meerkat_comms::CommsRuntime>,
     bind_count: Arc<std::sync::atomic::AtomicUsize>,
-    bind_protocol_versions: Arc<RwLock<Vec<u32>>>,
+    bind_protocol_versions: Arc<RwLock<Vec<super::bridge_protocol::BridgeProtocolVersion>>>,
     delivered_inputs: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
@@ -2960,7 +2960,7 @@ impl LiveExternalPeerHarness {
         self.bind_count.load(Ordering::Relaxed)
     }
 
-    async fn bind_protocol_versions(&self) -> Vec<u32> {
+    async fn bind_protocol_versions(&self) -> Vec<super::bridge_protocol::BridgeProtocolVersion> {
         self.bind_protocol_versions.read().await.clone()
     }
 
@@ -3064,22 +3064,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         .write()
                                         .await
                                         .push(payload.protocol_version);
-                                    if !super::bridge_protocol::supervisor_bridge_protocol_version_supported(
-                                        payload.protocol_version,
-                                    ) {
-                                        serde_json::to_value(
-                                            super::bridge_protocol::BridgeReply::Rejected {
-                                                cause:
-                                                    super::bridge_protocol::BridgeRejectionCause::UnsupportedProtocolVersion,
-                                                reason: format!(
-                                                    "unsupported bridge protocol version {} (supported {:?})",
-                                                    payload.protocol_version,
-                                                    super::bridge_protocol::supervisor_bridge_supported_protocol_versions()
-                                                ),
-                                            },
-                                        )
-                                        .expect("unsupported protocol rejection")
-                                    } else if responder_fail_next_bind.swap(false, Ordering::Relaxed) {
+                                    if responder_fail_next_bind.swap(false, Ordering::Relaxed) {
                                         serde_json::to_value(
                                             super::bridge_protocol::BridgeReply::Rejected {
                                                 cause: super::bridge_protocol::BridgeRejectionCause::Internal,
@@ -4683,7 +4668,7 @@ async fn test_mob_builder_persists_supervisor_runtime_metadata_on_create() {
 }
 
 #[tokio::test]
-async fn test_mob_resume_upgrades_legacy_supervisor_protocol_metadata() {
+async fn test_mob_resume_accepts_typed_supervisor_protocol_metadata() {
     let definition = sample_definition();
     let mob_id = definition.id.clone();
     let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
@@ -4699,11 +4684,13 @@ async fn test_mob_resume_upgrades_legacy_supervisor_protocol_metadata() {
         .expect("append mob created");
     let runtime_metadata: Arc<dyn MobRuntimeMetadataStore> =
         Arc::new(InMemoryMobRuntimeMetadataStore::new());
-    let legacy = SupervisorAuthorityRecord::generate(1);
+    let persisted = SupervisorAuthorityRecord::generate(
+        super::bridge_protocol::supervisor_bridge_default_protocol_version(),
+    );
     runtime_metadata
-        .put_supervisor_authority(&mob_id, &legacy)
+        .put_supervisor_authority(&mob_id, &persisted)
         .await
-        .expect("persist legacy supervisor metadata");
+        .expect("persist supervisor metadata");
 
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
@@ -4714,72 +4701,44 @@ async fn test_mob_resume_upgrades_legacy_supervisor_protocol_metadata() {
     .with_session_service(service)
     .resume()
     .await
-    .expect("legacy supervisor protocol metadata should be upgraded on resume");
+    .expect("typed supervisor protocol metadata should be accepted on resume");
 
-    let upgraded = runtime_metadata
+    let loaded = runtime_metadata
         .load_supervisor_authority(&mob_id)
         .await
-        .expect("load upgraded authority")
+        .expect("load authority")
         .expect("authority should remain present");
     assert_eq!(
-        upgraded.protocol_version,
+        loaded.protocol_version,
         super::bridge_protocol::supervisor_bridge_default_protocol_version(),
-        "resume should rewrite legacy supervisor protocol metadata to the canonical default"
+        "resume should preserve the canonical bridge protocol version"
     );
     assert_eq!(
-        upgraded.public_peer_id, legacy.public_peer_id,
-        "protocol metadata upgrade must preserve supervisor identity"
+        loaded.public_peer_id, persisted.public_peer_id,
+        "resume must preserve supervisor identity"
     );
     assert_eq!(
-        upgraded.epoch, legacy.epoch,
-        "protocol metadata upgrade must preserve authority epoch"
+        loaded.epoch, persisted.epoch,
+        "resume must preserve authority epoch"
     );
 }
 
-#[tokio::test]
-async fn test_mob_resume_rejects_newer_unsupported_supervisor_protocol_metadata() {
-    let definition = sample_definition();
-    let mob_id = definition.id.clone();
-    let events: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
-    events
-        .append(NewMobEvent {
-            mob_id: mob_id.clone(),
-            timestamp: None,
-            kind: MobEventKind::MobCreated {
-                definition: Box::new(definition),
-            },
-        })
-        .await
-        .expect("append mob created");
-    let runtime_metadata: Arc<dyn MobRuntimeMetadataStore> =
-        Arc::new(InMemoryMobRuntimeMetadataStore::new());
-    let unsupported = SupervisorAuthorityRecord::generate(
-        super::bridge_protocol::supervisor_bridge_default_protocol_version() + 1,
+#[test]
+fn test_supervisor_authority_record_rejects_unsupported_protocol_metadata_at_decode() {
+    let record = SupervisorAuthorityRecord::generate(
+        super::bridge_protocol::supervisor_bridge_default_protocol_version(),
     );
-    runtime_metadata
-        .put_supervisor_authority(&mob_id, &unsupported)
-        .await
-        .expect("persist unsupported supervisor metadata");
+    let mut raw = serde_json::to_value(record).expect("serialize supervisor authority");
+    raw["protocol_version"] = serde_json::json!(999);
 
-    let service = Arc::new(MockSessionService::new());
-    let _ = service.enable_runtime_adapter();
-    let result = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
-        events,
-        runtime_metadata,
-    ))
-    .with_session_service(service)
-    .resume()
-    .await;
-    let error = match result {
-        Ok(_) => panic!("newer unsupported supervisor protocol metadata should fail clearly"),
-        Err(error) => error,
-    };
+    let error = serde_json::from_value::<SupervisorAuthorityRecord>(raw)
+        .expect_err("unsupported persisted supervisor protocol metadata must fail at decode");
 
     assert!(
         error
             .to_string()
             .contains("unsupported supervisor bridge protocol version"),
-        "resume error should report protocol incompatibility, got: {error}"
+        "decode error should report protocol incompatibility, got: {error}"
     );
 }
 

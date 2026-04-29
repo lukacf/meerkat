@@ -1024,16 +1024,7 @@ impl MobBuilder {
                     .put_supervisor_authority_if_absent(&mob_id, &record)
                     .await?;
             }
-            Some(record)
-                if super::bridge_protocol::supervisor_bridge_protocol_version_supported(
-                    record.protocol_version,
-                ) => {}
-            Some(mut record) if record.protocol_version < default_protocol_version => {
-                record.protocol_version = default_protocol_version;
-                runtime_metadata
-                    .put_supervisor_authority(&mob_id, &record)
-                    .await?;
-            }
+            Some(record) if record.protocol_version.is_supported() => {}
             Some(record) => {
                 return Err(MobError::WiringError(format!(
                     "unsupported supervisor bridge protocol version {} (supported {:?}; default {})",

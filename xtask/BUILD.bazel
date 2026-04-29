@@ -193,6 +193,8 @@ rust_test(
         "//meerkat-rest:package_runfiles",
         "//meerkat-rpc:cargo_manifest",
         "//meerkat-rpc:package_runfiles",
+        "//meerkat-runtime:cargo_manifest",
+        "//meerkat-runtime:package_runfiles",
         "//meerkat-session:cargo_manifest",
         "//meerkat-session:package_runfiles",
         "//meerkat-tools:cargo_manifest",

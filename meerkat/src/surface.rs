@@ -23,7 +23,7 @@ pub use meerkat_core::{
 };
 pub use request_execution::{
     CancelActionInstallOutcome, CancelOutcome, CompleteOutcome, PreparedSurfaceSession,
-    RequestAlreadyExists, RequestAsyncAction, RequestContext, RequestTerminal,
+    PublishOutcome, RequestAlreadyExists, RequestAsyncAction, RequestContext, RequestTerminal,
     RequestTransitionError, SurfaceRequestExecution, SurfaceRequestExecutor, SurfaceRequestPhase,
     SurfaceRequestSemantics, SurfaceRequestTerminalPolicy, noop_request_action,
     prepare_surface_session, request_action,

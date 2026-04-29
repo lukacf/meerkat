@@ -43,9 +43,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    RequestAlreadyExists, RequestContext, RequestTerminal, SurfaceRequestExecutor,
-    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
-    noop_request_action, request_action,
+    CompleteOutcome, PublishOutcome, RequestAlreadyExists, RequestContext, RequestTerminal,
+    SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
+    build_recovered_session, noop_request_action, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -2647,33 +2647,33 @@ fn extract_request_context(
 }
 
 /// Drive a `RequestTerminal` outcome through the canonical surface request
-/// executor: `Publish(val)` commits the tracked request (late cancel is
-/// rejected as a typed terminal transition), `RespondWithoutPublish(val)`
-/// routes through `finish_unpublished` so any late cancel that arrived first
-/// still supersedes the response.
-async fn with_request_lifecycle<T>(
+/// executor: `Publish(val)` must claim committed publication before the
+/// response is returned; if cancel arrived first, the cancellation response
+/// wins. `RespondWithoutPublish(val)` routes through `finish_unpublished` so
+/// any late cancel that arrived first still supersedes the response.
+async fn with_request_lifecycle(
     executor: &SurfaceRequestExecutor,
     ctx: Option<RequestContext>,
-    outcome: RequestTerminal<T>,
-) -> T {
+    outcome: RequestTerminal<Result<Json<SessionResponse>, ApiError>>,
+) -> Result<Json<SessionResponse>, ApiError> {
     match ctx {
         Some(ctx) => match outcome {
-            RequestTerminal::Publish(val) => {
-                // `publish_and_complete` rejects terminal phases (e.g. late
-                // cancel landed first). REST handlers do not spawn long-running
-                // tasks after announcing `Publish`, so the only failures here
-                // come from shutdown racing, where we still return the value.
-                let _ = executor.publish_and_complete(ctx.key());
-                val
-            }
+            RequestTerminal::Publish(val) => match executor.publish_or_cancelled(ctx.key()).await {
+                Ok(PublishOutcome::Published) => val,
+                Ok(PublishOutcome::CancelledBeforePublish) => {
+                    Err(ApiError::RequestCancelled { details: None })
+                }
+                Err(err) => Err(ApiError::Internal(format!(
+                    "request lifecycle rejected publish response: {err}"
+                ))),
+            },
             RequestTerminal::RespondWithoutPublish(val) => {
-                // `finish_unpublished`'s `CompleteOutcome` distinguishes
-                // Completed vs SupersededByCancel on other surfaces. REST
-                // decides this branch inline before announcing anything, so
-                // the outcome is always Completed (cleanup runs) or the
-                // entry was already removed by a parallel shutdown path.
-                let _ = executor.finish_unpublished(ctx.key()).await;
-                val
+                match executor.finish_unpublished(ctx.key()).await {
+                    CompleteOutcome::Completed => val,
+                    CompleteOutcome::SupersededByCancel => {
+                        Err(ApiError::RequestCancelled { details: None })
+                    }
+                }
             }
         },
         None => match outcome {
@@ -6786,6 +6786,84 @@ mod tests {
                 .unwrap();
 
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_publish_terminal_after_cancel_returns_request_cancelled() {
+            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+            let ctx = executor.begin_request("rest-cancel-before-publish", noop_request_action());
+
+            assert_eq!(
+                executor.cancel_request(ctx.key()).await,
+                meerkat::surface::CancelOutcome::Cancelled
+            );
+
+            let result = with_request_lifecycle(
+                &executor,
+                Some(ctx),
+                RequestTerminal::Publish(Err(ApiError::Internal(
+                    "publish response must not leak after cancel".to_string(),
+                ))),
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(ApiError::RequestCancelled { details: None })
+            ));
+            assert_eq!(executor.phase("rest-cancel-before-publish"), None);
+        }
+
+        #[derive(Clone)]
+        struct RequestLifecycleProbeState {
+            executor: SurfaceRequestExecutor,
+        }
+
+        async fn publish_after_cancel_probe(
+            State(state): State<RequestLifecycleProbeState>,
+            headers: axum::http::HeaderMap,
+        ) -> Result<Json<SessionResponse>, ApiError> {
+            let ctx = extract_request_context(&headers, &state.executor)?;
+            if let Some(ctx) = ctx.as_ref() {
+                let _ = state.executor.cancel_request(ctx.key()).await;
+            }
+            with_request_lifecycle(
+                &state.executor,
+                ctx,
+                RequestTerminal::Publish(Err(ApiError::Internal(
+                    "publish response must not cross HTTP after cancel".to_string(),
+                ))),
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn test_publish_terminal_after_cancel_returns_http_499() {
+            let app = Router::new()
+                .route("/probe", post(publish_after_cancel_probe))
+                .with_state(RequestLifecycleProbeState {
+                    executor: SurfaceRequestExecutor::new(std::time::Duration::from_millis(1)),
+                });
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/probe")
+                        .header("x-meerkat-request-id", "rest-http-cancel-before-publish")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::from_u16(499).expect("499 should be a valid status")
+            );
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["code"], "REQUEST_CANCELLED");
         }
     }
 

@@ -237,6 +237,17 @@ pub enum CompleteOutcome {
     SupersededByCancel,
 }
 
+/// Outcome of claiming committed publication authority before a response is
+/// emitted to a surface client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// Pending → Published; the surface may emit the task's publish response.
+    Published,
+    /// Cancel landed first; the surface must emit its cancellation response and
+    /// must not leak the task's publish response.
+    CancelledBeforePublish,
+}
+
 struct RequestEntry {
     phase: Mutex<SurfaceRequestPhase>,
     cancel_action: Mutex<RequestAsyncAction>,
@@ -552,6 +563,27 @@ impl SurfaceRequestExecutor {
         self.lifecycle.publish_and_complete(key)
     }
 
+    /// Committed-terminal publication gate.
+    ///
+    /// Surfaces call this before writing or returning a publish response. If a
+    /// cancel already won, unpublished cleanup is still run and the caller gets
+    /// a typed cancellation outcome instead of a publish response.
+    pub async fn publish_or_cancelled(
+        &self,
+        key: &str,
+    ) -> Result<PublishOutcome, RequestTransitionError> {
+        match self.publish_and_complete(key) {
+            Ok(()) => Ok(PublishOutcome::Published),
+            Err(RequestTransitionError::AlreadyTerminal {
+                current: SurfaceRequestPhase::Cancelled,
+            }) => {
+                let _ = self.finish_unpublished(key).await;
+                Ok(PublishOutcome::CancelledBeforePublish)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// Uncommitted-terminal transition.
     ///
     /// * `Pending → Completed`: runs the installed cleanup (if any) and
@@ -818,6 +850,39 @@ mod tests {
                 current: SurfaceRequestPhase::Cancelled
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn publish_or_cancelled_after_cancel_runs_cleanup_and_reports_cancelled() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let context = executor.begin_request("cancel-then-publish-gate", noop_request_action());
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        assert_eq!(
+            executor.cancel_request("cancel-then-publish-gate").await,
+            CancelOutcome::Cancelled
+        );
+
+        let outcome = executor
+            .publish_or_cancelled("cancel-then-publish-gate")
+            .await
+            .expect("cancelled publish gate should be a typed outcome");
+        assert_eq!(outcome, PublishOutcome::CancelledBeforePublish);
+        assert_eq!(
+            cleanup_count.load(Ordering::SeqCst),
+            1,
+            "cleanup must still run when publish loses to cancel"
+        );
+        assert_eq!(executor.phase("cancel-then-publish-gate"), None);
     }
 
     #[tokio::test]

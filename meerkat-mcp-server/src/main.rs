@@ -2,8 +2,8 @@
 
 use clap::{Parser, ValueEnum};
 use meerkat::surface::{
-    RequestTerminal, SurfaceRequestExecutor, SurfaceRequestSemantics, noop_request_action,
-    spawn_stdio_json_writer,
+    CompleteOutcome, PublishOutcome, RequestTerminal, StdioJsonWriter, SurfaceRequestExecutor,
+    SurfaceRequestSemantics, noop_request_action, spawn_stdio_json_writer,
 };
 use meerkat_contracts::ErrorCode;
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
@@ -287,35 +287,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Some(completion) = completion_rx.recv() => {
-                // Lifecycle truth lives in the executor's typed state machine:
-                // Publish always commits; RespondWithoutPublish yields to a
-                // prior cancel via CompleteOutcome. No shell-side rewriting.
-                match completion.terminal {
-                    RequestTerminal::Publish(response) => {
-                        if writer.send(response).await.is_err() {
-                            let _ = request_executor
-                                .finish_unpublished(&completion.request_key)
-                                .await;
-                            break Ok(());
-                        }
-                        let _ = request_executor
-                            .publish_and_complete(&completion.request_key);
-                    }
-                    RequestTerminal::RespondWithoutPublish(response) => {
-                        let cancel_id = response.get("id").cloned();
-                        let outcome = request_executor
-                            .finish_unpublished(&completion.request_key)
-                            .await;
-                        let to_write = match outcome {
-                            meerkat::surface::CompleteOutcome::Completed => response,
-                            meerkat::surface::CompleteOutcome::SupersededByCancel => {
-                                request_cancelled_response(cancel_id)
-                            }
-                        };
-                        if writer.send(to_write).await.is_err() {
-                            break Ok(());
-                        }
-                    }
+                if !write_tool_completion(&writer, &request_executor, completion).await {
+                    break Ok(());
                 }
             }
             writer_result = &mut writer_task => {
@@ -346,6 +319,48 @@ fn request_cancel_target(params: Option<&Value>) -> Option<String> {
     Some(request_key(request_id))
 }
 
+async fn write_tool_completion(
+    writer: &StdioJsonWriter,
+    request_executor: &SurfaceRequestExecutor,
+    completion: ToolCompletion,
+) -> bool {
+    // Lifecycle truth lives in the executor's typed state machine:
+    // publish responses must claim Published before transport emission, while
+    // uncommitted responses yield to a prior cancel via CompleteOutcome.
+    let to_write = match completion.terminal {
+        RequestTerminal::Publish(response) => {
+            let cancel_id = response.get("id").cloned();
+            match request_executor
+                .publish_or_cancelled(&completion.request_key)
+                .await
+            {
+                Ok(PublishOutcome::Published) => response,
+                Ok(PublishOutcome::CancelledBeforePublish) => request_cancelled_response(cancel_id),
+                Err(err) => {
+                    tracing::warn!(
+                        request_key = %completion.request_key,
+                        error = %err,
+                        "request lifecycle rejected publish response"
+                    );
+                    request_lifecycle_error_response(cancel_id, err)
+                }
+            }
+        }
+        RequestTerminal::RespondWithoutPublish(response) => {
+            let cancel_id = response.get("id").cloned();
+            let outcome = request_executor
+                .finish_unpublished(&completion.request_key)
+                .await;
+            match outcome {
+                CompleteOutcome::Completed => response,
+                CompleteOutcome::SupersededByCancel => request_cancelled_response(cancel_id),
+            }
+        }
+    };
+
+    writer.send(to_write).await.is_ok()
+}
+
 fn request_cancelled_response(id: Option<Value>) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -353,6 +368,20 @@ fn request_cancelled_response(id: Option<Value>) -> Value {
         "error": {
             "code": ErrorCode::RequestCancelled.jsonrpc_code(),
             "message": "request cancelled before response publish"
+        }
+    })
+}
+
+fn request_lifecycle_error_response(
+    id: Option<Value>,
+    err: meerkat::surface::RequestTransitionError,
+) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id.unwrap_or(Value::Null),
+        "error": {
+            "code": -32603,
+            "message": format!("request lifecycle rejected publish response: {err}")
         }
     })
 }
@@ -375,5 +404,58 @@ mod tests {
             tool_call_request_semantics("meerkat_sessions").classify_terminal(true, ()),
             RequestTerminal::RespondWithoutPublish(())
         ));
+    }
+
+    #[tokio::test]
+    async fn publish_completion_after_cancel_writes_cancel_response() {
+        use tokio::io::AsyncReadExt;
+
+        let (transport, mut output) = tokio::io::duplex(4096);
+        let (writer, writer_task) = spawn_stdio_json_writer(transport, 8);
+        let request_executor = SurfaceRequestExecutor::new(tokio::time::Duration::from_millis(1));
+        let request_id = json!(42);
+        let request_key = request_key(&request_id);
+        let _ctx = request_executor.begin_request(request_key.clone(), noop_request_action());
+
+        assert_eq!(
+            request_executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::Cancelled
+        );
+
+        assert!(
+            write_tool_completion(
+                &writer,
+                &request_executor,
+                ToolCompletion {
+                    request_key: request_key.clone(),
+                    terminal: RequestTerminal::Publish(json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {"ok": true}
+                    })),
+                },
+            )
+            .await
+        );
+
+        assert_eq!(request_executor.phase(&request_key), None);
+        drop(writer);
+        writer_task
+            .await
+            .expect("writer task should join")
+            .expect("writer task should succeed");
+
+        let mut buf = String::new();
+        output
+            .read_to_string(&mut buf)
+            .await
+            .expect("output should read");
+        let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
+        assert_eq!(response["id"], 42);
+        assert_eq!(
+            response["error"]["code"],
+            ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        assert!(response.get("result").is_none());
     }
 }

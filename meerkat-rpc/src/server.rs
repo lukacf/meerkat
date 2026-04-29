@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use meerkat::surface::{
-    RequestTerminal, SurfaceRequestExecutor, SurfaceRequestSemantics, noop_request_action,
+    CompleteOutcome, PublishOutcome, RequestTerminal, SurfaceRequestExecutor,
+    SurfaceRequestSemantics, noop_request_action,
 };
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -294,47 +295,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                 }
 
                 Some(response) = self.long_running_rx.recv() => {
-                    // Lifecycle truth lives in the executor's typed state
-                    // machine: Publish always commits; RespondWithoutPublish
-                    // yields to a prior cancel via CompleteOutcome.
-                    match response.terminal {
-                        RequestTerminal::Publish(rpc_response) => {
-                            // Committed work is observable; write first, then
-                            // record publish. publish_and_complete rejects
-                            // post-terminal transitions with a typed error,
-                            // which here can only mean shutdown raced ahead.
-                            if self.transport.write_response(&rpc_response).await.is_err() {
-                                let _ = self
-                                    .request_executor
-                                    .finish_unpublished(&response.request_key)
-                                    .await;
-                                break;
-                            }
-                            let _ = self
-                                .request_executor
-                                .publish_and_complete(&response.request_key);
-                        }
-                        RequestTerminal::RespondWithoutPublish(rpc_response) => {
-                            // Uncommitted terminal: the executor tells us
-                            // whether cancel landed first. No shell-side
-                            // rewriting — a SupersededByCancel outcome means
-                            // we emit the cancel response the caller
-                            // requested, not the task's stale payload.
-                            let cancel_id = rpc_response.id.clone();
-                            let outcome = self
-                                .request_executor
-                                .finish_unpublished(&response.request_key)
-                                .await;
-                            let to_write = match outcome {
-                                meerkat::surface::CompleteOutcome::Completed => rpc_response,
-                                meerkat::surface::CompleteOutcome::SupersededByCancel => {
-                                    request_cancelled_response(cancel_id)
-                                }
-                            };
-                            if self.transport.write_response(&to_write).await.is_err() {
-                                break;
-                            }
-                        }
+                    if !self.write_long_running_response(response).await {
+                        break;
                     }
                 }
 
@@ -398,6 +360,52 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             }
         });
         Some((request_key, handle))
+    }
+
+    async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
+        // Lifecycle truth lives in the executor's typed state machine:
+        // publish responses must claim Published before transport emission,
+        // while uncommitted responses yield to a prior cancel via CompleteOutcome.
+        let to_write = match response.terminal {
+            RequestTerminal::Publish(rpc_response) => {
+                let cancel_id = rpc_response.id.clone();
+                match self
+                    .request_executor
+                    .publish_or_cancelled(&response.request_key)
+                    .await
+                {
+                    Ok(PublishOutcome::Published) => rpc_response,
+                    Ok(PublishOutcome::CancelledBeforePublish) => {
+                        request_cancelled_response(cancel_id)
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            request_key = %response.request_key,
+                            error = %err,
+                            "request lifecycle rejected publish response"
+                        );
+                        request_lifecycle_error_response(cancel_id, err)
+                    }
+                }
+            }
+            RequestTerminal::RespondWithoutPublish(rpc_response) => {
+                // Uncommitted terminal: the executor tells us whether cancel
+                // landed first. No shell-side rewriting — SupersededByCancel
+                // means we emit the cancel response the caller requested, not
+                // the task's stale payload.
+                let cancel_id = rpc_response.id.clone();
+                let outcome = self
+                    .request_executor
+                    .finish_unpublished(&response.request_key)
+                    .await;
+                match outcome {
+                    CompleteOutcome::Completed => rpc_response,
+                    CompleteOutcome::SupersededByCancel => request_cancelled_response(cancel_id),
+                }
+            }
+        };
+
+        self.transport.write_response(&to_write).await.is_ok()
     }
 
     /// Handle `tools/register` — register callback tool definitions.
@@ -469,6 +477,17 @@ fn request_cancelled_response(id: Option<RpcId>) -> RpcResponse {
         id,
         crate::error::REQUEST_CANCELLED,
         "request cancelled before response publish",
+    )
+}
+
+fn request_lifecycle_error_response(
+    id: Option<RpcId>,
+    err: meerkat::surface::RequestTransitionError,
+) -> RpcResponse {
+    RpcResponse::error(
+        id,
+        crate::error::INTERNAL_ERROR,
+        format!("request lifecycle rejected publish response: {err}"),
     )
 }
 
@@ -677,6 +696,64 @@ mod tests {
             classify_long_running_response(&response, semantics),
             RequestTerminal::Publish(_)
         ));
+    }
+
+    #[derive(Clone)]
+    struct SharedBufferWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[async_trait]
+    impl TransportWriter for SharedBufferWriter {
+        async fn write_message(&mut self, bytes: Vec<u8>) -> Result<(), TransportError> {
+            let mut output = self
+                .0
+                .lock()
+                .map_err(|_| std::io::Error::other("test writer mutex poisoned"))?;
+            output.extend(bytes);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_completion_after_cancel_writes_cancel_response() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(Arc::clone(&output));
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let request_id = RpcId::Num(42);
+        let request_key = request_key(&request_id);
+        let _ctx = server
+            .request_executor
+            .begin_request(request_key.clone(), noop_request_action());
+
+        assert_eq!(
+            server.request_executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::Cancelled
+        );
+
+        let publish_response =
+            RpcResponse::success(Some(request_id.clone()), serde_json::json!({"ok": true}));
+        assert!(
+            server
+                .write_long_running_response(LongRunningResponse {
+                    request_key: request_key.clone(),
+                    terminal: RequestTerminal::Publish(publish_response),
+                })
+                .await
+        );
+
+        assert_eq!(server.request_executor.phase(&request_key), None);
+        let bytes = output.lock().expect("output lock").clone();
+        let line = String::from_utf8(bytes).expect("output should be utf8");
+        let response: RpcResponse =
+            serde_json::from_str(line.trim()).expect("response should parse");
+        assert_eq!(response.id, Some(request_id));
+        assert!(response.result.is_none());
+        assert_eq!(
+            response.error.expect("expected cancel error").code,
+            crate::error::REQUEST_CANCELLED
+        );
     }
 
     // -----------------------------------------------------------------------

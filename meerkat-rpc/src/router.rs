@@ -5995,10 +5995,10 @@ mod tests {
         assert_eq!(result["status"]["state"], "opening");
     }
 
-    /// Wave-c C-9c R4 catching assertion: after the reconnect overlay
+    /// Wave-c C-9c R4 catching assertion: after the reconnect retry machine
     /// projects its progress into DSL state via
     /// `project_realtime_reconnect_progress`, a `realtime/status` RPC
-    /// response must surface the overlay-tracked `attempt_count` —
+    /// response must surface the retry-machine-tracked `attempt_count` —
     /// not the pre-R4 hard-coded `0`/`1` default.
     #[tokio::test]
     async fn realtime_status_surfaces_real_reconnect_attempt_count_not_hard_coded_default() {

@@ -3433,7 +3433,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         66 => Some(&Spec {
             id: Some(66),
             lane: Lane::Live,
-            title: "Realtime reconnect overlay exhausts within bounded budget",
+            title: "Realtime reconnect retry machine exhausts within bounded budget",
             timeout_secs: 300,
             required_env: &[],
             required_bins: &["cargo"],
@@ -3447,7 +3447,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                     "test",
                     "-p",
                     "meerkat-rpc",
-                    "reconnect_overlay_exhausts_after_attempt_budget",
+                    "reconnect_retry_exhausts_after_attempt_budget",
                     "--lib",
                     "--",
                     "--nocapture",

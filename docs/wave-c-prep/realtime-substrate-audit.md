@@ -94,7 +94,8 @@ canonical observation API; fenced by `RealtimeAttachmentSignalAuthority`).
 - **WS socket observes `ReattachRequired`**: poll loop at
   `realtime_ws.rs:1996` catches
   `RealtimeBindingProjection::ReattachRequired` for Primary roles,
-  enters `reconnect_overlay` with typed backoff+jitter, and emits status.
+  enters the reconnect retry machine with typed backoff+jitter, and emits
+  status.
 - **Mob member respawn**: MobMachine publishes
   `MemberRealtimeBindingEvent::Rotated`; WS picks it up at
   `realtime_ws.rs:1802`, calls `rotate_live_realtime_binding`
@@ -143,8 +144,8 @@ canonical observation API; fenced by `RealtimeAttachmentSignalAuthority`).
   per discriminant. `public_mcp.rs:213-225` `channel_status()` takes it as
   an argument but the runtime projection callers always pass a constant.
 - **Correct typed behavior**: `attempt_count` should come from the
-  reconnect overlay (`reconnect_overlay.attempt_count()`), which *is*
-  tracked on the realtime-WS side but never reaches the RPC/MCP status
+  reconnect retry machine, which *is* tracked on the realtime-WS side but
+  never reaches the RPC/MCP status
   projection. As-shipped, `realtime/status` from outside the active socket
   always returns `1` during reconnect, hiding genuine retry-budget
   exhaustion signal.
@@ -248,7 +249,7 @@ canonical observation API; fenced by `RealtimeAttachmentSignalAuthority`).
   `Err(...)` (`realtime_attachment.rs:182-197`). Both paths stage
   `ReattachRequired` in the DSL via
   `require_realtime_attachment_reattach_for_authority`.
-- **Retry policy**: the WS-side `reconnect_overlay` owns backoff+jitter
+- **Retry policy**: the WS-side reconnect retry machine owns backoff+jitter
   (splitmix64 RNG, `realtime_ws.rs:155-189`). Provider side does not
   retry — it surrenders the socket and leaves reattach decisions to the
   DSL, which is correct (DSL is the authority per dogma).
@@ -331,7 +332,7 @@ runtime panics on deprecated public API.
 | C-R1 | Delete panicking `RealtimeChannel::mob_member` and the deprecation stub | `meerkat/src/realtime.rs` | SDK compiles cleanly; callers must use `RealtimeChannel::session` with pre-resolved id | none |
 | C-R2 | Delete `realtime_status_from_mob_status` dead-code projection | `meerkat-mob-mcp/src/public_mcp.rs` | One typed projection from `RealtimeAttachmentStatus` only | none |
 | C-R3 | Move `projection_to_channel_status` / `realtime_status_from_runtime` to a single canonical impl | `meerkat-runtime/src/meerkat_machine_types.rs` (or new `meerkat-contracts` helper), `meerkat-rpc/src/realtime_ws.rs`, `meerkat-mob-mcp/src/public_mcp.rs` | `impl From<RealtimeAttachmentStatus> for RealtimeChannelStatus` owned in one place; RPC+MCP delegate | C-R2 |
-| C-R4 | Typed `attempt_count` / `next_retry_at` in `RealtimeAttachmentStatus` | `meerkat-runtime/src/meerkat_machine_types.rs`, `meerkat-runtime/src/meerkat_machine/dispatch_control.rs`, `meerkat-rpc/src/realtime_ws.rs` (reconnect overlay → DSL input) | Status queries see real retry state, not hard-coded `0/1` | C-R3 |
+| C-R4 | Typed `attempt_count` / `next_retry_at` in `RealtimeAttachmentStatus` | `meerkat-runtime/src/meerkat_machine_types.rs`, `meerkat-runtime/src/meerkat_machine/dispatch_control.rs`, `meerkat-rpc/src/realtime_ws.rs` (reconnect retry machine → DSL input) | Status queries see real retry state, not hard-coded `0/1` | C-R3 |
 | C-R5 | Typed `RealtimeActionResult` for interrupt/close on `RealtimeProductSessionCommand` — kill `preemptive_interrupt_can_be_ignored` message match | `meerkat-contracts/src/wire/realtime.rs`, `meerkat-rpc/src/realtime_ws.rs`, `meerkat-client/src/realtime_session.rs` | No `error.message.contains(...)` in realtime path | none |
 | C-R6 | Typed realtime error classification — expand `RealtimeErrorCode` and rewrite `realtime_client_error_frame` | `meerkat-contracts/src/wire/realtime.rs`, `meerkat-rpc/src/realtime_ws.rs` | Auth/ContentFiltered/ModelNotFound each get a typed code | schema regen |
 | C-R7 | `session.close()` timeout in product-session actor | `meerkat-rpc/src/realtime_ws.rs:2885` | Stuck provider close cannot pin the actor task | none |

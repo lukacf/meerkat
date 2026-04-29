@@ -2,7 +2,7 @@ use meerkat::contracts::{
     RealtimeCapabilities, RealtimeChannelClosedFrame, RealtimeChannelOpenFrame,
     RealtimeChannelOpenedFrame, RealtimeChannelState, RealtimeChannelStatus, RealtimeClientFrame,
     RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOutputKind,
-    RealtimeServerFrame, RealtimeTextChunk,
+    RealtimeProtocolVersion, RealtimeServerFrame, RealtimeTextChunk,
 };
 use meerkat::{
     RealtimeChannel, RealtimeChannelRole, RealtimeChannelTarget, RealtimeReconnectPolicy,
@@ -67,6 +67,8 @@ async fn realtime_channel_connects_and_exchanges_frames()
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let ws_url = format!("ws://{addr}/realtime/ws");
+    let protocol_version = RealtimeProtocolVersion::CURRENT.as_str().to_string();
+    let server_protocol_version = protocol_version.clone();
 
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
@@ -88,7 +90,7 @@ async fn realtime_channel_connects_and_exchanges_frames()
         assert_eq!(
             open_frame,
             RealtimeClientFrame::ChannelOpen(RealtimeChannelOpenFrame {
-                protocol_version: "1".to_string(),
+                protocol_version: server_protocol_version.clone(),
                 open_token: "token-1".to_string(),
                 role: RealtimeChannelRole::Primary,
                 turning_mode: RealtimeTurningMode::ProviderManaged,
@@ -99,7 +101,7 @@ async fn realtime_channel_connects_and_exchanges_frames()
             .send(Message::Text(
                 serde_json::to_string(&RealtimeServerFrame::ChannelOpened(
                     RealtimeChannelOpenedFrame {
-                        protocol_version: "1".to_string(),
+                        protocol_version: server_protocol_version.clone(),
                         status: RealtimeChannelStatus {
                             state: RealtimeChannelState::Ready,
                             attempt_count: 0,
@@ -224,8 +226,8 @@ async fn realtime_channel_connects_and_exchanges_frames()
         target: RealtimeChannelTarget::SessionTarget {
             session_id: "session-1".to_string(),
         },
-        supported_protocol_versions: vec!["1".to_string()],
-        default_protocol_version: "1".to_string(),
+        supported_protocol_versions: vec![protocol_version.clone()],
+        default_protocol_version: protocol_version,
         capabilities: RealtimeCapabilities {
             input_kinds: vec![RealtimeInputKind::Text],
             output_kinds: vec![RealtimeOutputKind::Text],

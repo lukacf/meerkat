@@ -1269,6 +1269,51 @@ mod tests {
     }
 
     #[test]
+    fn emitted_mob_spawn_override_profile_omits_internal_tool_bundles() {
+        let output_dir = temp_output_dir("mob-spawn-public-profile");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let params: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("params.json")).unwrap()).unwrap();
+        let spawn_profile = params
+            .pointer("/MobSpawnParams/$defs/WireMobProfile")
+            .expect("MobSpawnParams must define WireMobProfile");
+        assert_eq!(
+            spawn_profile.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "mob/spawn override_profile must fail closed on unknown profile fields"
+        );
+        let spawn_tool_config = params
+            .pointer("/MobSpawnParams/$defs/WireMobToolConfig")
+            .expect("MobSpawnParams must define WireMobToolConfig");
+        assert_eq!(
+            spawn_tool_config.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "mob/spawn override_profile.tools must fail closed on unknown tool fields"
+        );
+        assert!(
+            spawn_tool_config
+                .pointer("/properties/rust_bundles")
+                .is_none(),
+            "mob/spawn override_profile.tools must not expose internal rust_bundles"
+        );
+
+        let wire_types: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("wire-types.json")).unwrap()).unwrap();
+        let public_tool_config = wire_types
+            .get("WireMobToolConfig")
+            .expect("WireMobToolConfig schema must be emitted");
+        assert!(
+            public_tool_config
+                .pointer("/properties/rust_bundles")
+                .is_none(),
+            "top-level WireMobToolConfig must not expose internal rust_bundles"
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
     fn emitted_mob_turn_start_params_expose_typed_prompt_and_known_overrides() {
         let output_dir = temp_output_dir("mob-turn-start-typed");
         emit_all_schemas(&output_dir).expect("emit schemas");

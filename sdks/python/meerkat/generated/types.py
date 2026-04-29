@@ -179,7 +179,7 @@ class MobMemberParams:
 @dataclass
 class MobCreateParams:
     """Request payload for `mob/create`."""
-    definition: dict[str, Any]
+    definition: MobDefinitionInput
 
 
 @dataclass
@@ -232,11 +232,11 @@ class MobSpawnParams:
     context: Optional[Any] = None
     inherited_tool_filter: Optional[WireToolFilter] = None
     initial_message: Optional[WireContentInput] = None
-    labels: Optional[dict[str, Any]] = None
+    labels: Optional[dict[str, str]] = None
     launch_mode: Optional[WireMemberLaunchMode] = None
     override_profile: Optional[WireMobProfile] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
-    shell_env: Optional[dict[str, Any]] = None
+    shell_env: Optional[dict[str, str]] = None
     tool_access_policy: Optional[WireToolAccessPolicy] = None
 
 
@@ -258,7 +258,7 @@ class MobSpawnSpecParams:
     connection_ref: Optional[WireConnectionRef] = None
     context: Optional[Any] = None
     initial_message: Optional[WireContentInput] = None
-    labels: Optional[dict[str, Any]] = None
+    labels: Optional[dict[str, str]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
 
 
@@ -305,7 +305,7 @@ without leaking bridge-internal fields."""
     state: WireMemberState
     status: WireMobMemberStatus
     error: Optional[str] = None
-    labels: Optional[dict[str, Any]] = None
+    labels: Optional[dict[str, str]] = None
     wired_to: Optional[list[str]] = None
 
 
@@ -318,7 +318,6 @@ class WireMobToolConfig:
     memory: Optional[bool] = None
     mob: Optional[bool] = None
     mob_tasks: Optional[bool] = None
-    rust_bundles: Optional[list[str]] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
 
@@ -342,7 +341,7 @@ class WireMobProfile:
 class MobEnsureMemberParams:
     """Request payload for `mob/ensure_member`."""
     mob_id: str
-    spec: dict[str, Any]
+    spec: MobMemberSpecWire
 
 
 @dataclass
@@ -355,14 +354,14 @@ class MobEnsureMemberResult:
 class MobReconcileParams:
     """Request payload for `mob/reconcile`."""
     mob_id: str
-    desired: Optional[list[dict[str, Any]]] = None
-    options: Optional[dict[str, bool]] = None
+    desired: Optional[list[MobMemberSpecWire]] = None
+    options: Optional[MobReconcileOptionsWire] = None
 
 
 @dataclass
 class MobReconcileResult:
     """Response payload for `mob/reconcile`."""
-    report: dict[str, Any]
+    report: MobReconcileReportWire
 
 
 @dataclass
@@ -463,7 +462,7 @@ path. It composes the existing declarative roster and member-send
 semantics without introducing a separate thread/project runtime."""
     content: WireContentInput
     mob_id: str
-    spec: dict[str, Any]
+    spec: MobMemberSpecWire
     handling_mode: Optional[Literal['queue', 'steer']] = None
     render_metadata: Optional[dict[str, Any]] = None
 
@@ -711,7 +710,7 @@ class MobWaitMembersResult:
 class MobProfileCreateParams:
     """Request payload for `mob/profile/create`."""
     name: str
-    profile: dict[str, Any]
+    profile: MobProfileInput
 
 
 @dataclass
@@ -742,7 +741,7 @@ class MobProfileUpdateParams:
     """Request payload for `mob/profile/update`."""
     expected_revision: int
     name: str
-    profile: dict[str, Any]
+    profile: MobProfileInput
 
 
 @dataclass
@@ -785,6 +784,220 @@ class MobStreamCloseResult:
     already_closed: bool
     closed: bool
     stream_id: str
+
+
+@dataclass
+class MobDefinitionInput:
+    """Public mob definition input for `mob/create`.
+
+This mirrors the public creation contract shape. Runtime-owned lifecycle and
+bookkeeping fields such as internal owner/runtime bindings,
+`session_cleanup_policy`, `is_implicit`, and internal-only profile tool
+bundles are intentionally not part of this schema.
+
+Not `Eq`: `profiles` transitively carries float provider params."""
+    id: str
+    profiles: dict[str, MobProfileBindingInput]
+    backend: Optional[MobBackendConfigInput] = None
+    event_router: Optional[MobEventRouterConfigInput] = None
+    flows: Optional[dict[str, MobFlowSpecInput]] = None
+    limits: Optional[MobLimitsSpecInput] = None
+    mcp_servers: Optional[dict[str, MobMcpServerConfigInput]] = None
+    orchestrator: Optional[MobOrchestratorInput] = None
+    skills: Optional[dict[str, MobSkillSourceInput]] = None
+    spawn_policy: Optional[MobSpawnPolicyInput] = None
+    supervisor: Optional[MobSupervisorSpecInput] = None
+    topology: Optional[MobTopologySpecInput] = None
+    wiring: Optional[MobWiringRulesInput] = None
+
+
+@dataclass
+class MobBackendConfigInput:
+    """Request payload for MobBackendConfigInput."""
+    default: Optional[WireMobBackendKind] = None
+    external: Optional[MobExternalBackendConfigInput] = None
+
+
+@dataclass
+class MobEventRouterConfigInput:
+    """Request payload for MobEventRouterConfigInput."""
+    buffer_size: Optional[int] = None
+    exclude_patterns: Optional[list[str]] = None
+    include_patterns: Optional[list[str]] = None
+
+
+@dataclass
+class MobExternalBackendConfigInput:
+    """Request payload for MobExternalBackendConfigInput."""
+    address_base: str
+
+
+@dataclass
+class MobFlowSpecInput:
+    """Request payload for MobFlowSpecInput."""
+    description: Optional[str] = None
+    root: Optional[MobFrameSpecInput] = None
+    steps: Optional[dict[str, MobFlowStepInput]] = None
+
+
+@dataclass
+class MobFlowStepInput:
+    """Request payload for MobFlowStepInput."""
+    message: WireContentInput
+    role: str
+    allowed_tools: Optional[list[str]] = None
+    blocked_tools: Optional[list[str]] = None
+    branch: Optional[str] = None
+    collection_policy: Optional[MobCollectionPolicyInput] = None
+    condition: Optional[MobConditionExprInput] = None
+    depends_on: Optional[list[str]] = None
+    depends_on_mode: Optional[MobDependencyModeInput] = None
+    dispatch_mode: Optional[MobDispatchModeInput] = None
+    expected_schema_ref: Optional[str] = None
+    output_format: Optional[MobStepOutputFormatInput] = None
+    timeout_ms: Optional[int] = None
+
+
+@dataclass
+class MobFrameSpecInput:
+    """Request payload for MobFrameSpecInput."""
+    nodes: dict[str, MobFlowNodeInput]
+
+
+@dataclass
+class MobLimitsSpecInput:
+    """Request payload for MobLimitsSpecInput."""
+    cancel_grace_timeout_ms: Optional[int] = None
+    max_active_frames: Optional[int] = None
+    max_active_nodes: Optional[int] = None
+    max_flow_duration_ms: Optional[int] = None
+    max_frame_depth: Optional[int] = None
+    max_orphaned_turns: Optional[int] = None
+    max_step_retries: Optional[int] = None
+
+
+@dataclass
+class MobMcpServerConfigInput:
+    """Request payload for MobMcpServerConfigInput."""
+    command: Optional[list[str]] = None
+    env: Optional[dict[str, str]] = None
+    url: Optional[str] = None
+
+
+@dataclass
+class MobOrchestratorInput:
+    """Request payload for MobOrchestratorInput."""
+    profile: str
+
+
+@dataclass
+class MobProfileInput:
+    """Request payload for MobProfileInput."""
+    model: str
+    backend: Optional[WireMobBackendKind] = None
+    external_addressable: Optional[bool] = None
+    max_inline_peer_notifications: Optional[int] = None
+    output_schema: Optional[Any] = None
+    peer_description: Optional[str] = None
+    provider_params: Optional[Any] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+    skills: Optional[list[str]] = None
+    tools: Optional[MobToolConfigInput] = None
+
+
+@dataclass
+class MobRoleWiringRuleInput:
+    """Request payload for MobRoleWiringRuleInput."""
+    a: str
+    b: str
+
+
+@dataclass
+class MobSupervisorSpecInput:
+    """Request payload for MobSupervisorSpecInput."""
+    escalation_threshold: int
+    role: str
+
+
+@dataclass
+class MobToolConfigInput:
+    """Request payload for MobToolConfigInput."""
+    builtins: Optional[bool] = None
+    comms: Optional[bool] = None
+    mcp: Optional[list[str]] = None
+    memory: Optional[bool] = None
+    mob: Optional[bool] = None
+    mob_tasks: Optional[bool] = None
+    schedule: Optional[bool] = None
+    shell: Optional[bool] = None
+
+
+@dataclass
+class MobTopologyRuleInput:
+    """Request payload for MobTopologyRuleInput."""
+    allowed: bool
+    from_role: str
+    to_role: str
+
+
+@dataclass
+class MobTopologySpecInput:
+    """Request payload for MobTopologySpecInput."""
+    mode: MobPolicyModeInput
+    rules: list[MobTopologyRuleInput]
+
+
+@dataclass
+class MobWiringRulesInput:
+    """Request payload for MobWiringRulesInput."""
+    auto_wire_orchestrator: Optional[bool] = None
+    role_wiring: Optional[list[MobRoleWiringRuleInput]] = None
+
+
+@dataclass
+class MobMemberSpecWire:
+    """Per-member spec for `mob/ensure_member` and the `desired` entries of
+`mob/reconcile`.
+
+Mirrors the essential, codegen-friendly fields of
+[`meerkat_mob::SpawnMemberSpec`]. Complex sub-types (tool access policy,
+budget split, inherited tool filter, override profile) are not on this
+wire surface — callers that need that parity should use the non-declarative
+`mob/spawn` method."""
+    agent_identity: str
+    profile: str
+    additional_instructions: Optional[list[str]] = None
+    auto_wire_parent: Optional[bool] = None
+    backend: Optional[WireMobBackendKind] = None
+    binding: Optional[WireRuntimeBinding] = None
+    context: Optional[Any] = None
+    initial_message: Optional[WireContentInput] = None
+    labels: Optional[dict[str, str]] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+
+
+@dataclass
+class MobReconcileOptionsWire:
+    """Options controlling a `mob/reconcile` pass."""
+    retire_stale: Optional[bool] = None
+
+
+@dataclass
+class MobReconcileReportWire:
+    """Summary produced by a `mob/reconcile` pass."""
+    desired: Optional[list[str]] = None
+    failures: Optional[list[MobReconcileFailureWire]] = None
+    retained: Optional[list[str]] = None
+    retired: Optional[list[str]] = None
+    spawned: Optional[list[MobSpawnReceiptWire]] = None
+
+
+@dataclass
+class MobReconcileFailureWire:
+    """Per-identity failure in a `mob/reconcile` pass."""
+    agent_identity: str
+    error: str
+    stage: WireMobReconcileStage
 
 
 @dataclass
@@ -867,7 +1080,7 @@ class ScheduleIdParams:
 @dataclass
 class ListSchedulesParams:
     """Request payload for schedule/list."""
-    labels: Optional[dict[str, Any]] = None
+    labels: Optional[dict[str, str]] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
 
@@ -885,7 +1098,7 @@ class UpdateScheduleParams:
     schedule_id: str
     description: Optional[str] = None
     expected_revision: Optional[int] = None
-    labels: Optional[dict[str, Any]] = None
+    labels: Optional[dict[str, str]] = None
     misfire_policy: Optional[dict[str, Any]] = None
     missing_target_policy: Optional[Literal['skip', 'mark_misfired']] = None
     name: Optional[str] = None
@@ -1215,7 +1428,7 @@ class WireSessionInfo:
     provider: str
     session_id: str
     updated_at: int
-    labels: Optional[dict[str, Any]] = None
+    labels: Optional[dict[str, str]] = None
     last_assistant_text: Optional[str] = None
     session_ref: Optional[str] = None
 
@@ -1229,7 +1442,7 @@ class WireSessionSummary:
     session_id: str
     total_tokens: int
     updated_at: int
-    labels: Optional[dict[str, Any]] = None
+    labels: Optional[dict[str, str]] = None
     session_ref: Optional[str] = None
 
 
@@ -1375,9 +1588,9 @@ class WireProviderBinding:
 class WireRealmConnectionSet:
     """Wire projection of [`meerkat_core::RealmConnectionSet`]. Returned
 from the `realm/get` / `GET /realm/:id` endpoints."""
-    auth_profiles: dict[str, Any]
-    backends: dict[str, Any]
-    bindings: dict[str, Any]
+    auth_profiles: dict[str, dict[str, Any]]
+    backends: dict[str, dict[str, Any]]
+    bindings: dict[str, dict[str, Any]]
     realm_id: str
     default_binding: Optional[str] = None
 
@@ -1606,16 +1819,16 @@ WireMobBackendKind = Literal['session', 'external']
 # Runtime binding for spawn requests.
 #
 # First step toward identity-first mobs. Carries backend-specific binding
-# details at spawn time. `External` requires real process identity.
+# details at spawn time. `External` requires typed process identity; callers
+# do not supply raw comms peer IDs.
 class WireRuntimeBindingSession(TypedDict, total=False):
     kind: Required[Literal['session']]
 
 class WireRuntimeBindingExternal(TypedDict, total=False):
     address: Required[str]
     bootstrap_token: NotRequired[str]
+    identity: Required[WireTrustedPeerIdentity]
     kind: Required[Literal['external']]
-    peer_id: Required[str]
-    pubkey: NotRequired[list[int]]
 
 WireRuntimeBinding = WireRuntimeBindingSession | WireRuntimeBindingExternal
 
@@ -1685,6 +1898,116 @@ WireMobMemberStatus = Literal['active', 'retiring', 'broken', 'completed', 'unkn
 
 # Mob RPC helper wire type for WireMobRuntimeMode.
 WireMobRuntimeMode = Literal['autonomous_host', 'turn_driven']
+
+# Mob RPC helper wire type for MobCollectionPolicyInput.
+class MobCollectionPolicyInputAll(TypedDict, total=False):
+    type: Required[Literal['all']]
+
+class MobCollectionPolicyInputAny(TypedDict, total=False):
+    type: Required[Literal['any']]
+
+class MobCollectionPolicyInputQuorum(TypedDict, total=False):
+    n: Required[int]
+    type: Required[Literal['quorum']]
+
+MobCollectionPolicyInput = MobCollectionPolicyInputAll | MobCollectionPolicyInputAny | MobCollectionPolicyInputQuorum
+
+# Mob RPC helper wire type for MobConditionExprInput.
+class MobConditionExprInputEq(TypedDict, total=False):
+    op: Required[Literal['eq']]
+    path: Required[str]
+    value: Required[Any]
+
+class MobConditionExprInputIn(TypedDict, total=False):
+    op: Required[Literal['in']]
+    path: Required[str]
+    values: Required[list[Any]]
+
+class MobConditionExprInputGt(TypedDict, total=False):
+    op: Required[Literal['gt']]
+    path: Required[str]
+    value: Required[Any]
+
+class MobConditionExprInputLt(TypedDict, total=False):
+    op: Required[Literal['lt']]
+    path: Required[str]
+    value: Required[Any]
+
+class MobConditionExprInputAnd(TypedDict, total=False):
+    exprs: Required[list[MobConditionExprInput]]
+    op: Required[Literal['and']]
+
+class MobConditionExprInputOr(TypedDict, total=False):
+    exprs: Required[list[MobConditionExprInput]]
+    op: Required[Literal['or']]
+
+class MobConditionExprInputNot(TypedDict, total=False):
+    expr: Required[MobConditionExprInput]
+    op: Required[Literal['not']]
+
+MobConditionExprInput = MobConditionExprInputEq | MobConditionExprInputIn | MobConditionExprInputGt | MobConditionExprInputLt | MobConditionExprInputAnd | MobConditionExprInputOr | MobConditionExprInputNot
+
+# Mob RPC helper wire type for MobDependencyModeInput.
+MobDependencyModeInput = Literal['all', 'any']
+
+# Mob RPC helper wire type for MobDispatchModeInput.
+MobDispatchModeInput = Literal['fan_out', 'one_to_one', 'fan_in']
+
+# Mob RPC helper wire type for MobFlowNodeInput.
+class MobFlowNodeInputStep(TypedDict, total=False):
+    branch: NotRequired[str]
+    depends_on: NotRequired[list[str]]
+    depends_on_mode: NotRequired[MobDependencyModeInput]
+    kind: Required[Literal['step']]
+    step_id: Required[str]
+
+class MobFlowNodeInputRepeatUntil(TypedDict, total=False):
+    body: Required[MobFrameSpecInput]
+    depends_on: NotRequired[list[str]]
+    depends_on_mode: NotRequired[MobDependencyModeInput]
+    kind: Required[Literal['repeat_until']]
+    loop_id: Required[str]
+    max_iterations: Required[int]
+    until: Required[MobConditionExprInput]
+
+MobFlowNodeInput = MobFlowNodeInputStep | MobFlowNodeInputRepeatUntil
+
+# Mob RPC helper wire type for MobPolicyModeInput.
+MobPolicyModeInput = Literal['advisory', 'strict']
+
+# Profile binding input: either an inline profile or a realm profile reference.
+#
+# Not `Eq`: `Inline(MobProfileInput)` transitively carries float provider
+# params (`temperature`, `top_p`) so `Eq` cannot be derived without
+# losing fidelity.
+MobProfileBindingInput = dict[str, Any] | MobProfileInput
+
+# Mob RPC helper wire type for MobSkillSourceInput.
+class MobSkillSourceInputInline(TypedDict, total=False):
+    content: Required[str]
+    source: Required[Literal['inline']]
+
+class MobSkillSourceInputPath(TypedDict, total=False):
+    path: Required[str]
+    source: Required[Literal['path']]
+
+MobSkillSourceInput = MobSkillSourceInputInline | MobSkillSourceInputPath
+
+# Mob RPC helper wire type for MobSpawnPolicyInput.
+class MobSpawnPolicyInputNone(TypedDict, total=False):
+    mode: Required[Literal['none']]
+
+class MobSpawnPolicyInputAuto(TypedDict, total=False):
+    mode: Required[Literal['auto']]
+    profile_map: Required[dict[str, str]]
+
+MobSpawnPolicyInput = MobSpawnPolicyInputNone | MobSpawnPolicyInputAuto
+
+# Mob RPC helper wire type for MobStepOutputFormatInput.
+MobStepOutputFormatInput = Literal['json', 'text']
+
+# Closed wire stage for a per-identity `mob/reconcile` failure.
+WireMobReconcileStage = Literal['spawn', 'retire']
 
 # Shared operation kind for live MCP operations.
 McpLiveOperation = Literal['add', 'remove', 'reload']

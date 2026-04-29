@@ -12,9 +12,10 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
+use meerkat_contracts::wire::WireMobProfile;
 use meerkat_contracts::{
-    MobCreateParams, MobCreateResult, MobMemberListEntryWire, WireMemberState, WireMobMemberStatus,
-    WireMobRuntimeMode,
+    MobCreateParams, MobCreateResult, MobMemberListEntryWire, WireMemberState, WireMobBackendKind,
+    WireMobMemberStatus, WireMobRuntimeMode,
 };
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::skills::SkillRef;
@@ -22,7 +23,8 @@ use meerkat_core::types::ContentInput;
 use meerkat_mob::runtime::MobMemberSnapshot;
 use meerkat_mob::{
     AgentIdentity, FlowId, MemberRespawnReceipt, MemberState, MobBackendKind, MobId,
-    MobMemberStatus, MobRespawnError, MobRuntimeMode, RunId, SpawnMemberSpec, SpawnResult,
+    MobMemberStatus, MobRespawnError, MobRuntimeMode, Profile, RunId, SpawnMemberSpec, SpawnResult,
+    ToolConfig,
 };
 use meerkat_mob_mcp::MobMcpState;
 use std::collections::BTreeMap;
@@ -31,6 +33,46 @@ use std::sync::Arc;
 
 fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse {
     RpcResponse::error(id, error::INVALID_PARAMS, message.into())
+}
+
+fn mob_runtime_mode_from_wire(mode: WireMobRuntimeMode) -> MobRuntimeMode {
+    match mode {
+        WireMobRuntimeMode::AutonomousHost => MobRuntimeMode::AutonomousHost,
+        WireMobRuntimeMode::TurnDriven => MobRuntimeMode::TurnDriven,
+    }
+}
+
+fn mob_backend_kind_from_wire(kind: WireMobBackendKind) -> MobBackendKind {
+    match kind {
+        WireMobBackendKind::Session => MobBackendKind::Session,
+        WireMobBackendKind::External => MobBackendKind::External,
+    }
+}
+
+fn profile_from_wire(profile: WireMobProfile) -> Profile {
+    let tools = profile.tools;
+    Profile {
+        model: profile.model,
+        skills: profile.skills,
+        tools: ToolConfig {
+            builtins: tools.builtins,
+            shell: tools.shell,
+            comms: tools.comms,
+            memory: tools.memory,
+            mob: tools.mob,
+            mob_tasks: tools.mob_tasks,
+            schedule: tools.schedule,
+            mcp: tools.mcp,
+            rust_bundles: Vec::new(),
+        },
+        peer_description: profile.peer_description,
+        external_addressable: profile.external_addressable,
+        backend: profile.backend.map(mob_backend_kind_from_wire),
+        runtime_mode: mob_runtime_mode_from_wire(profile.runtime_mode),
+        max_inline_peer_notifications: profile.max_inline_peer_notifications,
+        output_schema: profile.output_schema,
+        provider_params: profile.provider_params,
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -264,11 +306,10 @@ pub struct MobSpawnParams {
     // `shell_env`, and `auto_wire_parent`; A3 + C1 unblocked
     // `launch_mode`; and this pass adds `tool_access_policy`,
     // `budget_split_policy`, `inherited_tool_filter`, and
-    // `override_profile` to reach full parity with Rust-in-process
-    // spawn. Types are taken verbatim from `meerkat-core` /
-    // `meerkat-mob` where they already have serde support, so no
-    // additional wire shape is introduced — the wire shape is just
-    // the existing Rust-type serde form.
+    // `override_profile` to reach full parity with Rust-in-process spawn.
+    // Internal-only profile fields stay behind the RPC boundary: override
+    // profiles parse through a public wire-owned profile shape and are then
+    // converted into the runtime profile type.
     /// Optional runtime binding for external-peer members (maps to
     /// SpawnMemberSpec::binding).
     #[serde(default)]
@@ -299,12 +340,11 @@ pub struct MobSpawnParams {
     /// `INHERITED_TOOL_FILTER_METADATA_KEY`.
     #[serde(default)]
     pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
-    /// Override profile resolved from `SpawnTooling::Profile`
-    /// (maps to SpawnMemberSpec::override_profile). When set, spawn
-    /// uses this profile instead of looking up by `profile` from the
-    /// mob definition.
+    /// Public profile override for `mob/spawn`. The handler converts this
+    /// wire-owned profile into the internal profile type with runtime-owned
+    /// Rust tool bundles intentionally empty.
     #[serde(default)]
-    pub override_profile: Option<meerkat_mob::Profile>,
+    pub override_profile: Option<WireMobProfile>,
     /// Explicit provider binding for this member's session build.
     ///
     /// The mob runtime refuses ambient credential selection; callers
@@ -365,7 +405,7 @@ pub async fn handle_spawn(
         spec.inherited_tool_filter = Some(inherited_tool_filter);
     }
     if let Some(override_profile) = params.override_profile {
-        spec.override_profile = Some(override_profile);
+        spec.override_profile = Some(profile_from_wire(override_profile));
     }
     if let Some(connection_ref) = params.connection_ref {
         spec.connection_ref = Some(connection_ref);
@@ -1915,14 +1955,8 @@ fn spawn_spec_from_wire(
         ),
         None => None,
     };
-    spec.runtime_mode = spec_wire.runtime_mode.map(|mode| match mode {
-        meerkat_contracts::WireMobRuntimeMode::AutonomousHost => MobRuntimeMode::AutonomousHost,
-        meerkat_contracts::WireMobRuntimeMode::TurnDriven => MobRuntimeMode::TurnDriven,
-    });
-    spec.backend = spec_wire.backend.map(|b| match b {
-        meerkat_contracts::WireMobBackendKind::Session => MobBackendKind::Session,
-        meerkat_contracts::WireMobBackendKind::External => MobBackendKind::External,
-    });
+    spec.runtime_mode = spec_wire.runtime_mode.map(mob_runtime_mode_from_wire);
+    spec.backend = spec_wire.backend.map(mob_backend_kind_from_wire);
     spec.context = spec_wire.context.clone();
     spec.labels = spec_wire.labels.clone();
     spec.additional_instructions = spec_wire.additional_instructions.clone();
@@ -2187,9 +2221,8 @@ mod tests {
     /// shell_env / auto_wire_parent; A3+C1 unblocked launch_mode; this
     /// final pass adds tool_access_policy, budget_split_policy,
     /// inherited_tool_filter, and override_profile. This test pins each
-    /// new field to round-trip through serde (proving the wire shape
-    /// is the serde form of the underlying Rust type — no parallel
-    /// wire contract introduced).
+    /// new field to round-trip through serde while override_profile stays
+    /// on the public wire-owned profile shape.
     #[test]
     fn mob_spawn_params_carry_full_member_spec_surface() {
         use meerkat_core::ops::ToolAccessPolicy;
@@ -2281,6 +2314,27 @@ mod tests {
         assert!(minimal_params.inherited_tool_filter.is_none());
         assert!(minimal_params.override_profile.is_none());
         assert!(minimal_params.connection_ref.is_none());
+    }
+
+    #[test]
+    fn mob_spawn_params_reject_internal_override_profile_tool_bundles() {
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+            "override_profile": {
+                "model": "claude-sonnet-4-6",
+                "tools": {
+                    "rust_bundles": ["internal-only"]
+                }
+            }
+        });
+        let err = serde_json::from_value::<MobSpawnParams>(value)
+            .expect_err("internal rust bundle fields must be rejected");
+        assert!(
+            err.to_string().contains("unknown field `rust_bundles`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

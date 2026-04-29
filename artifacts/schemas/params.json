@@ -5257,6 +5257,7 @@
         "type": "string"
       },
       "WireMobProfile": {
+        "additionalProperties": false,
         "description": "Profile override for `mob/spawn`.",
         "properties": {
           "backend": {
@@ -5309,7 +5310,6 @@
               "memory": false,
               "mob": false,
               "mob_tasks": false,
-              "rust_bundles": [],
               "schedule": false,
               "shell": false
             }
@@ -5328,6 +5328,7 @@
         "type": "string"
       },
       "WireMobToolConfig": {
+        "additionalProperties": false,
         "description": "Tool configuration embedded in a wire mob profile override.",
         "properties": {
           "builtins": {
@@ -5356,13 +5357,6 @@
           "mob_tasks": {
             "default": false,
             "type": "boolean"
-          },
-          "rust_bundles": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           },
           "schedule": {
             "default": false,
@@ -5420,29 +5414,6 @@
               "kind",
               "address",
               "identity"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "WireTrustedPeerIdentity": {
-        "description": "Typed external peer identity for public mob wiring surfaces.",
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
-            "properties": {
-              "kind": {
-                "const": "ed25519_public_key",
-                "type": "string"
-              },
-              "public_key": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "public_key"
             ],
             "type": "object"
           }
@@ -5539,6 +5510,29 @@
             },
             "required": [
               "Deny"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
             ],
             "type": "object"
           }

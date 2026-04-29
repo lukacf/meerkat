@@ -104,7 +104,58 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireMemberState",
     "WireMobMemberStatus",
     "WireMobRuntimeMode",
+    "MobCollectionPolicyInput",
+    "MobConditionExprInput",
+    "MobDependencyModeInput",
+    "MobDispatchModeInput",
+    "MobFlowNodeInput",
+    "MobPolicyModeInput",
+    "MobProfileBindingInput",
+    "MobSkillSourceInput",
+    "MobSpawnPolicyInput",
+    "MobStepOutputFormatInput",
+    "WireMobReconcileStage",
 ]
+
+MOB_RPC_CONTRACT_HELPER_TYPES = [
+    "MobDefinitionInput",
+    "MobBackendConfigInput",
+    "MobEventRouterConfigInput",
+    "MobExternalBackendConfigInput",
+    "MobFlowSpecInput",
+    "MobFlowStepInput",
+    "MobFrameSpecInput",
+    "MobLimitsSpecInput",
+    "MobMcpServerConfigInput",
+    "MobOrchestratorInput",
+    "MobProfileInput",
+    "MobRoleWiringRuleInput",
+    "MobSupervisorSpecInput",
+    "MobToolConfigInput",
+    "MobTopologyRuleInput",
+    "MobTopologySpecInput",
+    "MobWiringRulesInput",
+    "MobMemberSpecWire",
+    "MobReconcileOptionsWire",
+    "MobReconcileReportWire",
+    "MobReconcileFailureWire",
+]
+
+MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
+    [
+        *MOB_RPC_CONTRACT_ALIAS_TYPES,
+        *MOB_RPC_CONTRACT_HELPER_TYPES,
+        "MobMemberListEntryWire",
+        "MobSpawnReceiptWire",
+        "MobSpawnSpecParams",
+        "MobSpawnManyResultEntry",
+        "WireContentBlock",
+        "WireContentInput",
+        "WireConnectionRef",
+        "WireMobProfile",
+        "WireMobToolConfig",
+    ]
+)
 
 
 def load_schemas(artifacts_dir: Path) -> dict:
@@ -182,18 +233,9 @@ def _schema_root_with_nested_defs(root_schema: dict[str, Any]) -> dict[str, Any]
 def _promote_nested_schema_def(name: str) -> bool:
     return name.startswith("Realtime") or name in {
         "AudioFormatMismatchContext",
-        "MobMemberListEntryWire",
-        "MobSpawnReceiptWire",
         "ToolCallTimeoutContext",
         "WireTrustedPeerIdentity",
-        *MOB_RPC_CONTRACT_ALIAS_TYPES,
-        "WireContentBlock",
-        "WireContentInput",
-        "WireConnectionRef",
-        "MobSpawnSpecParams",
-        "MobSpawnManyResultEntry",
-        "WireMobToolConfig",
-        "WireMobProfile",
+        *MOB_RPC_PROMOTED_SCHEMA_DEFS,
     }
 
 
@@ -371,6 +413,9 @@ def _python_type_from_schema(
         case "object":
             properties = field_schema.get("properties")
             additional = field_schema.get("additionalProperties", True)
+            if isinstance(additional, dict) and not properties:
+                value_type, _ = _python_type_from_schema(root, additional, local_defs)
+                return (f"dict[str, {value_type}]", optional)
             if isinstance(properties, dict) and len(properties) == 1 and additional is False:
                 (_, value_schema), = properties.items()
                 value_type, _ = _python_type_from_schema(root, value_schema)
@@ -457,6 +502,9 @@ def _typescript_type_from_schema(
         case "object":
             properties = field_schema.get("properties")
             additional = field_schema.get("additionalProperties", True)
+            if isinstance(additional, dict) and not properties:
+                value_type, _ = _typescript_type_from_schema(root, additional, local_defs)
+                return (f"Record<string, {value_type}>", optional)
             if isinstance(properties, dict) and len(properties) == 1 and additional is False:
                 (field_name, value_schema), = properties.items()
                 value_type, _ = _typescript_type_from_schema(root, value_schema)
@@ -677,6 +725,8 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("MobWireParams", params_schema, "Request payload for mob/wire.")
     append_python_dataclass("MobUnwireParams", params_schema, "Request payload for mob/unwire.")
     for name in MOB_RPC_CONTRACT_TYPES:
+        append_python_contract_dataclass(name)
+    for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_python_contract_dataclass(name)
     append_python_dataclass("RuntimeStateParams", params_schema, "Request payload for runtime/session_status.")
     append_python_dataclass(
@@ -1021,6 +1071,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("MobWireParams", params_schema)
     append_typescript_interface("MobUnwireParams", params_schema)
     for name in MOB_RPC_CONTRACT_TYPES:
+        append_typescript_contract_interface(name)
+    for name in MOB_RPC_CONTRACT_HELPER_TYPES:
         append_typescript_contract_interface(name)
     append_typescript_interface("RuntimeStateParams", params_schema)
     append_typescript_interface("RuntimeRealtimeAttachmentStatusParams", params_schema)

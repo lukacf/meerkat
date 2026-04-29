@@ -1,9 +1,14 @@
 import type { SpawnSpec } from "../src/index.js";
 import type {
+  MobCreateParams,
+  MobDefinitionInput,
+  MobEnsureMemberParams,
   MobEnsureMemberResult,
   MobMemberListEntryWire,
+  MobMemberSpecWire,
   MobMembersResult,
   MobMemberStatusResult,
+  MobReconcileParams,
   MobSpawnManyParams,
   MobSpawnManyResult,
   MobSpawnManyResultEntry,
@@ -22,6 +27,7 @@ import type {
   WireMemberState,
   WireMobMemberStatus,
   WireMobRuntimeMode,
+  WireMobToolConfig,
   WireToolAccessPolicy,
   WireToolFilter,
 } from "../src/generated/types.js";
@@ -74,12 +80,74 @@ const generatedMobToolAccess: WireToolAccessPolicy = {
 const generatedMobBudgetSplit: WireBudgetSplitPolicy = { type: "remaining" };
 const generatedMobToolFilter: WireToolFilter = { Allow: ["grep"] };
 const generatedMobProfile: WireMobProfile = { model: "claude-sonnet-4-6" };
+const generatedMobOverrideTools: WireMobToolConfig = { shell: true };
+const generatedMobOverrideToolsWithRustBundles: WireMobToolConfig = {
+  // @ts-expect-error rust_bundles is runtime-internal and not public spawn input.
+  rust_bundles: ["internal-only"],
+};
 
 void generatedMobLaunchMode;
 void generatedMobToolAccess;
 void generatedMobBudgetSplit;
 void generatedMobToolFilter;
 void generatedMobProfile;
+void generatedMobOverrideTools;
+void generatedMobOverrideToolsWithRustBundles;
+
+const generatedMobDefinition: MobDefinitionInput = {
+  id: "mob-1",
+  profiles: {
+    worker: { model: "claude-sonnet-4-6" },
+  },
+};
+
+const generatedMobCreate: MobCreateParams = {
+  definition: generatedMobDefinition,
+};
+
+void generatedMobCreate;
+
+const generatedMobCreateWithBadDefinition: MobCreateParams = {
+  // @ts-expect-error definition must use the typed mob definition input.
+  definition: {},
+};
+
+void generatedMobCreateWithBadDefinition;
+
+const generatedMobMemberSpec: MobMemberSpecWire = {
+  profile: "worker",
+  agent_identity: "worker-1",
+};
+
+const generatedMobEnsureMemberParams: MobEnsureMemberParams = {
+  mob_id: "mob-1",
+  spec: generatedMobMemberSpec,
+};
+
+void generatedMobEnsureMemberParams;
+
+const generatedMobEnsureMemberWithBadSpec: MobEnsureMemberParams = {
+  mob_id: "mob-1",
+  // @ts-expect-error spec must use the typed member spec contract.
+  spec: { profile: "worker" },
+};
+
+void generatedMobEnsureMemberWithBadSpec;
+
+const generatedMobReconcileParams: MobReconcileParams = {
+  mob_id: "mob-1",
+  desired: [generatedMobMemberSpec],
+};
+
+void generatedMobReconcileParams;
+
+const generatedMobReconcileWithBadDesired: MobReconcileParams = {
+  mob_id: "mob-1",
+  // @ts-expect-error desired entries must use the typed member spec contract.
+  desired: [{ profile: "worker" }],
+};
+
+void generatedMobReconcileWithBadDesired;
 
 const generatedMobSpawnManySpec: MobSpawnSpecParams = {
   profile: "worker",

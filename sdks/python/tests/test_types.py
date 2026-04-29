@@ -152,6 +152,7 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         WireBudgetSplitPolicy as GeneratedWireBudgetSplitPolicy,
         WireMemberLaunchMode as GeneratedWireMemberLaunchMode,
         WireMobProfile as GeneratedWireMobProfile,
+        WireMobToolConfig as GeneratedWireMobToolConfig,
         WireToolAccessPolicy as GeneratedWireToolAccessPolicy,
         WireToolFilter as GeneratedWireToolFilter,
     )
@@ -180,6 +181,8 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
     assert "Any" not in str(spawn_hints["budget_split_policy"])
     assert "Any" not in str(spawn_hints["inherited_tool_filter"])
     assert "WireMobProfile" in str(spawn_hints["override_profile"])
+    tool_config_hints = get_type_hints(GeneratedWireMobToolConfig)
+    assert "rust_bundles" not in tool_config_hints
     assert GeneratedWireMemberLaunchMode is not None
     assert GeneratedWireToolAccessPolicy is not None
     assert GeneratedWireBudgetSplitPolicy is not None
@@ -246,6 +249,40 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     )
     result = GeneratedMobSpawnManyResult(results=[entry])
     assert result.results[0].member_ref == "opaque-member-ref"
+
+
+def test_generated_mob_create_ensure_reconcile_preserve_nested_param_types():
+    from meerkat.generated.types import (
+        MobCreateParams as GeneratedMobCreateParams,
+        MobDefinitionInput as GeneratedMobDefinitionInput,
+        MobEnsureMemberParams as GeneratedMobEnsureMemberParams,
+        MobMemberSpecWire as GeneratedMobMemberSpecWire,
+        MobReconcileParams as GeneratedMobReconcileParams,
+    )
+
+    create_hints = get_type_hints(GeneratedMobCreateParams)
+    assert create_hints["definition"] is GeneratedMobDefinitionInput
+
+    ensure_hints = get_type_hints(GeneratedMobEnsureMemberParams)
+    assert ensure_hints["spec"] is GeneratedMobMemberSpecWire
+
+    reconcile_hints = get_type_hints(GeneratedMobReconcileParams)
+    assert "MobMemberSpecWire" in str(reconcile_hints["desired"])
+    assert "Any" not in str(reconcile_hints["desired"])
+
+    definition = GeneratedMobDefinitionInput(
+        id="mob-1",
+        profiles={"worker": {"model": "claude-sonnet-4-6"}},
+    )
+    create = GeneratedMobCreateParams(definition=definition)
+    assert create.definition.id == "mob-1"
+
+    spec = GeneratedMobMemberSpecWire(profile="worker", agent_identity="worker-1")
+    ensure = GeneratedMobEnsureMemberParams(mob_id="mob-1", spec=spec)
+    assert ensure.spec.agent_identity == "worker-1"
+
+    reconcile = GeneratedMobReconcileParams(mob_id="mob-1", desired=[spec])
+    assert reconcile.desired[0].profile == "worker"
 
 
 def test_generated_mob_member_result_helpers_preserve_schema_types():

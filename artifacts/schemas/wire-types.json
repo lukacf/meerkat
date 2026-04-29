@@ -16676,6 +16676,7 @@
         "type": "string"
       },
       "WireMobToolConfig": {
+        "additionalProperties": false,
         "description": "Tool configuration embedded in a wire mob profile override.",
         "properties": {
           "builtins": {
@@ -16705,13 +16706,6 @@
             "default": false,
             "type": "boolean"
           },
-          "rust_bundles": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "schedule": {
             "default": false,
             "type": "boolean"
@@ -16725,6 +16719,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Profile override for `mob/spawn`.",
     "properties": {
       "backend": {
@@ -16777,7 +16772,6 @@
           "memory": false,
           "mob": false,
           "mob_tasks": false,
-          "rust_bundles": [],
           "schedule": false,
           "shell": false
         }
@@ -16800,6 +16794,7 @@
   },
   "WireMobToolConfig": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Tool configuration embedded in a wire mob profile override.",
     "properties": {
       "builtins": {
@@ -16828,13 +16823,6 @@
       "mob_tasks": {
         "default": false,
         "type": "boolean"
-      },
-      "rust_bundles": {
-        "default": [],
-        "items": {
-          "type": "string"
-        },
-        "type": "array"
       },
       "schedule": {
         "default": false,
@@ -17808,12 +17796,36 @@
       "BridgeBootstrapToken": {
         "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
         "type": "string"
+      },
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
+            ],
+            "type": "object"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Runtime binding for spawn requests.\n\nFirst step toward identity-first mobs. Carries backend-specific binding\ndetails at spawn time. `External` requires real process identity.",
+    "description": "Runtime binding for spawn requests.\n\nFirst step toward identity-first mobs. Carries backend-specific binding\ndetails at spawn time. `External` requires typed process identity; callers\ndo not supply raw comms peer IDs.",
     "oneOf": [
       {
+        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "session",
@@ -17826,6 +17838,7 @@
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "address": {
             "type": "string"
@@ -17840,33 +17853,19 @@
               }
             ]
           },
+          "identity": {
+            "$ref": "#/$defs/WireTrustedPeerIdentity",
+            "description": "Typed Ed25519 signing identity for the external process. The\ncanonical comms `PeerId` is derived from this key after the wire\nboundary, so callers cannot spoof an unrelated raw peer id."
+          },
           "kind": {
             "const": "external",
             "type": "string"
-          },
-          "peer_id": {
-            "type": "string"
-          },
-          "pubkey": {
-            "description": "Ed25519 signing pubkey (32 bytes) of the external peer. Required\nfor the supervisor to install a non-zero-pubkey trust entry so\nreal-comms signed-envelope replies admit past ingress trust\ncheck. Absent on legacy bindings that pre-date pubkey plumbing.",
-            "items": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "maxItems": 32,
-            "minItems": 32,
-            "type": [
-              "array",
-              "null"
-            ]
           }
         },
         "required": [
           "kind",
-          "peer_id",
-          "address"
+          "address",
+          "identity"
         ],
         "type": "object"
       }

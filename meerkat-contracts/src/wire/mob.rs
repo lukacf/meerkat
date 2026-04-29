@@ -119,6 +119,7 @@ pub enum WireToolFilter {
 /// Tool configuration embedded in a wire mob profile override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireMobToolConfig {
     #[serde(default)]
     pub builtins: bool,
@@ -136,13 +137,12 @@ pub struct WireMobToolConfig {
     pub schedule: bool,
     #[serde(default)]
     pub mcp: Vec<String>,
-    #[serde(default)]
-    pub rust_bundles: Vec<String>,
 }
 
 /// Profile override for `mob/spawn`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireMobProfile {
     pub model: String,
     #[serde(default)]

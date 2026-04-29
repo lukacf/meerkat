@@ -12480,6 +12480,7 @@
         "type": "string"
       },
       "WireMobProfile": {
+        "additionalProperties": false,
         "description": "Profile override for `mob/spawn`.",
         "properties": {
           "backend": {
@@ -12532,7 +12533,6 @@
               "memory": false,
               "mob": false,
               "mob_tasks": false,
-              "rust_bundles": [],
               "schedule": false,
               "shell": false
             }
@@ -12560,6 +12560,7 @@
         "type": "string"
       },
       "WireMobToolConfig": {
+        "additionalProperties": false,
         "description": "Tool configuration embedded in a wire mob profile override.",
         "properties": {
           "builtins": {
@@ -12588,13 +12589,6 @@
           "mob_tasks": {
             "default": false,
             "type": "boolean"
-          },
-          "rust_bundles": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           },
           "schedule": {
             "default": false,

@@ -587,17 +587,24 @@ pub(crate) enum RunReturnDisposition<'a> {
 pub(crate) enum RuntimeLoopRunCommitError {
     Rejected(RuntimeDriverError),
     BoundaryCommit(RuntimeDriverError),
+    PostBoundaryValidation(RuntimeDriverError),
     TerminalSnapshot(RuntimeDriverError),
 }
 
 impl RuntimeLoopRunCommitError {
     pub(crate) fn should_unregister_session(&self) -> bool {
-        matches!(self, Self::TerminalSnapshot(_))
+        matches!(
+            self,
+            Self::PostBoundaryValidation(_) | Self::TerminalSnapshot(_)
+        )
     }
 
     pub(crate) fn into_driver_error(self) -> RuntimeDriverError {
         match self {
-            Self::Rejected(err) | Self::BoundaryCommit(err) | Self::TerminalSnapshot(err) => err,
+            Self::Rejected(err)
+            | Self::BoundaryCommit(err)
+            | Self::PostBoundaryValidation(err)
+            | Self::TerminalSnapshot(err) => err,
         }
     }
 }
@@ -605,9 +612,10 @@ impl RuntimeLoopRunCommitError {
 impl std::fmt::Display for RuntimeLoopRunCommitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Rejected(err) | Self::BoundaryCommit(err) | Self::TerminalSnapshot(err) => {
-                write!(f, "{err}")
-            }
+            Self::Rejected(err)
+            | Self::BoundaryCommit(err)
+            | Self::PostBoundaryValidation(err)
+            | Self::TerminalSnapshot(err) => write!(f, "{err}"),
         }
     }
 }
@@ -940,6 +948,33 @@ pub(crate) fn machine_validate_run_completed(
     }
 
     Ok(())
+}
+
+pub(crate) fn machine_validate_run_commit_receipt(
+    driver: &DriverEntry,
+    run_id: &RunId,
+    consumed_input_ids: &[InputId],
+    receipt: &meerkat_core::lifecycle::RunBoundaryReceipt,
+) -> Result<(), RuntimeDriverError> {
+    if &receipt.run_id != run_id {
+        return Err(RuntimeDriverError::Internal(format!(
+            "run commit receipt run_id {:?} does not match active run {:?}",
+            receipt.run_id, run_id
+        )));
+    }
+
+    let same_contributors = consumed_input_ids.len() == receipt.contributing_input_ids.len()
+        && consumed_input_ids
+            .iter()
+            .all(|input_id| receipt.contributing_input_ids.contains(input_id));
+    if !same_contributors {
+        return Err(RuntimeDriverError::Internal(format!(
+            "run commit consumed inputs {:?} do not match receipt contributors {:?}",
+            consumed_input_ids, receipt.contributing_input_ids
+        )));
+    }
+
+    machine_validate_boundary_applied(driver, &receipt.contributing_input_ids)
 }
 
 pub(crate) fn machine_staged_contributors(driver: &DriverEntry) -> Vec<InputId> {
@@ -1665,7 +1700,7 @@ pub(crate) async fn commit_runtime_loop_run(
     // guards (input_id is informational), so firing once with any
     // contributing input is sufficient to flip `lifecycle_phase`.
     let commit_input_id = consumed_input_ids.first().cloned();
-    machine_validate_boundary_applied(&driver, &receipt.contributing_input_ids)
+    machine_validate_run_commit_receipt(&driver, &run_id, &consumed_input_ids, &receipt)
         .map_err(RuntimeLoopRunCommitError::Rejected)?;
     let completed_run_id = run_id.clone();
     machine_apply_turn_run_completed(&mut driver, &completed_run_id)
@@ -1690,8 +1725,11 @@ pub(crate) async fn commit_runtime_loop_run(
         ));
     }
 
-    machine_validate_run_completed(&driver, &consumed_input_ids)
-        .map_err(RuntimeLoopRunCommitError::Rejected)?;
+    machine_validate_run_completed(&driver, &consumed_input_ids).map_err(|err| {
+        RuntimeLoopRunCommitError::PostBoundaryValidation(RuntimeDriverError::Internal(format!(
+            "runtime completion validation failed after boundary commit: {err}"
+        )))
+    })?;
     driver
         .machine_realize_run_completed(completed_run_id.clone(), consumed_input_ids)
         .await

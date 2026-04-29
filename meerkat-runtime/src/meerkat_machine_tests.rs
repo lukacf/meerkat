@@ -11686,6 +11686,65 @@ async fn legacy_run_commit_rejection_preserves_registered_running_session() {
 }
 
 #[tokio::test]
+async fn legacy_run_commit_mismatched_input_rejection_preserves_active_run() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let prepared =
+        prepare_legacy_run_for_authority_test(&adapter, &session_id, "commit input mismatch").await;
+    let wrong_input_id = InputId::new();
+    let result = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Commit {
+                session_id: session_id.clone(),
+                input_id: wrong_input_id,
+                run_id: prepared.run_id.clone(),
+                output: legacy_run_test_output(prepared.run_id.clone(), prepared.input_id.clone()),
+            },
+        )
+        .await;
+
+    assert!(result.is_err(), "mismatched commit input should reject");
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "typed commit rejection must not unregister the session"
+    );
+    assert_eq!(
+        adapter.runtime_state(&session_id).await.unwrap(),
+        RuntimeState::Running,
+        "malformed commit must preserve the active runtime run"
+    );
+    let input_state = adapter
+        .input_state(&session_id, &prepared.input_id)
+        .await
+        .expect("input state read should succeed")
+        .expect("prepared input should remain visible");
+    assert_eq!(
+        input_state.seed.phase,
+        crate::input_state::InputLifecycleState::Staged,
+        "malformed commit must not leave the contributor pending consumption"
+    );
+
+    adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::Fail {
+                session_id: session_id.clone(),
+                run_id: prepared.run_id.clone(),
+                error: "unwind malformed commit".to_string(),
+            },
+        )
+        .await
+        .expect("preserved active run should still be terminalizable");
+    assert_eq!(
+        adapter.runtime_state(&session_id).await.unwrap(),
+        RuntimeState::Idle
+    );
+}
+
+#[tokio::test]
 async fn legacy_run_fail_rejection_preserves_registered_running_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

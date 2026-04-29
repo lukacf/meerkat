@@ -5786,6 +5786,20 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
 
     handle.stop().await.expect("stop");
 
+    let spawn = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await;
+    assert!(
+        matches!(
+            spawn,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "Spawn must surface the MobMachine stopped-phase rejection: {spawn:?}"
+    );
+
     let submit = handle
         .submit_work(
             entry.agent_runtime_id.clone(),
@@ -5805,6 +5819,20 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
         "SubmitWork must surface the MobMachine stopped-phase rejection: {submit:?}"
     );
 
+    let cancel_all_work = handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+        .await;
+    assert!(
+        matches!(
+            cancel_all_work,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "CancelAllWork must surface the MobMachine stopped-phase rejection: {cancel_all_work:?}"
+    );
+
     let run_flow = handle
         .run_flow(FlowId::from("demo"), serde_json::json!({}))
         .await;
@@ -5817,6 +5845,24 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
             })
         ),
         "RunFlow must surface the MobMachine stopped-phase rejection: {run_flow:?}"
+    );
+
+    let task_create = handle
+        .task_create(
+            "stopped task".to_string(),
+            "must be admitted by MobMachine".to_string(),
+            vec![],
+        )
+        .await;
+    assert!(
+        matches!(
+            task_create,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "TaskCreate must surface the MobMachine stopped-phase rejection: {task_create:?}"
     );
 
     let respawn = handle.respawn(AgentIdentity::from("w-1"), None).await;
@@ -5832,6 +5878,47 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
         ),
         "Respawn must surface the MobMachine stopped-phase rejection: {respawn:?}"
     );
+}
+
+fn mob_command_arm_source<'a>(source: &'a str, command: &str) -> &'a str {
+    let marker = format!("                MobCommand::{command}");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("MobCommand::{command} arm exists"));
+    let rest = &source[start + marker.len()..];
+    let end = rest
+        .find("\n                MobCommand::")
+        .map(|offset| start + marker.len() + offset)
+        .unwrap_or(source.len());
+    &source[start..end]
+}
+
+#[test]
+fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
+    let source = include_str!("actor.rs");
+    for command in [
+        "Spawn",
+        "Respawn",
+        "RunFlow",
+        "CancelFlow",
+        "SubmitWork",
+        "CancelAllWork",
+        "TaskCreate",
+        "TaskUpdate",
+    ] {
+        let arm = mob_command_arm_source(source, command);
+        for disallowed in [
+            "require_state(",
+            "require_live_lifecycle_phase(",
+            "require_live_reset_admission(",
+            "require_live_stop_admission(",
+        ] {
+            assert!(
+                !arm.contains(disallowed),
+                "MobCommand::{command} admission must be delegated to MobMachine guards, not shell `{disallowed}`"
+            );
+        }
+    }
 }
 
 struct StaticWorkerSpawnPolicy;

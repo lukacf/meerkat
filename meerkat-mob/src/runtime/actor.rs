@@ -1225,6 +1225,39 @@ impl MobActor {
         self.publish_machine_state_projection();
     }
 
+    fn prepare_command_admission(
+        &self,
+        input: mob_dsl::MobMachineInput,
+        target: MobState,
+        context: &str,
+    ) -> Result<PreparedDslInput, MobError> {
+        self.prepare_dsl_input(input, context).map_err(|error| {
+            tracing::debug!(
+                context,
+                error = %error,
+                "MobMachine command admission rejected input"
+            );
+            self.invalid_transition_to(target)
+        })
+    }
+
+    fn apply_command_admission(
+        &mut self,
+        input: mob_dsl::MobMachineInput,
+        target: MobState,
+        context: &str,
+    ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
+        self.apply_dsl_input_collect_effects(input, context)
+            .map_err(|error| {
+                tracing::debug!(
+                    context,
+                    error = %error,
+                    "MobMachine command admission rejected input"
+                );
+                self.invalid_transition_to(target)
+            })
+    }
+
     fn preview_dsl_input(
         &self,
         input: mob_dsl::MobMachineInput,
@@ -3085,10 +3118,7 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::CancelFlow { run_id, reply_tx } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_cancel_flow(run_id).await,
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_cancel_flow(run_id).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::FlowStatus { run_id, reply_tx } => {
@@ -3456,13 +3486,9 @@ impl MobActor {
                     blocked_by,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => {
-                            self.handle_task_create(subject, description, blocked_by)
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    };
+                    let result = self
+                        .handle_task_create(subject, description, blocked_by)
+                        .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::TaskUpdate {
@@ -3471,10 +3497,7 @@ impl MobActor {
                     owner,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_task_update(task_id, status, owner).await,
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_task_update(task_id, status, owner).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::TaskList { reply_tx } => {
@@ -3644,10 +3667,7 @@ impl MobActor {
                     fence_token,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_cancel_all_work(runtime_id, fence_token).await,
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_cancel_all_work(runtime_id, fence_token).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SetSpawnPolicy { policy, reply_tx } => {
@@ -8675,12 +8695,9 @@ impl MobActor {
         // shell task-board event using the same id. This prevents the
         // prior event-sourced-board/DSL split-brain where DSL rejection
         // was only logged after the shell write.
-        self.apply_dsl_input(dsl_input, "handle_task_create")
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "task create rejected by MobMachine guards before task-board write: {error}"
-                ))
-            })?;
+        let prepared =
+            self.prepare_command_admission(dsl_input, MobState::Running, "handle_task_create")?;
+        self.commit_prepared_dsl_input(prepared);
         self.task_board_service
             .create_task_with_id(task_id.clone(), subject, description, blocked_by)
             .await?;
@@ -8693,6 +8710,15 @@ impl MobActor {
         status: TaskStatus,
         owner: Option<AgentIdentity>,
     ) -> Result<(), MobError> {
+        let prepared = self.prepare_command_admission(
+            mob_dsl::MobMachineInput::TaskUpdate {
+                task_id: mob_dsl::TaskId::from(task_id.as_str()),
+                new_status: Self::task_status_to_dsl(status),
+            },
+            MobState::Running,
+            "handle_task_update",
+        )?;
+
         // TLA+ TaskBindingInvariant: owner must be a known identity (roster member).
         if let Some(ref owner_id) = owner {
             let roster = self.roster.read().await;
@@ -8707,18 +8733,7 @@ impl MobActor {
         // applying the shell-side event-sourced update. Rolling back from
         // a terminal status (Completed / Cancelled) is rejected here
         // rather than by the event projection.
-        self.apply_dsl_input(
-            mob_dsl::MobMachineInput::TaskUpdate {
-                task_id: mob_dsl::TaskId::from(task_id.as_str()),
-                new_status: Self::task_status_to_dsl(status),
-            },
-            "handle_task_update",
-        )
-        .map_err(|error| {
-            MobError::Internal(format!(
-                "task update rejected by MobMachine guards: {error}"
-            ))
-        })?;
+        self.commit_prepared_dsl_input(prepared);
         self.task_board_service
             .update_task(task_id, status, owner)
             .await
@@ -8921,6 +8936,30 @@ impl MobActor {
         fence_token: FenceToken,
     ) -> Result<(), MobError> {
         let agent_identity = MeerkatId::from(&runtime_id.identity);
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(fence_token);
+        let prepared = self
+            .prepare_dsl_input(
+                mob_dsl::MobMachineInput::CancelAllWork {
+                    agent_runtime_id: dsl_runtime_id.clone(),
+                    fence_token: dsl_fence_token,
+                },
+                "handle_cancel_all_work",
+            )
+            .map_err(|_| {
+                if self.state() != MobState::Running {
+                    return self.invalid_transition_to(MobState::Running);
+                }
+                if !self
+                    .dsl_authority
+                    .state
+                    .live_runtime_ids
+                    .contains(&dsl_runtime_id)
+                {
+                    return MobError::MemberNotFound(agent_identity.clone());
+                }
+                self.invalid_transition_to(MobState::Running)
+            })?;
 
         let entry = {
             let roster = self.roster.read().await;
@@ -8940,15 +8979,7 @@ impl MobActor {
         // Feed the DSL CancelAllWork input. Guards enforce live-runtime
         // membership + phase == Running. A rejection here is a state
         // legality violation.
-        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
-        let dsl_fence_token = mob_dsl::FenceToken::from_domain(entry.fence_token);
-        self.apply_dsl_input(
-            mob_dsl::MobMachineInput::CancelAllWork {
-                agent_runtime_id: dsl_runtime_id,
-                fence_token: dsl_fence_token,
-            },
-            "handle_cancel_all_work",
-        )?;
+        self.commit_prepared_dsl_input(prepared);
 
         // Dispatch the interrupt now that the machine has authorized.
         self.provisioner.interrupt_member(&entry.member_ref).await
@@ -9249,10 +9280,11 @@ impl MobActor {
 
     async fn handle_cancel_flow(&mut self, run_id: RunId) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_cancel_flow preflight")?;
-        self.apply_dsl_input(
+        self.apply_command_admission(
             mob_dsl::MobMachineInput::CancelFlow {
                 run_id: mob_dsl::RunId::from(run_id.to_string()),
             },
+            MobState::Running,
             "cancel_flow",
         )?;
         let Some((cancel_token, flow_id)) = self

@@ -3043,6 +3043,7 @@ impl AgentFactory {
                 silent_intents,
             )
             .map_err(|e| BuildAgentError::Comms(e.to_string()))?;
+            runtime.require_peer_comms_machine_authority();
             if let Some(ref meta) = build_config.peer_meta {
                 runtime.set_peer_meta(meta.clone());
             }

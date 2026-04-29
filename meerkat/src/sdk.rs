@@ -607,6 +607,8 @@ pub async fn build_session_scoped_comms_runtime_from_config_scoped_with_silent_i
         }
     };
 
+    runtime.require_peer_comms_machine_authority();
+
     if let Some(meta) = peer_meta {
         runtime.set_peer_meta(meta);
     }

@@ -27,6 +27,9 @@ use std::sync::Arc;
 
 use crate::LoopState;
 use crate::comms::InputSource;
+use crate::interaction::{
+    PeerIngressAdmission, PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts,
+};
 use crate::lifecycle::run_primitive::ModelId;
 use crate::lifecycle::{InputId, RunId};
 use crate::ops::{AsyncOpRef, OperationId};
@@ -887,18 +890,26 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 /// Peer comms ingress classification DSL handle.
 ///
 /// Covers the peer-envelope classification signals on the MeerkatMachine DSL.
-/// Runtime-backed comms ingress must fire one of these signals before the
-/// comms shell computes its stored compatibility projection (`PeerInputClass`,
-/// auth exemption, lifecycle subject, rendered text). A rejection is
-/// authoritative and callers fail closed. Standalone comms runtimes may have
-/// no session DSL handle; those retain the historical in-process projection
-/// path for wire compatibility.
+/// Runtime-backed comms ingress hands parsed transport facts to this handle
+/// and receives the complete typed admission/classification facts back. A
+/// rejection is authoritative and callers fail closed. Standalone comms
+/// runtimes may have no session DSL handle; those retain a local
+/// `PeerIngressMachinePolicy` adapter for wire-compatible operation without a
+/// session authority.
 pub trait PeerCommsHandle: Send + Sync {
-    /// Fire the `ClassifyExternalEnvelope` signal.
-    fn classify_external_envelope(&self) -> Result<(), DslTransitionError>;
+    /// Fire the `ClassifyExternalEnvelope` signal and return machine-owned
+    /// admission facts for the parsed envelope.
+    fn classify_external_envelope(
+        &self,
+        facts: PeerIngressEnvelopeFacts,
+    ) -> Result<PeerIngressAdmission, DslTransitionError>;
 
-    /// Fire the `ClassifyPlainEvent` signal.
-    fn classify_plain_event(&self) -> Result<(), DslTransitionError>;
+    /// Fire the `ClassifyPlainEvent` signal and return machine-owned
+    /// admission facts for the parsed plain event.
+    fn classify_plain_event(
+        &self,
+        facts: PeerIngressPlainEventFacts,
+    ) -> Result<PeerIngressAdmission, DslTransitionError>;
 
     /// Fire the `SetPeerIngressContext { keep_alive }` input.
     fn set_peer_ingress_context(&self, keep_alive: bool) -> Result<(), DslTransitionError>;

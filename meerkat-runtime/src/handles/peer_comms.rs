@@ -3,6 +3,9 @@
 use std::sync::Arc;
 
 use meerkat_core::handles::{DslTransitionError, PeerCommsHandle};
+use meerkat_core::interaction::{
+    PeerIngressAdmission, PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts,
+};
 
 use super::HandleDslAuthority;
 use crate::meerkat_machine::dsl as mm_dsl;
@@ -30,19 +33,275 @@ impl RuntimePeerCommsHandle {
     }
 }
 
+fn lifecycle_to_dsl(
+    kind: meerkat_core::comms::PeerLifecycleKind,
+) -> mm_dsl::PeerIngressLifecycleClass {
+    match kind {
+        meerkat_core::comms::PeerLifecycleKind::PeerAdded => {
+            mm_dsl::PeerIngressLifecycleClass::PeerAdded
+        }
+        meerkat_core::comms::PeerLifecycleKind::PeerRetired => {
+            mm_dsl::PeerIngressLifecycleClass::PeerRetired
+        }
+        meerkat_core::comms::PeerLifecycleKind::PeerUnwired => {
+            mm_dsl::PeerIngressLifecycleClass::PeerUnwired
+        }
+    }
+}
+
+fn lifecycle_from_dsl(
+    kind: mm_dsl::PeerIngressLifecycleClass,
+) -> meerkat_core::comms::PeerLifecycleKind {
+    match kind {
+        mm_dsl::PeerIngressLifecycleClass::PeerAdded => {
+            meerkat_core::comms::PeerLifecycleKind::PeerAdded
+        }
+        mm_dsl::PeerIngressLifecycleClass::PeerRetired => {
+            meerkat_core::comms::PeerLifecycleKind::PeerRetired
+        }
+        mm_dsl::PeerIngressLifecycleClass::PeerUnwired => {
+            meerkat_core::comms::PeerLifecycleKind::PeerUnwired
+        }
+    }
+}
+
+fn response_status_to_dsl(
+    status: meerkat_core::ResponseStatus,
+) -> mm_dsl::PeerIngressResponseStatus {
+    match status {
+        meerkat_core::ResponseStatus::Accepted => mm_dsl::PeerIngressResponseStatus::Accepted,
+        meerkat_core::ResponseStatus::Completed => mm_dsl::PeerIngressResponseStatus::Completed,
+        meerkat_core::ResponseStatus::Failed => mm_dsl::PeerIngressResponseStatus::Failed,
+    }
+}
+
+fn terminality_from_dsl(
+    terminality: mm_dsl::PeerIngressResponseTerminality,
+) -> meerkat_core::TerminalityClass {
+    match terminality {
+        mm_dsl::PeerIngressResponseTerminality::Progress => {
+            meerkat_core::TerminalityClass::Progress
+        }
+        mm_dsl::PeerIngressResponseTerminality::TerminalCompleted => {
+            meerkat_core::TerminalityClass::Terminal {
+                disposition: meerkat_core::TerminalDisposition::Completed,
+            }
+        }
+        mm_dsl::PeerIngressResponseTerminality::TerminalFailed => {
+            meerkat_core::TerminalityClass::Terminal {
+                disposition: meerkat_core::TerminalDisposition::Failed,
+            }
+        }
+    }
+}
+
+fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::MeerkatMachineSignal {
+    let (
+        envelope_kind,
+        request_intent,
+        lifecycle_kind,
+        lifecycle_peer,
+        response_status,
+        in_reply_to,
+    ) = match &facts.kind {
+        meerkat_core::PeerIngressEnvelopeKind::Message { .. } => (
+            mm_dsl::PeerIngressEnvelopeClass::Message,
+            String::new(),
+            mm_dsl::PeerIngressLifecycleClass::PeerAdded,
+            String::new(),
+            mm_dsl::PeerIngressResponseStatus::Accepted,
+            String::new(),
+        ),
+        meerkat_core::PeerIngressEnvelopeKind::Request { intent, params } => (
+            mm_dsl::PeerIngressEnvelopeClass::Request,
+            intent.clone(),
+            mm_dsl::PeerIngressLifecycleClass::PeerAdded,
+            meerkat_core::peer_lifecycle_subject(params, facts.from_peer.as_str()),
+            mm_dsl::PeerIngressResponseStatus::Accepted,
+            String::new(),
+        ),
+        meerkat_core::PeerIngressEnvelopeKind::Lifecycle { kind, params } => (
+            mm_dsl::PeerIngressEnvelopeClass::Lifecycle,
+            String::new(),
+            lifecycle_to_dsl(*kind),
+            meerkat_core::peer_lifecycle_subject(params, facts.from_peer.as_str()),
+            mm_dsl::PeerIngressResponseStatus::Accepted,
+            String::new(),
+        ),
+        meerkat_core::PeerIngressEnvelopeKind::Response {
+            in_reply_to: reply_to,
+            status,
+            ..
+        } => (
+            mm_dsl::PeerIngressEnvelopeClass::Response,
+            String::new(),
+            mm_dsl::PeerIngressLifecycleClass::PeerAdded,
+            String::new(),
+            response_status_to_dsl(*status),
+            reply_to.clone(),
+        ),
+        meerkat_core::PeerIngressEnvelopeKind::Ack {
+            in_reply_to: reply_to,
+        } => (
+            mm_dsl::PeerIngressEnvelopeClass::Ack,
+            String::new(),
+            mm_dsl::PeerIngressLifecycleClass::PeerAdded,
+            String::new(),
+            mm_dsl::PeerIngressResponseStatus::Accepted,
+            reply_to.clone(),
+        ),
+    };
+
+    mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
+        item_id: facts.item_id.clone(),
+        from_peer: facts.from_peer.clone(),
+        envelope_kind,
+        request_intent,
+        lifecycle_kind,
+        lifecycle_peer,
+        response_status,
+        in_reply_to,
+    }
+}
+
+struct PeerIngressClassifiedEffect {
+    class: mm_dsl::PeerIngressInputClass,
+    kind: mm_dsl::PeerIngressAdmittedKind,
+    auth: mm_dsl::PeerIngressAuthClass,
+    lifecycle_kind: Option<mm_dsl::PeerIngressLifecycleClass>,
+    lifecycle_peer: Option<String>,
+    request_id: Option<String>,
+    response_terminality: Option<mm_dsl::PeerIngressResponseTerminality>,
+}
+
+fn classified_effect(
+    effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    context: &'static str,
+) -> Result<PeerIngressClassifiedEffect, DslTransitionError> {
+    effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::PeerIngressClassified {
+                class,
+                kind,
+                auth,
+                lifecycle_kind,
+                lifecycle_peer,
+                request_id,
+                response_terminality,
+            } => Some(PeerIngressClassifiedEffect {
+                class,
+                kind,
+                auth,
+                lifecycle_kind,
+                lifecycle_peer,
+                request_id,
+                response_terminality,
+            }),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            DslTransitionError::guard_rejected(
+                context,
+                "machine transition did not emit PeerIngressClassified",
+            )
+        })
+}
+
+fn classification_from_effect(
+    effect: &PeerIngressClassifiedEffect,
+) -> meerkat_core::PeerIngressClassification {
+    let class = match effect.class {
+        mm_dsl::PeerIngressInputClass::ActionableMessage => {
+            meerkat_core::PeerInputClass::ActionableMessage
+        }
+        mm_dsl::PeerIngressInputClass::ActionableRequest => {
+            meerkat_core::PeerInputClass::ActionableRequest
+        }
+        mm_dsl::PeerIngressInputClass::ResponseProgress => {
+            meerkat_core::PeerInputClass::ResponseProgress
+        }
+        mm_dsl::PeerIngressInputClass::ResponseTerminal => {
+            meerkat_core::PeerInputClass::ResponseTerminal
+        }
+        mm_dsl::PeerIngressInputClass::PeerLifecycleAdded => {
+            meerkat_core::PeerInputClass::PeerLifecycleAdded
+        }
+        mm_dsl::PeerIngressInputClass::PeerLifecycleRetired => {
+            meerkat_core::PeerInputClass::PeerLifecycleRetired
+        }
+        mm_dsl::PeerIngressInputClass::PeerLifecycleUnwired => {
+            meerkat_core::PeerInputClass::PeerLifecycleUnwired
+        }
+        mm_dsl::PeerIngressInputClass::SilentRequest => meerkat_core::PeerInputClass::SilentRequest,
+        mm_dsl::PeerIngressInputClass::Ack => meerkat_core::PeerInputClass::Ack,
+        mm_dsl::PeerIngressInputClass::PlainEvent => meerkat_core::PeerInputClass::PlainEvent,
+    };
+    let kind = match effect.kind {
+        mm_dsl::PeerIngressAdmittedKind::Message => meerkat_core::PeerIngressKind::Message,
+        mm_dsl::PeerIngressAdmittedKind::Request => meerkat_core::PeerIngressKind::Request,
+        mm_dsl::PeerIngressAdmittedKind::Response => meerkat_core::PeerIngressKind::Response,
+        mm_dsl::PeerIngressAdmittedKind::Ack => meerkat_core::PeerIngressKind::Ack,
+        mm_dsl::PeerIngressAdmittedKind::PlainEvent => meerkat_core::PeerIngressKind::PlainEvent,
+    };
+    let auth = match effect.auth {
+        mm_dsl::PeerIngressAuthClass::Required => meerkat_core::PeerIngressAuthDecision::Required,
+        mm_dsl::PeerIngressAuthClass::SupervisorBridgeExempt => {
+            meerkat_core::PeerIngressAuthDecision::Exempt(
+                meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
+            )
+        }
+    };
+
+    meerkat_core::PeerIngressClassification {
+        class,
+        kind,
+        auth,
+        lifecycle_kind: effect.lifecycle_kind.map(lifecycle_from_dsl),
+        response_terminality: effect.response_terminality.map(terminality_from_dsl),
+    }
+}
+
 impl PeerCommsHandle for RuntimePeerCommsHandle {
-    fn classify_external_envelope(&self) -> Result<(), DslTransitionError> {
-        self.dsl.apply_signal(
-            mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope,
-            "PeerCommsHandle::classify_external_envelope",
-        )
+    fn classify_external_envelope(
+        &self,
+        facts: PeerIngressEnvelopeFacts,
+    ) -> Result<PeerIngressAdmission, DslTransitionError> {
+        let context = "PeerCommsHandle::classify_external_envelope";
+        let effects = self
+            .dsl
+            .apply_signal_with_effects(external_envelope_signal(&facts), context)?;
+        let effect = classified_effect(effects, context)?;
+        let classification = classification_from_effect(&effect);
+        Ok(PeerIngressAdmission {
+            rendered_text: meerkat_core::render_peer_ingress_admitted_text(&facts, &classification),
+            classification,
+            lifecycle_peer: effect.lifecycle_peer,
+            request_id: effect.request_id,
+        })
     }
 
-    fn classify_plain_event(&self) -> Result<(), DslTransitionError> {
-        self.dsl.apply_signal(
-            mm_dsl::MeerkatMachineSignal::ClassifyPlainEvent,
-            "PeerCommsHandle::classify_plain_event",
-        )
+    fn classify_plain_event(
+        &self,
+        facts: PeerIngressPlainEventFacts,
+    ) -> Result<PeerIngressAdmission, DslTransitionError> {
+        let context = "PeerCommsHandle::classify_plain_event";
+        let effects = self.dsl.apply_signal_with_effects(
+            mm_dsl::MeerkatMachineSignal::ClassifyPlainEvent {
+                source_name: facts.source_name.clone(),
+            },
+            context,
+        )?;
+        let effect = classified_effect(effects, context)?;
+        Ok(PeerIngressAdmission {
+            classification: classification_from_effect(&effect),
+            lifecycle_peer: effect.lifecycle_peer,
+            request_id: effect.request_id,
+            rendered_text: meerkat_core::interaction::format_external_event_projection(
+                &facts.source_name,
+                Some(&facts.body),
+            ),
+        })
     }
 
     fn set_peer_ingress_context(&self, keep_alive: bool) -> Result<(), DslTransitionError> {
@@ -51,5 +310,49 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
             mm_dsl::MeerkatMachineInput::SetPeerIngressContext { keep_alive },
             "PeerCommsHandle::set_peer_ingress_context",
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    #[test]
+    fn runtime_peer_comms_handle_classifies_from_dsl_silent_intents() {
+        let state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
+            session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+            silent_intent_overrides: BTreeSet::from(["probe.silent".to_string()]),
+            ..Default::default()
+        };
+        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
+            state,
+        )));
+        let handle =
+            RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
+
+        let admission = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "request-1".to_string(),
+                from_peer: "peer-1".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "probe.silent".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("attached session should classify peer ingress");
+
+        assert_eq!(
+            admission.classification.class,
+            meerkat_core::PeerInputClass::SilentRequest
+        );
+        assert_eq!(
+            admission.classification.auth,
+            meerkat_core::PeerIngressAuthDecision::Required
+        );
+        assert_eq!(admission.request_id.as_deref(), Some("request-1"));
     }
 }

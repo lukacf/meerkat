@@ -574,10 +574,94 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AcceptWithoutWakeRunning`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
-- `ClassifyExternalEnvelopeAttached`
+- `ClassifyExternalEnvelopeMessageAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
-- `ClassifyExternalEnvelopeRunning`
+- `ClassifyExternalEnvelopeMessageRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerAddedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerAddedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerRetiredAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerUnwiredAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSupervisorSilentAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSilentAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSilentRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSupervisorAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestSupervisorRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestActionableAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeRequestActionableRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleAddedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleAddedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleRetiredAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleRetiredRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleUnwiredAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeResponseAcceptedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeResponseAcceptedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeResponseCompletedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeResponseCompletedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeResponseFailedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeResponseFailedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeAckAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ClassifyExternalEnvelopeAckRunning`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `ClassifyPlainEventAttached`
@@ -2567,6 +2651,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: `ops_completion_and_waiters`
 - `EnqueueClassifiedEntry`
   - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `PeerIngressClassified`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
   - scenarios: `input_admission_and_queueing`
 - `SpawnDrainTask`
   - anchors: `meerkat_machine`

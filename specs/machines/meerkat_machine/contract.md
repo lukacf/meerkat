@@ -360,8 +360,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Initialize`
 - `BoundaryApplied`(revision: u64)
 - `DrainQueuedRun`(run_id: RunId)
-- `ClassifyExternalEnvelope`
-- `ClassifyPlainEvent`
+- `ClassifyExternalEnvelope`(item_id: String, from_peer: String, envelope_kind: PeerIngressEnvelopeClass, request_intent: String, lifecycle_kind: PeerIngressLifecycleClass, lifecycle_peer: String, response_status: PeerIngressResponseStatus, in_reply_to: String)
+- `ClassifyPlainEvent`(source_name: String)
 - `EnsureDrainRunning`
 
 ## Effects
@@ -412,6 +412,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WaitAllSatisfied`(wait_request_id: WaitRequestId, operation_ids: Set<OperationId>)
 - `CollectCompletedResult`
 - `EnqueueClassifiedEntry`
+- `PeerIngressClassified`(class: PeerIngressInputClass, kind: PeerIngressAdmittedKind, auth: PeerIngressAuthClass, lifecycle_kind: Option<PeerIngressLifecycleClass>, lifecycle_peer: Option<String>, request_id: Option<String>, response_terminality: Option<PeerIngressResponseTerminality>)
 - `SpawnDrainTask`
 - `ScheduleSurfaceCompletion`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, pending_task_sequence: u64, staged_intent_sequence: u64, applied_at_turn: u64)
 - `RefreshVisibleSurfaceSet`(snapshot_epoch: u64)
@@ -1892,36 +1893,290 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressAccepted`
 - To: `Running`
 
-### `ClassifyExternalEnvelopeAttached`
+### `ClassifyExternalEnvelopeMessageAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`()
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`
+  - `peer_ingress_message`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
-### `ClassifyExternalEnvelopeRunning`
+### `ClassifyExternalEnvelopeMessageRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`()
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`
+  - `peer_ingress_message`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeRequestPeerAddedAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_added`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestPeerAddedRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_added`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeRequestPeerRetiredAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeRequestPeerUnwiredAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_request_peer_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeRequestSupervisorSilentAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_silent_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_silent_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeRequestSilentAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_silent_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestSilentRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_silent_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeRequestSupervisorAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestSupervisorRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_supervisor_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeRequestActionableAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_actionable_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeRequestActionableRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_actionable_request`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeLifecycleAddedAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_added`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeLifecycleAddedRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_added`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeLifecycleRetiredAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeLifecycleRetiredRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_retired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeLifecycleUnwiredAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_lifecycle_unwired`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeResponseAcceptedAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_response_accepted`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeResponseAcceptedRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_response_accepted`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeResponseCompletedAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_response_completed`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeResponseCompletedRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_response_completed`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeResponseFailedAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_response_failed`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeResponseFailedRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_response_failed`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Running`
+
+### `ClassifyExternalEnvelopeAckAttached`
+- From: `Attached`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_ack`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
+- To: `Attached`
+
+### `ClassifyExternalEnvelopeAckRunning`
+- From: `Running`
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- Guards:
+  - `session_registered`
+  - `peer_ingress_ack`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
 ### `ClassifyPlainEventAttached`
 - From: `Attached`
-- On: `ClassifyPlainEvent`()
+- On: `ClassifyPlainEvent`(source_name)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Attached`
 
 ### `ClassifyPlainEventRunning`
 - From: `Running`
-- On: `ClassifyPlainEvent`()
+- On: `ClassifyPlainEvent`(source_name)
 - Guards:
   - `session_registered`
-- Emits: `EnqueueClassifiedEntry`
+- Emits: `EnqueueClassifiedEntry`, `PeerIngressClassified`
 - To: `Running`
 
 ### `PrepareIdle`

@@ -6,9 +6,9 @@ use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
 };
-use meerkat_core::interaction::{
-    InteractionContent, PeerInputCandidate, TerminalityClass, classify_response_terminality,
-};
+#[cfg(test)]
+use meerkat_core::interaction::classify_response_terminality;
+use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, TerminalityClass};
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::HandlingMode;
 use std::collections::{HashSet, VecDeque};
@@ -234,17 +234,16 @@ impl MobSupervisorBridge {
 
     /// Extract a terminal response value for the awaited request, if any.
     ///
-    /// Bridge code does not interpret `ResponseStatus` directly — it routes
-    /// through `classify_response_terminality` and matches the typed
-    /// `TerminalityClass` exhaustively. W1-B made that classifier canonical
-    /// across the system; W2-F closes the bridge layer against drift.
+    /// Bridge code does not interpret `ResponseStatus` directly. The
+    /// ingress classifier stamps response terminality onto the candidate, and
+    /// the bridge consumes that typed fact.
     fn response_value(
         candidate: &PeerInputCandidate,
         request_envelope_id: uuid::Uuid,
     ) -> Result<Option<serde_json::Value>, MobError> {
         let InteractionContent::Response {
             in_reply_to,
-            status,
+            status: _,
             result,
         } = &candidate.interaction.content
         else {
@@ -255,14 +254,9 @@ impl MobSupervisorBridge {
             return Ok(None);
         }
 
-        // Forward-compat wildcard: `TerminalityClass` is `#[non_exhaustive]`.
-        // Any future variant is treated as non-terminal here so the bridge
-        // keeps waiting rather than invented-terminal-ing on a class it does
-        // not yet understand — matching the conservative pattern in
-        // `meerkat-runtime/src/comms_drain.rs`.
-        match classify_response_terminality(*status) {
-            TerminalityClass::Terminal { .. } => Ok(Some(result.clone())),
-            TerminalityClass::Progress => Ok(None),
+        match candidate.response_terminality {
+            Some(TerminalityClass::Terminal { .. }) => Ok(Some(result.clone())),
+            Some(TerminalityClass::Progress) | None => Ok(None),
             _ => Ok(None),
         }
     }
@@ -327,6 +321,7 @@ mod tests {
             from_peer_id: None,
             lifecycle_peer: None,
             source_peer_id: None,
+            response_terminality: Some(classify_response_terminality(status)),
         }
     }
 

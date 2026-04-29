@@ -1536,6 +1536,30 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
                 "ClosedEarly",
             ],
             "McpServerState" => vec!["PendingConnect", "Connected", "Failed", "Disconnected"],
+            "PeerIngressEnvelopeClass" => {
+                vec!["Message", "Request", "Lifecycle", "Response", "Ack"]
+            }
+            "PeerIngressAdmittedKind" => {
+                vec!["Message", "Request", "Response", "Ack", "PlainEvent"]
+            }
+            "PeerIngressInputClass" => vec![
+                "ActionableMessage",
+                "ActionableRequest",
+                "ResponseProgress",
+                "ResponseTerminal",
+                "PeerLifecycleAdded",
+                "PeerLifecycleRetired",
+                "PeerLifecycleUnwired",
+                "SilentRequest",
+                "Ack",
+                "PlainEvent",
+            ],
+            "PeerIngressLifecycleClass" => vec!["PeerAdded", "PeerRetired", "PeerUnwired"],
+            "PeerIngressAuthClass" => vec!["Required", "SupervisorBridgeExempt"],
+            "PeerIngressResponseStatus" => vec!["Accepted", "Completed", "Failed"],
+            "PeerIngressResponseTerminality" => {
+                vec!["Progress", "TerminalCompleted", "TerminalFailed"]
+            }
             "PeerIngressOwnerKind" => vec!["Unattached", "SessionOwned", "MobOwned"],
             "SupervisorBindingKind" => vec!["Unbound", "Bound"],
             "TurnPhase" => vec![

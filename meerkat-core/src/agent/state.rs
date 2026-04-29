@@ -3801,6 +3801,7 @@ mod tests {
                     auth: Some(crate::interaction::PeerIngressAuthDecision::Required),
                     from_peer_id: None,
                     lifecycle_peer: None,
+                    response_terminality: None,
                 })
                 .collect()
         }

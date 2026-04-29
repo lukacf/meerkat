@@ -2244,6 +2244,7 @@ mod tests {
                     from_peer_id: None,
                     lifecycle_peer: None,
                     source_peer_id: None,
+                    response_terminality: None,
                 })
                 .collect()
         }

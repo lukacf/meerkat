@@ -362,6 +362,7 @@ pub struct PeerIngressClassification {
     pub kind: PeerIngressKind,
     pub auth: PeerIngressAuthDecision,
     pub lifecycle_kind: Option<PeerLifecycleKind>,
+    pub response_terminality: Option<TerminalityClass>,
 }
 
 impl PeerIngressClassification {
@@ -371,6 +372,7 @@ impl PeerIngressClassification {
             kind,
             auth: PeerIngressAuthDecision::Required,
             lifecycle_kind: None,
+            response_terminality: None,
         }
     }
 
@@ -385,14 +387,69 @@ impl PeerIngressClassification {
             kind: PeerIngressKind::Request,
             auth: PeerIngressAuthDecision::Required,
             lifecycle_kind: Some(kind),
+            response_terminality: None,
         }
     }
 }
 
-/// Machine-owned policy used to classify peer ingress.
+/// Parsed transport facts for one peer-envelope ingress item.
 ///
-/// Transport code may parse envelopes, but auth exemptions, lifecycle intent
-/// mapping, and silent-request routing flow through this typed authority.
+/// This is intentionally a typed adapter shape: comms may parse the envelope
+/// mechanics into this struct, but the policy below owns all semantic
+/// classification derived from it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerIngressEnvelopeFacts {
+    pub item_id: String,
+    pub from_peer: String,
+    pub from_peer_id: PeerId,
+    pub kind: PeerIngressEnvelopeKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PeerIngressEnvelopeKind {
+    Message {
+        body: String,
+    },
+    Request {
+        intent: String,
+        params: Value,
+    },
+    Lifecycle {
+        kind: PeerLifecycleKind,
+        params: Value,
+    },
+    Response {
+        in_reply_to: String,
+        status: ResponseStatus,
+        result: Value,
+    },
+    Ack {
+        in_reply_to: String,
+    },
+}
+
+/// Parsed transport facts for one plain external event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressPlainEventFacts {
+    pub source_name: String,
+    pub body: String,
+}
+
+/// Complete typed admission facts produced by peer-ingress classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressAdmission {
+    pub classification: PeerIngressClassification,
+    pub lifecycle_peer: Option<String>,
+    pub request_id: Option<String>,
+    pub rendered_text: String,
+}
+
+/// Standalone compatibility adapter for peer ingress classification.
+///
+/// Runtime-backed comms must use the MeerkatMachine
+/// `PeerIngressClassified` effect as authority. This adapter exists only for
+/// standalone comms runtimes without a session DSL and is ratcheted by comms
+/// tests so session-backed ingress cannot silently fall back to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressMachinePolicy {
     silent_request_intents: BTreeSet<String>,
@@ -455,11 +512,15 @@ impl PeerIngressMachinePolicy {
     }
 
     pub fn classify_response(&self, status: ResponseStatus) -> PeerIngressClassification {
-        let class = match classify_response_terminality(status) {
+        let terminality = classify_response_terminality(status);
+        let class = match terminality {
             TerminalityClass::Progress => PeerInputClass::ResponseProgress,
             TerminalityClass::Terminal { .. } => PeerInputClass::ResponseTerminal,
         };
-        PeerIngressClassification::required(class, PeerIngressKind::Response)
+        let mut classification =
+            PeerIngressClassification::required(class, PeerIngressKind::Response);
+        classification.response_terminality = Some(terminality);
+        classification
     }
 
     pub fn classify_ack(&self) -> PeerIngressClassification {
@@ -468,6 +529,117 @@ impl PeerIngressMachinePolicy {
 
     pub fn classify_plain_event(&self) -> PeerIngressClassification {
         PeerIngressClassification::required(PeerInputClass::PlainEvent, PeerIngressKind::PlainEvent)
+    }
+
+    pub fn classify_external_envelope(
+        &self,
+        facts: &PeerIngressEnvelopeFacts,
+    ) -> PeerIngressAdmission {
+        match &facts.kind {
+            PeerIngressEnvelopeKind::Message { .. } => {
+                let classification = self.classify_message();
+                PeerIngressAdmission {
+                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
+                    classification,
+                    lifecycle_peer: None,
+                    request_id: None,
+                }
+            }
+            PeerIngressEnvelopeKind::Request { intent, params } => {
+                let classification = self.classify_request_intent(intent);
+                let lifecycle_peer = classification
+                    .lifecycle_kind
+                    .map(|_| peer_lifecycle_subject(params, facts.from_peer.as_str()));
+                let rendered_text = render_peer_ingress_admitted_text(facts, &classification);
+                PeerIngressAdmission {
+                    classification,
+                    lifecycle_peer,
+                    request_id: Some(facts.item_id.clone()),
+                    rendered_text,
+                }
+            }
+            PeerIngressEnvelopeKind::Lifecycle { kind, params } => {
+                let classification = self.classify_lifecycle(*kind);
+                PeerIngressAdmission {
+                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
+                    classification,
+                    lifecycle_peer: Some(peer_lifecycle_subject(params, facts.from_peer.as_str())),
+                    request_id: None,
+                }
+            }
+            PeerIngressEnvelopeKind::Response {
+                in_reply_to,
+                status,
+                ..
+            } => {
+                let classification = self.classify_response(*status);
+                PeerIngressAdmission {
+                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
+                    classification,
+                    lifecycle_peer: None,
+                    request_id: Some(in_reply_to.clone()),
+                }
+            }
+            PeerIngressEnvelopeKind::Ack { in_reply_to } => {
+                let classification = self.classify_ack();
+                PeerIngressAdmission {
+                    rendered_text: render_peer_ingress_admitted_text(facts, &classification),
+                    classification,
+                    lifecycle_peer: None,
+                    request_id: Some(in_reply_to.clone()),
+                }
+            }
+        }
+    }
+
+    pub fn classify_plain_event_facts(
+        &self,
+        facts: &PeerIngressPlainEventFacts,
+    ) -> PeerIngressAdmission {
+        PeerIngressAdmission {
+            classification: self.classify_plain_event(),
+            lifecycle_peer: None,
+            request_id: None,
+            rendered_text: format_external_event_projection(&facts.source_name, Some(&facts.body)),
+        }
+    }
+}
+
+/// Derive model-facing text after typed peer ingress admission.
+///
+/// Classification is the authority. This renderer only projects already
+/// admitted facts into prompt text, so callers cannot change routing or auth
+/// by editing prose formatting.
+pub fn render_peer_ingress_admitted_text(
+    facts: &PeerIngressEnvelopeFacts,
+    classification: &PeerIngressClassification,
+) -> String {
+    match &facts.kind {
+        PeerIngressEnvelopeKind::Message { body } => {
+            format_peer_message_projection(&facts.from_peer, body)
+        }
+        PeerIngressEnvelopeKind::Request { intent, params } => {
+            if classification.lifecycle_kind.is_some() {
+                String::new()
+            } else {
+                format_peer_request_projection(
+                    facts.from_peer_id,
+                    Some(&facts.from_peer),
+                    facts.item_id.as_str(),
+                    intent,
+                    params,
+                )
+            }
+        }
+        PeerIngressEnvelopeKind::Lifecycle { .. } => String::new(),
+        PeerIngressEnvelopeKind::Response {
+            in_reply_to,
+            status,
+            result,
+        } => format_peer_response_projection(&facts.from_peer, in_reply_to, *status, result),
+        PeerIngressEnvelopeKind::Ack { in_reply_to } => {
+            format_peer_ack_projection(&facts.from_peer, in_reply_to)
+        }
     }
 }
 
@@ -522,6 +694,8 @@ pub struct PeerInputCandidate {
     pub from_peer_id: Option<PeerId>,
     /// For lifecycle events, the peer name that was added/retired.
     pub lifecycle_peer: Option<String>,
+    /// For response events, the machine-owned progress/terminal classifier.
+    pub response_terminality: Option<TerminalityClass>,
 }
 
 /// Back-compat alias for older runtime and diagnostic seams.
@@ -620,6 +794,9 @@ pub struct PeerIngressEntrySnapshot {
     /// Admission-time trust diagnostic, when peer authority owns the entry.
     /// Plain external events leave this unset.
     pub admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
+    /// Machine-owned response progress/terminal classifier when this entry is
+    /// a response.
+    pub response_terminality: Option<TerminalityClass>,
 }
 
 /// Non-destructive snapshot of the queued peer-ingress surface.

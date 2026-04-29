@@ -983,6 +983,83 @@ impl<T: Into<String>> From<T> for MobId {
     }
 }
 
+/// Parsed transport envelope class for peer ingress.
+///
+/// This is the mechanical shape comms may derive from a wire envelope before
+/// semantic admission. The DSL consumes it to own the peer-input class,
+/// auth-exemption, lifecycle, silent-routing, and response-terminal facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressEnvelopeClass {
+    #[default]
+    Message,
+    Request,
+    Lifecycle,
+    Response,
+    Ack,
+}
+
+/// DSL-owned admitted ingress kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAdmittedKind {
+    #[default]
+    Message,
+    Request,
+    Response,
+    Ack,
+    PlainEvent,
+}
+
+/// DSL-owned peer input class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressInputClass {
+    #[default]
+    ActionableMessage,
+    ActionableRequest,
+    ResponseProgress,
+    ResponseTerminal,
+    PeerLifecycleAdded,
+    PeerLifecycleRetired,
+    PeerLifecycleUnwired,
+    SilentRequest,
+    Ack,
+    PlainEvent,
+}
+
+/// DSL-owned peer lifecycle classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressLifecycleClass {
+    #[default]
+    PeerAdded,
+    PeerRetired,
+    PeerUnwired,
+}
+
+/// DSL-owned peer ingress auth classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAuthClass {
+    #[default]
+    Required,
+    SupervisorBridgeExempt,
+}
+
+/// Parsed response status for peer ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressResponseStatus {
+    #[default]
+    Accepted,
+    Completed,
+    Failed,
+}
+
+/// DSL-owned response progress/terminal classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressResponseTerminality {
+    #[default]
+    Progress,
+    TerminalCompleted,
+    TerminalFailed,
+}
+
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).
 ///
 /// Paired with `peer_ingress_comms_runtime_id` and `peer_ingress_mob_id` in

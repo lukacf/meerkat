@@ -289,6 +289,7 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "PostAdmissionSignal",
         "SubmitOpEvent",
         "EnqueueClassifiedEntry",
+        "PeerIngressClassified",
         "SpawnDrainTask",
         "EmitExternalToolDelta",
         "CommittedVisibleSetPublished",

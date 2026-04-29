@@ -278,6 +278,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "PeerIngressClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local typed peer-ingress classification result consumed synchronously by the runtime peer-comms handle",
+        ),
+        (
+            "MeerkatMachine",
             "SpawnDrainTask",
             SeamClassification::NoOwnerRealization,
             "Local drain-task spawn inside the comms drain-control region",

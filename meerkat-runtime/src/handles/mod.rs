@@ -205,14 +205,40 @@ impl HandleDslAuthority {
         signal: mm_dsl::MeerkatMachineSignal,
         context: &'static str,
     ) -> Result<(), DslTransitionError> {
+        self.apply_signal_with_effects(signal, context).map(|_| ())
+    }
+
+    /// Apply a DSL signal and return emitted effects.
+    pub fn apply_signal_with_effects(
+        &self,
+        signal: mm_dsl::MeerkatMachineSignal,
+        context: &'static str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .apply_signal(signal)
-            .map(|_| ())
+            .map(|transition| transition.effects)
             .map_err(|err| map_kernel_error(err, context))
+    }
+
+    /// Apply a DSL signal and sample state under the same authority mutex.
+    pub fn apply_signal_and_sample<S>(
+        &self,
+        signal: mm_dsl::MeerkatMachineSignal,
+        context: &'static str,
+        sample: impl FnOnce(&mm_dsl::MeerkatMachineState) -> S,
+    ) -> Result<S, DslTransitionError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .apply_signal(signal)
+            .map_err(|err| map_kernel_error(err, context))?;
+        Ok(sample(&guard.state))
     }
 
     /// Clone the current DSL state under the shared authority's mutex.

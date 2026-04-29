@@ -1852,6 +1852,7 @@ mod tests {
                 from_peer_id: None,
                 lifecycle_peer: None,
                 source_peer_id: None,
+                response_terminality: None,
                 interaction: InboxInteraction {
                     id: meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4()),
                     from_route: None,

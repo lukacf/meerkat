@@ -98,11 +98,12 @@ pub use mob::{
     MobStreamOpenParams, MobStreamOpenResult, MobSubmitWorkParams, MobSubmitWorkResult,
     MobSupervisorSpecInput, MobToolConfigInput, MobTopologyRuleInput, MobTopologySpecInput,
     MobTurnStartParams, MobUnwireParams, MobUnwireResult, MobWaitMembersResult, MobWaitParams,
-    MobWireParams, MobWireResult, MobWiringRulesInput, WireAgentRuntimeId, WireHandlingMode,
-    WireMemberRef, WireMemberRefError, WireMemberState, WireMobBackendKind, WireMobLifecycleAction,
-    WireMobMemberStatus, WireMobReconcileStage, WireMobRuntimeMode, WireRenderClass,
-    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireTrustedPeerIdentity,
-    WireTrustedPeerSpec, WireWorkOrigin,
+    MobWireParams, MobWireResult, MobWiringRulesInput, WireAgentRuntimeId, WireBudgetSplitPolicy,
+    WireForkContext, WireHandlingMode, WireMemberLaunchMode, WireMemberRef, WireMemberRefError,
+    WireMemberState, WireMobBackendKind, WireMobLifecycleAction, WireMobMemberStatus,
+    WireMobProfile, WireMobReconcileStage, WireMobRuntimeMode, WireMobToolConfig, WireRenderClass,
+    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireToolAccessPolicy,
+    WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,

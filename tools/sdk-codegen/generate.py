@@ -25,10 +25,14 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobLifecycleResult",
     "MobSpawnParams",
     "MobSpawnResult",
+    "MobSpawnSpecParams",
     "MobSpawnManyParams",
     "MobSpawnManyResult",
+    "MobSpawnManyResultEntry",
     "MobSpawnReceiptWire",
     "MobMemberListEntryWire",
+    "WireMobToolConfig",
+    "WireMobProfile",
     "MobEnsureMemberParams",
     "MobEnsureMemberResult",
     "MobReconcileParams",
@@ -90,6 +94,13 @@ MOB_RPC_CONTRACT_TYPES = [
 
 MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireMemberRef",
+    "WireMobBackendKind",
+    "WireRuntimeBinding",
+    "WireMemberLaunchMode",
+    "WireForkContext",
+    "WireToolAccessPolicy",
+    "WireBudgetSplitPolicy",
+    "WireToolFilter",
     "WireMemberState",
     "WireMobMemberStatus",
     "WireMobRuntimeMode",
@@ -176,6 +187,13 @@ def _promote_nested_schema_def(name: str) -> bool:
         "ToolCallTimeoutContext",
         "WireTrustedPeerIdentity",
         *MOB_RPC_CONTRACT_ALIAS_TYPES,
+        "WireContentBlock",
+        "WireContentInput",
+        "WireConnectionRef",
+        "MobSpawnSpecParams",
+        "MobSpawnManyResultEntry",
+        "WireMobToolConfig",
+        "WireMobProfile",
     }
 
 

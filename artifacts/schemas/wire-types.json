@@ -13406,6 +13406,67 @@
     "title": "WireBindingIdentity",
     "type": "object"
   },
+  "WireBudgetSplitPolicy": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Budget split policy for a spawned mob member.",
+    "oneOf": [
+      {
+        "properties": {
+          "type": {
+            "const": "equal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "proportional",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "remaining",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "fixed",
+            "type": "string"
+          },
+          "value": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireBudgetSplitPolicy"
+  },
   "WireConnectionRef": {
     "$defs": {
       "BindingId": {
@@ -13904,6 +13965,43 @@
     ],
     "title": "WireDeviceStart",
     "type": "object"
+  },
+  "WireForkContext": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Conversation history scope used when forking a mob member.",
+    "oneOf": [
+      {
+        "properties": {
+          "type": {
+            "const": "full_history",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "last_messages",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "count"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireForkContext"
   },
   "WireGenerateImageExecutionPlan": {
     "$defs": {
@@ -16458,6 +16556,298 @@
     "title": "WireLoginStart",
     "type": "object"
   },
+  "WireMemberLaunchMode": {
+    "$defs": {
+      "WireForkContext": {
+        "description": "Conversation history scope used when forking a mob member.",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "How a mob member should be launched by `mob/spawn`.",
+    "oneOf": [
+      {
+        "properties": {
+          "mode": {
+            "const": "fresh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "bridge_session_id": {
+            "type": "string"
+          },
+          "mode": {
+            "const": "resume",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "bridge_session_id"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "fork_context": {
+            "$ref": "#/$defs/WireForkContext",
+            "default": {
+              "type": "full_history"
+            }
+          },
+          "mode": {
+            "const": "fork",
+            "type": "string"
+          },
+          "source_member_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "source_member_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireMemberLaunchMode"
+  },
+  "WireMobBackendKind": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "session",
+      "external"
+    ],
+    "title": "WireMobBackendKind",
+    "type": "string"
+  },
+  "WireMobProfile": {
+    "$defs": {
+      "WireMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      },
+      "WireMobToolConfig": {
+        "description": "Tool configuration embedded in a wire mob profile override.",
+        "properties": {
+          "builtins": {
+            "default": false,
+            "type": "boolean"
+          },
+          "comms": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mcp": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "memory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob_tasks": {
+            "default": false,
+            "type": "boolean"
+          },
+          "rust_bundles": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "schedule": {
+            "default": false,
+            "type": "boolean"
+          },
+          "shell": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Profile override for `mob/spawn`.",
+    "properties": {
+      "backend": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobBackendKind"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "external_addressable": {
+        "default": false,
+        "type": "boolean"
+      },
+      "max_inline_peer_notifications": {
+        "format": "int32",
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "model": {
+        "type": "string"
+      },
+      "output_schema": true,
+      "peer_description": {
+        "default": "",
+        "type": "string"
+      },
+      "provider_params": true,
+      "runtime_mode": {
+        "$ref": "#/$defs/WireMobRuntimeMode",
+        "default": "autonomous_host"
+      },
+      "skills": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "tools": {
+        "$ref": "#/$defs/WireMobToolConfig",
+        "default": {
+          "builtins": false,
+          "comms": false,
+          "mcp": [],
+          "memory": false,
+          "mob": false,
+          "mob_tasks": false,
+          "rust_bundles": [],
+          "schedule": false,
+          "shell": false
+        }
+      }
+    },
+    "required": [
+      "model"
+    ],
+    "title": "WireMobProfile",
+    "type": "object"
+  },
+  "WireMobRuntimeMode": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "enum": [
+      "autonomous_host",
+      "turn_driven"
+    ],
+    "title": "WireMobRuntimeMode",
+    "type": "string"
+  },
+  "WireMobToolConfig": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Tool configuration embedded in a wire mob profile override.",
+    "properties": {
+      "builtins": {
+        "default": false,
+        "type": "boolean"
+      },
+      "comms": {
+        "default": false,
+        "type": "boolean"
+      },
+      "mcp": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "memory": {
+        "default": false,
+        "type": "boolean"
+      },
+      "mob": {
+        "default": false,
+        "type": "boolean"
+      },
+      "mob_tasks": {
+        "default": false,
+        "type": "boolean"
+      },
+      "rust_bundles": {
+        "default": [],
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "schedule": {
+        "default": false,
+        "type": "boolean"
+      },
+      "shell": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "title": "WireMobToolConfig",
+    "type": "object"
+  },
   "WireModelRoutingApprovalPhase": {
     "$defs": {
       "ModelRoutingApprovalTerminalClass": {
@@ -17412,6 +17802,76 @@
     ],
     "title": "WireRunResult",
     "type": "object"
+  },
+  "WireRuntimeBinding": {
+    "$defs": {
+      "BridgeBootstrapToken": {
+        "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Runtime binding for spawn requests.\n\nFirst step toward identity-first mobs. Carries backend-specific binding\ndetails at spawn time. `External` requires real process identity.",
+    "oneOf": [
+      {
+        "properties": {
+          "kind": {
+            "const": "session",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "bootstrap_token": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BridgeBootstrapToken"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "external",
+            "type": "string"
+          },
+          "peer_id": {
+            "type": "string"
+          },
+          "pubkey": {
+            "description": "Ed25519 signing pubkey (32 bytes) of the external peer. Required\nfor the supervisor to install a non-zero-pubkey trust entry so\nreal-comms signed-envelope replies admit past ingress trust\ncheck. Absent on legacy bindings that pre-date pubkey plumbing.",
+            "items": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 32,
+            "minItems": 32,
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "peer_id",
+          "address"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireRuntimeBinding"
   },
   "WireRuntimeState": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -20784,6 +21244,63 @@
     ],
     "title": "SwitchTurnPhase"
   },
+  "WireToolAccessPolicy": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Tool access policy for a spawned mob member.",
+    "oneOf": [
+      {
+        "properties": {
+          "type": {
+            "const": "inherit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "allow_list",
+            "type": "string"
+          },
+          "value": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "deny_list",
+            "type": "string"
+          },
+          "value": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "type",
+          "value"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolAccessPolicy"
+  },
   "WireToolCall": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Legacy assistant tool call payload.\n\nNot `PartialEq`: `args` rides as `Box<RawValue>` for pass-through\nfidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —\nopaque from provider to dispatcher, never re-parsed on the wire.\nEquivalence checks should round-trip through serialization.",
@@ -20803,6 +21320,49 @@
     ],
     "title": "WireToolCall",
     "type": "object"
+  },
+  "WireToolFilter": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Pre-resolved tool filter inherited by a spawned mob member.",
+    "oneOf": [
+      {
+        "enum": [
+          "All"
+        ],
+        "type": "string"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "Allow": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "Allow"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "Deny": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "Deny"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireToolFilter"
   },
   "WireToolResult": {
     "$defs": {

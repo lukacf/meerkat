@@ -4842,7 +4842,7 @@
       },
       "MobSpawnParams": {
         "additionalProperties": false,
-        "description": "Request payload for `mob/spawn`.\n\nThe public catalog uses wire-owned projections only. Advanced Rust-native\nspawn options such as launch mode, tool access policy, budget splitting,\ninherited tool filtering, and override profiles are intentionally not\nadvertised here until `meerkat-contracts` owns stable wire schemas for them.",
+        "description": "Request payload for `mob/spawn`.",
         "properties": {
           "additional_instructions": {
             "items": {
@@ -4882,6 +4882,16 @@
               }
             ]
           },
+          "budget_split_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireBudgetSplitPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "connection_ref": {
             "anyOf": [
               {
@@ -4893,6 +4903,16 @@
             ]
           },
           "context": true,
+          "inherited_tool_filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireToolFilter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "initial_message": {
             "anyOf": [
               {
@@ -4912,8 +4932,28 @@
               "null"
             ]
           },
+          "launch_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMemberLaunchMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "mob_id": {
             "type": "string"
+          },
+          "override_profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "profile": {
             "type": "string"
@@ -4935,6 +4975,16 @@
             "type": [
               "object",
               "null"
+            ]
+          },
+          "tool_access_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -11361,6 +11411,66 @@
         "title": "WireBindingIdentity",
         "type": "object"
       },
+      "WireBudgetSplitPolicy": {
+        "description": "Budget split policy for a spawned mob member.",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "equal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "proportional",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "remaining",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "fixed",
+                "type": "string"
+              },
+              "value": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireBudgetSplitPolicy"
+      },
       "WireConnectionRef": {
         "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
@@ -11703,6 +11813,42 @@
         ],
         "title": "WireError",
         "type": "object"
+      },
+      "WireForkContext": {
+        "description": "Conversation history scope used when forking a mob member.",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireForkContext"
       },
       "WireGenerateImageExecutionPlan": {
         "properties": {
@@ -12236,6 +12382,62 @@
         "title": "WireLoginStart",
         "type": "object"
       },
+      "WireMemberLaunchMode": {
+        "description": "How a mob member should be launched by `mob/spawn`.",
+        "oneOf": [
+          {
+            "properties": {
+              "mode": {
+                "const": "fresh",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "bridge_session_id": {
+                "type": "string"
+              },
+              "mode": {
+                "const": "resume",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "bridge_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "fork_context": {
+                "$ref": "#/components/schemas/WireForkContext",
+                "default": {
+                  "type": "full_history"
+                }
+              },
+              "mode": {
+                "const": "fork",
+                "type": "string"
+              },
+              "source_member_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "source_member_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireMemberLaunchMode"
+      },
       "WireMemberRef": {
         "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
         "type": "string"
@@ -12277,6 +12479,71 @@
         ],
         "type": "string"
       },
+      "WireMobProfile": {
+        "description": "Profile override for `mob/spawn`.",
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_addressable": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_inline_peer_notifications": {
+            "format": "int32",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_schema": true,
+          "peer_description": {
+            "default": "",
+            "type": "string"
+          },
+          "provider_params": true,
+          "runtime_mode": {
+            "$ref": "#/components/schemas/WireMobRuntimeMode",
+            "default": "autonomous_host"
+          },
+          "skills": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "$ref": "#/components/schemas/WireMobToolConfig",
+            "default": {
+              "builtins": false,
+              "comms": false,
+              "mcp": [],
+              "memory": false,
+              "mob": false,
+              "mob_tasks": false,
+              "rust_bundles": [],
+              "schedule": false,
+              "shell": false
+            }
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "WireMobProfile",
+        "type": "object"
+      },
       "WireMobReconcileStage": {
         "description": "Closed wire stage for a per-identity `mob/reconcile` failure.",
         "enum": [
@@ -12291,6 +12558,54 @@
           "turn_driven"
         ],
         "type": "string"
+      },
+      "WireMobToolConfig": {
+        "description": "Tool configuration embedded in a wire mob profile override.",
+        "properties": {
+          "builtins": {
+            "default": false,
+            "type": "boolean"
+          },
+          "comms": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mcp": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "memory": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mob_tasks": {
+            "default": false,
+            "type": "boolean"
+          },
+          "rust_bundles": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "schedule": {
+            "default": false,
+            "type": "boolean"
+          },
+          "shell": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
       },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
@@ -13800,6 +14115,62 @@
         ],
         "title": "SwitchTurnPhase"
       },
+      "WireToolAccessPolicy": {
+        "description": "Tool access policy for a spawned mob member.",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "allow_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "deny_list",
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireToolAccessPolicy"
+      },
       "WireToolCall": {
         "description": "Legacy assistant tool call payload.\n\nNot `PartialEq`: `args` rides as `Box<RawValue>` for pass-through\nfidelity with `meerkat_core::types::AssistantBlock::ToolUse.args` —\nopaque from provider to dispatcher, never re-parsed on the wire.\nEquivalence checks should round-trip through serialization.",
         "properties": {
@@ -13817,6 +14188,48 @@
           "args"
         ],
         "type": "object"
+      },
+      "WireToolFilter": {
+        "description": "Pre-resolved tool filter inherited by a spawned mob member.",
+        "oneOf": [
+          {
+            "enum": [
+              "All"
+            ],
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Allow": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "Allow"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "Deny": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "Deny"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "WireToolFilter"
       },
       "WireToolResult": {
         "description": "Tool result payload in a transcript.",

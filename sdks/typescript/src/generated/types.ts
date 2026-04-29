@@ -161,16 +161,21 @@ export interface MobSpawnParams {
   additional_instructions?: string[];
   agent_identity: string;
   auto_wire_parent?: boolean;
-  backend?: "session" | "external";
-  binding?: Record<string, unknown>;
-  connection_ref?: Record<string, unknown>;
+  backend?: WireMobBackendKind;
+  binding?: WireRuntimeBinding;
+  budget_split_policy?: WireBudgetSplitPolicy;
+  connection_ref?: WireConnectionRef;
   context?: unknown;
-  initial_message?: string | Record<string, unknown>[];
+  inherited_tool_filter?: WireToolFilter;
+  initial_message?: WireContentInput;
   labels?: Record<string, unknown>;
+  launch_mode?: WireMemberLaunchMode;
   mob_id: string;
+  override_profile?: WireMobProfile;
   profile: string;
   runtime_mode?: WireMobRuntimeMode;
   shell_env?: Record<string, unknown>;
+  tool_access_policy?: WireToolAccessPolicy;
 }
 
 export interface MobSpawnResult {
@@ -179,13 +184,32 @@ export interface MobSpawnResult {
   mob_id: string;
 }
 
+export interface MobSpawnSpecParams {
+  additional_instructions?: string[];
+  agent_identity: string;
+  backend?: WireMobBackendKind;
+  connection_ref?: WireConnectionRef;
+  context?: unknown;
+  initial_message?: WireContentInput;
+  labels?: Record<string, unknown>;
+  profile: string;
+  runtime_mode?: WireMobRuntimeMode;
+}
+
 export interface MobSpawnManyParams {
   mob_id: string;
-  specs: Record<string, unknown>[];
+  specs: MobSpawnSpecParams[];
 }
 
 export interface MobSpawnManyResult {
-  results: Record<string, unknown>[];
+  results: MobSpawnManyResultEntry[];
+}
+
+export interface MobSpawnManyResultEntry {
+  agent_identity?: string;
+  error?: string;
+  member_ref?: WireMemberRef;
+  ok: boolean;
 }
 
 export interface MobSpawnReceiptWire {
@@ -204,6 +228,31 @@ export interface MobMemberListEntryWire {
   state: WireMemberState;
   status: WireMobMemberStatus;
   wired_to?: string[];
+}
+
+export interface WireMobToolConfig {
+  builtins?: boolean;
+  comms?: boolean;
+  mcp?: string[];
+  memory?: boolean;
+  mob?: boolean;
+  mob_tasks?: boolean;
+  rust_bundles?: string[];
+  schedule?: boolean;
+  shell?: boolean;
+}
+
+export interface WireMobProfile {
+  backend?: WireMobBackendKind;
+  external_addressable?: boolean;
+  max_inline_peer_notifications?: number;
+  model: string;
+  output_schema?: unknown;
+  peer_description?: string;
+  provider_params?: unknown;
+  runtime_mode?: WireMobRuntimeMode;
+  skills?: string[];
+  tools?: WireMobToolConfig;
 }
 
 export interface MobEnsureMemberParams {
@@ -240,7 +289,7 @@ export interface MobRetireResult {
 
 export interface MobRespawnParams {
   agent_identity: string;
-  initial_message?: string | Record<string, unknown>[];
+  initial_message?: WireContentInput;
   mob_id: string;
 }
 
@@ -276,7 +325,7 @@ export interface MobEventsResult {
 
 export interface MobMemberSendParams {
   agent_identity: string;
-  content: string | Record<string, unknown>[];
+  content: WireContentInput;
   handling_mode?: "queue" | "steer";
   mob_id: string;
   render_metadata?: Record<string, unknown>;
@@ -290,7 +339,7 @@ export interface MobMemberSendResult {
 }
 
 export interface MobIngressInteractionParams {
-  content: string | Record<string, unknown>[];
+  content: WireContentInput;
   handling_mode?: "queue" | "steer";
   mob_id: string;
   render_metadata?: Record<string, unknown>;
@@ -356,7 +405,7 @@ export interface MobFlowCancelResult {
 
 export interface MobSpawnHelperParams {
   agent_identity?: string;
-  backend?: "session" | "external";
+  backend?: WireMobBackendKind;
   mob_id: string;
   prompt: string;
   role_name?: string;
@@ -365,7 +414,7 @@ export interface MobSpawnHelperParams {
 
 export interface MobForkHelperParams {
   agent_identity?: string;
-  backend?: "session" | "external";
+  backend?: WireMobBackendKind;
   fork_context?: unknown;
   mob_id: string;
   prompt: string;
@@ -390,14 +439,14 @@ export interface MobTurnStartParams {
   agent_identity: string;
   clear_connection_ref?: boolean;
   clear_provider_params?: boolean;
-  connection_ref?: Record<string, unknown>;
+  connection_ref?: WireConnectionRef;
   flow_tool_overlay?: Record<string, unknown>;
   keep_alive?: boolean;
   max_tokens?: number;
   mob_id: string;
   model?: string;
   output_schema?: unknown;
-  prompt: string | Record<string, unknown>[];
+  prompt: WireContentInput;
   provider?: string;
   provider_params?: unknown;
   skill_refs?: Record<string, unknown>[];
@@ -437,7 +486,7 @@ export interface MobRotateSupervisorResult {
 }
 
 export interface MobSubmitWorkParams {
-  content: string | Record<string, unknown>[];
+  content: WireContentInput;
   member_ref: WireMemberRef;
   origin?: "external" | "internal";
   work_ref?: string;
@@ -645,9 +694,90 @@ export interface WireContentBlockUnknown {
 
 export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown;
 
-export type WireContentInput = string | Record<string, unknown>[];
+export type WireContentInput = string | WireContentBlock[];
 
 export type WireMemberRef = string;
+
+export type WireMobBackendKind = "session" | "external";
+
+export interface WireRuntimeBindingSession {
+  kind: "session";
+}
+
+export interface WireRuntimeBindingExternal {
+  address: string;
+  bootstrap_token?: string;
+  kind: "external";
+  peer_id: string;
+  pubkey?: number[];
+}
+
+export type WireRuntimeBinding = WireRuntimeBindingSession | WireRuntimeBindingExternal;
+
+export interface WireMemberLaunchModeFresh {
+  mode: "fresh";
+}
+
+export interface WireMemberLaunchModeResume {
+  bridge_session_id: string;
+  mode: "resume";
+}
+
+export interface WireMemberLaunchModeFork {
+  fork_context?: WireForkContext;
+  mode: "fork";
+  source_member_id: string;
+}
+
+export type WireMemberLaunchMode = WireMemberLaunchModeFresh | WireMemberLaunchModeResume | WireMemberLaunchModeFork;
+
+export interface WireForkContextFullHistory {
+  type: "full_history";
+}
+
+export interface WireForkContextLastMessages {
+  count: number;
+  type: "last_messages";
+}
+
+export type WireForkContext = WireForkContextFullHistory | WireForkContextLastMessages;
+
+export interface WireToolAccessPolicyInherit {
+  type: "inherit";
+}
+
+export interface WireToolAccessPolicyAllowList {
+  type: "allow_list";
+  value: string[];
+}
+
+export interface WireToolAccessPolicyDenyList {
+  type: "deny_list";
+  value: string[];
+}
+
+export type WireToolAccessPolicy = WireToolAccessPolicyInherit | WireToolAccessPolicyAllowList | WireToolAccessPolicyDenyList;
+
+export interface WireBudgetSplitPolicyEqual {
+  type: "equal";
+}
+
+export interface WireBudgetSplitPolicyProportional {
+  type: "proportional";
+}
+
+export interface WireBudgetSplitPolicyRemaining {
+  type: "remaining";
+}
+
+export interface WireBudgetSplitPolicyFixed {
+  type: "fixed";
+  value: number;
+}
+
+export type WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplitPolicyProportional | WireBudgetSplitPolicyRemaining | WireBudgetSplitPolicyFixed;
+
+export type WireToolFilter = "All" | { Allow: string[] } | { Deny: string[] };
 
 export type WireMemberState = "active" | "retiring";
 
@@ -914,7 +1044,7 @@ export type WireInputLifecycleState = "accepted" | "queued" | "staged" | "applie
 
 export type WireStopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
 
-export type WireToolResultContent = string | Record<string, unknown>[];
+export type WireToolResultContent = string | WireContentBlock[];
 
 export type WireModelTier = "recommended" | "supported";
 
@@ -1309,14 +1439,14 @@ export interface WireRealmConnectionSet {
 
 export interface WireBindingIdentity {
   binding_id: string;
-  connection_ref: Record<string, unknown>;
+  connection_ref: WireConnectionRef;
   realm_id: string;
 }
 
 export interface WireAuthProfileCreated {
   auth_method: string;
   binding_id: string;
-  connection_ref: Record<string, unknown>;
+  connection_ref: WireConnectionRef;
   profile_id: string;
   provider: string;
   realm_id: string;
@@ -1326,14 +1456,14 @@ export interface WireAuthProfileCreated {
 export interface WireAuthProfileDetail {
   auth_profile: Record<string, unknown>;
   binding_id: string;
-  connection_ref: Record<string, unknown>;
+  connection_ref: WireConnectionRef;
   profile_id: string;
 }
 
 export interface WireAuthProfileCleared {
   binding_id: string;
   cleared: boolean;
-  connection_ref: Record<string, unknown>;
+  connection_ref: WireConnectionRef;
   profile_id: string;
   realm_id: string;
 }
@@ -1347,7 +1477,7 @@ export interface WireLoginStart {
 
 export interface WireLoginReady {
   binding_id: string;
-  connection_ref: Record<string, unknown>;
+  connection_ref: WireConnectionRef;
   expires_at?: string;
   has_refresh_token: boolean;
   profile_id: string;
@@ -1401,7 +1531,7 @@ export interface WireAuthStatusDetail {
   account_id?: string;
   auth_method: string;
   binding_id: string;
-  connection_ref: Record<string, unknown>;
+  connection_ref: WireConnectionRef;
   expires_at?: string;
   has_refresh_token: boolean;
   last_refresh_at?: string;

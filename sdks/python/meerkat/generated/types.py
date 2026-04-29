@@ -219,25 +219,25 @@ class MobLifecycleResult:
 
 @dataclass
 class MobSpawnParams:
-    """Request payload for `mob/spawn`.
-
-The public catalog uses wire-owned projections only. Advanced Rust-native
-spawn options such as launch mode, tool access policy, budget splitting,
-inherited tool filtering, and override profiles are intentionally not
-advertised here until `meerkat-contracts` owns stable wire schemas for them."""
+    """Request payload for `mob/spawn`."""
     agent_identity: str
     mob_id: str
     profile: str
     additional_instructions: Optional[list[str]] = None
     auto_wire_parent: Optional[bool] = None
-    backend: Optional[Literal['session', 'external']] = None
-    binding: Optional[dict[str, Any]] = None
-    connection_ref: Optional[dict[str, Any]] = None
+    backend: Optional[WireMobBackendKind] = None
+    binding: Optional[WireRuntimeBinding] = None
+    budget_split_policy: Optional[WireBudgetSplitPolicy] = None
+    connection_ref: Optional[WireConnectionRef] = None
     context: Optional[Any] = None
-    initial_message: Optional[str | list[dict[str, Any]]] = None
+    inherited_tool_filter: Optional[WireToolFilter] = None
+    initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, Any]] = None
+    launch_mode: Optional[WireMemberLaunchMode] = None
+    override_profile: Optional[WireMobProfile] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
     shell_env: Optional[dict[str, Any]] = None
+    tool_access_policy: Optional[WireToolAccessPolicy] = None
 
 
 @dataclass
@@ -249,16 +249,39 @@ class MobSpawnResult:
 
 
 @dataclass
+class MobSpawnSpecParams:
+    """Per-member request payload inside `mob/spawn_many`."""
+    agent_identity: str
+    profile: str
+    additional_instructions: Optional[list[str]] = None
+    backend: Optional[WireMobBackendKind] = None
+    connection_ref: Optional[WireConnectionRef] = None
+    context: Optional[Any] = None
+    initial_message: Optional[WireContentInput] = None
+    labels: Optional[dict[str, Any]] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+
+
+@dataclass
 class MobSpawnManyParams:
     """Request payload for `mob/spawn_many`."""
     mob_id: str
-    specs: list[dict[str, Any]]
+    specs: list[MobSpawnSpecParams]
 
 
 @dataclass
 class MobSpawnManyResult:
     """Response payload for `mob/spawn_many`."""
-    results: list[dict[str, Any]]
+    results: list[MobSpawnManyResultEntry]
+
+
+@dataclass
+class MobSpawnManyResultEntry:
+    """One result entry in a `mob/spawn_many` response."""
+    ok: bool
+    agent_identity: Optional[str] = None
+    error: Optional[str] = None
+    member_ref: Optional[WireMemberRef] = None
 
 
 @dataclass
@@ -284,6 +307,35 @@ without leaking bridge-internal fields."""
     error: Optional[str] = None
     labels: Optional[dict[str, Any]] = None
     wired_to: Optional[list[str]] = None
+
+
+@dataclass
+class WireMobToolConfig:
+    """Tool configuration embedded in a wire mob profile override."""
+    builtins: Optional[bool] = None
+    comms: Optional[bool] = None
+    mcp: Optional[list[str]] = None
+    memory: Optional[bool] = None
+    mob: Optional[bool] = None
+    mob_tasks: Optional[bool] = None
+    rust_bundles: Optional[list[str]] = None
+    schedule: Optional[bool] = None
+    shell: Optional[bool] = None
+
+
+@dataclass
+class WireMobProfile:
+    """Profile override for `mob/spawn`."""
+    model: str
+    backend: Optional[WireMobBackendKind] = None
+    external_addressable: Optional[bool] = None
+    max_inline_peer_notifications: Optional[int] = None
+    output_schema: Optional[Any] = None
+    peer_description: Optional[str] = None
+    provider_params: Optional[Any] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+    skills: Optional[list[str]] = None
+    tools: Optional[WireMobToolConfig] = None
 
 
 @dataclass
@@ -338,7 +390,7 @@ class MobRespawnParams:
     """Request payload for `mob/respawn`."""
     agent_identity: str
     mob_id: str
-    initial_message: Optional[str | list[dict[str, Any]]] = None
+    initial_message: Optional[WireContentInput] = None
 
 
 @dataclass
@@ -387,7 +439,7 @@ class MobEventsResult:
 class MobMemberSendParams:
     """Request payload for host-side mob member delivery."""
     agent_identity: str
-    content: str | list[dict[str, Any]]
+    content: WireContentInput
     mob_id: str
     handling_mode: Optional[Literal['queue', 'steer']] = None
     render_metadata: Optional[dict[str, Any]] = None
@@ -409,7 +461,7 @@ class MobIngressInteractionParams:
 This is the ergonomic "ensure an ingress member, then deliver user input"
 path. It composes the existing declarative roster and member-send
 semantics without introducing a separate thread/project runtime."""
-    content: str | list[dict[str, Any]]
+    content: WireContentInput
     mob_id: str
     spec: dict[str, Any]
     handling_mode: Optional[Literal['queue', 'steer']] = None
@@ -499,7 +551,7 @@ class MobSpawnHelperParams:
     mob_id: str
     prompt: str
     agent_identity: Optional[str] = None
-    backend: Optional[Literal['session', 'external']] = None
+    backend: Optional[WireMobBackendKind] = None
     role_name: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
 
@@ -511,7 +563,7 @@ class MobForkHelperParams:
     prompt: str
     source_member_id: str
     agent_identity: Optional[str] = None
-    backend: Optional[Literal['session', 'external']] = None
+    backend: Optional[WireMobBackendKind] = None
     fork_context: Optional[Any] = None
     role_name: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
@@ -537,11 +589,11 @@ class MobTurnStartParams:
     """Request payload for `mob/turn_start`."""
     agent_identity: str
     mob_id: str
-    prompt: str | list[dict[str, Any]]
+    prompt: WireContentInput
     additional_instructions: Optional[list[str]] = None
     clear_connection_ref: Optional[bool] = None
     clear_provider_params: Optional[bool] = None
-    connection_ref: Optional[dict[str, Any]] = None
+    connection_ref: Optional[WireConnectionRef] = None
     flow_tool_overlay: Optional[dict[str, Any]] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
@@ -600,7 +652,7 @@ class MobSubmitWorkParams:
 Identifies the member through the opaque [`WireMemberRef`] handle the
 server resolves against the live roster — callers do not pass
 `generation` or `fence_token`."""
-    content: str | list[dict[str, Any]]
+    content: WireContentInput
     member_ref: WireMemberRef
     origin: Optional[Literal['external', 'internal']] = None
     work_ref: Optional[str] = None
@@ -1338,7 +1390,7 @@ trio. Built from a typed [`meerkat_core::ConnectionRef`] so the three
 fields always agree; the `realm_id`/`binding_id` strings carry the
 slug form for wire consumers that key by string."""
     binding_id: str
-    connection_ref: dict[str, Any]
+    connection_ref: WireConnectionRef
     realm_id: str
 
 
@@ -1347,7 +1399,7 @@ class WireAuthProfileCreated:
     """`POST /auth/profiles` (create) success body."""
     auth_method: str
     binding_id: str
-    connection_ref: dict[str, Any]
+    connection_ref: WireConnectionRef
     profile_id: str
     provider: str
     realm_id: str
@@ -1359,7 +1411,7 @@ class WireAuthProfileDetail:
     """`GET /auth/bindings/{binding_id}` success body."""
     auth_profile: dict[str, Any]
     binding_id: str
-    connection_ref: dict[str, Any]
+    connection_ref: WireConnectionRef
     profile_id: str
 
 
@@ -1369,7 +1421,7 @@ class WireAuthProfileCleared:
 `POST /auth/bindings/{binding_id}/logout` success body."""
     binding_id: str
     cleared: bool
-    connection_ref: dict[str, Any]
+    connection_ref: WireConnectionRef
     profile_id: str
     realm_id: str
 
@@ -1392,7 +1444,7 @@ The optional `state` field distinguishes the flat `POST
 ready leg (`state = "ready"`) which is part of the pending/slow_down/
 access_denied/expired/ready tagged protocol."""
     binding_id: str
-    connection_ref: dict[str, Any]
+    connection_ref: WireConnectionRef
     has_refresh_token: bool
     profile_id: str
     provider: str
@@ -1462,7 +1514,7 @@ class WireAuthStatusDetail:
 binding directly."""
     auth_method: str
     binding_id: str
-    connection_ref: dict[str, Any]
+    connection_ref: WireConnectionRef
     has_refresh_token: bool
     profile_id: str
     provider: str
@@ -1533,7 +1585,7 @@ class WireContentBlockUnknown(TypedDict, total=False):
 WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown
 
 # Wire-safe content input (mirrors `ContentInput`).
-WireContentInput = str | list[dict[str, Any]]
+WireContentInput = str | list[WireContentBlock]
 
 # Server-resolved opaque handle for a mob member.
 #
@@ -1547,6 +1599,83 @@ WireContentInput = str | list[dict[str, Any]]
 # [`WireMemberRef::decode`] inside an RPC handler to recover the
 # `(mob_id, agent_identity)` pair before resolving against the runtime.
 WireMemberRef = str
+
+# Mob RPC helper wire type for WireMobBackendKind.
+WireMobBackendKind = Literal['session', 'external']
+
+# Runtime binding for spawn requests.
+#
+# First step toward identity-first mobs. Carries backend-specific binding
+# details at spawn time. `External` requires real process identity.
+class WireRuntimeBindingSession(TypedDict, total=False):
+    kind: Required[Literal['session']]
+
+class WireRuntimeBindingExternal(TypedDict, total=False):
+    address: Required[str]
+    bootstrap_token: NotRequired[str]
+    kind: Required[Literal['external']]
+    peer_id: Required[str]
+    pubkey: NotRequired[list[int]]
+
+WireRuntimeBinding = WireRuntimeBindingSession | WireRuntimeBindingExternal
+
+# How a mob member should be launched by `mob/spawn`.
+class WireMemberLaunchModeFresh(TypedDict, total=False):
+    mode: Required[Literal['fresh']]
+
+class WireMemberLaunchModeResume(TypedDict, total=False):
+    bridge_session_id: Required[str]
+    mode: Required[Literal['resume']]
+
+class WireMemberLaunchModeFork(TypedDict, total=False):
+    fork_context: NotRequired[WireForkContext]
+    mode: Required[Literal['fork']]
+    source_member_id: Required[str]
+
+WireMemberLaunchMode = WireMemberLaunchModeFresh | WireMemberLaunchModeResume | WireMemberLaunchModeFork
+
+# Conversation history scope used when forking a mob member.
+class WireForkContextFullHistory(TypedDict, total=False):
+    type: Required[Literal['full_history']]
+
+class WireForkContextLastMessages(TypedDict, total=False):
+    count: Required[int]
+    type: Required[Literal['last_messages']]
+
+WireForkContext = WireForkContextFullHistory | WireForkContextLastMessages
+
+# Tool access policy for a spawned mob member.
+class WireToolAccessPolicyInherit(TypedDict, total=False):
+    type: Required[Literal['inherit']]
+
+class WireToolAccessPolicyAllowList(TypedDict, total=False):
+    type: Required[Literal['allow_list']]
+    value: Required[list[str]]
+
+class WireToolAccessPolicyDenyList(TypedDict, total=False):
+    type: Required[Literal['deny_list']]
+    value: Required[list[str]]
+
+WireToolAccessPolicy = WireToolAccessPolicyInherit | WireToolAccessPolicyAllowList | WireToolAccessPolicyDenyList
+
+# Budget split policy for a spawned mob member.
+class WireBudgetSplitPolicyEqual(TypedDict, total=False):
+    type: Required[Literal['equal']]
+
+class WireBudgetSplitPolicyProportional(TypedDict, total=False):
+    type: Required[Literal['proportional']]
+
+class WireBudgetSplitPolicyRemaining(TypedDict, total=False):
+    type: Required[Literal['remaining']]
+
+class WireBudgetSplitPolicyFixed(TypedDict, total=False):
+    type: Required[Literal['fixed']]
+    value: Required[int]
+
+WireBudgetSplitPolicy = WireBudgetSplitPolicyEqual | WireBudgetSplitPolicyProportional | WireBudgetSplitPolicyRemaining | WireBudgetSplitPolicyFixed
+
+# Pre-resolved tool filter inherited by a spawned mob member.
+WireToolFilter = Literal['All'] | dict[str, list[str]]
 
 # Roster member lifecycle state for `MobMemberFilterWire`.
 WireMemberState = Literal['active', 'retiring']
@@ -1822,7 +1951,7 @@ WireInputLifecycleState = Literal['accepted', 'queued', 'staged', 'applied', 'ap
 WireStopReason = Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']
 
 # Wire-safe tool result content that handles both legacy string and array formats.
-WireToolResultContent = str | list[dict[str, Any]]
+WireToolResultContent = str | list[WireContentBlock]
 
 # Transcript block inside a block-assistant message.
 #

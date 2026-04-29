@@ -4,15 +4,26 @@ import type {
   MobMemberListEntryWire,
   MobMembersResult,
   MobMemberStatusResult,
+  MobSpawnManyParams,
+  MobSpawnManyResult,
+  MobSpawnManyResultEntry,
   MobSpawnParams,
   MobSpawnReceiptWire,
   MobSpawnResult,
+  MobSpawnSpecParams,
   MobSubmitWorkParams,
   MobTurnStartParams,
+  WireBudgetSplitPolicy,
+  WireConnectionRef,
+  WireMemberLaunchMode,
   WireMemberRef,
+  WireMobBackendKind,
+  WireMobProfile,
   WireMemberState,
   WireMobMemberStatus,
   WireMobRuntimeMode,
+  WireToolAccessPolicy,
+  WireToolFilter,
 } from "../src/generated/types.js";
 
 const spawnSpec: SpawnSpec = {
@@ -43,11 +54,85 @@ const generatedMobSpawnWithAdvancedJsonSlot: MobSpawnParams = {
   mob_id: "mob-1",
   profile: "worker",
   agent_identity: "worker-2",
-  // @ts-expect-error advanced spawn options are not advertised as raw JSON slots.
   launch_mode: { mode: "fresh" },
+  tool_access_policy: { type: "allow_list", value: ["grep"] },
+  budget_split_policy: { type: "remaining" },
+  inherited_tool_filter: { Allow: ["grep"] },
+  override_profile: {
+    model: "claude-sonnet-4-6",
+    tools: { shell: true },
+  },
 };
 
 void generatedMobSpawnWithAdvancedJsonSlot;
+
+const generatedMobLaunchMode: WireMemberLaunchMode = { mode: "fresh" };
+const generatedMobToolAccess: WireToolAccessPolicy = {
+  type: "allow_list",
+  value: ["grep"],
+};
+const generatedMobBudgetSplit: WireBudgetSplitPolicy = { type: "remaining" };
+const generatedMobToolFilter: WireToolFilter = { Allow: ["grep"] };
+const generatedMobProfile: WireMobProfile = { model: "claude-sonnet-4-6" };
+
+void generatedMobLaunchMode;
+void generatedMobToolAccess;
+void generatedMobBudgetSplit;
+void generatedMobToolFilter;
+void generatedMobProfile;
+
+const generatedMobSpawnManySpec: MobSpawnSpecParams = {
+  profile: "worker",
+  agent_identity: "worker-3",
+  initial_message: "hello",
+  backend: "session",
+  connection_ref: { realm: "dev", binding: "default_anthropic" },
+};
+
+const generatedMobSpawnManyBackend: WireMobBackendKind = "session";
+const generatedMobSpawnManyConnectionRef: WireConnectionRef = {
+  realm: "dev",
+  binding: "default_anthropic",
+};
+
+void generatedMobSpawnManyBackend;
+void generatedMobSpawnManyConnectionRef;
+
+const generatedMobSpawnManySpecWithBadContent: MobSpawnSpecParams = {
+  profile: "worker",
+  agent_identity: "worker-bad",
+  // @ts-expect-error content input must be text or content blocks.
+  initial_message: 123,
+};
+
+void generatedMobSpawnManySpecWithBadContent;
+
+const generatedMobSpawnManySpecWithBadBackend: MobSpawnSpecParams = {
+  profile: "worker",
+  agent_identity: "worker-bad-backend",
+  // @ts-expect-error backend is a closed mob backend enum.
+  backend: "background",
+};
+
+void generatedMobSpawnManySpecWithBadBackend;
+
+const generatedMobSpawnManyParams: MobSpawnManyParams = {
+  mob_id: "mob-1",
+  specs: [generatedMobSpawnManySpec],
+};
+
+const generatedMobSpawnManyResultEntry: MobSpawnManyResultEntry = {
+  ok: true,
+  agent_identity: "worker-3",
+  member_ref: "opaque-member-ref",
+};
+
+const generatedMobSpawnManyResult: MobSpawnManyResult = {
+  results: [generatedMobSpawnManyResultEntry],
+};
+
+void generatedMobSpawnManyParams;
+void generatedMobSpawnManyResult;
 
 const generatedMobTurnStart: MobTurnStartParams = {
   mob_id: "mob-1",

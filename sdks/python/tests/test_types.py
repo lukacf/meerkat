@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-from typing import get_args, get_type_hints
+from typing import get_args, get_origin, get_type_hints
 
 import pytest
 
@@ -149,6 +149,11 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         MobSpawnParams as GeneratedMobSpawnParams,
         MobSpawnResult as GeneratedMobSpawnResult,
         MobTurnStartParams as GeneratedMobTurnStartParams,
+        WireBudgetSplitPolicy as GeneratedWireBudgetSplitPolicy,
+        WireMemberLaunchMode as GeneratedWireMemberLaunchMode,
+        WireMobProfile as GeneratedWireMobProfile,
+        WireToolAccessPolicy as GeneratedWireToolAccessPolicy,
+        WireToolFilter as GeneratedWireToolFilter,
     )
 
     spawn = GeneratedMobSpawnParams(
@@ -157,7 +162,28 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         agent_identity="worker-1",
     )
     assert spawn.mob_id == "mob-1"
-    assert not hasattr(spawn, "launch_mode")
+
+    spawn_with_advanced = GeneratedMobSpawnParams(
+        mob_id="mob-1",
+        profile="worker",
+        agent_identity="worker-2",
+        launch_mode={"mode": "fresh"},
+        tool_access_policy={"type": "allow_list", "value": ["grep"]},
+        budget_split_policy={"type": "remaining"},
+        inherited_tool_filter={"Allow": ["grep"]},
+        override_profile=GeneratedWireMobProfile(model="claude-sonnet-4-6"),
+    )
+    assert spawn_with_advanced.launch_mode == {"mode": "fresh"}
+    spawn_hints = get_type_hints(GeneratedMobSpawnParams)
+    assert "Any" not in str(spawn_hints["launch_mode"])
+    assert "Any" not in str(spawn_hints["tool_access_policy"])
+    assert "Any" not in str(spawn_hints["budget_split_policy"])
+    assert "Any" not in str(spawn_hints["inherited_tool_filter"])
+    assert "WireMobProfile" in str(spawn_hints["override_profile"])
+    assert GeneratedWireMemberLaunchMode is not None
+    assert GeneratedWireToolAccessPolicy is not None
+    assert GeneratedWireBudgetSplitPolicy is not None
+    assert GeneratedWireToolFilter is not None
 
     turn = GeneratedMobTurnStartParams(
         mob_id="mob-1",
@@ -182,6 +208,44 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         is_final=False,
     )
     assert status.status == "active"
+
+
+def test_generated_mob_spawn_many_preserves_nested_contract_types():
+    from meerkat.generated.types import (
+        MobSpawnManyParams as GeneratedMobSpawnManyParams,
+        MobSpawnManyResult as GeneratedMobSpawnManyResult,
+        MobSpawnManyResultEntry as GeneratedMobSpawnManyResultEntry,
+        MobSpawnSpecParams as GeneratedMobSpawnSpecParams,
+    )
+
+    params_hints = get_type_hints(GeneratedMobSpawnManyParams)
+    assert get_origin(params_hints["specs"]) is list
+    assert get_args(params_hints["specs"]) == (GeneratedMobSpawnSpecParams,)
+
+    spec_hints = get_type_hints(GeneratedMobSpawnSpecParams)
+    assert "Any" not in str(spec_hints["initial_message"])
+    assert "Any" not in str(spec_hints["backend"])
+    assert "WireConnectionRef" in str(spec_hints["connection_ref"])
+
+    result_hints = get_type_hints(GeneratedMobSpawnManyResult)
+    assert get_origin(result_hints["results"]) is list
+    assert get_args(result_hints["results"]) == (GeneratedMobSpawnManyResultEntry,)
+
+    spec = GeneratedMobSpawnSpecParams(
+        profile="worker",
+        agent_identity="worker-1",
+        initial_message="hello",
+    )
+    params = GeneratedMobSpawnManyParams(mob_id="mob-1", specs=[spec])
+    assert params.specs[0].agent_identity == "worker-1"
+
+    entry = GeneratedMobSpawnManyResultEntry(
+        ok=True,
+        agent_identity="worker-1",
+        member_ref="opaque-member-ref",
+    )
+    result = GeneratedMobSpawnManyResult(results=[entry])
+    assert result.results[0].member_ref == "opaque-member-ref"
 
 
 def test_generated_mob_member_result_helpers_preserve_schema_types():

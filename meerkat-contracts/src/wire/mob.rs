@@ -54,6 +54,117 @@ pub enum WireMobRuntimeMode {
     TurnDriven,
 }
 
+/// How a mob member should be launched by `mob/spawn`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WireMemberLaunchMode {
+    Fresh,
+    Resume {
+        #[serde(alias = "session_id")]
+        bridge_session_id: String,
+    },
+    Fork {
+        source_member_id: String,
+        #[serde(default)]
+        fork_context: WireForkContext,
+    },
+}
+
+/// Conversation history scope used when forking a mob member.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireForkContext {
+    #[default]
+    FullHistory,
+    LastMessages {
+        count: u32,
+    },
+}
+
+/// Budget split policy for a spawned mob member.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum WireBudgetSplitPolicy {
+    #[default]
+    Equal,
+    Proportional,
+    Remaining,
+    Fixed(u64),
+}
+
+/// Tool access policy for a spawned mob member.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum WireToolAccessPolicy {
+    #[default]
+    Inherit,
+    AllowList(Vec<String>),
+    DenyList(Vec<String>),
+}
+
+/// Pre-resolved tool filter inherited by a spawned mob member.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WireToolFilter {
+    #[default]
+    All,
+    Allow(Vec<String>),
+    Deny(Vec<String>),
+}
+
+/// Tool configuration embedded in a wire mob profile override.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobToolConfig {
+    #[serde(default)]
+    pub builtins: bool,
+    #[serde(default)]
+    pub shell: bool,
+    #[serde(default)]
+    pub comms: bool,
+    #[serde(default)]
+    pub memory: bool,
+    #[serde(default)]
+    pub mob: bool,
+    #[serde(default)]
+    pub mob_tasks: bool,
+    #[serde(default)]
+    pub schedule: bool,
+    #[serde(default)]
+    pub mcp: Vec<String>,
+    #[serde(default)]
+    pub rust_bundles: Vec<String>,
+}
+
+/// Profile override for `mob/spawn`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobProfile {
+    pub model: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub tools: WireMobToolConfig,
+    #[serde(default)]
+    pub peer_description: String,
+    #[serde(default)]
+    pub external_addressable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<WireMobBackendKind>,
+    #[serde(default)]
+    pub runtime_mode: WireMobRuntimeMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inline_peer_notifications: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_params: Option<Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -488,11 +599,6 @@ pub struct MobListResult {
 }
 
 /// Request payload for `mob/spawn`.
-///
-/// The public catalog uses wire-owned projections only. Advanced Rust-native
-/// spawn options such as launch mode, tool access policy, budget splitting,
-/// inherited tool filtering, and override profiles are intentionally not
-/// advertised here until `meerkat-contracts` owns stable wire schemas for them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -518,6 +624,16 @@ pub struct MobSpawnParams {
     pub shell_env: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_wire_parent: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_mode: Option<WireMemberLaunchMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access_policy: Option<WireToolAccessPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_split_policy: Option<WireBudgetSplitPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_tool_filter: Option<WireToolFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_profile: Option<WireMobProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_ref: Option<WireConnectionRef>,
 }

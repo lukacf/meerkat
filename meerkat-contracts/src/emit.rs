@@ -38,6 +38,16 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
         "WireTrustedPeerSpec": schema_for!(crate::wire::WireTrustedPeerSpec),
         "MobPeerTarget": schema_for!(crate::wire::MobPeerTarget),
+        "WireMobBackendKind": schema_for!(crate::wire::WireMobBackendKind),
+        "WireMobRuntimeMode": schema_for!(crate::wire::WireMobRuntimeMode),
+        "WireRuntimeBinding": schema_for!(crate::wire::WireRuntimeBinding),
+        "WireMemberLaunchMode": schema_for!(crate::wire::WireMemberLaunchMode),
+        "WireForkContext": schema_for!(crate::wire::WireForkContext),
+        "WireToolAccessPolicy": schema_for!(crate::wire::WireToolAccessPolicy),
+        "WireBudgetSplitPolicy": schema_for!(crate::wire::WireBudgetSplitPolicy),
+        "WireToolFilter": schema_for!(crate::wire::WireToolFilter),
+        "WireMobToolConfig": schema_for!(crate::wire::WireMobToolConfig),
+        "WireMobProfile": schema_for!(crate::wire::WireMobProfile),
         "MobDefinitionInput": schema_for!(crate::wire::MobDefinitionInput),
         "MobCreateResult": schema_for!(crate::wire::MobCreateResult),
         "MobListResult": schema_for!(crate::wire::MobListResult),
@@ -1219,7 +1229,7 @@ mod tests {
     }
 
     #[test]
-    fn emitted_mob_spawn_params_do_not_advertise_unowned_advanced_json_slots() {
+    fn emitted_mob_spawn_params_expose_advanced_fields_as_concrete_wire_schemas() {
         let output_dir = temp_output_dir("mob-spawn-advanced-slots");
         emit_all_schemas(&output_dir).expect("emit schemas");
 
@@ -1233,19 +1243,27 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .expect("MobSpawnParams schema must expose properties");
 
-        for field in [
-            "launch_mode",
-            "tool_access_policy",
-            "budget_split_policy",
-            "inherited_tool_filter",
-            "override_profile",
+        for (field, expected_ref) in [
+            ("launch_mode", "WireMemberLaunchMode"),
+            ("tool_access_policy", "WireToolAccessPolicy"),
+            ("budget_split_policy", "WireBudgetSplitPolicy"),
+            ("inherited_tool_filter", "WireToolFilter"),
+            ("override_profile", "WireMobProfile"),
         ] {
-            assert_ne!(
-                properties.get(field),
-                Some(&serde_json::Value::Bool(true)),
-                "MobSpawnParams.{field} must be omitted or backed by a concrete wire-owned schema"
+            let field_schema = properties
+                .get(field)
+                .unwrap_or_else(|| panic!("MobSpawnParams missing accepted field {field}"));
+            let field_schema = serde_json::to_string(field_schema).unwrap();
+            assert!(
+                field_schema.contains(&format!("#/$defs/{expected_ref}")),
+                "MobSpawnParams.{field} must reference concrete {expected_ref} schema, got {field_schema}"
             );
         }
+        assert_eq!(
+            spawn.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "mob/spawn can be closed only when all accepted fields are in the typed schema"
+        );
 
         fs::remove_dir_all(&output_dir).unwrap();
     }

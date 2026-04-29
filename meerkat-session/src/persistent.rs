@@ -1326,6 +1326,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         .await
     }
 
+    /// Apply runtime-owned system context to the live session before a
+    /// reaction turn. The subsequent runtime turn commit owns durability and
+    /// lifecycle for the combined context+run operation.
+    pub async fn apply_runtime_system_context_for_turn(
+        &self,
+        id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        self.inner.apply_runtime_system_context(id, appends).await
+    }
+
     pub async fn apply_runtime_context_appends_with_boundary(
         &self,
         id: &SessionId,

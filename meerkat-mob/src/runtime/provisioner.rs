@@ -737,6 +737,21 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 });
         }
 
+        if primitive.is_peer_response_terminal_context_and_run() {
+            let RunPrimitive::StagedInput(staged) = &primitive else {
+                unreachable!("terminal peer-response apply intent only matches staged primitives");
+            };
+            self.session_service
+                .apply_runtime_system_context_for_turn(
+                    &self.bridge_session_id,
+                    pending_system_context_appends_for_runtime_executor(&staged.context_appends),
+                )
+                .await
+                .map_err(|err| CoreExecutorError::ApplyFailed {
+                    reason: err.to_string(),
+                })?;
+        }
+
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
         let queued_context = self
             .state

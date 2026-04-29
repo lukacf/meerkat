@@ -2399,6 +2399,19 @@ impl SessionRuntime {
                 .map_err(session_error_to_rpc);
         }
 
+        if primitive.is_peer_response_terminal_context_and_run() {
+            let RunPrimitive::StagedInput(staged) = primitive else {
+                unreachable!("terminal peer-response apply intent only matches staged primitives");
+            };
+            self.service
+                .apply_runtime_system_context_for_turn(
+                    session_id,
+                    pending_system_context_appends(&staged.context_appends),
+                )
+                .await
+                .map_err(session_error_to_rpc)?;
+        }
+
         let effective_identity = self
             .effective_llm_identity_for_turn(session_id, overrides.as_ref())
             .await?;

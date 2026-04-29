@@ -238,6 +238,18 @@ pub trait MobSessionService:
         ))
     }
 
+    async fn apply_runtime_system_context_for_turn(
+        &self,
+        _session_id: &SessionId,
+        _appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(
+                "runtime-backed context staging is unavailable for this session service".into(),
+            ),
+        ))
+    }
+
     async fn discard_live_session(&self, _session_id: &SessionId) -> Result<(), SessionError> {
         Ok(())
     }
@@ -386,6 +398,17 @@ where
         )
         .await
     }
+
+    async fn apply_runtime_system_context_for_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::apply_runtime_system_context(
+            self, session_id, appends,
+        )
+        .await
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -526,6 +549,17 @@ where
             appends,
             boundary,
             contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_system_context_for_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        meerkat_session::PersistentSessionService::<B>::apply_runtime_system_context_for_turn(
+            self, session_id, appends,
         )
         .await
     }

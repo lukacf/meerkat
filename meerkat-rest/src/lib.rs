@@ -595,6 +595,19 @@ async fn apply_runtime_turn(
             .await;
     }
 
+    if primitive.is_peer_response_terminal_context_and_run() {
+        let RunPrimitive::StagedInput(staged) = primitive else {
+            unreachable!("terminal peer-response apply intent only matches staged primitives");
+        };
+        context
+            .session_service
+            .apply_runtime_system_context_for_turn(
+                session_id,
+                pending_system_context_appends(&staged.context_appends),
+            )
+            .await?;
+    }
+
     let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
     let forwarder = spawn_event_forwarder(
         event_rx,

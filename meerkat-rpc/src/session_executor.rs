@@ -236,6 +236,21 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 });
         }
 
+        if primitive.is_peer_response_terminal_context_and_run() {
+            let RunPrimitive::StagedInput(staged) = &primitive else {
+                unreachable!("terminal peer-response apply intent only matches staged primitives");
+            };
+            self.session_service
+                .apply_runtime_system_context_for_turn(
+                    &self.session_id,
+                    pending_system_context_appends_from_primitive(&staged.context_appends),
+                )
+                .await
+                .map_err(|err| CoreExecutorError::ApplyFailed {
+                    reason: err.to_string(),
+                })?;
+        }
+
         let prompt = primitive.extract_content_input();
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();

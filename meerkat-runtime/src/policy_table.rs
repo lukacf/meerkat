@@ -54,6 +54,39 @@ impl DefaultPolicyTable {
         // but the policy table also refuses to honor it so the contract
         // holds for any caller of resolve(), not just the driver path.
         let is_response_progress = matches!(kind, InputKind::PeerResponseProgress);
+        if matches!(kind, InputKind::PeerResponseTerminal)
+            && let Some(mode) = input.handling_mode()
+        {
+            let (wake_mode, drain_policy, routing_disposition) = match mode {
+                meerkat_core::types::HandlingMode::Queue => (
+                    if runtime_idle {
+                        WakeMode::WakeIfIdle
+                    } else {
+                        WakeMode::None
+                    },
+                    DrainPolicy::QueueNextTurn,
+                    RoutingDisposition::Queue,
+                ),
+                meerkat_core::types::HandlingMode::Steer => (
+                    if runtime_idle {
+                        WakeMode::WakeIfIdle
+                    } else {
+                        WakeMode::InterruptYielding
+                    },
+                    DrainPolicy::SteerBatch,
+                    RoutingDisposition::Steer,
+                ),
+            };
+            return pd(
+                ApplyMode::StageRunStart,
+                wake_mode,
+                QueueMode::Fifo,
+                ConsumePoint::OnRunComplete,
+                drain_policy,
+                routing_disposition,
+                true,
+            );
+        }
         if !is_response_progress && let Some(mode) = input.handling_mode() {
             return match mode {
                 meerkat_core::types::HandlingMode::Queue => pd(
@@ -744,7 +777,13 @@ mod tests {
         );
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.routing_disposition, RoutingDisposition::Steer);
-        assert_eq!(decision.apply_mode, ApplyMode::StageRunBoundary);
+        assert_eq!(
+            decision.apply_mode,
+            ApplyMode::StageRunStart,
+            "terminal peer-response apply intent owns the context+reaction boundary; steer only changes urgency/lane"
+        );
+        assert_eq!(decision.drain_policy, DrainPolicy::SteerBatch);
+        assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
         assert!(decision.record_transcript);
     }
 

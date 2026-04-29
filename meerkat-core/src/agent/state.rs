@@ -1931,30 +1931,25 @@ where
                                 )
                                 .await?;
 
-                            let post_tool_denied = if let Some(HookDecision::Deny {
+                            if let Some(HookDecision::Deny {
                                 reason_code,
                                 message,
                                 payload,
                                 ..
                             }) = post_tool_report.decision
                             {
-                                let denied_payload = serde_json::json!({
-                                    "error": "hook_denied",
-                                    "reason_code": serde_json::to_value(reason_code).unwrap_or_else(|_| Value::String("runtime_error".to_string())),
-                                    "message": message,
-                                    "payload": payload,
-                                });
-                                tool_result.set_text_content(
-                                    serde_json::to_string(&denied_payload).unwrap_or_else(|_| {
-                                        "{\"error\":\"hook_denied\",\"message\":\"denied by hook\"}"
-                                            .to_string()
-                                    }),
-                                );
-                                tool_result.is_error = true;
-                                true
-                            } else {
-                                false
-                            };
+                                let error = AgentError::HookDenied {
+                                    point: HookPoint::PostToolExecution,
+                                    reason_code,
+                                    message,
+                                    payload,
+                                };
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
+                            }
 
                             for outcome in &post_tool_report.outcomes {
                                 for patch in &outcome.patches {
@@ -2002,9 +1997,7 @@ where
                             }
 
                             tool_results.push(tool_result);
-                            if !post_tool_denied {
-                                accumulated_session_effects.extend(tool_session_effects);
-                            }
+                            accumulated_session_effects.extend(tool_session_effects);
 
                             // Track tool call in budget
                             self.budget.record_tool_call();
@@ -4168,7 +4161,10 @@ mod tests {
             Vec::new(),
             vec!["late boundary message".to_string()],
         ]));
-        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
             .with_hook_engine(Arc::new(DenyTurnBoundaryHook))
             .with_comms_runtime(comms)
             .build(
@@ -4201,10 +4197,34 @@ mod tests {
 
         let mut saw_turn_completed = false;
         let mut saw_run_failed = false;
+        let mut saw_run_completed = false;
+        let mut saw_typed_boundary_failure = false;
+        let mut saw_tool_result_event = false;
         while let Ok(event) = rx.try_recv() {
             match event {
                 crate::event::AgentEvent::TurnCompleted { .. } => saw_turn_completed = true,
-                crate::event::AgentEvent::RunFailed { .. } => saw_run_failed = true,
+                crate::event::AgentEvent::RunCompleted { .. } => saw_run_completed = true,
+                crate::event::AgentEvent::RunFailed {
+                    error_class,
+                    error_report,
+                    ..
+                } => {
+                    saw_run_failed = true;
+                    saw_typed_boundary_failure = error_class == crate::event::AgentErrorClass::Hook
+                        && matches!(
+                            error_report
+                                .as_ref()
+                                .and_then(|report| report.reason.as_ref()),
+                            Some(crate::event::AgentErrorReason::HookDenied {
+                                point: HookPoint::TurnBoundary,
+                                reason_code: HookReasonCode::PolicyViolation,
+                            })
+                        );
+                }
+                crate::event::AgentEvent::ToolExecutionCompleted { .. }
+                | crate::event::AgentEvent::ToolResultReceived { .. } => {
+                    saw_tool_result_event = true;
+                }
                 _ => {}
             }
         }
@@ -4212,7 +4232,29 @@ mod tests {
             !saw_turn_completed,
             "boundary denial should not emit TurnCompleted before failing the run"
         );
+        assert!(
+            !saw_run_completed,
+            "boundary denial should not emit RunCompleted"
+        );
         assert!(saw_run_failed, "boundary denial should emit RunFailed");
+        assert!(
+            saw_typed_boundary_failure,
+            "boundary denial should emit typed HookDenied terminal error shape"
+        );
+        assert!(
+            !saw_tool_result_event,
+            "boundary denial should not fabricate tool-result-shaped progress events"
+        );
+        assert_eq!(
+            turn_handle.run_failed_effect_count(),
+            1,
+            "boundary denial should terminalize through failed authority exactly once"
+        );
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            0,
+            "boundary denial must not publish completed authority effects"
+        );
 
         let snapshot = agent
             .execution_snapshot()
@@ -4861,20 +4903,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_denied_tool_result_suppresses_session_effects() {
+    async fn post_tool_denial_terminalizes_without_fabricated_tool_result() {
         let client = Arc::new(ImageEffectClient {
             call_count: Mutex::new(0),
         });
         let tools = Arc::new(ImageEffectDispatcher::new());
-        let mut agent = with_test_turn_state_handle(
-            AgentBuilder::new().with_hook_engine(Arc::new(DenyPostToolHook)),
-        )
-        .build(client, tools, Arc::new(NoopStore))
-        .await;
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle.clone())
+            .with_hook_engine(Arc::new(DenyPostToolHook))
+            .build(client.clone(), tools, Arc::new(NoopStore))
+            .await;
         agent.config.max_turns = Some(2);
 
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
-        assert_eq!(result.text, "done");
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err("PostToolExecution denial should fail the run");
+        assert!(matches!(
+            err,
+            AgentError::HookDenied {
+                point: crate::hooks::HookPoint::PostToolExecution,
+                ..
+            }
+        ));
+        assert_eq!(
+            *client.call_count.lock().unwrap(),
+            1,
+            "post-tool denial should not continue into a follow-up LLM turn"
+        );
+        assert!(
+            !agent
+                .session()
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::ToolResults { .. })),
+            "post-tool denial must not fabricate a transcript ToolResult"
+        );
         assert!(
             !agent.session().messages().iter().any(|message| matches!(
                 message,
@@ -4885,6 +4952,67 @@ mod tests {
                         .any(|block| matches!(block, AssistantBlock::Image { .. }))
             )),
             "hook-denied tool session effects must not append assistant image blocks"
+        );
+
+        let mut saw_run_failed = false;
+        let mut saw_typed_post_tool_failure = false;
+        let mut saw_success_like_event = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunFailed {
+                    error_class,
+                    error_report,
+                    ..
+                } => {
+                    saw_run_failed = true;
+                    saw_typed_post_tool_failure = error_class
+                        == crate::event::AgentErrorClass::Hook
+                        && matches!(
+                            error_report
+                                .as_ref()
+                                .and_then(|report| report.reason.as_ref()),
+                            Some(crate::event::AgentErrorReason::HookDenied {
+                                point: crate::hooks::HookPoint::PostToolExecution,
+                                reason_code: crate::hooks::HookReasonCode::PolicyViolation,
+                            })
+                        );
+                }
+                crate::event::AgentEvent::RunCompleted { .. }
+                | crate::event::AgentEvent::TurnCompleted { .. }
+                | crate::event::AgentEvent::ToolExecutionCompleted { .. }
+                | crate::event::AgentEvent::ToolResultReceived { .. } => {
+                    saw_success_like_event = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_run_failed, "post-tool denial should emit RunFailed");
+        assert!(
+            saw_typed_post_tool_failure,
+            "post-tool denial should emit typed HookDenied terminal error shape"
+        );
+        assert!(
+            !saw_success_like_event,
+            "post-tool denial should not emit success-like terminal or tool result events"
+        );
+        assert_eq!(
+            turn_handle.run_failed_effect_count(),
+            1,
+            "post-tool denial should terminalize through failed authority exactly once"
+        );
+        assert_eq!(
+            turn_handle.run_completed_effect_count(),
+            0,
+            "post-tool denial must not publish completed authority effects"
+        );
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed,
+            "post-tool denial should leave the canonical turn snapshot failed"
         );
     }
 

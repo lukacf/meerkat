@@ -37,7 +37,7 @@ fn assert_machine_owned_admission_signal(
 }
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver) {
-    driver.contract_set_control_projection(
+    driver.contract_force_runtime_authority(
         RuntimeState::Running,
         Some(meerkat_core::lifecycle::RunId::new()),
         Some(RuntimeState::Idle),
@@ -274,7 +274,7 @@ async fn response_after_completed_turn_wakes() {
 
     // Simulate a completed run by starting and completing
     bind_running(&mut driver);
-    driver.contract_set_control_projection(RuntimeState::Idle, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Idle, None, None);
 
     // Now idle — accept a terminal response
     let resp = make_response("peer-1", ResponseStatus::Completed);

@@ -138,7 +138,7 @@ fn sorted_id_strings(ids: impl IntoIterator<Item = InputId>) -> Vec<String> {
 }
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    driver.contract_set_control_projection(
+    driver.contract_force_runtime_authority(
         RuntimeState::Running,
         Some(run_id),
         Some(pre_run_phase),
@@ -148,7 +148,7 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phas
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_set_control_projection(RuntimeState::Retired, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Retired, None, None);
     driver.contract_finalize_retire().await
 }
 

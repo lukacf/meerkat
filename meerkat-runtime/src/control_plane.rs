@@ -11,21 +11,21 @@ use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::types::SessionId;
 
 use crate::meerkat_machine::{MeerkatMachine, SharedCompletionRegistry, SharedDriver};
-use crate::runtime_state::RuntimeState;
 use crate::tokio::sync::mpsc;
 use crate::traits::RuntimeDriverError;
 
-async fn mark_runtime_stopped(driver: &SharedDriver) -> Result<(), RuntimeDriverError> {
+async fn finalize_runtime_stopped(driver: &SharedDriver) -> Result<(), RuntimeDriverError> {
     let mut driver = driver.lock().await;
     if matches!(
         driver.as_driver().runtime_state(),
-        RuntimeState::Stopped | RuntimeState::Destroyed
+        crate::RuntimeState::Destroyed
     ) {
         return Ok(());
     }
 
-    driver.set_control_projection(RuntimeState::Stopped, None, None);
-    driver.finalize_stop_runtime().await
+    driver.finalize_stop_runtime().await?;
+    driver.sync_control_projection_from_dsl_authority();
+    Ok(())
 }
 
 /// Deliver one executor control command and report whether the runtime loop
@@ -48,7 +48,11 @@ pub(crate) async fn apply_executor_control(
         tracing::warn!(error = %err, "failed to deliver out-of-band executor control");
     }
 
-    if should_stop && let Err(err) = mark_runtime_stopped(driver).await {
+    if should_stop && let Some(machine) = machine.upgrade() {
+        machine.notify_runtime_executor_exited(session_id).await;
+    }
+
+    if should_stop && let Err(err) = finalize_runtime_stopped(driver).await {
         tracing::warn!(
             error = %err,
             "failed to mark runtime stopped after stop-runtime-executor command"
@@ -58,10 +62,6 @@ pub(crate) async fn apply_executor_control(
     if should_stop && let Some(completions) = completions {
         let mut reg = completions.lock().await;
         reg.resolve_all_terminated("runtime stopped");
-    }
-
-    if should_stop && let Some(machine) = machine.upgrade() {
-        machine.notify_runtime_executor_exited(session_id).await;
     }
 
     should_stop

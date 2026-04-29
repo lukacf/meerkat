@@ -106,7 +106,7 @@ fn assert_machine_owned_admission_signal(
 }
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    driver.contract_set_control_projection(
+    driver.contract_force_runtime_authority(
         RuntimeState::Running,
         Some(run_id),
         Some(pre_run_phase),
@@ -114,27 +114,27 @@ fn bind_running(driver: &mut EphemeralRuntimeDriver, run_id: RunId, pre_run_phas
 }
 
 fn complete_run_projection(driver: &mut EphemeralRuntimeDriver, next_phase: RuntimeState) {
-    driver.contract_set_control_projection(next_phase, None, None);
+    driver.contract_force_runtime_authority(next_phase, None, None);
 }
 
 fn retire_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::RetireReport {
-    driver.contract_set_control_projection(RuntimeState::Retired, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Retired, None, None);
     driver.contract_finalize_retire()
 }
 
 fn reset_runtime(driver: &mut EphemeralRuntimeDriver) -> meerkat_runtime::ResetReport {
-    driver.contract_set_control_projection(RuntimeState::Idle, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Idle, None, None);
     driver.contract_reset_cleanup()
 }
 
 fn destroy_runtime(driver: &mut EphemeralRuntimeDriver) -> usize {
     let abandoned = driver.contract_destroy_cleanup();
-    driver.contract_set_control_projection(RuntimeState::Destroyed, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Destroyed, None, None);
     abandoned
 }
 
 fn stop_runtime(driver: &mut EphemeralRuntimeDriver) {
-    driver.contract_set_control_projection(RuntimeState::Stopped, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Stopped, None, None);
     driver.contract_finalize_stop_runtime();
 }
 

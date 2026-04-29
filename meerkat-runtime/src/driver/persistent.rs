@@ -154,6 +154,27 @@ impl PersistentRuntimeDriver {
         self.set_control_projection(next_phase, current_run_id, pre_run_phase);
     }
 
+    #[doc(hidden)]
+    pub fn contract_force_runtime_authority(
+        &mut self,
+        next_phase: RuntimeState,
+        current_run_id: Option<RunId>,
+        pre_run_phase: Option<RuntimeState>,
+    ) {
+        self.inner
+            .contract_force_runtime_authority(next_phase, current_run_id, pre_run_phase);
+    }
+
+    pub(crate) fn sync_control_projection_from_dsl_authority(&mut self) {
+        self.inner.sync_control_projection_from_dsl_authority();
+    }
+
+    pub(crate) fn apply_runtime_executor_exited_authority(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        self.inner.apply_runtime_executor_exited_authority()
+    }
+
     /// Get pending events (delegates to inner).
     pub fn drain_events(&mut self) -> Vec<RuntimeEventEnvelope> {
         self.inner.drain_events()
@@ -486,6 +507,7 @@ impl PersistentRuntimeDriver {
 
     pub async fn finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
+        self.inner.sync_control_projection_from_dsl_authority();
         self.inner.stop_runtime_cleanup();
         self.commit_lifecycle_with_rollback(
             checkpoint,
@@ -497,8 +519,9 @@ impl PersistentRuntimeDriver {
 
     pub(crate) async fn realize_stop_lifecycle(&mut self) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        self.inner
-            .set_control_projection(RuntimeState::Stopped, None, None);
+        self.inner.apply_stop_runtime_executor_authority()?;
+        let _ = self.inner.apply_runtime_executor_exited_authority();
+        self.inner.sync_control_projection_from_dsl_authority();
         self.inner.stop_runtime_cleanup();
         self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Stopped, "stop")
             .await

@@ -314,6 +314,13 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) fn sync_control_projection_from_dsl_authority(&mut self) {
+        match self {
+            DriverEntry::Ephemeral(d) => d.sync_control_projection_from_dsl_authority(),
+            DriverEntry::Persistent(d) => d.sync_control_projection_from_dsl_authority(),
+        }
+    }
+
     pub(crate) fn control_projection_handle(
         &self,
     ) -> Arc<std::sync::RwLock<crate::driver::ephemeral::RuntimeControlProjection>> {
@@ -609,11 +616,9 @@ pub(crate) fn machine_apply_run_return_projection(
     // DSL input; the DSL's `CommitRunningTo{Idle,Attached,Retired}` /
     // `FailRunningTo{Idle,Attached,Retired}` transitions dispatch on
     // `pre_run_phase` (set by `Prepare` during `machine_begin_run`) and
-    // flip `lifecycle_phase` accordingly. The runtime-loop path now goes
-    // through this DSL transition uniformly with the dispatch-ingress
-    // Commit path. Idempotent when the dispatch-ingress Commit handler
-    // already staged Commit before entering here — the second apply hits
-    // `lifecycle_phase == Running` guard and no-ops.
+    // flip `lifecycle_phase` accordingly. The runtime-loop path owns this
+    // DSL transition uniformly; dispatch-ingress no longer snapshots or
+    // pre-stages the return input.
     let authority = driver.shared_dsl_authority();
     {
         let mut auth = authority
@@ -635,7 +640,8 @@ pub(crate) fn machine_apply_run_return_projection(
 
     // Shell `control_projection` update is retained as mechanical event
     // plumbing. DSL's Commit/Fail transition is the authoritative
-    // lifecycle/run writer above; DriverEntry readers consult DSL state.
+    // lifecycle/run writer above; DriverEntry readers consult DSL state, so
+    // this projection must stay mechanical.
     driver.set_control_projection(next_phase, None, None);
     Ok(())
 }
@@ -1125,14 +1131,21 @@ pub(crate) fn machine_realize_recovered_runtime_state(
             let mut auth = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(session_id) = auth.state.session_id.clone() {
-                let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            let applied = if let Some(session_id) = auth.state.session_id.clone() {
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                     &mut *auth,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::Retire { session_id },
-                );
-            }
+                )
+                .is_ok()
+            } else {
+                false
+            };
             drop(auth);
-            driver.set_control_projection(RuntimeState::Retired, None, None);
+            if applied {
+                driver.sync_control_projection_from_dsl_authority();
+            } else {
+                driver.force_runtime_authority(RuntimeState::Retired, None, None);
+            }
         }
         RuntimeState::Stopped
             if driver.runtime_state() != RuntimeState::Stopped
@@ -1142,12 +1155,17 @@ pub(crate) fn machine_realize_recovered_runtime_state(
             let mut auth = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            let applied = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                 &mut *auth,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
-            );
+            )
+            .is_ok();
             drop(auth);
-            driver.set_control_projection(RuntimeState::Stopped, None, None);
+            if applied {
+                driver.sync_control_projection_from_dsl_authority();
+            } else {
+                driver.force_runtime_authority(RuntimeState::Stopped, None, None);
+            }
             driver.stop_runtime_cleanup();
         }
         RuntimeState::Destroyed if driver.runtime_state() != RuntimeState::Destroyed => {
@@ -1155,14 +1173,21 @@ pub(crate) fn machine_realize_recovered_runtime_state(
             let mut auth = authority
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(session_id) = auth.state.session_id.clone() {
-                let _ = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            let applied = if let Some(session_id) = auth.state.session_id.clone() {
+                crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
                     &mut *auth,
                     crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy { session_id },
-                );
-            }
+                )
+                .is_ok()
+            } else {
+                false
+            };
             drop(auth);
-            driver.set_control_projection(RuntimeState::Destroyed, None, None);
+            if applied {
+                driver.sync_control_projection_from_dsl_authority();
+            } else {
+                driver.force_runtime_authority(RuntimeState::Destroyed, None, None);
+            }
             driver.destroy_cleanup();
         }
         _ => {}
@@ -1362,14 +1387,15 @@ pub(crate) async fn machine_stop_runtime(
 
     match driver {
         DriverEntry::Ephemeral(d) => {
-            // The session DSL has already accepted `StopRuntimeExecutor`
-            // before this realization path runs. Mirror that machine-owned
-            // terminal phase into the concrete projection before finalizing.
-            d.set_control_projection(RuntimeState::Stopped, None, None);
+            let _ = d.apply_runtime_executor_exited_authority();
+            d.sync_control_projection_from_dsl_authority();
             d.finalize_stop_runtime();
             Ok(())
         }
-        DriverEntry::Persistent(d) => d.realize_stop_lifecycle().await,
+        DriverEntry::Persistent(d) => {
+            let _ = d.apply_runtime_executor_exited_authority();
+            d.finalize_stop_runtime().await
+        }
     }
 }
 
@@ -1377,7 +1403,7 @@ pub(crate) async fn machine_destroy(
     driver: &mut DriverEntry,
 ) -> Result<DestroyReport, RuntimeDriverError> {
     match driver.runtime_state() {
-        RuntimeState::Initializing | RuntimeState::Destroyed => {
+        RuntimeState::Initializing => {
             return Err(RuntimeDriverError::Internal(
                 crate::runtime_state::RuntimeStateTransitionError {
                     from: driver.runtime_state(),
@@ -1390,10 +1416,13 @@ pub(crate) async fn machine_destroy(
         | RuntimeState::Attached
         | RuntimeState::Running
         | RuntimeState::Retired
-        | RuntimeState::Stopped => {}
+        | RuntimeState::Stopped
+        | RuntimeState::Destroyed => {}
     }
 
-    driver.destroy().await
+    let report = driver.destroy().await?;
+    driver.sync_control_projection_from_dsl_authority();
+    Ok(report)
 }
 
 pub(crate) async fn machine_retire(

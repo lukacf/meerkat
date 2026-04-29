@@ -1090,6 +1090,37 @@ impl EphemeralRuntimeDriver {
         current_run_id: Option<RunId>,
         pre_run_phase: Option<RuntimeState>,
     ) {
+        if self.control_snapshot().phase == next_phase {
+            self.write_control_projection().phase = next_phase;
+        } else {
+            self.transition_phase(next_phase);
+        }
+        let mut control = self.write_control_projection();
+        control.current_run_id = current_run_id;
+        control.pre_run_phase = pre_run_phase;
+    }
+
+    pub(crate) fn sync_control_projection_from_dsl_authority(&mut self) {
+        let (phase, current_run_id, pre_run_phase) = {
+            let authority = self.shared_dsl_authority();
+            let authority = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+                crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority),
+                crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority),
+            )
+        };
+        self.set_control_projection(phase, current_run_id, pre_run_phase);
+    }
+
+    pub(crate) fn force_runtime_authority(
+        &mut self,
+        next_phase: RuntimeState,
+        current_run_id: Option<RunId>,
+        pre_run_phase: Option<RuntimeState>,
+    ) {
         {
             let authority = self.shared_dsl_authority();
             let mut authority = authority
@@ -1103,15 +1134,35 @@ impl EphemeralRuntimeDriver {
             authority.state.pre_run_phase = pre_run_phase
                 .and_then(crate::meerkat_machine::dsl_authority::pre_run_phase_from_runtime_state);
         }
+        self.set_control_projection(next_phase, current_run_id, pre_run_phase);
+    }
 
-        if self.control_snapshot().phase == next_phase {
-            self.write_control_projection().phase = next_phase;
-        } else {
-            self.transition_phase(next_phase);
-        }
-        let mut control = self.write_control_projection();
-        control.current_run_id = current_run_id;
-        control.pre_run_phase = pre_run_phase;
+    #[doc(hidden)]
+    pub fn contract_force_runtime_authority(
+        &mut self,
+        next_phase: RuntimeState,
+        current_run_id: Option<RunId>,
+        pre_run_phase: Option<RuntimeState>,
+    ) {
+        self.force_runtime_authority(next_phase, current_run_id, pre_run_phase);
+    }
+
+    pub(crate) fn apply_runtime_executor_exited_authority(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RuntimeExecutorExited,
+            "RuntimeExecutorExited",
+        )
+    }
+
+    pub(crate) fn apply_stop_runtime_executor_authority(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::StopRuntimeExecutor,
+            "StopRuntimeExecutor",
+        )
     }
     /// Drain and return the accumulated post-admission signal.
     ///
@@ -1690,7 +1741,7 @@ impl EphemeralRuntimeDriver {
     }
 
     pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
-        let runtime_idle = self.read_control_projection().phase.is_idle_or_attached();
+        let runtime_idle = self.runtime_phase_snapshot().is_idle_or_attached();
         self.resolve_admission_for_runtime_idle(input, runtime_idle)
     }
 
@@ -1699,10 +1750,11 @@ impl EphemeralRuntimeDriver {
         input: Input,
         resolved: crate::accept::ResolvedAdmission,
     ) -> Result<AcceptOutcome, RuntimeDriverError> {
-        match self.read_control_projection().phase {
+        let runtime_phase = self.runtime_phase_snapshot();
+        match runtime_phase {
             RuntimeState::Retired | RuntimeState::Stopped => {
                 return Err(RuntimeDriverError::NotReady {
-                    state: self.read_control_projection().phase,
+                    state: runtime_phase,
                 });
             }
             RuntimeState::Destroyed => return Err(RuntimeDriverError::Destroyed),
@@ -1773,7 +1825,7 @@ impl EphemeralRuntimeDriver {
             },
         ));
 
-        let runtime_idle = self.read_control_projection().phase.is_idle_or_attached();
+        let runtime_idle = runtime_phase.is_idle_or_attached();
         let handling_mode = resolved.handling_mode;
         let content_shape = ContentShape(input.kind_id().to_string());
         let is_prompt = matches!(input, Input::Prompt(_));
@@ -2123,6 +2175,7 @@ mod tests {
         Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
         PeerInput,
     };
+    use crate::traits::RuntimeDriver;
     use crate::{RuntimeState, WakeMode};
     use chrono::Utc;
     use meerkat_core::lifecycle::{InputId, RunId};
@@ -2150,10 +2203,64 @@ mod tests {
         })
     }
 
+    fn force_control_shadow(
+        driver: &mut EphemeralRuntimeDriver,
+        phase: RuntimeState,
+        current_run_id: Option<RunId>,
+        pre_run_phase: Option<RuntimeState>,
+    ) {
+        let mut control = driver.write_control_projection();
+        control.phase = phase;
+        control.current_run_id = current_run_id;
+        control.pre_run_phase = pre_run_phase;
+    }
+
+    #[test]
+    fn set_control_projection_does_not_write_dsl_authority() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("projection-only"));
+        let run_id = RunId::new();
+
+        driver.set_control_projection(
+            RuntimeState::Running,
+            Some(run_id),
+            Some(RuntimeState::Attached),
+        );
+
+        assert_eq!(
+            driver.runtime_phase_snapshot(),
+            RuntimeState::Idle,
+            "control projection writes must not mutate DSL lifecycle truth",
+        );
+        assert_eq!(
+            driver.current_run_id(),
+            None,
+            "control projection writes must not mutate DSL run binding truth",
+        );
+        assert_eq!(
+            driver.control_snapshot().phase,
+            RuntimeState::Running,
+            "the shell projection still records the mechanical projection",
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_accept_uses_dsl_phase_not_control_projection_shadow() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("admission-shadow"));
+        force_control_shadow(&mut driver, RuntimeState::Stopped, None, None);
+
+        let outcome = driver.accept_input(peer_message_input()).await.unwrap();
+
+        assert!(
+            outcome.is_accepted(),
+            "direct RuntimeDriver admission should follow DSL phase, not a stale control shadow",
+        );
+    }
+
     #[test]
     fn resolve_admission_for_runtime_idle_uses_explicit_machine_phase_not_control_projection() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("phase-drift"));
-        driver.set_control_projection(
+        force_control_shadow(
+            &mut driver,
             RuntimeState::Running,
             Some(RunId::new()),
             Some(RuntimeState::Attached),
@@ -2161,8 +2268,8 @@ mod tests {
 
         let input = peer_message_input();
         let projected = driver.resolve_admission(&input);
-        assert_eq!(projected.policy.wake_mode, WakeMode::InterruptYielding);
-        assert!(projected.coarse_flags.interrupt_yielding);
+        assert_eq!(projected.policy.wake_mode, WakeMode::WakeIfIdle);
+        assert!(!projected.coarse_flags.interrupt_yielding);
 
         let machine_owned = driver.resolve_admission_for_runtime_idle(&input, true);
         assert_eq!(machine_owned.policy.wake_mode, WakeMode::WakeIfIdle);

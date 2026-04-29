@@ -419,17 +419,12 @@ impl MeerkatMachine {
                 if matches!(state, RuntimeState::Initializing) {
                     return Err(RuntimeControlPlaneError::InvalidState { state });
                 }
-                self.preview_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
-                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                            &session_id,
-                        ),
-                    },
-                    "Destroy",
-                )
-                .await
-                .map_err(RuntimeControlPlaneError::Internal)?;
+                let destroy_input = crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
+                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+                };
+                self.preview_session_dsl_input(&session_id, destroy_input.clone(), "Destroy")
+                    .await
+                    .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
                 let report = match machine_destroy(&mut drv).await {
@@ -438,17 +433,13 @@ impl MeerkatMachine {
                 };
                 drop(drv);
 
-                self.apply_session_dsl_input(
-                    &session_id,
-                    crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
-                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                            &session_id,
-                        ),
-                    },
-                    "Destroy",
-                )
-                .await
-                .map_err(RuntimeControlPlaneError::Internal)?;
+                self.apply_session_dsl_input(&session_id, destroy_input, "Destroy")
+                    .await
+                    .map_err(RuntimeControlPlaneError::Internal)?;
+                driver
+                    .lock()
+                    .await
+                    .sync_control_projection_from_dsl_authority();
 
                 let mut comp = completions.lock().await;
                 comp.resolve_all_terminated("runtime destroyed");

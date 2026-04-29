@@ -256,7 +256,7 @@ fn make_multimodal_prompt(text: &str, label: &str) -> Input {
 }
 
 fn bind_running(driver: &mut PersistentRuntimeDriver, run_id: RunId, pre_run_phase: RuntimeState) {
-    driver.contract_set_control_projection(
+    driver.contract_force_runtime_authority(
         RuntimeState::Running,
         Some(run_id),
         Some(pre_run_phase),
@@ -266,14 +266,14 @@ fn bind_running(driver: &mut PersistentRuntimeDriver, run_id: RunId, pre_run_pha
 async fn retire_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::RetireReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_set_control_projection(RuntimeState::Retired, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Retired, None, None);
     driver.contract_finalize_retire().await
 }
 
 async fn reset_runtime(
     driver: &mut PersistentRuntimeDriver,
 ) -> Result<meerkat_runtime::ResetReport, meerkat_runtime::RuntimeDriverError> {
-    driver.contract_set_control_projection(RuntimeState::Idle, None, None);
+    driver.contract_force_runtime_authority(RuntimeState::Idle, None, None);
     driver.contract_finalize_reset().await
 }
 

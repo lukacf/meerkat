@@ -19,7 +19,7 @@ fn runtime_id() -> LogicalRuntimeId {
 }
 
 fn bind_running(driver: &mut EphemeralRuntimeDriver) {
-    driver.contract_set_control_projection(
+    driver.contract_force_runtime_authority(
         meerkat_runtime::RuntimeState::Running,
         Some(RunId::new()),
         Some(meerkat_runtime::RuntimeState::Idle),

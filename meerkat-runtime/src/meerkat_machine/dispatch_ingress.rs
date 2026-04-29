@@ -363,41 +363,27 @@ impl MeerkatMachine {
                     return Err(err);
                 }
 
-                // Driver preconditions above are read-only and run before the
-                // machine transition. Once `Prepare` is accepted, every later
-                // failure is an effect-realization failure and must explicitly
-                // unwind both sides rather than treating driver projection as a
-                // veto over an accepted transition.
                 let run_id = RunId::new();
-                let previous_dsl_state = match self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
-                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                                &session_id,
-                            ),
-                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
-                        },
-                        "Prepare",
-                    )
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(reason) => {
-                        tracing::error!(
-                            error = %reason,
-                            session_id = %session_id,
-                            "DSL rejected Prepare input"
-                        );
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(Self::normalize_destroyed_error(
-                            RuntimeDriverError::NotReady { state },
-                        ));
-                    }
-                };
+                self.preview_session_dsl_input(
+                    &session_id,
+                    crate::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
+                        session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                            &session_id,
+                        ),
+                        run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
+                    },
+                    "Prepare",
+                )
+                .await
+                .map_err(|reason| {
+                    tracing::error!(
+                        error = %reason,
+                        session_id = %session_id,
+                        "DSL rejected Prepare input"
+                    );
+                    let state = visible_state;
+                    Self::normalize_destroyed_error(RuntimeDriverError::NotReady { state })
+                })?;
 
                 let prepared = {
                     let mut driver = driver.lock().await;
@@ -408,17 +394,11 @@ impl MeerkatMachine {
                         .map_err(Self::normalize_destroyed_error)
                     {
                         Ok(o) => o,
-                        Err(err) => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
-                            return Err(err);
-                        }
+                        Err(err) => return Err(err),
                     };
                     let input_id = match outcome {
                         AcceptOutcome::Accepted { input_id, .. } => input_id,
                         AcceptOutcome::Deduplicated { existing_id, .. } => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
                             return Err(RuntimeDriverError::ValidationFailed {
                                 reason: format!(
                                     "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
@@ -426,8 +406,6 @@ impl MeerkatMachine {
                             });
                         }
                         AcceptOutcome::Rejected { reason } => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
                             return Err(RuntimeDriverError::ValidationFailed {
                                 reason: reason.to_string(),
                             });
@@ -437,16 +415,12 @@ impl MeerkatMachine {
                     let (dequeued_id, dequeued_input) = match driver.dequeue_next() {
                         Some(pair) => pair,
                         None => {
-                            self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                                .await;
                             return Err(RuntimeDriverError::Internal(
                                 "accepted input was not queued for execution".into(),
                             ));
                         }
                     };
                     if dequeued_id != input_id {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
                         return Err(Self::normalize_destroyed_error(
                             RuntimeDriverError::NotReady {
                                 state: self
@@ -458,8 +432,6 @@ impl MeerkatMachine {
                     }
 
                     if let Err(err) = machine_begin_run(&mut driver, run_id.clone()) {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
                         return Err(RuntimeDriverError::Internal(format!(
                             "failed to start runtime run: {err}"
                         )));
@@ -475,8 +447,6 @@ impl MeerkatMachine {
                             crate::meerkat_machine::driver::RunReturnDisposition::Fail,
                             next_phase,
                         );
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
                         return Err(RuntimeDriverError::Internal(format!(
                             "failed to stage accepted input: {err}"
                         )));
@@ -505,8 +475,6 @@ impl MeerkatMachine {
                 run_id,
                 output,
             } => {
-                let shadow_input_id = input_id.clone();
-                let shadow_run_id = run_id.clone();
                 let driver = {
                     let sessions = self.sessions.read().await;
                     sessions
@@ -524,21 +492,6 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Commit {
-                            input_id: crate::meerkat_machine::dsl::InputId::from_domain(
-                                &shadow_input_id,
-                            ),
-                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(&shadow_run_id),
-                        },
-                        "Commit",
-                    )
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-
-                let commit_run_id = run_id.clone();
                 if let Err(err) = commit_runtime_loop_run(
                     &driver,
                     run_id,
@@ -548,28 +501,6 @@ impl MeerkatMachine {
                 )
                 .await
                 {
-                    let _ = previous_dsl_state;
-                    // Driver already unwinds the shared canonical ingress state
-                    // on commit failure. Only the coarse Fail transition remains
-                    // to keep the top-level machine phase in sync.
-                    if let Err(dsl_err) = self
-                        .stage_session_dsl_input(
-                            &session_id,
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::Fail {
-                                run_id: crate::meerkat_machine::dsl::RunId::from_domain(
-                                    &commit_run_id,
-                                ),
-                            },
-                            "Fail(commit_unwind)",
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %dsl_err,
-                            "DSL rejected Fail unwind after commit failure"
-                        );
-                    }
                     let should_unregister =
                         !err.to_string().contains("runtime boundary commit failed");
                     if should_unregister {
@@ -587,7 +518,6 @@ impl MeerkatMachine {
                 run_id,
                 error,
             } => {
-                let shadow_fail_run_id = run_id.clone();
                 let driver = {
                     let sessions = self.sessions.read().await;
                     sessions
@@ -605,22 +535,7 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::Fail {
-                            run_id: crate::meerkat_machine::dsl::RunId::from_domain(
-                                &shadow_fail_run_id,
-                            ),
-                        },
-                        "Fail",
-                    )
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-
                 if let Err(run_err) = fail_runtime_loop_run(&driver, run_id, error).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
                     self.unregister_session_inner(&session_id).await;
                     return Err(RuntimeDriverError::Internal(format!(
                         "failed to persist runtime failure snapshot: {run_err}"

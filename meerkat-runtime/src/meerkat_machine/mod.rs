@@ -439,8 +439,11 @@ impl MeerkatMachine {
     /// runtime loop has realised an async stop into the driver's control
     /// projection. Called via `Weak<Self>` from `control_plane`.
     pub(crate) async fn notify_runtime_executor_exited(&self, session_id: &SessionId) {
-        let mut sessions = self.sessions.write().await;
-        if let Some(entry) = sessions.get_mut(session_id) {
+        let driver = {
+            let mut sessions = self.sessions.write().await;
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return;
+            };
             let mut authority = entry
                 .dsl_authority
                 .lock()
@@ -455,7 +458,11 @@ impl MeerkatMachine {
                     "DSL rejected RuntimeExecutorExited (terminal or phase-not-covered)"
                 );
             }
-        }
+            Arc::clone(&entry.driver)
+        };
+
+        let mut driver = driver.lock().await;
+        driver.sync_control_projection_from_dsl_authority();
     }
 }
 

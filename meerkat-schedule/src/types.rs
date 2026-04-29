@@ -749,12 +749,32 @@ impl HelperOptionsSpec {
     /// `InheritParent` and `Minimal` require an active parent agent context and
     /// are only valid when created through agent tools. Public APIs must reject them.
     pub fn validate_public_api(&self) -> Result<(), String> {
+        if self.resolved_spawn_snapshot.is_some() {
+            return Err(
+                "resolved spawn snapshots are trusted internal schedule state and cannot be \
+                 supplied through public schedule APIs"
+                    .to_string(),
+            );
+        }
         if let Some(tooling) = &self.tooling
             && tooling.requires_parent_context()
         {
             return Err("schedule spawn tooling mode requires parent agent context \
                  (inherit_parent/minimal are only valid through agent tools)"
                 .to_string());
+        }
+        if let Some(ScheduleSpawnTooling::Profile {
+            allow_overlay,
+            deny_overlay,
+            ..
+        }) = &self.tooling
+            && (allow_overlay.is_some() || deny_overlay.is_some())
+        {
+            return Err(
+                "schedule spawn profile overlays require trusted resolved spawn state and are \
+                 only valid through agent tools"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -1400,6 +1420,42 @@ mod tests {
             ..Default::default()
         };
         assert!(spec.validate_public_api().is_err());
+    }
+
+    #[test]
+    fn validate_public_api_rejects_resolved_snapshot() {
+        let spec = HelperOptionsSpec {
+            resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
+                tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
+                    "shell".to_string(),
+                ])),
+                model: "claude-sonnet-4-6".into(),
+                provider_params: None,
+            }),
+            ..Default::default()
+        };
+        let result = spec.validate_public_api();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("trusted internal schedule state")
+        );
+    }
+
+    #[test]
+    fn validate_public_api_rejects_profile_overlay() {
+        let spec = HelperOptionsSpec {
+            tooling: Some(ScheduleSpawnTooling::Profile {
+                name: "worker".into(),
+                allow_overlay: Some(vec!["shell".into()]),
+                deny_overlay: None,
+            }),
+            ..Default::default()
+        };
+        let result = spec.validate_public_api();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("profile overlays"));
     }
 
     #[test]

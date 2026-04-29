@@ -201,23 +201,6 @@ impl PeerAddress {
         };
         Ok(Self::new(transport, endpoint))
     }
-
-    /// Parse with the explicit legacy compatibility rule that schemeless
-    /// addresses are TCP endpoints.
-    ///
-    /// This compatibility path is intentionally separate from [`Self::parse`]:
-    /// it accepts `host:port` as `tcp://host:port`, but still rejects any
-    /// unknown `scheme://...` input.
-    pub fn parse_legacy_schemeless_tcp(
-        raw: impl AsRef<str>,
-    ) -> Result<Self, PeerAddressParseError> {
-        let raw = raw.as_ref();
-        if raw.contains("://") {
-            Self::parse(raw)
-        } else {
-            Ok(Self::new(PeerTransport::Tcp, raw))
-        }
-    }
 }
 
 impl std::fmt::Display for PeerAddress {
@@ -1034,22 +1017,6 @@ mod tests {
             .expect_err("strict parser requires an address scheme");
         assert!(
             err.to_string().contains("missing transport scheme"),
-            "unexpected error: {err}",
-        );
-    }
-
-    #[test]
-    fn peer_address_legacy_schemeless_tcp_is_explicit() {
-        let parsed = PeerAddress::parse_legacy_schemeless_tcp("127.0.0.1:4200")
-            .expect("legacy schemeless TCP input remains explicit");
-        assert_eq!(parsed.transport(), PeerTransport::Tcp);
-        assert_eq!(parsed.endpoint(), "127.0.0.1:4200");
-        assert_eq!(parsed.to_string(), "tcp://127.0.0.1:4200");
-
-        let err = PeerAddress::parse_legacy_schemeless_tcp("http://127.0.0.1:4200")
-            .expect_err("legacy schemeless compatibility must not accept unknown schemes");
-        assert!(
-            err.to_string().contains("unknown peer address transport"),
             "unexpected error: {err}",
         );
     }

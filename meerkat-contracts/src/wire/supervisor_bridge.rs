@@ -791,6 +791,23 @@ mod tests {
     }
 
     #[test]
+    fn bridge_peer_spec_rejects_schemeless_address() {
+        let spec = BridgePeerSpec {
+            name: "member-a".to_string(),
+            peer_id: "aaaaaaaa-0000-4000-8000-000000000001".to_string(),
+            address: "127.0.0.1:7000".to_string(),
+            pubkey: [0u8; 32],
+        };
+
+        let err = meerkat_core::comms::TrustedPeerDescriptor::try_from(&spec)
+            .expect_err("supervisor bridge peer specs must fail closed on schemeless addresses");
+        assert!(
+            err.contains("missing transport scheme"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[test]
     fn bridge_command_authorize_supervisor_round_trip() {
         let cmd = BridgeCommand::AuthorizeSupervisor(sample_supervisor_payload());
         assert_command_round_trip(&cmd);

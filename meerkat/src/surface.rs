@@ -24,9 +24,9 @@ pub use meerkat_core::{
 pub use request_execution::{
     CancelActionInstallOutcome, CancelOutcome, CompleteOutcome, PreparedSurfaceSession,
     PublishOutcome, RequestAlreadyExists, RequestAsyncAction, RequestContext, RequestTerminal,
-    RequestTransitionError, SurfaceRequestExecution, SurfaceRequestExecutor, SurfaceRequestPhase,
-    SurfaceRequestSemantics, SurfaceRequestTerminalPolicy, noop_request_action,
-    prepare_surface_session, request_action,
+    RequestTerminalResolution, RequestTransitionError, SurfaceRequestExecution,
+    SurfaceRequestExecutor, SurfaceRequestPhase, SurfaceRequestSemantics,
+    SurfaceRequestTerminalPolicy, noop_request_action, prepare_surface_session, request_action,
 };
 #[cfg(all(feature = "session-store", feature = "comms"))]
 pub use runtime_backed::configure_peer_ingress;

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use meerkat::surface::{
-    CompleteOutcome, PublishOutcome, RequestTerminal, SurfaceRequestExecutor,
-    SurfaceRequestSemantics, noop_request_action,
+    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestSemantics,
+    noop_request_action,
 };
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -363,45 +363,21 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
-        // Lifecycle truth lives in the executor's typed state machine:
-        // publish responses must claim Published before transport emission,
-        // while uncommitted responses yield to a prior cancel via CompleteOutcome.
-        let to_write = match response.terminal {
-            RequestTerminal::Publish(rpc_response) => {
-                let cancel_id = rpc_response.id.clone();
-                match self
-                    .request_executor
-                    .publish_or_cancelled(&response.request_key)
-                    .await
-                {
-                    Ok(PublishOutcome::Published) => rpc_response,
-                    Ok(PublishOutcome::CancelledBeforePublish) => {
-                        request_cancelled_response(cancel_id)
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            request_key = %response.request_key,
-                            error = %err,
-                            "request lifecycle rejected publish response"
-                        );
-                        request_lifecycle_error_response(cancel_id, err)
-                    }
-                }
-            }
-            RequestTerminal::RespondWithoutPublish(rpc_response) => {
-                // Uncommitted terminal: the executor tells us whether cancel
-                // landed first. No shell-side rewriting — SupersededByCancel
-                // means we emit the cancel response the caller requested, not
-                // the task's stale payload.
-                let cancel_id = rpc_response.id.clone();
-                let outcome = self
-                    .request_executor
-                    .finish_unpublished(&response.request_key)
-                    .await;
-                match outcome {
-                    CompleteOutcome::Completed => rpc_response,
-                    CompleteOutcome::SupersededByCancel => request_cancelled_response(cancel_id),
-                }
+        let cancel_id = response.terminal.payload().id.clone();
+        let to_write = match self
+            .request_executor
+            .resolve_terminal(Some(&response.request_key), response.terminal)
+            .await
+        {
+            RequestTerminalResolution::Emit(rpc_response) => rpc_response,
+            RequestTerminalResolution::Cancelled => request_cancelled_response(cancel_id),
+            RequestTerminalResolution::LifecycleError(err) => {
+                tracing::warn!(
+                    request_key = %response.request_key,
+                    error = %err,
+                    "request lifecycle rejected publish response"
+                );
+                request_lifecycle_error_response(cancel_id, err)
             }
         };
 
@@ -492,24 +468,9 @@ fn request_lifecycle_error_response(
 }
 
 fn request_semantics(request: &RpcRequest) -> SurfaceRequestSemantics {
-    SurfaceRequestSemantics::for_rpc_method(
+    SurfaceRequestSemantics::for_rpc_request(
         request.method.as_str(),
-        session_create_runs_immediately(request.params.as_deref()),
-    )
-}
-
-fn session_create_runs_immediately(params: Option<&serde_json::value::RawValue>) -> bool {
-    let Some(params) = params else {
-        return true;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(params.get()) else {
-        return true;
-    };
-    !matches!(
-        value
-            .get("initial_turn")
-            .and_then(serde_json::Value::as_str),
-        Some("deferred")
+        request.params.as_deref().map(|params| params.get()),
     )
 }
 

@@ -43,7 +43,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
-    CompleteOutcome, PublishOutcome, RequestAlreadyExists, RequestContext, RequestTerminal,
+    RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
     SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
     build_recovered_session, noop_request_action, request_action,
 };
@@ -2662,29 +2662,16 @@ async fn with_request_lifecycle(
     ctx: Option<RequestContext>,
     outcome: RequestTerminal<Result<Json<SessionResponse>, ApiError>>,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    match ctx {
-        Some(ctx) => match outcome {
-            RequestTerminal::Publish(val) => match executor.publish_or_cancelled(ctx.key()).await {
-                Ok(PublishOutcome::Published) => val,
-                Ok(PublishOutcome::CancelledBeforePublish) => {
-                    Err(ApiError::RequestCancelled { details: None })
-                }
-                Err(err) => Err(ApiError::Internal(format!(
-                    "request lifecycle rejected publish response: {err}"
-                ))),
-            },
-            RequestTerminal::RespondWithoutPublish(val) => {
-                match executor.finish_unpublished(ctx.key()).await {
-                    CompleteOutcome::Completed => val,
-                    CompleteOutcome::SupersededByCancel => {
-                        Err(ApiError::RequestCancelled { details: None })
-                    }
-                }
-            }
-        },
-        None => match outcome {
-            RequestTerminal::Publish(val) | RequestTerminal::RespondWithoutPublish(val) => val,
-        },
+    let request_key = ctx.as_ref().map(|ctx| ctx.key().to_string());
+    match executor
+        .resolve_terminal(request_key.as_deref(), outcome)
+        .await
+    {
+        RequestTerminalResolution::Emit(val) => val,
+        RequestTerminalResolution::Cancelled => Err(ApiError::RequestCancelled { details: None }),
+        RequestTerminalResolution::LifecycleError(err) => Err(ApiError::Internal(format!(
+            "request lifecycle rejected publish response: {err}"
+        ))),
     }
 }
 

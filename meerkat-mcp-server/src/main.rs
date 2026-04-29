@@ -2,7 +2,7 @@
 
 use clap::{Parser, ValueEnum};
 use meerkat::surface::{
-    CompleteOutcome, PublishOutcome, RequestTerminal, StdioJsonWriter, SurfaceRequestExecutor,
+    RequestTerminal, RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor,
     SurfaceRequestSemantics, noop_request_action, spawn_stdio_json_writer,
 };
 use meerkat_contracts::ErrorCode;
@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let state = Arc::clone(&state);
                         let completion_tx = completion_tx.clone();
                         let tool_name = name.clone();
-                        let semantics = tool_call_request_semantics(&tool_name);
+                        let semantics = SurfaceRequestSemantics::for_mcp_tool_call(&tool_name);
                         let request_id_for_task = request_id.clone();
                         let request_key_for_task = request_key.clone();
                         let handle = tokio::spawn(async move {
@@ -310,10 +310,6 @@ fn request_key(id: &Value) -> String {
     serde_json::to_string(id).unwrap_or_else(|_| id.to_string())
 }
 
-fn tool_call_request_semantics(tool_name: &str) -> SurfaceRequestSemantics {
-    SurfaceRequestSemantics::for_mcp_tool_call(tool_name)
-}
-
 fn request_cancel_target(params: Option<&Value>) -> Option<String> {
     let request_id = params?.get("requestId")?;
     Some(request_key(request_id))
@@ -324,37 +320,20 @@ async fn write_tool_completion(
     request_executor: &SurfaceRequestExecutor,
     completion: ToolCompletion,
 ) -> bool {
-    // Lifecycle truth lives in the executor's typed state machine:
-    // publish responses must claim Published before transport emission, while
-    // uncommitted responses yield to a prior cancel via CompleteOutcome.
-    let to_write = match completion.terminal {
-        RequestTerminal::Publish(response) => {
-            let cancel_id = response.get("id").cloned();
-            match request_executor
-                .publish_or_cancelled(&completion.request_key)
-                .await
-            {
-                Ok(PublishOutcome::Published) => response,
-                Ok(PublishOutcome::CancelledBeforePublish) => request_cancelled_response(cancel_id),
-                Err(err) => {
-                    tracing::warn!(
-                        request_key = %completion.request_key,
-                        error = %err,
-                        "request lifecycle rejected publish response"
-                    );
-                    request_lifecycle_error_response(cancel_id, err)
-                }
-            }
-        }
-        RequestTerminal::RespondWithoutPublish(response) => {
-            let cancel_id = response.get("id").cloned();
-            let outcome = request_executor
-                .finish_unpublished(&completion.request_key)
-                .await;
-            match outcome {
-                CompleteOutcome::Completed => response,
-                CompleteOutcome::SupersededByCancel => request_cancelled_response(cancel_id),
-            }
+    let cancel_id = completion.terminal.payload().get("id").cloned();
+    let to_write = match request_executor
+        .resolve_terminal(Some(&completion.request_key), completion.terminal)
+        .await
+    {
+        RequestTerminalResolution::Emit(response) => response,
+        RequestTerminalResolution::Cancelled => request_cancelled_response(cancel_id),
+        RequestTerminalResolution::LifecycleError(err) => {
+            tracing::warn!(
+                request_key = %completion.request_key,
+                error = %err,
+                "request lifecycle rejected publish response"
+            );
+            request_lifecycle_error_response(cancel_id, err)
         }
     };
 
@@ -393,15 +372,17 @@ mod tests {
     #[test]
     fn meerkat_run_and_resume_publish_on_success() {
         assert!(matches!(
-            tool_call_request_semantics("meerkat_run").classify_terminal(true, ()),
+            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_run").classify_terminal(true, ()),
             RequestTerminal::Publish(())
         ));
         assert!(matches!(
-            tool_call_request_semantics("meerkat_resume").classify_terminal(true, ()),
+            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_resume")
+                .classify_terminal(true, ()),
             RequestTerminal::Publish(())
         ));
         assert!(matches!(
-            tool_call_request_semantics("meerkat_sessions").classify_terminal(true, ()),
+            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_sessions")
+                .classify_terminal(true, ()),
             RequestTerminal::RespondWithoutPublish(())
         ));
     }

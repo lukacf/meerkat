@@ -57,6 +57,34 @@ pub enum RequestTerminal<T> {
     RespondWithoutPublish(T),
 }
 
+impl<T> RequestTerminal<T> {
+    /// Borrow the terminal payload without exposing whether it was classified as
+    /// committed or observational.
+    pub fn payload(&self) -> &T {
+        match self {
+            Self::Publish(payload) | Self::RespondWithoutPublish(payload) => payload,
+        }
+    }
+
+    fn into_payload(self) -> T {
+        match self {
+            Self::Publish(payload) | Self::RespondWithoutPublish(payload) => payload,
+        }
+    }
+}
+
+/// Canonical resolution of a surface terminal through the lifecycle machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestTerminalResolution<T> {
+    /// The surface may emit or return the request's terminal payload.
+    Emit(T),
+    /// Cancel won before terminal publication. The surface should emit its
+    /// protocol-specific cancellation response instead of the stale payload.
+    Cancelled,
+    /// The lifecycle machine rejected a committed publication transition.
+    LifecycleError(RequestTransitionError),
+}
+
 /// Whether a surface request needs tracked asynchronous execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceRequestExecution {
@@ -104,11 +132,9 @@ impl SurfaceRequestSemantics {
         }
     }
 
-    /// Canonical RPC request semantics.
-    ///
-    /// The RPC surface supplies only the already-parsed "does session/create
-    /// run immediately?" fact. Method-to-publication policy lives here so RPC
-    /// transports do not each grow their own terminal classifier.
+    /// Canonical RPC request semantics for an already-parsed `session/create`
+    /// initial-turn policy. Prefer [`Self::for_rpc_request`] at protocol
+    /// boundaries so request lifecycle classification stays machine-owned.
     pub fn for_rpc_method(method: &str, session_create_runs_immediately: bool) -> Self {
         match method {
             "turn/start" | "mob/turn_start" => Self::long_running_publish_on_success(),
@@ -117,6 +143,13 @@ impl SurfaceRequestSemantics {
             }
             _ => Self::inline_observation(),
         }
+    }
+
+    /// Canonical RPC request semantics, including wire-parameter classification.
+    pub fn for_rpc_request(method: &str, params_json: Option<&str>) -> Self {
+        let session_create_runs_immediately =
+            rpc_session_create_runs_immediately(method, params_json);
+        Self::for_rpc_method(method, session_create_runs_immediately)
     }
 
     /// Canonical MCP tool-call request semantics.
@@ -143,6 +176,24 @@ impl SurfaceRequestSemantics {
             RequestTerminal::RespondWithoutPublish(response)
         }
     }
+}
+
+fn rpc_session_create_runs_immediately(method: &str, params_json: Option<&str>) -> bool {
+    if method != "session/create" {
+        return false;
+    }
+    let Some(params_json) = params_json else {
+        return true;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(params_json) else {
+        return true;
+    };
+    !matches!(
+        value
+            .get("initial_turn")
+            .and_then(serde_json::Value::as_str),
+        Some("deferred")
+    )
 }
 
 /// Canonical lifecycle phase of a tracked request.
@@ -597,6 +648,35 @@ impl SurfaceRequestExecutor {
         self.lifecycle.finish_unpublished(key).await
     }
 
+    /// Resolve a surface terminal through the canonical lifecycle machine.
+    ///
+    /// This is the shared publish/cancel/complete authority used by RPC, MCP,
+    /// and REST. Surfaces still own wire formatting for cancellation and
+    /// lifecycle errors, but they do not decide which terminal wins.
+    pub async fn resolve_terminal<T>(
+        &self,
+        key: Option<&str>,
+        terminal: RequestTerminal<T>,
+    ) -> RequestTerminalResolution<T> {
+        let Some(key) = key else {
+            return RequestTerminalResolution::Emit(terminal.into_payload());
+        };
+
+        match terminal {
+            RequestTerminal::Publish(payload) => match self.publish_or_cancelled(key).await {
+                Ok(PublishOutcome::Published) => RequestTerminalResolution::Emit(payload),
+                Ok(PublishOutcome::CancelledBeforePublish) => RequestTerminalResolution::Cancelled,
+                Err(err) => RequestTerminalResolution::LifecycleError(err),
+            },
+            RequestTerminal::RespondWithoutPublish(payload) => {
+                match self.finish_unpublished(key).await {
+                    CompleteOutcome::Completed => RequestTerminalResolution::Emit(payload),
+                    CompleteOutcome::SupersededByCancel => RequestTerminalResolution::Cancelled,
+                }
+            }
+        }
+    }
+
     /// Cancel every tracked request. Honours the same typed transitions as
     /// [`Self::cancel_request`]; already-terminal entries are left alone.
     pub async fn cancel_all(&self) {
@@ -661,6 +741,190 @@ pub async fn prepare_surface_session(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn canonical_request_classifiers_cover_rpc_and_mcp_names() {
+        assert_eq!(
+            SurfaceRequestSemantics::for_rpc_request("turn/start", None),
+            SurfaceRequestSemantics::long_running_publish_on_success()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_rpc_request("mob/turn_start", Some("{}")),
+            SurfaceRequestSemantics::long_running_publish_on_success()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_rpc_request("session/create", None),
+            SurfaceRequestSemantics::long_running_publish_on_success()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_rpc_request(
+                "session/create",
+                Some(r#"{"initial_turn":"immediate"}"#),
+            ),
+            SurfaceRequestSemantics::long_running_publish_on_success()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_rpc_request(
+                "session/create",
+                Some(r#"{"initial_turn":"deferred"}"#),
+            ),
+            SurfaceRequestSemantics::inline_observation()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_rpc_request("session/create", Some("{not json")),
+            SurfaceRequestSemantics::long_running_publish_on_success()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_rpc_request("session/list", None),
+            SurfaceRequestSemantics::inline_observation()
+        );
+
+        assert_eq!(
+            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_run"),
+            SurfaceRequestSemantics::long_running_publish_on_success()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_resume"),
+            SurfaceRequestSemantics::long_running_publish_on_success()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_sessions"),
+            SurfaceRequestSemantics::long_running_observation()
+        );
+    }
+
+    #[test]
+    fn terminal_policy_publishes_only_successful_commits() {
+        assert!(matches!(
+            SurfaceRequestSemantics::long_running_publish_on_success()
+                .classify_terminal(true, "committed"),
+            RequestTerminal::Publish("committed")
+        ));
+        assert!(matches!(
+            SurfaceRequestSemantics::long_running_publish_on_success()
+                .classify_terminal(false, "failed"),
+            RequestTerminal::RespondWithoutPublish("failed")
+        ));
+        assert!(matches!(
+            SurfaceRequestSemantics::long_running_observation()
+                .classify_terminal(true, "observation"),
+            RequestTerminal::RespondWithoutPublish("observation")
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_resolution_policy_is_shared_for_rpc_mcp_and_rest() {
+        for surface in ["rpc", "mcp", "rest"] {
+            let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+
+            let publish_key = format!("{surface}-publish");
+            let publish_context = executor.begin_request(&publish_key, noop_request_action());
+            assert_eq!(
+                executor
+                    .resolve_terminal(
+                        Some(publish_context.key()),
+                        RequestTerminal::Publish(format!("{surface}-committed")),
+                    )
+                    .await,
+                RequestTerminalResolution::Emit(format!("{surface}-committed"))
+            );
+            assert_eq!(executor.phase(&publish_key), None);
+            assert_eq!(
+                executor.cancel_request(&publish_key).await,
+                CancelOutcome::NotFound
+            );
+
+            let cancel_publish_key = format!("{surface}-cancel-publish");
+            let cancel_publish_context =
+                executor.begin_request(&cancel_publish_key, noop_request_action());
+            assert_eq!(
+                executor.cancel_request(cancel_publish_context.key()).await,
+                CancelOutcome::Cancelled
+            );
+            assert_eq!(
+                executor
+                    .resolve_terminal(
+                        Some(cancel_publish_context.key()),
+                        RequestTerminal::Publish(format!("{surface}-stale-publish")),
+                    )
+                    .await,
+                RequestTerminalResolution::Cancelled
+            );
+            assert_eq!(executor.phase(&cancel_publish_key), None);
+
+            let cancel_observation_key = format!("{surface}-cancel-observation");
+            let cancel_observation_context =
+                executor.begin_request(&cancel_observation_key, noop_request_action());
+            assert_eq!(
+                executor
+                    .cancel_request(cancel_observation_context.key())
+                    .await,
+                CancelOutcome::Cancelled
+            );
+            assert_eq!(
+                executor
+                    .resolve_terminal(
+                        Some(cancel_observation_context.key()),
+                        RequestTerminal::RespondWithoutPublish(format!(
+                            "{surface}-stale-observation"
+                        )),
+                    )
+                    .await,
+                RequestTerminalResolution::Cancelled
+            );
+            assert_eq!(executor.phase(&cancel_observation_key), None);
+
+            assert_eq!(
+                executor
+                    .resolve_terminal(
+                        None,
+                        RequestTerminal::Publish(format!("{surface}-untracked")),
+                    )
+                    .await,
+                RequestTerminalResolution::Emit(format!("{surface}-untracked"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_resolution_runs_cancelled_cleanup_once() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let context = executor.begin_request("cancelled-terminal-cleanup", noop_request_action());
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        assert_eq!(
+            executor.cancel_request(context.key()).await,
+            CancelOutcome::Cancelled
+        );
+        assert_eq!(
+            executor
+                .resolve_terminal(
+                    Some(context.key()),
+                    RequestTerminal::Publish("cancelled-publish"),
+                )
+                .await,
+            RequestTerminalResolution::Cancelled
+        );
+        assert_eq!(
+            executor
+                .resolve_terminal(
+                    Some(context.key()),
+                    RequestTerminal::RespondWithoutPublish("late-observation"),
+                )
+                .await,
+            RequestTerminalResolution::Emit("late-observation")
+        );
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn lifecycle_machine_owns_cancel_publish_complete_transitions() {

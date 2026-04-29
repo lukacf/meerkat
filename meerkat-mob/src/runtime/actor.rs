@@ -9370,6 +9370,12 @@ impl MobActor {
         run_id: &RunId,
         plan: FlowFrameLoopStorePlan,
     ) -> Result<bool, MobError> {
+        if !self
+            .flow_frame_store_plan_expected_matches(run_id, &plan)
+            .await?
+        {
+            return Ok(false);
+        }
         let prepared =
             self.prepare_dsl_inputs(plan.machine_inputs(), "flow_frame_loop_store_plan")?;
         let won = match &plan {
@@ -9575,6 +9581,101 @@ impl MobActor {
             self.commit_prepared_dsl_input(prepared);
         }
         Ok(won)
+    }
+
+    async fn flow_frame_store_plan_expected_matches(
+        &self,
+        run_id: &RunId,
+        plan: &FlowFrameLoopStorePlan,
+    ) -> Result<bool, MobError> {
+        let run = self
+            .run_store
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+        Ok(match plan {
+            FlowFrameLoopStorePlan::InsertFrame { frame_id, .. } => {
+                !run.frames.contains_key(frame_id)
+            }
+            FlowFrameLoopStorePlan::FrameState {
+                frame_id,
+                expected_frame,
+                ..
+            }
+            | FlowFrameLoopStorePlan::CompleteStepAndRecordOutput {
+                frame_id,
+                expected_frame,
+                ..
+            }
+            | FlowFrameLoopStorePlan::SealFrame {
+                frame_id,
+                expected_frame,
+                ..
+            } => run.frames.get(frame_id) == Some(expected_frame),
+            FlowFrameLoopStorePlan::GrantNodeSlot {
+                expected_run_state,
+                frame_id,
+                expected_frame,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.frames.get(frame_id) == Some(expected_frame)
+            }
+            FlowFrameLoopStorePlan::StartLoop {
+                loop_instance_id,
+                expected_run_state,
+                frame_id,
+                expected_frame,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.frames.get(frame_id) == Some(expected_frame)
+                    && !run.loops.contains_key(loop_instance_id)
+            }
+            FlowFrameLoopStorePlan::GrantBodyFrameStart {
+                loop_instance_id,
+                expected_loop,
+                frame_id,
+                expected_run_state,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.loops.get(loop_instance_id) == Some(expected_loop)
+                    && !run.frames.contains_key(frame_id)
+            }
+            FlowFrameLoopStorePlan::RunStateOnly {
+                expected_run_state, ..
+            } => &run.flow_state == expected_run_state,
+            FlowFrameLoopStorePlan::CompleteBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                frame_id,
+                expected_frame,
+                expected_run_state,
+                ..
+            }
+            | FlowFrameLoopStorePlan::CompleteLoop {
+                loop_instance_id,
+                expected_loop,
+                frame_id,
+                expected_frame,
+                expected_run_state,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.loops.get(loop_instance_id) == Some(expected_loop)
+                    && run.frames.get(frame_id) == Some(expected_frame)
+            }
+            FlowFrameLoopStorePlan::LoopRequestBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                expected_run_state,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.loops.get(loop_instance_id) == Some(expected_loop)
+            }
+        })
     }
 
     async fn commit_flow_terminalization_in_actor(

@@ -15327,6 +15327,102 @@ fn test_flow_frame_scheduler_start_run_routes_through_actor_authority() {
     }
 }
 
+#[tokio::test]
+async fn test_stale_flow_frame_store_plan_loses_cas_before_authority_prepare() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::{FlowNodeId, FrameId};
+    use crate::runtime::flow_frame_engine::{FlowFrameKernel, FlowFrameLoopStorePlan};
+
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        crate::run::flow_run::initial_state(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create run");
+
+    let (handle, _) = create_test_mob_with_run_store(sample_definition(), store.clone()).await;
+    seed_test_run_in_mob_machine(&handle, &run_id).await;
+
+    let node_id = FlowNodeId::from("start-node");
+    let mut nodes = IndexMap::new();
+    nodes.insert(
+        node_id.clone(),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    let root_spec = FrameSpec { nodes };
+
+    let frame_id = FrameId::from(format!("{run_id}-root").as_str());
+    let frame_kernel = FlowFrameKernel::new(store.clone(), handle.clone());
+    let initial_frame = frame_kernel
+        .start_frame(&run_id, &frame_id, &root_spec)
+        .await
+        .expect("start root frame");
+    frame_kernel
+        .admit_next_ready_node_with_retry(&run_id, &frame_id, 5)
+        .await
+        .expect("admit next ready node")
+        .expect("admission effects");
+
+    let advanced_frame = store
+        .get_run(&run_id)
+        .await
+        .expect("get run")
+        .expect("run exists")
+        .frames
+        .get(&frame_id)
+        .cloned()
+        .expect("advanced frame exists");
+    assert_ne!(
+        advanced_frame, initial_frame,
+        "admission should advance the persisted frame before replaying stale plan"
+    );
+
+    let stale_admit = crate::run::MobMachineFlowFrameCommand::AdmitNextReadyNode(
+        crate::run::flow_frame::inputs::AdmitNextReadyNode {
+            node_id,
+            ready_queue: Vec::new(),
+        },
+    );
+    let won = handle
+        .commit_flow_frame_store_plan(
+            &run_id,
+            FlowFrameLoopStorePlan::FrameState {
+                machine_inputs: vec![stale_admit.authority_input(&frame_id)],
+                frame_id: frame_id.clone(),
+                expected_frame: initial_frame,
+                next_frame: advanced_frame.clone(),
+            },
+        )
+        .await
+        .expect("stale frame plan should lose through store expectation, not authority prepare");
+    assert!(
+        !won,
+        "stale frame plan must return a clean CAS miss so callers can retry/revisit"
+    );
+
+    let after_replay = store
+        .get_run(&run_id)
+        .await
+        .expect("get run after replay")
+        .expect("run exists after replay")
+        .frames
+        .get(&frame_id)
+        .cloned()
+        .expect("frame exists after replay");
+    assert_eq!(
+        after_replay, advanced_frame,
+        "losing stale plan must not mutate the persisted frame"
+    );
+}
+
 #[test]
 fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
     let source = include_str!("actor.rs");

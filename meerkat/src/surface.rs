@@ -36,7 +36,9 @@ pub use runtime_backed::{
     default_persistent_executor, materialize_session,
 };
 #[cfg(feature = "session-store")]
-pub use runtime_schedule_host::spawn_runtime_backed_schedule_host;
+pub use runtime_schedule_host::{
+    spawn_runtime_backed_schedule_host, spawn_runtime_backed_schedule_host_with_mobs,
+};
 pub use schedule_host::{
     AcceptedScheduledInput, NoopScheduleMobHost, ScheduleHostHandle, ScheduledPromptDispatch,
     SharedScheduleTargetAdapter, SurfaceScheduleMobHost, SurfaceScheduleSessionHost,

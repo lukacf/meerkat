@@ -38,6 +38,9 @@ impl ScheduleService {
         &self,
         request: CreateScheduleRequest,
     ) -> Result<Schedule, ScheduleDomainError> {
+        request
+            .validate_public_api()
+            .map_err(ScheduleDomainError::InvalidSchedule)?;
         let _planning_guard = self.planning_lock.lock().await;
         let mut mutator = Schedule::apply(None, ScheduleLifecycleInput::Create(request))
             .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
@@ -83,6 +86,9 @@ impl ScheduleService {
         schedule_id: &ScheduleId,
         request: UpdateScheduleRequest,
     ) -> Result<Schedule, ScheduleDomainError> {
+        request
+            .validate_public_api()
+            .map_err(ScheduleDomainError::InvalidSchedule)?;
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
         let mut mutator =
@@ -371,8 +377,9 @@ mod tests {
     use super::*;
     use crate::OccurrenceLifecycleInput;
     use crate::types::{
-        DeliveryReceipt, IntervalTriggerSpec, MisfirePolicy, OccurrenceId, ScheduledSessionAction,
-        SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
+        DeliveryReceipt, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy, MobTargetBinding,
+        OccurrenceId, ScheduleSpawnTooling, ScheduledSessionAction, SessionMaterializationSpec,
+        SessionTargetBinding, TargetBinding, TriggerSpec,
     };
     use crate::{MemoryScheduleStore, OverlapPolicy};
     use chrono::Duration;
@@ -497,6 +504,49 @@ mod tests {
                 )
                 .await
         }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_parent_context_mob_helper_tooling() {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+
+        let error = service
+            .create(CreateScheduleRequest {
+                name: Some("bad-helper".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() + Duration::minutes(1),
+                    every_seconds: 60,
+                    end_at_utc: None,
+                }),
+                target: TargetBinding::Mob(Box::new(MobTargetBinding::SpawnHelper {
+                    mob_id: "ops".to_string(),
+                    member_id: "helper".to_string(),
+                    prompt: "check state".to_string(),
+                    options: HelperOptionsSpec {
+                        tooling: Some(ScheduleSpawnTooling::InheritParent {
+                            allow_overlay: None,
+                            deny_overlay: None,
+                        }),
+                        ..HelperOptionsSpec::default()
+                    },
+                })),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect_err("parent-context helper tooling should be rejected");
+
+        assert!(matches!(
+            error,
+            ScheduleDomainError::InvalidSchedule(message)
+                if message.contains("requires parent agent context")
+        ));
     }
 
     #[tokio::test]

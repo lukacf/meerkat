@@ -173,14 +173,15 @@ pub use meerkat_schedule::{
     DisabledScheduleStore, ForkContextSpec, HelperOptionsSpec, IntervalTriggerSpec,
     MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, MobTargetBinding, Occurrence,
     OccurrenceFailureClass, OccurrenceFilter, OccurrenceId, OccurrenceOrdinal, OccurrencePhase,
-    OverlapPolicy, SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE, SCHEDULE_TOOL_INVALID_ARGUMENTS,
-    SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError, ScheduleDriver, ScheduleDriverConfig,
-    ScheduleFilter, ScheduleId, SchedulePhase, ScheduleRevision, ScheduleService, ScheduleStore,
-    ScheduleStoreError, ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe,
-    ScheduleToolDispatcher, ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind,
-    ScheduledMobRuntimeMode, ScheduledSessionAction, SessionMaterializationSpec,
-    SessionTargetBinding, TargetBinding, TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest,
-    handle_schedule_tools_call, schedule_tools_list,
+    OverlapPolicy, ResolvedSpawnSnapshot, SCHEDULE_TOOL_CAPABILITY_UNAVAILABLE,
+    SCHEDULE_TOOL_INVALID_ARGUMENTS, SCHEDULE_TOOL_NOT_FOUND, Schedule, ScheduleDomainError,
+    ScheduleDriver, ScheduleDriverConfig, ScheduleFilter, ScheduleId, SchedulePhase,
+    ScheduleRevision, ScheduleService, ScheduleSpawnTooling, ScheduleStore, ScheduleStoreError,
+    ScheduleStoreKind, ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher,
+    ScheduleToolError, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
+    ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
+    TargetProbeOutcome, TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call,
+    schedule_tools_list,
 };
 pub use meerkat_tools::ToolError;
 

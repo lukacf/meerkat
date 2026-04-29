@@ -304,6 +304,13 @@ impl TargetBinding {
             Self::Mob(_) => false,
         }
     }
+
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        match self {
+            Self::Session(_) => Ok(()),
+            Self::Mob(binding) => binding.validate_public_api(),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -630,6 +637,15 @@ impl MobTargetBinding {
                 member_id,
                 ..
             } => format!("mob:{mob_id}:fork_helper:{source_member_id}:{member_id}"),
+        }
+    }
+
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        match self {
+            Self::SpawnHelper { options, .. } | Self::ForkHelper { options, .. } => {
+                options.validate_public_api()
+            }
+            Self::Member { .. } | Self::Flow { .. } => Ok(()),
         }
     }
 }
@@ -1097,6 +1113,12 @@ pub struct CreateScheduleRequest {
     pub planning_horizon_occurrences: Option<u32>,
 }
 
+impl CreateScheduleRequest {
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        self.target.validate_public_api()
+    }
+}
+
 #[cfg(all(test, feature = "schema"))]
 #[allow(clippy::unwrap_used)]
 mod schema_tests {
@@ -1146,6 +1168,15 @@ pub struct UpdateScheduleRequest {
     pub planning_horizon_occurrences: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
+}
+
+impl UpdateScheduleRequest {
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        if let Some(target) = &self.target {
+            target.validate_public_api()?;
+        }
+        Ok(())
+    }
 }
 
 pub fn default_planning_horizon_days() -> u32 {

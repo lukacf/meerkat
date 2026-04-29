@@ -50,6 +50,7 @@ rust_library(
         "//meerkat-core:meerkat_core",
         "//meerkat-mob:meerkat_mob",
         "//meerkat-runtime:meerkat_runtime",
+        "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "meerkat-mob-mcp",
         normal = True,
@@ -99,6 +100,7 @@ rust_test(
         "//meerkat-core:meerkat_core",
         "//meerkat-mob:meerkat_mob",
         "//meerkat-runtime:meerkat_runtime",
+        "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "meerkat-mob-mcp",
         normal = True,
@@ -133,6 +135,7 @@ rust_binary(
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob:meerkat_mob",
         "//meerkat-runtime:meerkat_runtime",
+        "//meerkat:meerkat",
     ] + all_crate_deps(
         package_name = "meerkat-mob-mcp",
         normal = True,

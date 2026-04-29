@@ -639,6 +639,14 @@ pub struct HelperOptions {
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// Explicit auth binding used for the helper member's agent build.
     pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    /// Pre-resolved inherited tool filter from scheduled or agent-owned tooling resolution.
+    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    /// Override profile resolved from scheduled or agent-owned tooling resolution.
+    pub override_profile: Option<crate::profile::Profile>,
+    /// Model override resolved from scheduled helper tooling.
+    pub model_override: Option<String>,
+    /// Provider params override resolved from scheduled helper tooling.
+    pub provider_params_override: Option<serde_json::Value>,
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -850,6 +858,10 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
+    /// Model override resolved outside the mob runtime while keeping the selected role profile.
+    pub model_override: Option<String>,
+    /// Provider params override resolved outside the mob runtime while keeping the selected role profile.
+    pub provider_params_override: Option<serde_json::Value>,
     /// Per-member auth binding. When set, this member's agent builds with
     /// `AgentBuildConfig.connection_ref = Some(this)`, scoping credential
     /// resolution to the named realm + binding. `None` means the caller did not
@@ -877,6 +889,8 @@ impl SpawnMemberSpec {
             shell_env: None,
             inherited_tool_filter: None,
             override_profile: None,
+            model_override: None,
+            provider_params_override: None,
             connection_ref: None,
         }
     }
@@ -3488,6 +3502,10 @@ impl MobHandle {
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
         spec.connection_ref = options.connection_ref;
+        spec.inherited_tool_filter = options.inherited_tool_filter;
+        spec.override_profile = options.override_profile;
+        spec.model_override = options.model_override;
+        spec.provider_params_override = options.provider_params_override;
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
@@ -3534,6 +3552,10 @@ impl MobHandle {
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
         spec.connection_ref = options.connection_ref;
+        spec.inherited_tool_filter = options.inherited_tool_filter;
+        spec.override_profile = options.override_profile;
+        spec.model_override = options.model_override;
+        spec.provider_params_override = options.provider_params_override;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,

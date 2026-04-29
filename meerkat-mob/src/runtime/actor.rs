@@ -3772,6 +3772,8 @@ impl MobActor {
             shell_env,
             inherited_tool_filter,
             override_profile,
+            model_override,
+            provider_params_override,
             connection_ref,
         } = spec;
         let agent_identity = MeerkatId::from(identity.as_str());
@@ -3830,13 +3832,19 @@ impl MobActor {
 
             // Use override_profile if provided (from SpawnTooling::Profile resolution),
             // otherwise resolve from the mob definition.
-            let profile = if let Some(p) = override_profile {
+            let mut profile = if let Some(p) = override_profile {
                 p
             } else {
                 self.definition
                     .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
                     .await?
             };
+            if let Some(model) = model_override {
+                profile.model = model;
+            }
+            if provider_params_override.is_some() {
+                profile.provider_params = provider_params_override;
+            }
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
             let profile_external_addressable = profile.external_addressable;

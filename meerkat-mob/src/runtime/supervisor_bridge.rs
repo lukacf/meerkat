@@ -60,7 +60,51 @@ impl MobSupervisorBridge {
                 "failed to construct mob supervisor comms runtime '{participant_name}': {error}"
             ))
         })?;
-        Ok(Arc::new(runtime))
+        let runtime = Arc::new(runtime);
+        Self::install_supervisor_peer_request_response_authority(&runtime, participant_name)?;
+        Ok(runtime)
+    }
+
+    /// Supervisor bridge runtimes intentionally issue semantic peer
+    /// request/response commands outside a session surface. Give them an
+    /// explicit ephemeral machine authority so comms never owns that lifecycle.
+    fn install_supervisor_peer_request_response_authority(
+        runtime: &Arc<meerkat_comms::CommsRuntime>,
+        participant_name: &str,
+    ) -> Result<(), MobError> {
+        let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+        dsl.apply_signal(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+            "mob_supervisor_bridge::initialize",
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "failed to initialize supervisor bridge authority '{participant_name}': {error}"
+            ))
+        })?;
+        dsl.apply_input(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                    participant_name.to_string(),
+                ),
+            },
+            "mob_supervisor_bridge::register",
+        )
+        .map_err(|error| {
+            MobError::Internal(format!(
+                "failed to register supervisor bridge authority '{participant_name}': {error}"
+            ))
+        })?;
+
+        runtime.install_peer_request_response_authority(
+            meerkat_comms::PeerRequestResponseAuthority::new(
+                Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
+                    Arc::clone(&dsl),
+                )),
+                Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(dsl)),
+            ),
+        );
+        Ok(())
     }
 
     pub(crate) async fn rotate(

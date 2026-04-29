@@ -41,7 +41,7 @@ use meerkat_core::types::{
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
     AppendSystemContextStatus, EventInjector, EventInjectorError, LlmStreamResult,
-    PendingSystemContextAppend, PlainEventSource,
+    PeerCorrelationId, PendingSystemContextAppend, PlainEventSource,
     event_injector::{InteractionSubscription, SubscribableInjector},
 };
 use meerkat_core::{
@@ -66,6 +66,56 @@ fn default_supervisor_authority_record() -> SupervisorAuthorityRecord {
     SupervisorAuthorityRecord::generate(
         super::bridge_protocol::supervisor_bridge_default_protocol_version(),
     )
+}
+
+fn install_ephemeral_peer_request_response_authority(
+    runtime: &Arc<meerkat_comms::CommsRuntime>,
+    session: &str,
+) {
+    let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+    dsl.apply_signal(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+        "test::initialize",
+    )
+    .expect("Initialize");
+    dsl.apply_input(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session.to_string()),
+        },
+        "test::register_session",
+    )
+    .expect("RegisterSession");
+
+    runtime.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
+                Arc::clone(&dsl),
+            )),
+            Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(dsl)),
+        ),
+    );
+}
+
+async fn install_machine_peer_request_response_authority(
+    adapter: &meerkat_runtime::MeerkatMachine,
+    runtime: &Arc<meerkat_comms::CommsRuntime>,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    let bindings = adapter
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .map_err(|err| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                "failed to prepare comms lifecycle authority: {err}"
+            )))
+        })?;
+    runtime.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            bindings.peer_interaction,
+            bindings.interaction_stream,
+        ),
+    );
+    Ok(())
 }
 
 // -----------------------------------------------------------------------
@@ -3005,6 +3055,10 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         meerkat_comms::CommsRuntime::inproc_only(&peer_name)
             .expect("create live external peer runtime"),
     );
+    install_ephemeral_peer_request_response_authority(
+        &runtime,
+        &format!("live-external-peer-{peer_name}"),
+    );
     let bootstrap_token = runtime.bridge_bootstrap_token().to_string();
     let peer_pubkey = *runtime.public_key().as_bytes();
     let binding = crate::RuntimeBinding::External {
@@ -3052,6 +3106,13 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                             .write()
                             .await
                             .push(intent.clone());
+                        responder_runtime
+                            .peer_interaction_handle()
+                            .expect("live external peer semantic authority")
+                            .request_received(PeerCorrelationId::from_uuid(
+                                candidate.interaction.id.0,
+                            ))
+                            .expect("record inbound peer request before response");
                         let reply_name = candidate.interaction.from.clone();
                         let to = test_trusted_peer_route(responder_runtime.as_ref(), &reply_name);
                         let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
@@ -18782,12 +18843,16 @@ impl SessionService for RealCommsSessionService {
             .and_then(|b| b.comms_name.clone())
             .unwrap_or_else(|| format!("real-comms-session-{n}"));
 
-        let comms = meerkat_comms::CommsRuntime::inproc_only(&comms_name)
-            .expect("create inproc CommsRuntime");
+        let comms = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only(&comms_name)
+                .expect("create inproc CommsRuntime"),
+        );
+        install_machine_peer_request_response_authority(&self.runtime_adapter, &comms, &session_id)
+            .await?;
         self.sessions
             .write()
             .await
-            .insert(session_id.clone(), Arc::new(comms));
+            .insert(session_id.clone(), Arc::clone(&comms));
         let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
         if is_keep_alive {
             self.keep_alive_notifiers
@@ -18799,10 +18864,6 @@ impl SessionService for RealCommsSessionService {
             .write()
             .await
             .insert(session_id.clone(), comms_name);
-        self.runtime_adapter
-            .register_session(session_id.clone())
-            .await;
-
         Ok(mock_run_result(session_id, "Session created".to_string()))
     }
 
@@ -19084,12 +19145,16 @@ impl SessionService for RuntimeBackedRealCommsSessionService {
             .and_then(|b| b.comms_name.clone())
             .unwrap_or_else(|| format!("real-runtime-comms-session-{n}"));
 
-        let comms = meerkat_comms::CommsRuntime::inproc_only(&comms_name)
-            .expect("create inproc CommsRuntime");
+        let comms = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only(&comms_name)
+                .expect("create inproc CommsRuntime"),
+        );
+        install_machine_peer_request_response_authority(&self.runtime_adapter, &comms, &session_id)
+            .await?;
         self.sessions
             .write()
             .await
-            .insert(session_id.clone(), Arc::new(comms));
+            .insert(session_id.clone(), Arc::clone(&comms));
         let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
         if is_keep_alive {
             self.keep_alive_notifiers

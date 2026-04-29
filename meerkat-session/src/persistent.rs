@@ -2367,11 +2367,13 @@ mod tests {
             mcp_server_lifecycle: Arc::new(
                 meerkat_runtime::RuntimeMcpServerLifecycleHandle::ephemeral(),
             ),
-            peer_interaction: None,
+            peer_interaction: Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::ephemeral()),
             session_context: Arc::new(meerkat_runtime::RuntimeSessionContextHandle::ephemeral()),
             session_claim_handle: meerkat_core::handles::DefaultSessionClaimRegistry::global()
                 as Arc<dyn meerkat_core::handles::SessionClaimHandle>,
-            interaction_stream: None,
+            interaction_stream: Arc::new(
+                meerkat_runtime::RuntimeInteractionStreamHandle::ephemeral(),
+            ),
             realtime_product_turn: Arc::new(
                 meerkat_runtime::RuntimeRealtimeProductTurnHandle::ephemeral(),
             ),

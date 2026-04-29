@@ -814,9 +814,9 @@ pub trait CommsRuntime: Send + Sync {
 
     /// Access the session's peer-interaction DSL handle (W1-A).
     ///
-    /// Returns `None` for standalone / ephemeral comms runtimes that have no
-    /// attached session DSL. Returns `Some` once the surface has installed
-    /// the handle via [`meerkat_comms::CommsRuntime::install_peer_interaction_handle`].
+    /// Returns `None` for transport-only comms runtimes. A runtime that emits
+    /// semantic peer request/response receipts must return `Some` after the
+    /// surface installs machine authority.
     fn peer_interaction_handle(
         &self,
     ) -> Option<std::sync::Arc<dyn crate::handles::PeerInteractionHandle>> {

@@ -145,8 +145,8 @@ fn product_turn_completion_is_logically_terminal(
 
 /// Tiny splitmix64 PRNG. Used to produce a per-channel full-jitter stream for
 /// reconnect backoff without pulling a crate-level `rand` dependency into the
-/// realtime hot path. Deterministic per-overlay: tests can seed it by
-/// constructing the overlay with a fixed seed.
+/// realtime hot path. Deterministic per retry machine: tests can seed it by
+/// constructing the machine with a fixed seed.
 #[derive(Debug, Clone)]
 struct BackoffJitterRng {
     state: u64,
@@ -286,7 +286,7 @@ async fn resolve_mob_member_session_id(
 }
 
 #[derive(Debug, Clone)]
-struct RealtimeReconnectOverlay {
+struct RealtimeReconnectRetryMachine {
     policy: RealtimeReconnectPolicy,
     cycle_started_at: Option<Instant>,
     cycle_started_at_utc: Option<DateTime<Utc>>,
@@ -306,7 +306,7 @@ enum RealtimeReconnectFailure {
     },
 }
 
-impl RealtimeReconnectOverlay {
+impl RealtimeReconnectRetryMachine {
     fn new(policy: RealtimeReconnectPolicy) -> Self {
         // Per-channel seed derived from the wall-clock plus an incrementing
         // counter. Tests use `new_with_seed` for determinism.
@@ -528,8 +528,8 @@ enum RealtimeProductSessionUpdate {
 /// Shared bootstrap/control-plane host for realtime websocket transport.
 pub struct RealtimeWsHost {
     ws_url: String,
-    supported_protocol_versions: Vec<String>,
-    default_protocol_version: String,
+    supported_protocol_versions: Vec<RealtimeProtocolVersion>,
+    default_protocol_version: RealtimeProtocolVersion,
     token_ttl: Duration,
     session_factory: Option<Arc<dyn RealtimeSessionFactory>>,
     pending_opens: Mutex<HashMap<String, PendingOpenEntry>>,
@@ -541,7 +541,7 @@ pub struct RealtimeWsHost {
 pub struct AcceptedRealtimeOpen {
     pub request: RealtimeOpenRequest,
     pub capabilities: RealtimeCapabilities,
-    pub protocol_version: String,
+    pub protocol_version: RealtimeProtocolVersion,
 }
 
 #[derive(Debug)]
@@ -621,14 +621,10 @@ impl RealtimeOpenError {
 impl RealtimeWsHost {
     /// Create a new shared websocket bootstrap host for one websocket URL.
     pub fn new(ws_url: impl Into<String>) -> Self {
-        let supported = RealtimeProtocolVersion::SUPPORTED
-            .iter()
-            .map(|version| version.as_str().to_string())
-            .collect();
         Self {
             ws_url: ws_url.into(),
-            supported_protocol_versions: supported,
-            default_protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
+            supported_protocol_versions: RealtimeProtocolVersion::SUPPORTED.to_vec(),
+            default_protocol_version: RealtimeProtocolVersion::CURRENT,
             token_ttl: DEFAULT_OPEN_TOKEN_TTL,
             session_factory: None,
             pending_opens: Mutex::new(HashMap::new()),
@@ -660,6 +656,13 @@ impl RealtimeWsHost {
 
     fn session_factory(&self) -> Option<Arc<dyn RealtimeSessionFactory>> {
         self.session_factory.clone()
+    }
+
+    fn supported_protocol_version_strings(&self) -> Vec<String> {
+        self.supported_protocol_versions
+            .iter()
+            .map(|version| version.as_str().to_string())
+            .collect()
     }
 
     /// Issue bootstrap info for a validated realtime target.
@@ -696,8 +699,8 @@ impl RealtimeWsHost {
             open_token,
             expires_at: expires_at.to_rfc3339(),
             target,
-            supported_protocol_versions: self.supported_protocol_versions.clone(),
-            default_protocol_version: self.default_protocol_version.clone(),
+            supported_protocol_versions: self.supported_protocol_version_strings(),
+            default_protocol_version: self.default_protocol_version.as_str().to_string(),
             capabilities,
         }
     }
@@ -727,16 +730,14 @@ impl RealtimeWsHost {
         frame: &RealtimeChannelOpenFrame,
         observed_realm_id: Option<&str>,
     ) -> Result<AcceptedRealtimeOpen, RealtimeOpenError> {
-        if !self
-            .supported_protocol_versions
-            .iter()
-            .any(|version| version == &frame.protocol_version)
-        {
+        let Some(protocol_version) = RealtimeProtocolVersion::parse(&frame.protocol_version)
+            .filter(|version| self.supported_protocol_versions.contains(version))
+        else {
             return Err(RealtimeOpenError::UnsupportedProtocolVersion {
                 requested: frame.protocol_version.clone(),
-                supported: self.supported_protocol_versions.clone(),
+                supported: self.supported_protocol_version_strings(),
             });
-        }
+        };
 
         let mut pending = self.pending_opens.lock().await;
         let Some(entry) = pending.get(&frame.open_token).cloned() else {
@@ -775,7 +776,7 @@ impl RealtimeWsHost {
         Ok(AcceptedRealtimeOpen {
             request: entry.request,
             capabilities: entry.capabilities,
-            protocol_version: frame.protocol_version.clone(),
+            protocol_version,
         })
     }
 
@@ -979,7 +980,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                     let expected_audio_input_format =
                         accepted.capabilities.audio_input_format.clone();
                     let opened = RealtimeServerFrame::ChannelOpened(RealtimeChannelOpenedFrame {
-                        protocol_version: accepted.protocol_version,
+                        protocol_version: accepted.protocol_version.as_str().to_string(),
                         status: opened_status.clone(),
                         capabilities: accepted.capabilities,
                         role: accepted.request.role,
@@ -994,12 +995,12 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                         .unwrap_or_default()
                         .tool_timeout_ms_or_default();
                     let mut observer_fanout_rx = registered.observer_fanout_rx.take();
-                    let mut reconnect_overlay = RealtimeReconnectOverlay::new(
+                    let mut reconnect_retry = RealtimeReconnectRetryMachine::new(
                         accepted
                             .request
                             .reconnect_policy
                             .clone()
-                            .unwrap_or_else(RealtimeReconnectOverlay::default_policy),
+                            .unwrap_or_else(RealtimeReconnectRetryMachine::default_policy),
                     );
                     let mut cleanup_performed = false;
                     let mut pending_turn = RealtimePendingTurn::default();
@@ -2113,7 +2114,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         product_turn_handle = observers.1;
                                         _wake_observer_guard = observers.2;
                                         _bridge_observer_guard = observers.3;
-                                        reconnect_overlay.clear();
+                                        reconnect_retry.clear();
                                         clear_reconnect_progress_in_dsl(
                                             &state.runtime,
                                             binding.as_ref(),
@@ -2142,7 +2143,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                     Ok(meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired)
                                         if matches!(role, meerkat_contracts::RealtimeChannelRole::Primary) =>
                                     {
-                                        if let Some(status) = reconnect_overlay.begin_if_needed(now, now_utc) {
+                                        if let Some(status) = reconnect_retry.begin_if_needed(now, now_utc) {
                                             project_reconnect_progress_to_dsl(
                                                 &state.runtime,
                                                 binding.as_ref(),
@@ -2159,8 +2160,8 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                             .await;
                                         }
 
-                                        if reconnect_overlay.should_exhaust(now) {
-                                            let exhausted = reconnect_overlay.on_attempt_failure(
+                                        if reconnect_retry.should_exhaust(now) {
+                                            let exhausted = reconnect_retry.on_attempt_failure(
                                                 now,
                                                 now_utc,
                                                 "realtime reconnect budget expired before the next retry",
@@ -2201,7 +2202,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                 .await;
                                                 break;
                                             }
-                                        } else if reconnect_overlay.attempt_due(now) {
+                                        } else if reconnect_retry.attempt_due(now) {
                                             match attempt_realtime_reconnect(
                                                 &state.runtime,
                                                 binding.as_ref(),
@@ -2236,7 +2237,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     .await
                                                         && projection != meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired
                                                     {
-                                                        reconnect_overlay.clear();
+                                                        reconnect_retry.clear();
                                                         clear_reconnect_progress_in_dsl(
                                                             &state.runtime,
                                                             binding.as_ref(),
@@ -2253,7 +2254,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                     }
                                                 }
                                                 Err(error) => {
-                                                    match reconnect_overlay.on_attempt_failure(
+                                                    match reconnect_retry.on_attempt_failure(
                                                         now,
                                                         now_utc,
                                                         error.message.clone(),
@@ -2315,7 +2316,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                         }
                                     }
                                     Ok(projection) => {
-                                        reconnect_overlay.clear();
+                                        reconnect_retry.clear();
                                         clear_reconnect_progress_in_dsl(
                                             &state.runtime,
                                             binding.as_ref(),
@@ -2800,11 +2801,10 @@ async fn reconcile_product_session_binding(
     Ok(Some(status))
 }
 
-/// Wave-c C-9c R4: project the realtime-WS reconnect-overlay's current
-/// `RealtimeChannelStatus` shape into DSL state so RPC/MCP
-/// `realtime/status` responders read real retry-budget data. Best-effort
-/// — failures log at `debug!` and do not break the overlay's own
-/// direct-emit status frame path.
+/// Project the reconnect retry machine's current `RealtimeChannelStatus` shape
+/// into DSL state so RPC/MCP `realtime/status` responders read real
+/// retry-budget data. Best-effort: failures log at `debug!` and do not break
+/// the websocket's direct status frame path.
 async fn project_reconnect_progress_to_dsl(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
@@ -2842,14 +2842,14 @@ async fn project_reconnect_progress_to_dsl(
         tracing::debug!(
             ?err,
             session_id = %session_id,
-            "C-9c R4: project_realtime_reconnect_progress failed; RPC/MCP status will see stale data until next overlay tick"
+            "project_realtime_reconnect_progress failed; RPC/MCP status will see stale data until the next reconnect retry tick"
         );
     }
 }
 
-/// Wave-c C-9c R4: clear the DSL's reconnect-progress fields when the
-/// overlay exits its active cycle (successful reconnect, operator detach,
-/// non-reconnecting transition).
+/// Clear the DSL's reconnect-progress fields when the retry machine exits its
+/// active cycle (successful reconnect, operator detach, non-reconnecting
+/// transition).
 async fn clear_reconnect_progress_in_dsl(
     runtime: &SessionRuntime,
     binding: Option<&RealtimeSocketBinding>,
@@ -4097,7 +4097,7 @@ mod tests {
 
     use super::{
         RealtimeErrorCode, RealtimeOpenError, RealtimeProtocolVersion, RealtimeReconnectFailure,
-        RealtimeReconnectOverlay, RealtimeSocketBinding, RealtimeTurnCompletionDisposition,
+        RealtimeReconnectRetryMachine, RealtimeSocketBinding, RealtimeTurnCompletionDisposition,
         RealtimeWsHost, product_turn_completion_disposition,
         product_turn_completion_is_logically_terminal,
     };
@@ -4317,6 +4317,38 @@ mod tests {
         };
         assert_eq!(reused, RealtimeOpenError::InvalidOpenToken);
         assert_eq!(reused.code(), RealtimeErrorCode::InvalidOpenToken);
+    }
+
+    #[tokio::test]
+    async fn accept_open_frame_returns_typed_protocol_version() {
+        let host = RealtimeWsHost::new("ws://127.0.0.1:4900/realtime/ws");
+        let info = host
+            .issue_open_info(
+                RealtimeOpenRequest {
+                    target: RealtimeChannelTarget::SessionTarget {
+                        session_id: "12345678-1234-5678-1234-567812345678".to_string(),
+                    },
+                    role: RealtimeChannelRole::Primary,
+                    turning_mode: RealtimeTurningMode::ProviderManaged,
+                    reconnect_policy: None,
+                    channel_config: None,
+                },
+                conservative_capabilities(),
+                None,
+            )
+            .await;
+
+        let accepted = host
+            .accept_open_frame(&RealtimeChannelOpenFrame {
+                protocol_version: RealtimeProtocolVersion::CURRENT.as_str().to_string(),
+                open_token: info.open_token,
+                role: RealtimeChannelRole::Primary,
+                turning_mode: RealtimeTurningMode::ProviderManaged,
+            })
+            .await
+            .expect("current typed protocol version must open");
+
+        assert_eq!(accepted.protocol_version, RealtimeProtocolVersion::CURRENT);
     }
 
     #[tokio::test]
@@ -4616,7 +4648,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_overlay_schedules_exponential_backoff() {
+    fn reconnect_retry_schedules_exponential_backoff() {
         // Full-jitter backoff draws in `[0, capped_exponential]`; the pre-jitter
         // test pinned exact durations. After Item 4 we only check that each
         // draw is bounded by the exponential cap for that attempt.
@@ -4626,14 +4658,14 @@ mod tests {
             max_backoff_ms: 200,
             max_total_ms: 1_000,
         };
-        let mut overlay = RealtimeReconnectOverlay::new_with_seed(policy, 0x5eed_face);
+        let mut retry_machine = RealtimeReconnectRetryMachine::new_with_seed(policy, 0x5eed_face);
         let started_at = Instant::now();
-        let started_status = overlay
+        let started_status = retry_machine
             .begin_if_needed(started_at, Utc::now())
             .expect("initial reattach should start reconnect tracking");
         assert_eq!(started_status.state, RealtimeChannelState::Reconnecting);
         assert_eq!(started_status.attempt_count, 1);
-        let first_deadline = overlay
+        let first_deadline = retry_machine
             .next_retry_deadline
             .expect("first reconnect should have a retry deadline");
         let first_backoff = first_deadline.duration_since(started_at);
@@ -4645,7 +4677,7 @@ mod tests {
 
         let first_failure_at = started_at + Duration::from_millis(60);
         let first_failure =
-            overlay.on_attempt_failure(first_failure_at, Utc::now(), "transient failure");
+            retry_machine.on_attempt_failure(first_failure_at, Utc::now(), "transient failure");
         match first_failure {
             RealtimeReconnectFailure::RetryScheduled(status) => {
                 assert_eq!(status.state, RealtimeChannelState::Reconnecting);
@@ -4653,7 +4685,7 @@ mod tests {
             }
             other => panic!("expected retry scheduling after first failure, got {other:?}"),
         }
-        let second_deadline = overlay
+        let second_deadline = retry_machine
             .next_retry_deadline
             .expect("second reconnect should have a retry deadline");
         let second_backoff = second_deadline.duration_since(first_failure_at);
@@ -4665,19 +4697,19 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_overlay_exhausts_after_attempt_budget() {
-        let mut overlay = RealtimeReconnectOverlay::new(RealtimeReconnectPolicy {
+    fn reconnect_retry_exhausts_after_attempt_budget() {
+        let mut retry_machine = RealtimeReconnectRetryMachine::new(RealtimeReconnectPolicy {
             max_attempts: 2,
             initial_backoff_ms: 10,
             max_backoff_ms: 40,
             max_total_ms: 1_000,
         });
         let started_at = Instant::now();
-        overlay
+        retry_machine
             .begin_if_needed(started_at, Utc::now())
             .expect("initial reattach should start reconnect tracking");
 
-        let first_failure = overlay.on_attempt_failure(
+        let first_failure = retry_machine.on_attempt_failure(
             started_at + Duration::from_millis(10),
             Utc::now(),
             "still disconnected",
@@ -4687,7 +4719,7 @@ mod tests {
             "first failure should schedule the second and final retry: {first_failure:?}"
         );
 
-        let exhausted = overlay.on_attempt_failure(
+        let exhausted = retry_machine.on_attempt_failure(
             started_at + Duration::from_millis(30),
             Utc::now(),
             "still disconnected",
@@ -4705,7 +4737,7 @@ mod tests {
             other => panic!("expected reconnect exhaustion, got {other:?}"),
         }
         assert!(
-            !overlay.is_active(),
+            !retry_machine.is_active(),
             "exhaustion should clear reconnect state"
         );
     }
@@ -4845,15 +4877,15 @@ mod tests {
             max_backoff_ms: 5_000,
             max_total_ms: 0, // disable exhaustion budget so we can sample freely
         };
-        let mut overlay =
-            super::RealtimeReconnectOverlay::new_with_seed(policy, 0xfeed_d00d_f00d_beef);
+        let mut retry_machine =
+            super::RealtimeReconnectRetryMachine::new_with_seed(policy, 0xfeed_d00d_f00d_beef);
 
         let mut draws = std::collections::BTreeSet::new();
         // Saturate the exponent quickly so later draws all share the same cap.
         let attempts: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
         for _ in 0..1_000 {
             for &attempt in &attempts {
-                let backoff = overlay.backoff_for_attempt(attempt);
+                let backoff = retry_machine.backoff_for_attempt(attempt);
                 draws.insert(backoff.as_millis() as u64);
             }
         }
@@ -4876,13 +4908,13 @@ mod tests {
             max_total_ms: 0,
         };
         let seed = 0x1234_5678_9abc_def0;
-        let mut a = super::RealtimeReconnectOverlay::new_with_seed(policy.clone(), seed);
-        let mut b = super::RealtimeReconnectOverlay::new_with_seed(policy, seed);
+        let mut a = super::RealtimeReconnectRetryMachine::new_with_seed(policy.clone(), seed);
+        let mut b = super::RealtimeReconnectRetryMachine::new_with_seed(policy, seed);
         for attempt in 1..=8u32 {
             assert_eq!(
                 a.backoff_for_attempt(attempt),
                 b.backoff_for_attempt(attempt),
-                "same-seed overlays must draw identical backoff for attempt {attempt}",
+                "same-seed retry machines must draw identical backoff for attempt {attempt}",
             );
         }
     }
@@ -4898,10 +4930,10 @@ mod tests {
             max_backoff_ms: 200,
             max_total_ms: 1_000,
         };
-        let mut overlay = super::RealtimeReconnectOverlay::new_with_seed(policy, 0);
+        let mut retry_machine = super::RealtimeReconnectRetryMachine::new_with_seed(policy, 0);
         let started_at = Instant::now();
         let started_utc = Utc::now();
-        let status = overlay
+        let status = retry_machine
             .begin_if_needed(started_at, started_utc)
             .expect("initial reattach should start reconnect tracking");
         assert_eq!(status.state, RealtimeChannelState::Reconnecting);
@@ -4910,7 +4942,7 @@ mod tests {
             "reconnect status with a max_total_ms budget must carry a deadline_at",
         );
 
-        let on_failure = overlay.on_attempt_failure(
+        let on_failure = retry_machine.on_attempt_failure(
             started_at + Duration::from_millis(25),
             started_utc,
             "transient failure",
@@ -4921,7 +4953,7 @@ mod tests {
                     status.deadline_at.is_some(),
                     "retry-scheduled status must carry deadline_at",
                 );
-                assert_eq!(status.deadline_at, overlay.deadline_at());
+                assert_eq!(status.deadline_at, retry_machine.deadline_at());
             }
             other => panic!("expected retry to be scheduled, got {other:?}"),
         }
@@ -4935,8 +4967,8 @@ mod tests {
             max_backoff_ms: 200,
             max_total_ms: 0,
         };
-        let mut overlay = super::RealtimeReconnectOverlay::new_with_seed(policy, 0);
-        let status = overlay
+        let mut retry_machine = super::RealtimeReconnectRetryMachine::new_with_seed(policy, 0);
+        let status = retry_machine
             .begin_if_needed(Instant::now(), Utc::now())
             .expect("reattach should start");
         assert_eq!(status.deadline_at, None);

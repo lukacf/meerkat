@@ -57,10 +57,10 @@ pub enum RealtimeAttachmentStatus {
     ReattachRequired,
 }
 
-/// Typed reconnect-progress carrier produced by the realtime-WS reconnect
-/// overlay. Wave-c C-9c (R4): `attempt_count` and `next_retry_at` were
+/// Typed reconnect-progress carrier produced by the realtime-WS retry machine.
+/// Wave-c C-9c (R4): `attempt_count` and `next_retry_at` were
 /// hard-coded `0` or `1` in the two duplicate status projections; this
-/// struct is the typed carrier the overlay emits so the canonical
+/// struct is the typed carrier the retry machine emits so the canonical
 /// `RealtimeChannelStatus` projection can surface actual retry-budget
 /// exhaustion signal to RPC / MCP callers.
 ///
@@ -113,12 +113,12 @@ impl RealtimeAttachmentStatus {
         }
     }
 
-    /// Wave-c C-9c (R3/R4) canonical projection, overlay-aware variant.
+    /// Wave-c C-9c (R3/R4) canonical projection, reconnect-progress-aware variant.
     ///
     /// Shell callers that own live reconnect state (the realtime-WS
     /// handler inside the active socket loop) pass `Some(progress)` so
     /// the projected `RealtimeChannelStatus` surfaces real retry-budget
-    /// data. Callers without overlay state (RPC `realtime/status`
+    /// data. Callers without retry-machine state (RPC `realtime/status`
     /// responder, MCP bridge) pass `None` and get the current reconnect
     /// defaults (`attempt_count = 1` for the two reconnecting states,
     /// `0` elsewhere) — identical to the pre-C-9c projection output,
@@ -463,7 +463,7 @@ pub(crate) enum MeerkatMachineCommand {
         session_id: SessionId,
     },
     /// Wave-c C-9c R4: fully-projected public channel status. Returns the
-    /// bare `RealtimeAttachmentStatus` plus the overlay-tracked
+    /// bare `RealtimeAttachmentStatus` plus the retry-machine-tracked
     /// `ReconnectProgress` (if any) read from DSL state, collapsed into a
     /// ready-to-serialize [`RealtimeChannelStatus`]. Consumed by the
     /// `realtime/status` RPC handler and the MCP `meerkat_realtime_status`

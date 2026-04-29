@@ -1274,7 +1274,7 @@ macro_rules! meerkat_catalog_machine_dsl {
 
             // --- Realtime reconnect progress (wave-c C-9c R4) ---
             //
-            // Overlay-tracked reconnect progress the realtime-WS shell projects
+            // Retry-machine reconnect progress the realtime-WS shell projects
             // into the DSL via `ProjectRealtimeReconnectProgress`. RPC/MCP
             // `realtime/status` queries against a session whose socket is
             // actively reconnecting read these fields through
@@ -1284,9 +1284,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             //
             // Cleared on `PublishRealtimeSignal::BindingReady` and on any
             // transition that returns the binding to `Unbound` without a
-            // reattach requirement — the overlay only owns the reconnect
-            // cycle's lifetime, so progress fields fall to zero the instant
-            // the cycle ends.
+            // reattach requirement, so progress fields fall to zero the
+            // instant the retry cycle ends.
             realtime_reconnect_attempt_count: u64,
             realtime_reconnect_next_retry_at_ms: Option<u64>,
             realtime_reconnect_deadline_at_ms: Option<u64>,
@@ -1873,7 +1872,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             RequireRealtimeReattach,
             RequireRealtimeReattachForAuthority { authority_epoch: u64 },
             PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
-            // Wave-c C-9c R4: overlay-tracked reconnect progress projected
+            // Wave-c C-9c R4: retry-machine reconnect progress projected
             // into DSL state so RPC/MCP status queries read real retry state.
             // The `*_ms` fields are millis-since-epoch so the DSL doesn't
             // depend on `chrono::DateTime`; the shell converts at the
@@ -6235,8 +6234,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // Wave-c C-9c R4: overlay → DSL input that records the current
-        // reconnect-cycle attempt count and next-retry deadline so
+        // Wave-c C-9c R4: retry-machine → DSL input that records the
+        // current reconnect-cycle attempt count and next-retry deadline so
         // `project_realtime_attachment_status` can surface them to
         // RPC/MCP `realtime/status` responders.
         transition ProjectRealtimeReconnectProgress {
@@ -6257,7 +6256,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // Wave-c C-9c R4: reset the reconnect-progress fields. Shell fires
-        // this when the overlay clears (successful reconnect, operator
+        // this when the retry machine clears (successful reconnect, operator
         // detach, or non-reconnecting lifecycle transition).
         transition ClearRealtimeReconnectProgress {
             per_phase [Idle, Attached, Running, Retired, Stopped]

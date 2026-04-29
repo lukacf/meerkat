@@ -324,23 +324,23 @@ impl RequestContext {
     }
 }
 
+/// Machine-owned lifecycle authority for tracked surface requests.
+///
+/// Transport adapters may store closures, task handles, and response writers,
+/// but all phase transitions and terminal outcomes flow through this type.
 #[derive(Clone)]
-pub struct SurfaceRequestExecutor {
+struct SurfaceRequestLifecycleMachine {
     entries: Arc<Mutex<HashMap<String, Arc<RequestEntry>>>>,
-    shutdown_grace: Duration,
 }
 
-impl SurfaceRequestExecutor {
-    pub fn new(shutdown_grace: Duration) -> Self {
+impl SurfaceRequestLifecycleMachine {
+    fn new() -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
-            shutdown_grace,
         }
     }
 
-    /// Register a new in-flight request. Panics on duplicate keys are avoided;
-    /// use [`Self::try_begin_request`] when the caller must detect duplicates.
-    pub fn begin_request(
+    fn begin_request(
         &self,
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
@@ -352,12 +352,7 @@ impl SurfaceRequestExecutor {
         RequestContext { key, entry }
     }
 
-    /// Fallible variant of `begin_request` that rejects duplicate in-flight keys.
-    ///
-    /// Returns `Err(RequestAlreadyExists)` if a request with the same key is
-    /// already tracked. This prevents REST callers from silently overwriting an
-    /// in-flight request's cancel/cleanup state.
-    pub fn try_begin_request(
+    fn try_begin_request(
         &self,
         key: impl Into<String>,
         initial_cancel: RequestAsyncAction,
@@ -372,29 +367,20 @@ impl SurfaceRequestExecutor {
         Ok(RequestContext { key, entry })
     }
 
-    /// Attach the task handle for later forced abort during shutdown.
-    pub fn attach_task(&self, key: &str, handle: JoinHandle<()>) {
+    fn attach_task(&self, key: &str, handle: JoinHandle<()>) {
         if let Some(entry) = lock_or_recover(&self.entries).get(key).cloned() {
             let mut slot = lock_or_recover(&entry.task_handle);
             *slot = Some(handle);
         }
     }
 
-    /// Read-only observation of the current phase for a key.
-    pub fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
+    fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
         lock_or_recover(&self.entries)
             .get(key)
             .map(|entry| entry.phase())
     }
 
-    /// Typed cancel transition.
-    ///
-    /// * `Pending → Cancelled` fires the installed cancel action.
-    /// * `Published` is suppressed ([`CancelOutcome::AlreadyPublished`]);
-    ///   committed work cannot be revoked at the surface.
-    /// * Terminal phases return the matching `Already*` outcome; no state
-    ///   is mutated and no action fires twice.
-    pub async fn cancel_request(&self, key: &str) -> CancelOutcome {
+    async fn cancel_request(&self, key: &str) -> CancelOutcome {
         // Acquire entry + decide transition atomically. Actions run outside
         // the lock so they can await.
         let (outcome, maybe_action) = {
@@ -424,13 +410,7 @@ impl SurfaceRequestExecutor {
         outcome
     }
 
-    /// Committed-terminal transition.
-    ///
-    /// `Pending → Published → (entry removed)` in one atomic step. Rejects
-    /// terminal phases via [`RequestTransitionError::AlreadyTerminal`] so a
-    /// late publish after cancel surfaces as a typed error rather than a
-    /// silent overwrite.
-    pub fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
+    fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
         let mut entries = lock_or_recover(&self.entries);
         let Some(entry) = entries.get(key).cloned() else {
             return Err(RequestTransitionError::NotFound);
@@ -447,16 +427,7 @@ impl SurfaceRequestExecutor {
         }
     }
 
-    /// Uncommitted-terminal transition.
-    ///
-    /// * `Pending → Completed`: runs the installed cleanup (if any) and
-    ///   removes the entry; returns [`CompleteOutcome::Completed`].
-    /// * `Cancelled`: cancel already won the race. Cleanup is still run
-    ///   (the surface still needs the invariants restored), and the caller
-    ///   is told to write a cancel response instead of the task's terminal.
-    /// * `Published`/`Completed`: terminal reached via another path;
-    ///   returns `Completed` idempotently with no side effect.
-    pub async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
+    async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
         let (outcome, cleanup) = {
             let mut entries = lock_or_recover(&self.entries);
             let Some(entry) = entries.get(key).cloned() else {
@@ -493,10 +464,111 @@ impl SurfaceRequestExecutor {
         outcome
     }
 
+    fn is_empty(&self) -> bool {
+        lock_or_recover(&self.entries).is_empty()
+    }
+
+    fn keys(&self) -> Vec<String> {
+        lock_or_recover(&self.entries).keys().cloned().collect()
+    }
+
+    fn remaining_entries(&self) -> Vec<(String, Arc<RequestEntry>)> {
+        lock_or_recover(&self.entries)
+            .iter()
+            .map(|(key, entry)| (key.clone(), Arc::clone(entry)))
+            .collect()
+    }
+
+    fn remove(&self, key: &str) {
+        lock_or_recover(&self.entries).remove(key);
+    }
+}
+
+#[derive(Clone)]
+pub struct SurfaceRequestExecutor {
+    lifecycle: SurfaceRequestLifecycleMachine,
+    shutdown_grace: Duration,
+}
+
+impl SurfaceRequestExecutor {
+    pub fn new(shutdown_grace: Duration) -> Self {
+        Self {
+            lifecycle: SurfaceRequestLifecycleMachine::new(),
+            shutdown_grace,
+        }
+    }
+
+    /// Register a new in-flight request. Panics on duplicate keys are avoided;
+    /// use [`Self::try_begin_request`] when the caller must detect duplicates.
+    pub fn begin_request(
+        &self,
+        key: impl Into<String>,
+        initial_cancel: RequestAsyncAction,
+    ) -> RequestContext {
+        self.lifecycle.begin_request(key, initial_cancel)
+    }
+
+    /// Fallible variant of `begin_request` that rejects duplicate in-flight keys.
+    ///
+    /// Returns `Err(RequestAlreadyExists)` if a request with the same key is
+    /// already tracked. This prevents REST callers from silently overwriting an
+    /// in-flight request's cancel/cleanup state.
+    pub fn try_begin_request(
+        &self,
+        key: impl Into<String>,
+        initial_cancel: RequestAsyncAction,
+    ) -> Result<RequestContext, RequestAlreadyExists> {
+        self.lifecycle.try_begin_request(key, initial_cancel)
+    }
+
+    /// Attach the task handle for later forced abort during shutdown.
+    pub fn attach_task(&self, key: &str, handle: JoinHandle<()>) {
+        self.lifecycle.attach_task(key, handle);
+    }
+
+    /// Read-only observation of the current phase for a key.
+    pub fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
+        self.lifecycle.phase(key)
+    }
+
+    /// Typed cancel transition.
+    ///
+    /// * `Pending → Cancelled` fires the installed cancel action.
+    /// * `Published` is suppressed ([`CancelOutcome::AlreadyPublished`]);
+    ///   committed work cannot be revoked at the surface.
+    /// * Terminal phases return the matching `Already*` outcome; no state
+    ///   is mutated and no action fires twice.
+    pub async fn cancel_request(&self, key: &str) -> CancelOutcome {
+        self.lifecycle.cancel_request(key).await
+    }
+
+    /// Committed-terminal transition.
+    ///
+    /// `Pending → Published → (entry removed)` in one atomic step. Rejects
+    /// terminal phases via [`RequestTransitionError::AlreadyTerminal`] so a
+    /// late publish after cancel surfaces as a typed error rather than a
+    /// silent overwrite.
+    pub fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
+        self.lifecycle.publish_and_complete(key)
+    }
+
+    /// Uncommitted-terminal transition.
+    ///
+    /// * `Pending → Completed`: runs the installed cleanup (if any) and
+    ///   removes the entry; returns [`CompleteOutcome::Completed`].
+    /// * `Cancelled`: cancel already won the race. Cleanup is still run
+    ///   (the surface still needs the invariants restored), and the caller
+    ///   is told to write a cancel response instead of the task's terminal.
+    /// * `Published`/`Completed`: terminal reached via another path;
+    ///   returns `Completed` idempotently with no side effect.
+    pub async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
+        self.lifecycle.finish_unpublished(key).await
+    }
+
     /// Cancel every tracked request. Honours the same typed transitions as
     /// [`Self::cancel_request`]; already-terminal entries are left alone.
     pub async fn cancel_all(&self) {
-        let keys: Vec<String> = lock_or_recover(&self.entries).keys().cloned().collect();
+        let keys = self.lifecycle.keys();
 
         for key in keys {
             let _ = self.cancel_request(&key).await;
@@ -506,18 +578,12 @@ impl SurfaceRequestExecutor {
     /// Graceful shutdown: cancel all, wait `shutdown_grace`, then force-abort
     /// remaining tasks and run any pending unpublished cleanups.
     pub async fn shutdown_and_abort_stragglers(&self) {
-        let has_entries = !lock_or_recover(&self.entries).is_empty();
-        if has_entries {
+        if !self.lifecycle.is_empty() {
             self.cancel_all().await;
             tokio::time::sleep(self.shutdown_grace).await;
         }
 
-        let remaining: Vec<(String, Arc<RequestEntry>)> = lock_or_recover(&self.entries)
-            .iter()
-            .map(|(key, entry)| (key.clone(), Arc::clone(entry)))
-            .collect();
-
-        for (key, entry) in remaining {
+        for (key, entry) in self.lifecycle.remaining_entries() {
             if let Some(handle) = lock_or_recover(&entry.task_handle).take() {
                 handle.abort();
             }
@@ -531,7 +597,7 @@ impl SurfaceRequestExecutor {
                     cleanup().await;
                 }
             }
-            lock_or_recover(&self.entries).remove(&key);
+            self.lifecycle.remove(&key);
         }
     }
 }
@@ -563,6 +629,31 @@ pub async fn prepare_surface_session(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn lifecycle_machine_owns_cancel_publish_complete_transitions() {
+        let lifecycle = SurfaceRequestLifecycleMachine::new();
+        let _ctx = lifecycle.begin_request("machine-owned", noop_request_action());
+
+        assert_eq!(
+            lifecycle.cancel_request("machine-owned").await,
+            CancelOutcome::Cancelled
+        );
+        let publish_error = lifecycle
+            .publish_and_complete("machine-owned")
+            .expect_err("cancelled requests cannot later publish committed work");
+        assert_eq!(
+            publish_error,
+            RequestTransitionError::AlreadyTerminal {
+                current: SurfaceRequestPhase::Cancelled
+            }
+        );
+        assert_eq!(
+            lifecycle.finish_unpublished("machine-owned").await,
+            CompleteOutcome::SupersededByCancel
+        );
+        assert_eq!(lifecycle.phase("machine-owned"), None);
+    }
 
     #[tokio::test]
     async fn finish_unpublished_runs_cleanup_once() {

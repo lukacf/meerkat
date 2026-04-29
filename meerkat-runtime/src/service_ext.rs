@@ -67,8 +67,7 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     /// Wave-c C-9c R4: fully-projected public channel status. RPC / MCP
     /// `realtime/status` responders use this so `attempt_count` /
     /// `next_retry_at` / `deadline_at` come from DSL state projected off
-    /// the reconnect overlay's DSL-projected progress, not hard-coded
-    /// defaults.
+    /// the reconnect retry machine's progress, not hard-coded defaults.
     async fn realtime_channel_status(
         &self,
         session_id: &SessionId,

@@ -1131,7 +1131,7 @@ fn project_realtime_attachment_status(
 
 /// Wave-c C-9c R4: project the DSL's reconnect-progress fields onto the
 /// shell-facing `ReconnectProgress` struct. Returns `None` when the
-/// overlay has cleared (`attempt_count == 0` and no pending retry) —
+/// retry machine has cleared (`attempt_count == 0` and no pending retry) —
 /// the default state for a binding that isn't actively reconnecting.
 fn project_realtime_reconnect_progress(
     state: &super::dsl::MeerkatMachineState,

@@ -810,7 +810,7 @@ impl MeerkatMachine {
         .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })
     }
 
-    /// Wave-c C-9c R4: project the realtime-WS reconnect-overlay progress
+    /// Wave-c C-9c R4: project the realtime-WS retry-machine progress
     /// (attempt count, next retry deadline) into DSL state so RPC/MCP
     /// `realtime/status` queries surface real retry-budget data instead of
     /// hard-coded `0`/`1` defaults.
@@ -840,7 +840,7 @@ impl MeerkatMachine {
     }
 
     /// Wave-c C-9c R4: clear the reconnect-progress fields. Shell fires
-    /// this when the overlay cycle ends — successful reconnect (DSL
+    /// this when the retry cycle ends — successful reconnect (DSL
     /// moves back to `BindingReady`) or operator detach.
     pub async fn clear_realtime_reconnect_progress(
         &self,

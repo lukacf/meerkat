@@ -4,8 +4,8 @@ use crate::contracts::{
     RealtimeServerFrame,
 };
 use crate::contracts::{
-    RealtimeChannelRole, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeReconnectPolicy,
-    RealtimeTurningMode,
+    RealtimeChannelRole, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeProtocolVersion,
+    RealtimeReconnectPolicy, RealtimeTurningMode,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -145,13 +145,15 @@ impl RealtimeConnection {
         open_info: &RealtimeOpenInfo,
         open_frame: RealtimeChannelOpenFrame,
     ) -> Result<(Self, RealtimeChannelOpenedFrame), RealtimeConnectionError> {
-        if !open_info
+        let supported_versions: Vec<RealtimeProtocolVersion> = open_info
             .supported_protocol_versions
             .iter()
-            .any(|version| version == &open_frame.protocol_version)
-        {
+            .filter_map(|version| RealtimeProtocolVersion::parse(version))
+            .collect();
+        let requested_protocol = RealtimeProtocolVersion::parse(&open_frame.protocol_version);
+        if requested_protocol.is_none_or(|version| !supported_versions.contains(&version)) {
             return Err(RealtimeConnectionError::UnsupportedProtocolVersion {
-                requested: open_frame.protocol_version,
+                requested: open_frame.protocol_version.clone(),
                 supported: open_info.supported_protocol_versions.clone(),
             });
         }

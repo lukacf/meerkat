@@ -434,29 +434,84 @@ pub enum PeerIngressKind {
     PlainEvent,
 }
 
+/// Display-only peer or source label captured for ingress diagnostics.
+///
+/// This is deliberately not a routing, trust, or admission identity. Canonical
+/// peer authority lives in the admitted ingress fact and runtime/machine
+/// admission state; snapshot rows only expose this label so operators can read
+/// queue diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressDiagnosticDisplay(String);
+
+impl PeerIngressDiagnosticDisplay {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PeerIngressDiagnosticDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Diagnostic copy of the admission-time trust observation for a queued item.
+///
+/// This records what admission observed when the item was queued. It is not a
+/// live trust oracle and must not be used to reconstruct routing or admission
+/// authority from a snapshot row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerIngressAdmissionDiagnostic {
+    TrustedAtAdmission,
+    UntrustedAtAdmission,
+}
+
+impl PeerIngressAdmissionDiagnostic {
+    pub const fn from_trusted(trusted: bool) -> Self {
+        if trusted {
+            Self::TrustedAtAdmission
+        } else {
+            Self::UntrustedAtAdmission
+        }
+    }
+
+    pub const fn trusted_at_admission(self) -> bool {
+        matches!(self, Self::TrustedAtAdmission)
+    }
+}
+
 /// Snapshot of one queued peer-ingress item.
+///
+/// Snapshot rows are diagnostics derived from the canonical admitted ingress
+/// candidate. They are intentionally incomplete for route/trust reconstruction:
+/// peer labels are display-only, correlation ids are typed, and admission
+/// details are diagnostic copies rather than authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressEntrySnapshot {
-    /// Stable ingress-time identity for this queued raw item.
-    pub raw_item_id: String,
+    /// Stable typed ingress-time identity for this queued raw item.
+    pub raw_item_id: InteractionId,
     /// Interaction/correlation identifier when one exists.
     pub interaction_id: Option<InteractionId>,
     /// Pre-computed ingress classification.
     pub class: PeerInputClass,
     /// Coarse admitted kind.
     pub kind: PeerIngressKind,
-    /// Sender identity fixed at ingress time, if applicable.
-    pub from_peer: Option<String>,
-    /// Lifecycle peer identity for add/retire notices, if applicable.
-    pub lifecycle_peer: Option<String>,
+    /// Display-only sender label, if applicable. Not route/trust authority.
+    pub from_peer_display: Option<PeerIngressDiagnosticDisplay>,
+    /// Display-only lifecycle peer label, if applicable. Not route/trust authority.
+    pub lifecycle_peer_display: Option<PeerIngressDiagnosticDisplay>,
     /// Request envelope id or reply-to correlation when one exists.
-    pub request_id: Option<String>,
+    pub request_correlation_id: Option<InteractionId>,
     /// Auth decision used by peer ingress admission, if this queued entry came
     /// from authenticated peer transport. Plain events leave this unset.
     pub auth: Option<PeerIngressAuthDecision>,
-    /// Whether this entry was trusted at ingress time, when peer authority
-    /// owns the entry. Plain external events leave this unset.
-    pub trusted_snapshot: Option<bool>,
+    /// Admission-time trust diagnostic, when peer authority owns the entry.
+    /// Plain external events leave this unset.
+    pub admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
 }
 
 /// Non-destructive snapshot of the queued peer-ingress surface.

@@ -19,7 +19,8 @@ use crate::peer_types::PeerIngressState;
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem, MessageKind};
 use meerkat_core::{
-    InteractionId, PeerIngressAuthDecision, PeerIngressEntrySnapshot, PeerIngressKind,
+    InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
+    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressKind,
     PeerIngressMachinePolicy, PeerIngressQueueSnapshot, PeerInputClass,
 };
 
@@ -91,25 +92,25 @@ impl From<DropReason> for meerkat_core::comms::AdmissionDropReason {
 /// A classified inbox entry, pairing an item with its ingress classification.
 #[derive(Debug)]
 pub(crate) struct ClassifiedInboxEntry {
-    pub(crate) raw_item_id: String,
+    pub(crate) raw_item_id: InteractionId,
     pub(crate) item: InboxItem,
     pub(crate) class: PeerInputClass,
     pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
-    pub(crate) request_id: Option<String>,
-    pub(crate) trusted_snapshot: Option<bool>,
+    pub(crate) request_id: Option<InteractionId>,
+    pub(crate) admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
     pub(crate) text_projection: String,
 }
 
-/// Internal admission decision paired with the peer-trust snapshot that the
+/// Internal admission decision paired with the peer-trust diagnostic that the
 /// enqueue site still needs to stamp on the entry. `AdmissionOutcome` is the
-/// public face; `trusted_snapshot` stays crate-internal.
+/// public face; the trust copy is diagnostic and never a live trust oracle.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdmissionDecision {
     pub(crate) outcome: AdmissionOutcome,
-    pub(crate) trusted_snapshot: Option<bool>,
+    pub(crate) admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
 }
 
 #[derive(Debug)]
@@ -152,11 +153,11 @@ impl ClassifiedInboxQueue {
     /// Admit a prepared item into the peer-ingress lifecycle.
     ///
     /// Returns a typed `AdmissionDecision`:
-    /// - Plain events are always admitted, with no trust snapshot.
+    /// - Plain events are always admitted, with no trust diagnostic.
     /// - External envelopes consult the canonical trust set
     ///   (`Arc<RwLock<TrustedPeers>>` shared with the router) plus the
     ///   auth-required policy. Untrusted senders with auth required are
-    ///   `Dropped { reason: UntrustedSender }`; the trust snapshot still
+    ///   `Dropped { reason: UntrustedSender }`; the trust diagnostic still
     ///   records the decision for queue visibility.
     ///
     /// C-H3 — the trust check is re-read from the canonical
@@ -165,7 +166,7 @@ impl ClassifiedInboxQueue {
     /// computed at classification time (T0); a trust revoke between T0
     /// and this admission point (T2) must be observed, and it is — a
     /// revoked sender is dropped here even when the classification
-    /// snapshot said trusted. The prepared bool is retained for
+    /// observation said trusted. The prepared bool is retained for
     /// diagnostics only (TOCTOU observability).
     ///
     /// Auth-exempt items (bridge bootstrap / idempotency-ack) bypass the
@@ -183,7 +184,7 @@ impl ClassifiedInboxQueue {
         let InboxItem::External { envelope } = &prepared.item else {
             return AdmissionDecision {
                 outcome: AdmissionOutcome::Admitted,
-                trusted_snapshot: None,
+                admission_diagnostic: None,
             };
         };
         // Authoritative trust check at admission time. The read lock on
@@ -193,7 +194,7 @@ impl ClassifiedInboxQueue {
         let trusted = self.trusted_peers.read().is_trusted(&envelope.from);
         // Auth-exempt items always admit; otherwise admission is gated by
         // the authoritative trust read against the require_peer_auth
-        // policy. The prepared classification snapshot is NOT consulted
+        // policy. The prepared classification observation is NOT consulted
         // here — only the admission-time read is authoritative.
         let admitted = prepared.auth.is_exempt() || trusted || !self.auth_required;
         let had_queued_work = !self.entries.is_empty();
@@ -202,7 +203,7 @@ impl ClassifiedInboxQueue {
             self.phase = PeerIngressState::Received;
             AdmissionDecision {
                 outcome: AdmissionOutcome::Admitted,
-                trusted_snapshot: Some(trusted),
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnostic::from_trusted(trusted)),
             }
         } else {
             if had_queued_work {
@@ -214,7 +215,7 @@ impl ClassifiedInboxQueue {
                 outcome: AdmissionOutcome::Dropped {
                     reason: DropReason::UntrustedSender,
                 },
-                trusted_snapshot: Some(false),
+                admission_diagnostic: Some(PeerIngressAdmissionDiagnostic::UntrustedAtAdmission),
             }
         }
     }
@@ -555,7 +556,7 @@ impl InboxSender {
             from_peer: result.from_peer,
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
-            trusted_snapshot: decision.trusted_snapshot,
+            admission_diagnostic: decision.admission_diagnostic,
             text_projection: result.text_projection,
         };
         match classified_queue.lock().try_push(entry) {
@@ -694,7 +695,7 @@ impl InboxSender {
         let kind = result.kind;
         // C-H3 — the admission decision (trust re-check, auth-exempt
         // bypass, and phase update) happens inside a single queue-lock
-        // scope so classification's T0 trust snapshot cannot admit an
+        // scope so classification's T0 trust observation cannot admit an
         // envelope that was revoked at T2.
         let decision = {
             let mut queue = classified_queue.lock();
@@ -704,12 +705,14 @@ impl InboxSender {
             AdmissionOutcome::Admitted => {}
             AdmissionOutcome::Dropped { reason } => {
                 if let InboxItem::External { envelope } = &result.item {
+                    let request_id_for_log =
+                        result.request_id.map(|request_id| request_id.to_string());
                     tracing::warn!(
                         peer_id = %envelope.from.to_peer_id(),
                         from_peer = result.from_peer.as_deref().unwrap_or("<unresolved>"),
                         class = ?result.class,
                         kind = ?kind,
-                        request_id = result.request_id.as_deref().unwrap_or("<none>"),
+                        request_id = request_id_for_log.as_deref().unwrap_or("<none>"),
                         auth_required = ctx.require_peer_auth,
                         trusted_sender = result.trusted_sender,
                         reason = ?reason,
@@ -728,7 +731,7 @@ impl InboxSender {
             from_peer: result.from_peer,
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
-            trusted_snapshot: decision.trusted_snapshot,
+            admission_diagnostic: decision.admission_diagnostic,
             text_projection: result.text_projection,
         };
         // Enqueue only on classified queue (no raw double-enqueue).
@@ -793,21 +796,27 @@ fn ingress_auth_decision(kind: &MessageKind) -> PeerIngressAuthDecision {
 
 fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
     PeerIngressEntrySnapshot {
-        raw_item_id: entry.raw_item_id.clone(),
+        raw_item_id: entry.raw_item_id,
         interaction_id: match &entry.item {
             InboxItem::External { envelope } => Some(InteractionId(envelope.id)),
             InboxItem::PlainEvent { interaction_id, .. } => interaction_id.map(InteractionId),
         },
         class: entry.class,
         kind: entry.kind,
-        from_peer: entry.from_peer.clone(),
-        lifecycle_peer: entry.lifecycle_peer.clone(),
-        request_id: entry.request_id.clone(),
+        from_peer_display: entry
+            .from_peer
+            .as_ref()
+            .map(|peer| PeerIngressDiagnosticDisplay::new(peer.clone())),
+        lifecycle_peer_display: entry
+            .lifecycle_peer
+            .as_ref()
+            .map(|peer| PeerIngressDiagnosticDisplay::new(peer.clone())),
+        request_correlation_id: entry.request_id,
         auth: match &entry.item {
             InboxItem::External { .. } => Some(entry.auth),
             InboxItem::PlainEvent { .. } => None,
         },
-        trusted_snapshot: entry.trusted_snapshot,
+        admission_diagnostic: entry.admission_diagnostic,
     }
 }
 
@@ -854,6 +863,26 @@ mod tests {
             },
             sig: crate::identity::Signature::new([0u8; 64]),
         }
+    }
+
+    fn make_response_envelope(in_reply_to: Uuid) -> Envelope {
+        let mut envelope = make_test_envelope();
+        envelope.kind = MessageKind::Response {
+            in_reply_to,
+            status: crate::types::Status::Completed,
+            result: serde_json::json!({"ok": true}),
+            handling_mode: None,
+        };
+        envelope
+    }
+
+    fn make_lifecycle_envelope(peer: &str) -> Envelope {
+        let mut envelope = make_test_envelope();
+        envelope.kind = MessageKind::Lifecycle {
+            kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
+            params: serde_json::json!({ "peer": peer }),
+        };
+        envelope
     }
 
     #[test]
@@ -1286,7 +1315,7 @@ mod tests {
 
         let entries = inbox.try_drain_classified();
         assert_eq!(entries.len(), 1);
-        assert!(!entries[0].raw_item_id.is_empty());
+        assert!(!entries[0].raw_item_id.to_string().is_empty());
         assert_eq!(
             entries[0].class,
             meerkat_core::PeerInputClass::ActionableMessage
@@ -1358,10 +1387,16 @@ mod tests {
             Some(PeerIngressAuthDecision::Required)
         );
         assert_eq!(snapshot.queued_entries[1].auth, None);
-        assert_eq!(snapshot.queued_entries[0].trusted_snapshot, Some(true));
-        assert_eq!(snapshot.queued_entries[1].trusted_snapshot, None);
+        assert_eq!(
+            snapshot.queued_entries[0].admission_diagnostic,
+            Some(PeerIngressAdmissionDiagnostic::TrustedAtAdmission)
+        );
+        assert_eq!(snapshot.queued_entries[1].admission_diagnostic, None);
         assert!(
-            !snapshot.queued_entries[0].raw_item_id.is_empty(),
+            !snapshot.queued_entries[0]
+                .raw_item_id
+                .to_string()
+                .is_empty(),
             "external items should keep a stable ingress raw item id"
         );
         assert!(
@@ -1373,7 +1408,6 @@ mod tests {
             snapshot.queued_entries[1]
                 .interaction_id
                 .expect("plain event interaction id should be present")
-                .to_string()
         );
 
         let drained = inbox.try_drain_classified();
@@ -1387,7 +1421,7 @@ mod tests {
         let (inbox, sender) = Inbox::new_classified(ctx);
 
         let envelope = make_request_envelope();
-        let request_id = envelope.id.to_string();
+        let request_id = InteractionId(envelope.id);
 
         sender
             .send_classified(InboxItem::External { envelope })
@@ -1400,8 +1434,158 @@ mod tests {
         assert_eq!(snapshot.total_count, 1);
         assert_eq!(snapshot.queued_entries.len(), 1);
         assert_eq!(snapshot.queued_entries[0].kind, PeerIngressKind::Request);
-        assert_eq!(snapshot.queued_entries[0].request_id, Some(request_id));
-        assert_eq!(snapshot.queued_entries[0].trusted_snapshot, Some(true));
+        assert_eq!(
+            snapshot.queued_entries[0].request_correlation_id,
+            Some(request_id)
+        );
+        assert_eq!(
+            snapshot.queued_entries[0].admission_diagnostic,
+            Some(PeerIngressAdmissionDiagnostic::TrustedAtAdmission)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_classified_snapshot_diagnostics_cover_admitted_shapes() {
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
+        let (inbox, sender) = Inbox::new_classified(ctx);
+
+        let message = make_test_envelope();
+        let message_id = InteractionId(message.id);
+        let request = make_request_envelope();
+        let request_id = InteractionId(request.id);
+        let response_reply_to = Uuid::new_v4();
+        let response = make_response_envelope(response_reply_to);
+        let lifecycle = make_lifecycle_envelope("worker-1");
+
+        for envelope in [message, request, response, lifecycle] {
+            sender
+                .send_classified(InboxItem::External { envelope })
+                .into_result()
+                .unwrap();
+        }
+        sender
+            .send_classified(InboxItem::PlainEvent {
+                body: "event".to_string(),
+                source: meerkat_core::PlainEventSource::Tcp,
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                interaction_id: None,
+                blocks: None,
+                render_metadata: None,
+            })
+            .into_result()
+            .unwrap();
+
+        let snapshot = inbox
+            .classified_snapshot()
+            .expect("classified snapshot should exist");
+        assert_eq!(snapshot.total_count, 5);
+        assert_eq!(snapshot.actionable_count, 4);
+        assert_eq!(snapshot.response_count, 1);
+        assert_eq!(snapshot.lifecycle_count, 1);
+        assert_eq!(snapshot.plain_event_count, 1);
+        assert_eq!(snapshot.ack_count, 0);
+        assert_eq!(snapshot.silent_request_count, 0);
+
+        let entries = &snapshot.queued_entries;
+        assert_eq!(entries[0].kind, PeerIngressKind::Message);
+        assert_eq!(entries[0].raw_item_id, message_id);
+        assert_eq!(entries[0].interaction_id, Some(message_id));
+        assert_eq!(
+            entries[0]
+                .from_peer_display
+                .as_ref()
+                .map(|peer| peer.as_str()),
+            Some("peer")
+        );
+        assert_eq!(entries[0].lifecycle_peer_display, None);
+        assert_eq!(entries[0].request_correlation_id, None);
+        assert_eq!(
+            entries[0].admission_diagnostic,
+            Some(PeerIngressAdmissionDiagnostic::TrustedAtAdmission)
+        );
+
+        assert_eq!(entries[1].kind, PeerIngressKind::Request);
+        assert_eq!(entries[1].request_correlation_id, Some(request_id));
+        assert_eq!(
+            entries[1]
+                .from_peer_display
+                .as_ref()
+                .map(|peer| peer.as_str()),
+            Some("peer")
+        );
+
+        assert_eq!(entries[2].kind, PeerIngressKind::Response);
+        assert_eq!(
+            entries[2].request_correlation_id,
+            Some(InteractionId(response_reply_to))
+        );
+        assert_eq!(
+            entries[2]
+                .from_peer_display
+                .as_ref()
+                .map(|peer| peer.as_str()),
+            Some("peer")
+        );
+
+        assert_eq!(entries[3].kind, PeerIngressKind::Request);
+        assert_eq!(entries[3].class, PeerInputClass::PeerLifecycleAdded);
+        assert_eq!(
+            entries[3]
+                .lifecycle_peer_display
+                .as_ref()
+                .map(|peer| peer.as_str()),
+            Some("worker-1")
+        );
+        assert_eq!(
+            entries[3]
+                .from_peer_display
+                .as_ref()
+                .map(|peer| peer.as_str()),
+            Some("peer")
+        );
+
+        assert_eq!(entries[4].kind, PeerIngressKind::PlainEvent);
+        assert_eq!(entries[4].from_peer_display, None);
+        assert_eq!(entries[4].lifecycle_peer_display, None);
+        assert_eq!(entries[4].request_correlation_id, None);
+        assert_eq!(entries[4].auth, None);
+        assert_eq!(entries[4].admission_diagnostic, None);
+        assert_eq!(entries[4].raw_item_id, entries[4].interaction_id.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_classified_snapshot_trust_observation_is_diagnostic_only() {
+        let ctx = make_classification_context(TrustedPeers::new(), false);
+        let (mut inbox, sender) = Inbox::new_classified(ctx);
+
+        sender
+            .send_classified(InboxItem::External {
+                envelope: make_test_envelope(),
+            })
+            .into_result()
+            .unwrap();
+
+        let snapshot = inbox
+            .classified_snapshot()
+            .expect("classified snapshot should exist");
+        assert_eq!(snapshot.queued_entries.len(), 1);
+        assert_eq!(
+            snapshot.queued_entries[0].admission_diagnostic,
+            Some(PeerIngressAdmissionDiagnostic::UntrustedAtAdmission),
+            "the queued row records an observation, not an admission oracle"
+        );
+        assert!(
+            snapshot.queued_entries[0].from_peer_display.is_some(),
+            "the fallback sender label is display-only diagnostics"
+        );
+
+        let drained = inbox.try_drain_classified();
+        assert_eq!(
+            drained.len(),
+            1,
+            "admission was governed by policy, not reconstructed from the snapshot"
+        );
     }
 
     #[tokio::test]

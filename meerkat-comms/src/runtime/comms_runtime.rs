@@ -3319,7 +3319,7 @@ mod tests {
             .0;
         assert_eq!(
             snapshot.queued_entries[0].raw_item_id,
-            ingress_id.to_string(),
+            meerkat_core::InteractionId(ingress_id),
             "the queue snapshot should expose the same stable ingress id it uses as the raw item key"
         );
 
@@ -3434,13 +3434,12 @@ mod tests {
             snapshot.queue.queued_entries[0].kind,
             meerkat_core::PeerIngressKind::PlainEvent
         );
-        assert_eq!(snapshot.queue.queued_entries[0].trusted_snapshot, None);
+        assert_eq!(snapshot.queue.queued_entries[0].admission_diagnostic, None);
         assert_eq!(
             snapshot.queue.queued_entries[0].raw_item_id,
             snapshot.queue.queued_entries[0]
                 .interaction_id
                 .expect("plain event should retain an ingress interaction id")
-                .to_string()
         );
     }
 
@@ -3577,8 +3576,8 @@ mod tests {
         assert_eq!(snapshot.submission_queue_len, 1);
         assert_eq!(snapshot.queue.total_count, 1);
         assert_eq!(
-            snapshot.queue.queued_entries[0].trusted_snapshot,
-            Some(true)
+            snapshot.queue.queued_entries[0].admission_diagnostic,
+            Some(meerkat_core::PeerIngressAdmissionDiagnostic::TrustedAtAdmission)
         );
 
         {

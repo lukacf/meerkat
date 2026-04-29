@@ -7,8 +7,8 @@ use crate::peer_types::ContentShape as PeerContentShape;
 use crate::trust::TrustedPeers;
 use crate::types::{InboxItem, MessageKind};
 use meerkat_core::{
-    PeerIngressAuthDecision, PeerIngressKind, PeerIngressMachinePolicy, PeerInputClass,
-    handles::PeerCommsHandle,
+    InteractionId, PeerIngressAuthDecision, PeerIngressKind, PeerIngressMachinePolicy,
+    PeerInputClass, handles::PeerCommsHandle,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -44,7 +44,7 @@ pub(crate) struct ClassificationResult {
 /// inbox queue can enqueue entries with full correlation context.
 pub(crate) struct PreparedIngressItem {
     pub(crate) item: InboxItem,
-    pub(crate) raw_item_id: String,
+    pub(crate) raw_item_id: InteractionId,
     pub(crate) kind: PeerIngressKind,
     pub(crate) class: PeerInputClass,
     pub(crate) auth: PeerIngressAuthDecision,
@@ -55,7 +55,7 @@ pub(crate) struct PreparedIngressItem {
     pub(crate) text_projection: String,
     #[allow(dead_code)]
     pub(crate) content_shape: PeerContentShape,
-    pub(crate) request_id: Option<String>,
+    pub(crate) request_id: Option<InteractionId>,
 }
 
 fn content_shape_for_text_and_blocks(
@@ -147,7 +147,7 @@ impl IngressClassificationContext {
                         (
                             classification,
                             lifecycle_peer,
-                            Some(envelope.id.to_string()),
+                            Some(InteractionId(envelope.id)),
                         )
                     }
                     MessageKind::Lifecycle { kind, params } => {
@@ -162,12 +162,12 @@ impl IngressClassificationContext {
                     } => (
                         self.ingress_policy.classify_response((*status).into()),
                         None,
-                        Some(in_reply_to.to_string()),
+                        Some(InteractionId(*in_reply_to)),
                     ),
                     MessageKind::Ack { in_reply_to } => (
                         self.ingress_policy.classify_ack(),
                         None,
-                        Some(in_reply_to.to_string()),
+                        Some(InteractionId(*in_reply_to)),
                     ),
                 };
 
@@ -211,7 +211,7 @@ impl IngressClassificationContext {
                 };
 
                 Some(PreparedIngressItem {
-                    raw_item_id: envelope.id.to_string(),
+                    raw_item_id: InteractionId(envelope.id),
                     kind: classification.kind,
                     class: classification.class,
                     auth: classification.auth,
@@ -244,7 +244,7 @@ impl IngressClassificationContext {
                 let content_shape = content_shape_for_text_and_blocks(&body, blocks.as_deref());
                 let classification = self.ingress_policy.classify_plain_event();
                 Some(PreparedIngressItem {
-                    raw_item_id: interaction_id.to_string(),
+                    raw_item_id: InteractionId(interaction_id),
                     kind: classification.kind,
                     class: classification.class,
                     auth: classification.auth,
@@ -757,7 +757,8 @@ mod tests {
             .expect("machine accepted request should prepare");
 
         assert_eq!(prepared.class, PeerInputClass::ActionableRequest);
-        assert_eq!(prepared.request_id.as_deref(), Some(request_id.as_str()));
+        let prepared_request_id = prepared.request_id.map(|id| id.to_string());
+        assert_eq!(prepared_request_id.as_deref(), Some(request_id.as_str()));
         assert!(prepared.text_projection.starts_with(&format!(
             "[COMMS REQUEST from sender-agent (id: {request_id})]\nIntent: review"
         )));
@@ -883,7 +884,7 @@ mod tests {
         assert_eq!(prepared.class, PeerInputClass::PlainEvent);
         assert_eq!(prepared.kind, PeerIngressKind::PlainEvent);
         assert!(
-            Uuid::parse_str(&prepared.raw_item_id).is_ok(),
+            Uuid::parse_str(&prepared.raw_item_id.to_string()).is_ok(),
             "plain events should receive a stable generated ingress id"
         );
         assert_eq!(
@@ -894,7 +895,7 @@ mod tests {
         match prepared.item {
             InboxItem::PlainEvent { interaction_id, .. } => {
                 assert_eq!(
-                    interaction_id.map(|id| id.to_string()),
+                    interaction_id.map(meerkat_core::InteractionId),
                     Some(prepared.raw_item_id)
                 );
             }

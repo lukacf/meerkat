@@ -30,7 +30,7 @@ it further):
   added here rather than in a follow-up audit.
 - Field-name patterns `_cache`, `_snapshot`, `_shadow`, `_mirror`,
   `_projection`. The surviving hits beyond fields 1–12 are covered in
-  fields 13–15; other hits (`trusted_snapshot` on queue entries,
+  fields 13–15; other hits (`admission_diagnostic` on queue entries,
   `session_snapshot` in run-ledger records, `config_snapshot` on
   `FactoryAgentBuilder`) were examined and are frozen-point-in-time
   captures or fallback defaults, not live projections — noted here so

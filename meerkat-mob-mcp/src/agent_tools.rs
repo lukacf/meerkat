@@ -1461,7 +1461,8 @@ fn build_tool_defs_with_profile_support(
                                 "properties": {
                                     "local": {"type": "string", "description": "Another member in this mob"}
                                 },
-                                "required": ["local"]
+                                "required": ["local"],
+                                "additionalProperties": false
                             },
                             {
                                 "type": "object",
@@ -1485,7 +1486,8 @@ fn build_tool_defs_with_profile_support(
                                         "additionalProperties": false
                                     }
                                 },
-                                "required": ["external_binding"]
+                                "required": ["external_binding"],
+                                "additionalProperties": false
                             }
                         ],
                         "description": "Target peer: local member or typed external binding"
@@ -1512,7 +1514,8 @@ fn build_tool_defs_with_profile_support(
                                 "properties": {
                                     "local": {"type": "string"}
                                 },
-                                "required": ["local"]
+                                "required": ["local"],
+                                "additionalProperties": false
                             },
                             {
                                 "type": "object",
@@ -1526,7 +1529,8 @@ fn build_tool_defs_with_profile_support(
                                         "additionalProperties": false
                                     }
                                 },
-                                "required": ["external"]
+                                "required": ["external"],
+                                "additionalProperties": false
                             }
                         ],
                         "description": "Target peer to unwire"
@@ -1755,19 +1759,33 @@ struct UnwireArgs {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum WirePeerArg {
-    Local {
-        local: String,
-    },
-    ExternalBinding {
-        external_binding: ExternalPeerBindingArg,
-    },
+    Local(LocalPeerArg),
+    ExternalBinding(WireExternalPeerBindingArg),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum UnwirePeerArg {
-    Local { local: String },
-    External { external: ExternalPeerHandleArg },
+    Local(LocalPeerArg),
+    External(UnwireExternalPeerHandleArg),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalPeerArg {
+    local: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireExternalPeerBindingArg {
+    external_binding: ExternalPeerBindingArg,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnwireExternalPeerHandleArg {
+    external: ExternalPeerHandleArg,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1786,8 +1804,8 @@ struct ExternalPeerHandleArg {
 
 fn wire_peer_target_from_args(peer: WirePeerArg) -> meerkat_mob::PeerTarget {
     match peer {
-        WirePeerArg::Local { local } => meerkat_mob::PeerTarget::Local(local.into()),
-        WirePeerArg::ExternalBinding { external_binding } => {
+        WirePeerArg::Local(LocalPeerArg { local }) => meerkat_mob::PeerTarget::Local(local.into()),
+        WirePeerArg::ExternalBinding(WireExternalPeerBindingArg { external_binding }) => {
             meerkat_mob::PeerTarget::ExternalBinding(meerkat_mob::ExternalPeerBindingSpec::new(
                 external_binding.name,
                 external_binding.address,
@@ -1801,8 +1819,10 @@ fn unwire_peer_target_from_args(
     peer: UnwirePeerArg,
 ) -> Result<meerkat_mob::PeerTarget, meerkat_core::error::ToolError> {
     match peer {
-        UnwirePeerArg::Local { local } => Ok(meerkat_mob::PeerTarget::Local(local.into())),
-        UnwirePeerArg::External { external } => {
+        UnwirePeerArg::Local(LocalPeerArg { local }) => {
+            Ok(meerkat_mob::PeerTarget::Local(local.into()))
+        }
+        UnwirePeerArg::External(UnwireExternalPeerHandleArg { external }) => {
             let peer_name = PeerName::new(external.name)
                 .map_err(|e| meerkat_core::error::ToolError::invalid_arguments("mob_unwire", e))?;
             Ok(meerkat_mob::PeerTarget::ExternalName(peer_name))
@@ -1957,6 +1977,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_mcp_wire_rejects_ambiguous_peer_target_shape() {
+        let err = serde_json::from_value::<WirePeerArg>(serde_json::json!({
+            "local": "worker-a",
+            "external_binding": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": ED25519_PUBLIC_KEY_7
+                }
+            }
+        }))
+        .expect_err("agent MCP wire peer target must not accept multiple target shapes");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did not match")
+                || msg.contains("unknown field")
+                || msg.contains("external_binding"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
     fn agent_mcp_unwire_accepts_external_peer_name_handle() {
         let target = unwire_peer_target_from_args(
             serde_json::from_value::<UnwirePeerArg>(serde_json::json!({
@@ -1970,6 +2014,21 @@ mod tests {
             panic!("unwire external should use the external peer handle");
         };
         assert_eq!(peer_name.as_str(), "external-worker");
+    }
+
+    #[test]
+    fn agent_mcp_unwire_rejects_ambiguous_peer_target_shape() {
+        let err = serde_json::from_value::<UnwirePeerArg>(serde_json::json!({
+            "local": "worker-a",
+            "external": { "name": "external-worker" }
+        }))
+        .expect_err("agent MCP unwire peer target must not accept multiple target shapes");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did not match") || msg.contains("unknown field"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

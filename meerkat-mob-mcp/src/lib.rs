@@ -2100,7 +2100,8 @@ impl MobMcpDispatcher {
                                 {
                                     "type":"object",
                                     "properties":{"local":{"type":"string"}},
-                                    "required":["local"]
+                                    "required":["local"],
+                                    "additionalProperties":false
                                 },
                                 {
                                     "type":"object",
@@ -2124,7 +2125,8 @@ impl MobMcpDispatcher {
 	                                            "additionalProperties":false
 	                                        }
 	                                    },
-	                                    "required":["external_binding"]
+	                                    "required":["external_binding"],
+	                                    "additionalProperties":false
 	                                },
 	                                {
 	                                    "type":"object",
@@ -2138,7 +2140,8 @@ impl MobMcpDispatcher {
 	                                            "additionalProperties":false
 	                                        }
 	                                    },
-	                                    "required":["external"]
+	                                    "required":["external"],
+	                                    "additionalProperties":false
 	                                }
 	                            ]
 	                        },
@@ -2349,15 +2352,27 @@ struct WireActionArgs {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum WireActionPeerTarget {
-    Local {
-        local: String,
-    },
-    ExternalBinding {
-        external_binding: WireActionExternalBinding,
-    },
-    External {
-        external: WireActionExternalHandle,
-    },
+    Local(WireActionLocalPeerTarget),
+    ExternalBinding(WireActionExternalBindingTarget),
+    External(WireActionExternalHandleTarget),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireActionLocalPeerTarget {
+    local: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireActionExternalBindingTarget {
+    external_binding: WireActionExternalBinding,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireActionExternalHandleTarget {
+    external: WireActionExternalHandle,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2399,15 +2414,19 @@ impl WireActionArgs {
     fn resolve(self) -> Result<(String, AgentIdentity, meerkat_mob::PeerTarget, String), String> {
         let action = self.action;
         let target = match self.peer {
-            WireActionPeerTarget::Local { local } => meerkat_mob::PeerTarget::Local(local.into()),
-            WireActionPeerTarget::ExternalBinding { external_binding } => {
+            WireActionPeerTarget::Local(WireActionLocalPeerTarget { local }) => {
+                meerkat_mob::PeerTarget::Local(local.into())
+            }
+            WireActionPeerTarget::ExternalBinding(WireActionExternalBindingTarget {
+                external_binding,
+            }) => {
                 meerkat_mob::PeerTarget::ExternalBinding(meerkat_mob::ExternalPeerBindingSpec::new(
                     external_binding.name,
                     external_binding.address,
                     external_binding.identity,
                 ))
             }
-            WireActionPeerTarget::External { external } => {
+            WireActionPeerTarget::External(WireActionExternalHandleTarget { external }) => {
                 if action == "wire" {
                     return Err("wire external peer requires external_binding".to_string());
                 }
@@ -3117,6 +3136,30 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("public_key") || msg.contains("identity") || msg.contains("did not match"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn wire_action_args_rejects_ambiguous_peer_target_shape() {
+        let err = serde_json::from_value::<WireActionPeerTarget>(json!({
+            "local": "worker-a",
+            "external_binding": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": ED25519_PUBLIC_KEY_7
+                }
+            }
+        }))
+        .expect_err("legacy wire action must not accept multiple peer target shapes");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did not match")
+                || msg.contains("unknown field")
+                || msg.contains("external_binding"),
             "unexpected error: {msg}"
         );
     }

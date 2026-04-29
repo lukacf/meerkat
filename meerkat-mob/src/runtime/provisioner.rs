@@ -719,10 +719,11 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         {
             return self
                 .session_service
-                .apply_runtime_context_appends(
+                .apply_runtime_context_appends_with_boundary(
                     &self.bridge_session_id,
                     run_id,
                     pending_system_context_appends_for_runtime_executor(&staged.context_appends),
+                    staged.boundary,
                     staged.contributing_input_ids.clone(),
                 )
                 .await

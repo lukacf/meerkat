@@ -9,9 +9,10 @@ use meerkat_core::ToolScopeSnapshot;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-use meerkat_core::service::StartTurnRequest;
+use meerkat_core::service::{AppendSystemContextRequest, StartTurnRequest};
 use meerkat_core::service::{
-    SessionError, SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
+    SessionControlError, SessionError, SessionServiceCommsExt, SessionServiceControlExt,
+    SessionServiceHistoryExt,
 };
 use meerkat_core::{InputId, RunId};
 use sha2::{Digest, Sha256};
@@ -39,6 +40,15 @@ fn build_runtime_receipt(
         message_count: session.messages().len(),
         sequence: 0,
     })
+}
+
+fn session_control_error_to_session_error(err: SessionControlError) -> SessionError {
+    match err {
+        SessionControlError::Session(err) => err,
+        other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            other.to_string(),
+        )),
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -179,16 +189,52 @@ pub trait MobSessionService:
 
     async fn apply_runtime_context_appends(
         &self,
-        _session_id: &SessionId,
-        _run_id: RunId,
-        _appends: Vec<PendingSystemContextAppend>,
-        _contributing_input_ids: Vec<InputId>,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        Err(SessionError::Agent(
-            meerkat_core::error::AgentError::InternalError(
-                "runtime-backed context append apply is unavailable for this session service"
-                    .into(),
-            ),
+        self.apply_runtime_context_appends_with_boundary(
+            session_id,
+            run_id,
+            appends,
+            RunApplyBoundary::Immediate,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        for append in appends {
+            self.append_system_context(
+                session_id,
+                AppendSystemContextRequest {
+                    text: append.text,
+                    source: append.source,
+                    idempotency_key: append.idempotency_key,
+                },
+            )
+            .await
+            .map_err(session_control_error_to_session_error)?;
+        }
+
+        Ok(CoreApplyOutput::without_terminal(
+            RunBoundaryReceipt {
+                run_id,
+                boundary,
+                contributing_input_ids,
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            },
+            None,
         ))
     }
 
@@ -321,6 +367,25 @@ where
         )
         .await
     }
+
+    async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        meerkat_session::EphemeralSessionService::<B>::apply_runtime_context_appends_with_boundary(
+            self,
+            session_id,
+            run_id,
+            appends,
+            boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -441,6 +506,25 @@ where
             session_id,
             run_id,
             appends,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        appends: Vec<PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<CoreApplyOutput, SessionError> {
+        meerkat_session::PersistentSessionService::<B>::apply_runtime_context_appends_with_boundary(
+            self,
+            session_id,
+            run_id,
+            appends,
+            boundary,
             contributing_input_ids,
         )
         .await

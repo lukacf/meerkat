@@ -18945,6 +18945,7 @@ struct RuntimeBackedRealCommsSessionService {
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
     applied_runtime_prompts: RwLock<HashMap<SessionId, Vec<ContentInput>>>,
+    applied_runtime_context_appends: RwLock<HashMap<SessionId, Vec<AppendSystemContextRequest>>>,
     applied_runtime_render_metadata:
         RwLock<HashMap<SessionId, Vec<Option<meerkat_core::types::RenderMetadata>>>>,
 }
@@ -18959,6 +18960,7 @@ impl RuntimeBackedRealCommsSessionService {
             runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
             applied_runtime_prompts: RwLock::new(HashMap::new()),
+            applied_runtime_context_appends: RwLock::new(HashMap::new()),
             applied_runtime_render_metadata: RwLock::new(HashMap::new()),
         }
     }
@@ -18974,6 +18976,18 @@ impl RuntimeBackedRealCommsSessionService {
 
     async fn applied_runtime_prompts(&self, session_id: &SessionId) -> Vec<ContentInput> {
         self.applied_runtime_prompts
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn applied_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<AppendSystemContextRequest> {
+        self.applied_runtime_context_appends
             .read()
             .await
             .get(session_id)
@@ -19124,6 +19138,10 @@ impl SessionService for RuntimeBackedRealCommsSessionService {
         }
         self.session_comms_names.write().await.remove(id);
         self.applied_runtime_prompts.write().await.remove(id);
+        self.applied_runtime_context_appends
+            .write()
+            .await
+            .remove(id);
         Ok(())
     }
 }
@@ -19162,11 +19180,29 @@ impl SessionServiceControlExt for RuntimeBackedRealCommsSessionService {
     async fn append_system_context(
         &self,
         id: &SessionId,
-        _req: AppendSystemContextRequest,
+        req: AppendSystemContextRequest,
     ) -> Result<AppendSystemContextResult, SessionControlError> {
         if !self.sessions.read().await.contains_key(id) {
             return Err(SessionError::NotFound { id: id.clone() }.into());
         }
+        let mut appends = self.applied_runtime_context_appends.write().await;
+        let session_appends = appends.entry(id.clone()).or_default();
+        if let Some(key) = req.idempotency_key.as_ref()
+            && let Some(existing) = session_appends
+                .iter()
+                .find(|append| append.idempotency_key.as_ref() == Some(key))
+        {
+            if existing == &req {
+                return Ok(AppendSystemContextResult {
+                    status: AppendSystemContextStatus::Duplicate,
+                });
+            }
+            return Err(SessionControlError::Conflict {
+                id: id.clone(),
+                key: key.clone(),
+            });
+        }
+        session_appends.push(req);
         Ok(AppendSystemContextResult {
             status: AppendSystemContextStatus::Staged,
         })
@@ -19244,6 +19280,10 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         self.keep_alive_notifiers.write().await.remove(session_id);
         self.session_comms_names.write().await.remove(session_id);
         self.applied_runtime_prompts
+            .write()
+            .await
+            .remove(session_id);
+        self.applied_runtime_context_appends
             .write()
             .await
             .remove(session_id);
@@ -19795,7 +19835,6 @@ async fn test_running_peer_message_to_autonomous_member_drains_after_current_app
 }
 
 #[tokio::test]
-#[ignore = "exploratory runtime-backed peer-response wake contract; follow-up hardening pending"]
 async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
     let (handle, service) =
@@ -19837,7 +19876,11 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         .await
         .expect("wait_for_ready should resolve");
 
-    let requester_baseline = service.applied_runtime_prompts(&sid_requester).await.len();
+    let requester_prompt_baseline = service.applied_runtime_prompts(&sid_requester).await.len();
+    let requester_context_baseline = service
+        .applied_runtime_context_appends(&sid_requester)
+        .await
+        .len();
     let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
 
     let requester_comms = service
@@ -19897,12 +19940,23 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
 
     let requester_response_delivery = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let prompts = service.applied_runtime_prompts(&sid_requester).await;
-            if prompts.iter().skip(requester_baseline).any(|prompt| {
-                let text = prompt.text_content();
-                text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
-                    && text.contains("from test-mob/worker/w-responder")
-            }) {
+            let appends = service
+                .applied_runtime_context_appends(&sid_requester)
+                .await;
+            if appends
+                .iter()
+                .skip(requester_context_baseline)
+                .any(|append| {
+                    let text = append.text.as_str();
+                    text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                        && text.contains("from test-mob/worker/w-responder")
+                        && text.contains("lighthouse")
+                        && append.source.as_deref().is_some_and(|source| {
+                            source
+                                .starts_with("peer_response_terminal:test-mob/worker/w-responder:")
+                        })
+                })
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -19933,6 +19987,89 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
             "requester should receive the terminal peer response; has_executor={has_executor} has_comms={has_comms} snapshot={snapshot:?}"
         );
     }
+
+    let requester_snapshot = service
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&sid_requester)
+        .await
+        .expect("requester snapshot should still exist after delivery");
+    assert!(
+        requester_snapshot.inputs.queue.is_empty(),
+        "terminal peer response should be consumed, not left queued: {requester_snapshot:?}"
+    );
+    let terminal_admission = requester_snapshot
+        .inputs
+        .admission_order
+        .iter()
+        .find(|input| {
+            input
+                .content_shape
+                .as_ref()
+                .is_some_and(|shape| shape.0.as_str() == "peer_response_terminal")
+        })
+        .expect("requester should admit a terminal peer response input");
+    assert_eq!(
+        terminal_admission.lifecycle,
+        Some(meerkat_runtime::InputLifecycleState::Consumed),
+        "terminal peer response should be applied and consumed: {requester_snapshot:?}"
+    );
+    assert_eq!(
+        service.applied_runtime_prompts(&sid_requester).await.len(),
+        requester_prompt_baseline,
+        "terminal peer response should apply as runtime system context without requiring a user prompt turn"
+    );
+
+    let duplicate = meerkat_runtime::peer_response_terminal_input(
+        &PeerName::new(test_comms_name("worker", "w-responder")).expect("peer name"),
+        request_id.to_string(),
+        meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+        serde_json::json!({"interpretation":"lighthouse"}),
+    )
+    .expect("duplicate terminal response input");
+    service
+        .runtime_adapter
+        .accept_input_with_completion(&sid_requester, duplicate)
+        .await
+        .expect("duplicate terminal response should be accepted for idempotent apply");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = service
+                .runtime_adapter
+                .meerkat_machine_spine_snapshot(&sid_requester)
+                .await
+                .expect("requester snapshot should still exist after duplicate");
+            if snapshot.inputs.queue.is_empty()
+                && snapshot
+                    .inputs
+                    .admission_order
+                    .iter()
+                    .filter(|input| {
+                        input
+                            .content_shape
+                            .as_ref()
+                            .is_some_and(|shape| shape.0.as_str() == "peer_response_terminal")
+                            && input.lifecycle
+                                == Some(meerkat_runtime::InputLifecycleState::Consumed)
+                    })
+                    .count()
+                    >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("duplicate terminal response should be consumed without re-applying context");
+    assert_eq!(
+        service
+            .applied_runtime_context_appends(&sid_requester)
+            .await
+            .len(),
+        requester_context_baseline + 1,
+        "duplicate terminal response should not append duplicate runtime system context"
+    );
 }
 
 #[tokio::test]

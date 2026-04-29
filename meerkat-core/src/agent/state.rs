@@ -24,7 +24,7 @@ use crate::turn_execution_authority::{
 };
 use crate::types::{
     AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
-    SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, ToolResult, UserMessage,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -1797,41 +1797,17 @@ where
                                 ..
                             }) = pre_tool_report.decision
                             {
-                                let denied_payload = serde_json::json!({
-                                    "error": "hook_denied",
-                                    "reason_code": serde_json::to_value(reason_code).unwrap_or_else(|_| Value::String("runtime_error".to_string())),
-                                    "message": message,
-                                    "payload": payload,
-                                });
-                                let denied_content = serde_json::to_string(&denied_payload)
-                                    .unwrap_or_else(|_| {
-                                        "{\"error\":\"hook_denied\",\"message\":\"denied by hook\"}"
-                                            .to_string()
-                                    });
-                                tool_results.push(ToolResult::new(
-                                    tc.id.clone(),
-                                    denied_content,
-                                    true,
-                                ));
-                                emit_event!(AgentEvent::ToolExecutionCompleted {
-                                    id: tc.id.clone(),
-                                    name: tc.name.clone(),
-                                    result: tool_results
-                                        .last()
-                                        .map(ToolResult::text_content)
-                                        .unwrap_or_default(),
-                                    is_error: true,
-                                    duration_ms: 0,
-                                    has_images: false,
-                                });
-                                emit_event!(AgentEvent::ToolResultReceived {
-                                    id: tc.id.clone(),
-                                    name: tc.name.clone(),
-                                    is_error: true,
-                                });
-                                self.budget.record_tool_call();
-                                tool_call_count += 1;
-                                continue;
+                                let error = AgentError::HookDenied {
+                                    point: HookPoint::PreToolExecution,
+                                    reason_code,
+                                    message,
+                                    payload,
+                                };
+                                self.terminalize_fatal_error(
+                                    &run_id, turn_count, &event_tx, &error,
+                                )
+                                .await?;
+                                return Err(error);
                             }
 
                             for outcome in &pre_tool_report.outcomes {

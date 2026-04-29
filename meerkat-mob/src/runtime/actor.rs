@@ -8488,6 +8488,24 @@ impl MobActor {
 
         let agent_identity = MeerkatId::from(&runtime_id.identity);
 
+        // SubmitWork admission belongs to MobMachine even when the shell may
+        // need to auto-spawn an absent external target. Probe the declared
+        // command before policy resolution so stopped/completed mobs reject
+        // without staging spawn side effects.
+        if let Err(error) = self.probe_mob_machine_input(
+            mob_dsl::MobMachineInput::SubmitWork {
+                agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
+                fence_token: mob_dsl::FenceToken::from_domain(fence_token),
+                work_id: mob_dsl::WorkId::from_work_ref(&work_ref),
+                origin: mob_dsl::WorkOrigin::from(origin),
+            },
+            MobState::Running,
+        ) {
+            if self.state() != MobState::Running {
+                return Err(error);
+            }
+        }
+
         // Resolve entry + validate fence freshness in a single roster read.
         // Fence-token freshness is a shell-owned concurrency invariant (a
         // stale token means the caller is talking to a superseded

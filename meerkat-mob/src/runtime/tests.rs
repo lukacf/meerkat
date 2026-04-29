@@ -5362,6 +5362,63 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
     );
 }
 
+struct StaticWorkerSpawnPolicy;
+
+#[async_trait]
+impl super::spawn_policy::SpawnPolicy for StaticWorkerSpawnPolicy {
+    async fn resolve(&self, _target: &AgentIdentity) -> Option<super::spawn_policy::SpawnSpec> {
+        Some(super::spawn_policy::SpawnSpec {
+            profile: ProfileName::from("worker"),
+            runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_stopped_submit_work_auto_spawn_rejects_before_policy_provisioning() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticWorkerSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+    handle.stop().await.expect("stop");
+
+    let target = AgentIdentity::from("auto-stopped");
+    let result = handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new("queued while stopped".to_string(), WorkOrigin::External),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "stopped auto-spawn SubmitWork must surface MobMachine phase admission: {result:?}"
+    );
+    assert!(
+        handle.get_member(&target).await.is_none(),
+        "stopped SubmitWork must not auto-spawn the absent target"
+    );
+    assert_eq!(
+        service.recorded_create_requests().await.len(),
+        0,
+        "stopped SubmitWork must reject before policy provisioning side effects"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "stopped SubmitWork must not leak a provisioned session"
+    );
+}
+
 #[tokio::test]
 async fn test_register_tool_bundle_is_wired_into_spawn() {
     let definition = sample_definition_with_tool_bundle("bundle-a");

@@ -1096,6 +1096,137 @@ impl AgentFactory {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn selected_image_binding_id_for_provider(
+        realm: &RealmConnectionSet,
+        provider: Provider,
+    ) -> Result<String, String> {
+        let mut provider_bindings = Vec::new();
+        for (binding_id, binding) in &realm.bindings {
+            let backend = realm
+                .backends
+                .get(&binding.backend_profile)
+                .ok_or_else(|| {
+                    format!(
+                        "image credential binding for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' references unknown backend '{}'",
+                        provider.as_str(),
+                        realm.realm_id,
+                        realm.realm_id,
+                        binding_id,
+                        binding.backend_profile,
+                    )
+                })?;
+            let auth = realm
+                .auth_profiles
+                .get(&binding.auth_profile)
+                .ok_or_else(|| {
+                    format!(
+                        "image credential binding for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' references unknown auth '{}'",
+                        provider.as_str(),
+                        realm.realm_id,
+                        realm.realm_id,
+                        binding_id,
+                        binding.auth_profile,
+                    )
+                })?;
+            if backend.provider == provider && auth.provider == provider {
+                provider_bindings.push(binding_id.as_str());
+            }
+        }
+
+        if let Some(default_binding) = realm.default_binding.as_deref()
+            && provider_bindings.contains(&default_binding)
+        {
+            return Ok(default_binding.to_string());
+        }
+
+        let provider_default_binding = format!("default_{}", provider.as_str());
+        if provider_bindings
+            .iter()
+            .any(|binding_id| *binding_id == provider_default_binding)
+        {
+            return Ok(provider_default_binding);
+        }
+
+        match provider_bindings.as_slice() {
+            [binding_id] => Ok((*binding_id).to_string()),
+            [] => {
+                if let Some(default_binding) = realm.default_binding.as_deref() {
+                    match realm.lookup_binding(default_binding) {
+                        Ok((_binding, backend, auth)) => Err(format!(
+                            "image credential binding for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' resolves backend={:?} auth={:?}, expected provider {:?}",
+                            provider.as_str(),
+                            realm.realm_id,
+                            realm.realm_id,
+                            default_binding,
+                            backend.provider,
+                            auth.provider,
+                            provider,
+                        )),
+                        Err(source) => Err(format!(
+                            "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm default binding '{}' is invalid: {source}",
+                            provider.as_str(),
+                            realm.realm_id,
+                            default_binding,
+                        )),
+                    }
+                } else {
+                    Err(format!(
+                        "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm has no default binding and no binding for provider '{}'",
+                        provider.as_str(),
+                        realm.realm_id,
+                        provider.as_str(),
+                    ))
+                }
+            }
+            many => Err(format!(
+                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm has multiple bindings for provider '{}' ({}) and no unambiguous image default",
+                provider.as_str(),
+                realm.realm_id,
+                provider.as_str(),
+                many.join(", "),
+            )),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_selected_image_binding_for_provider(
+        config: &Config,
+        provider: Provider,
+        selected_realm: RealmId,
+    ) -> Result<(RealmConnectionSet, String, ConnectionRef), String> {
+        let selected_realm_id = selected_realm.as_str();
+        let section = config.realm.get(selected_realm_id).ok_or_else(|| {
+            format!(
+                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm not found in config.realm",
+                provider.as_str(),
+                selected_realm_id,
+            )
+        })?;
+        let realm = RealmConnectionSet::from_config(selected_realm_id, section).map_err(|e| {
+            format!(
+                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm config invalid: {e}",
+                provider.as_str(),
+                selected_realm_id,
+            )
+        })?;
+        let binding_id = Self::selected_image_binding_id_for_provider(&realm, provider)?;
+        let binding = meerkat_core::BindingId::parse(binding_id.clone()).map_err(|e| {
+            format!(
+                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected binding id '{}' is invalid: {e}",
+                provider.as_str(),
+                selected_realm_id,
+                binding_id,
+            )
+        })?;
+        let connection_ref = ConnectionRef {
+            realm: selected_realm,
+            binding,
+            profile: None,
+        };
+        Ok((realm, binding_id, connection_ref))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn resolve_image_binding_for_provider(
         config: &Config,
         provider: Provider,
@@ -1105,35 +1236,7 @@ impl AgentFactory {
             return Self::resolve_realm_binding_for_provider(config, provider, None, None);
         };
         let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
-        if !config.realm.contains_key(selected_realm.as_str()) {
-            return Self::resolve_realm_binding_for_provider(
-                config,
-                provider,
-                None,
-                Some(selected_realm.as_str()),
-            );
-        }
-        let target = meerkat_core::resolve_realm_binding_target_for_provider(
-            config,
-            provider,
-            Some(&selected_realm),
-            None,
-            None,
-            None,
-            false,
-        )
-        .map_err(|e| {
-            format!(
-                "image credential binding for provider '{}' is unavailable in selected realm '{}': {e}",
-                provider.as_str(),
-                selected_realm.as_str(),
-            )
-        })?;
-        Ok((
-            target.realm,
-            target.connection_ref.binding.to_string(),
-            target.connection_ref,
-        ))
+        Self::resolve_selected_image_binding_for_provider(config, provider, selected_realm)
     }
 
     #[cfg(all(
@@ -3561,6 +3664,10 @@ mod tests {
         }
     }
 
+    fn inline_realm_section(entries: &[(&str, &str)]) -> RealmConfigSection {
+        RealmConfigSection::from_inline_api_keys(entries)
+    }
+
     #[test]
     fn missing_connection_ref_synthesizes_env_default_binding_for_resolved_provider() {
         let config = Config::default();
@@ -3755,6 +3862,29 @@ mod tests {
     }
 
     #[test]
+    fn missing_selected_realm_image_binding_rejects_configured_default_realm() {
+        let mut config = Config::default();
+        config.realm.insert(
+            "default".to_string(),
+            inline_realm_section(&[("openai", "default-openai-key")]),
+        );
+
+        let err = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some("session_missing"),
+        )
+        .expect_err("missing selected image realm must not fall back to configured default");
+
+        assert!(
+            err.contains("provider 'openai'")
+                && err.contains("selected realm 'session_missing'")
+                && err.contains("not found"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn unscoped_image_binding_can_still_synthesize_env_default() {
         let config = Config::default();
         let (realm, binding_id, connection_ref) =
@@ -3768,19 +3898,39 @@ mod tests {
     }
 
     #[test]
-    fn unconfigured_storage_realm_can_still_synthesize_env_default_image_binding() {
+    fn unscoped_image_binding_can_still_use_configured_default_realm() {
+        let mut config = Config::default();
+        config.realm.insert(
+            "default".to_string(),
+            inline_realm_section(&[("openai", "default-openai-key")]),
+        );
+
+        let (realm, binding_id, connection_ref) =
+            AgentFactory::resolve_image_binding_for_provider(&config, Provider::OpenAI, None)
+                .expect("unscoped image lookup may use the configured default realm");
+
+        assert_eq!(realm.realm_id, "default");
+        assert_eq!(binding_id, "default_openai");
+        assert_eq!(connection_ref.realm.as_str(), "default");
+        assert_eq!(connection_ref.binding.as_str(), "default_openai");
+    }
+
+    #[test]
+    fn missing_selected_realm_image_binding_rejects_env_default_synthesis() {
         let config = Config::default();
-        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+        let err = AgentFactory::resolve_image_binding_for_provider(
             &config,
             Provider::OpenAI,
             Some("workspace_derived"),
         )
-        .expect("workspace storage realm without credential config may use env_default");
+        .expect_err("selected image realm without credential config must not use env_default");
 
-        assert_eq!(realm.realm_id, "env_default");
-        assert_eq!(binding_id, "default");
-        assert_eq!(connection_ref.realm.as_str(), "env_default");
-        assert_eq!(connection_ref.binding.as_str(), "default");
+        assert!(
+            err.contains("provider 'openai'")
+                && err.contains("selected realm 'workspace_derived'")
+                && err.contains("not found"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -3803,6 +3953,130 @@ mod tests {
                 && err.contains("has no default binding"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn selected_image_binding_uses_provider_binding_over_text_default() {
+        let mut config = Config::default();
+        let mut selected = inline_realm_section(&[
+            ("anthropic", "text-anthropic-key"),
+            ("openai", "image-openai-key"),
+        ]);
+        selected
+            .binding
+            .get_mut("default_openai")
+            .expect("openai binding")
+            .policy
+            .require_metadata_account = true;
+        config.realm.insert("session_a".to_string(), selected);
+        config.realm.insert(
+            "default".to_string(),
+            inline_realm_section(&[("openai", "default-openai-key")]),
+        );
+
+        let (realm, binding_id, connection_ref) = AgentFactory::resolve_image_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some("session_a"),
+        )
+        .expect("selected image lookup should pick the selected realm's OpenAI binding");
+
+        assert_eq!(realm.realm_id, "session_a");
+        assert_eq!(binding_id, "default_openai");
+        assert_eq!(connection_ref.realm.as_str(), "session_a");
+        assert_eq!(connection_ref.binding.as_str(), "default_openai");
+        let (binding, backend, auth) = realm.lookup_connection_ref(&connection_ref).unwrap();
+        assert_eq!(backend.provider, Provider::OpenAI);
+        assert_eq!(auth.provider, Provider::OpenAI);
+        assert!(
+            binding.policy.require_metadata_account,
+            "image binding policy must stay attached to the provider-specific selected binding"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn selected_image_binding_auth_policy_failure_keeps_typed_shape() {
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderBindingError, ProviderClientError, ProviderRuntime,
+            ProviderRuntimeRegistry, ResolvedConnection, ResolverEnvironment, ValidatedBinding,
+        };
+
+        struct PolicyRejectingOpenAiRuntime;
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for PolicyRejectingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                assert_eq!(connection_ref.realm.as_str(), "session_a");
+                assert_eq!(connection_ref.binding.as_str(), "default_openai");
+                assert_eq!(backend.provider, Provider::OpenAI);
+                assert_eq!(auth.provider, Provider::OpenAI);
+                assert!(policy.require_metadata_account);
+                Err(ProviderBindingError::MissingRequiredDefault(
+                    "metadata_account",
+                ))
+            }
+
+            async fn resolve_binding(
+                &self,
+                _binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                unreachable!("validation failure should keep the typed auth-policy error shape")
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                unreachable!("test only resolves the selected image binding")
+            }
+        }
+
+        let mut config = Config::default();
+        let mut selected = inline_realm_section(&[
+            ("anthropic", "text-anthropic-key"),
+            ("openai", "image-openai-key"),
+        ]);
+        selected
+            .binding
+            .get_mut("default_openai")
+            .expect("openai binding")
+            .policy
+            .require_metadata_account = true;
+        config.realm.insert("session_a".to_string(), selected);
+
+        let (realm, _binding_id, connection_ref) =
+            AgentFactory::resolve_image_binding_for_provider(
+                &config,
+                Provider::OpenAI,
+                Some("session_a"),
+            )
+            .expect("selected image lookup should resolve the selected OpenAI binding");
+        let registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(PolicyRejectingOpenAiRuntime));
+
+        let err = registry
+            .resolve(&realm, &connection_ref, &ResolverEnvironment::testing())
+            .await
+            .expect_err("auth-policy validation should fail in the provider-runtime domain");
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Binding(ProviderBindingError::MissingRequiredDefault(
+                "metadata_account"
+            ))
+        ));
     }
 
     #[test]

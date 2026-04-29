@@ -421,6 +421,21 @@ fn apply_recovered_flow_signal(
     Ok(())
 }
 
+fn seed_mob_authority_restore_failures(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    restore_diagnostics: &HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>,
+) {
+    use crate::machines::mob_machine as mob_dsl;
+    for (identity, diagnostic) in restore_diagnostics {
+        authority.state.member_restore_failures.insert(
+            mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(
+                identity.as_str(),
+            )),
+            diagnostic.reason.clone(),
+        );
+    }
+}
+
 struct RuntimeWiring {
     roster: Arc<RwLock<RosterAuthority>>,
     task_board: Arc<RwLock<TaskBoard>>,
@@ -438,6 +453,8 @@ struct RuntimeWiring {
     /// inside the async `resume()` future (the DSL state struct itself is
     /// several hundred bytes worth of maps + sets).
     dsl_authority: Box<crate::machines::mob_machine::MobMachineAuthority>,
+    machine_state_watch_tx:
+        tokio::sync::watch::Sender<crate::machines::mob_machine::MobMachineState>,
     restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>>>,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     supervisor_bridge: Arc<MobSupervisorBridge>,
@@ -879,6 +896,9 @@ impl MobBuilder {
         ));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
+        let initial_dsl_authority = Box::new(seed_mob_authority(resumed_state));
+        let (machine_state_watch_tx, machine_state_watch_rx) =
+            tokio::sync::watch::channel(initial_dsl_authority.state.clone());
         // Preview phase watch so the preview handle can answer status()
         // before the actor spawns. The real actor-side sender replaces
         // this once start_runtime_with_components owns the final pair.
@@ -891,7 +911,8 @@ impl MobBuilder {
             // `reconcile_resume` finalizes the shell roster. The DSL
             // membership state is populated from the finalized roster so
             // MobMachine guards see the resumed members immediately.
-            dsl_authority: Box::new(seed_mob_authority(resumed_state)),
+            dsl_authority: initial_dsl_authority,
+            machine_state_watch_tx,
             restore_diagnostics: restore_diagnostics.clone(),
             runtime_metadata: storage.runtime_metadata.clone(),
             supervisor_bridge: supervisor_bridge.clone(),
@@ -909,6 +930,7 @@ impl MobBuilder {
             session_service: session_service.clone(),
             runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics,
+            machine_state_watch_rx,
             phase_watch_rx: preview_phase_rx,
             realtime_session_factory: realtime_session_factory.clone(),
         };
@@ -944,6 +966,14 @@ impl MobBuilder {
             &definition.id,
         )
         .await?;
+        let restore_diagnostics_snapshot = preview_handle.restore_diagnostics.read().await.clone();
+        seed_mob_authority_restore_failures(
+            &mut wiring.dsl_authority,
+            &restore_diagnostics_snapshot,
+        );
+        let _ = wiring
+            .machine_state_watch_tx
+            .send(wiring.dsl_authority.state.clone());
         *wiring.roster.write().await = RosterAuthority::from_roster(roster);
         *wiring.task_board.write().await = task_board;
 
@@ -1552,6 +1582,8 @@ impl MobBuilder {
         // paths pass an empty roster so the replay is a no-op either way.
         let mut dsl_authority = Box::new(seed_mob_authority(initial_state));
         seed_mob_authority_sync_from_roster(&mut dsl_authority, &initial_roster, &definition);
+        let (machine_state_watch_tx, _machine_state_watch_rx) =
+            tokio::sync::watch::channel(dsl_authority.state.clone());
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
         let task_board = Arc::new(RwLock::new(initial_task_board));
         let mcp_servers = Arc::new(tokio::sync::Mutex::new(
@@ -1577,6 +1609,7 @@ impl MobBuilder {
             task_board,
             initial_phase: initial_state,
             dsl_authority,
+            machine_state_watch_tx,
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
@@ -1620,6 +1653,7 @@ impl MobBuilder {
             task_board,
             initial_phase: wiring_initial_phase,
             dsl_authority,
+            machine_state_watch_tx,
             restore_diagnostics,
             runtime_metadata,
             supervisor_bridge,
@@ -1643,6 +1677,7 @@ impl MobBuilder {
             session_service: handle_session_service.clone(),
             runtime_adapter: runtime_adapter.clone(),
             restore_diagnostics: restore_diagnostics.clone(),
+            machine_state_watch_rx: machine_state_watch_tx.subscribe(),
             phase_watch_rx,
             realtime_session_factory,
         };
@@ -1749,6 +1784,7 @@ impl MobBuilder {
             task_board_service,
             spawn_policy,
             dsl_authority: *dsl_authority,
+            machine_state_watch_tx,
             phase_watch_tx: phase_watch_tx_actor,
             default_external_tools_provider,
             realm_profile_store,

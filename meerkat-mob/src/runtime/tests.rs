@@ -7844,6 +7844,22 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
         "broken member should surface restore failure reason"
     );
 
+    let machine_state = resumed
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after restore failure");
+    let machine_identity =
+        crate::machines::mob_machine::AgentIdentity::from_domain(&AgentIdentity::from("w-1"));
+    assert_eq!(
+        machine_state.member_lifecycle_for_identity(&machine_identity, true),
+        crate::machines::mob_machine::MobMemberLifecycleMaterial {
+            status: crate::machines::mob_machine::MobMemberLifecycleStatus::Broken,
+            terminal_class: crate::machines::mob_machine::MobMemberTerminalClass::TerminalFailure,
+            error: Some(format!("missing durable session snapshot for '{old_sid}'")),
+        },
+        "restore-failure member status must be owned by MobMachine, not reconstructed by projection code"
+    );
+
     let members = resumed.list_members().await;
     let broken = members
         .into_iter()
@@ -7862,6 +7878,17 @@ async fn test_resume_marks_missing_persisted_session_as_broken() {
             .is_some_and(|message| message.contains("missing durable session")),
         "projected member listing should carry the restore failure"
     );
+
+    let including_retiring = resumed.list_members_including_retiring().await;
+    let broken_including_retiring = including_retiring
+        .into_iter()
+        .find(|entry| entry.agent_identity == "w-1")
+        .expect("broken member should remain visible in list_members_including_retiring");
+    assert_eq!(
+        broken_including_retiring.status,
+        crate::runtime::handle::MobMemberStatus::Broken
+    );
+    assert!(broken_including_retiring.is_final);
 }
 
 #[tokio::test]
@@ -23450,6 +23477,7 @@ struct MobRuntimeParitySnapshotSummary {
     tasks: BTreeMap<String, String>,
     in_progress_task_ids: BTreeSet<String>,
     completed_task_ids: BTreeSet<String>,
+    member_restore_failures: BTreeMap<String, String>,
     // W3-H-1: canonical identity→bridge-session binding map. Stubbed as an
     // empty BTreeMap for the parity evaluator; full projection through the
     // runtime-parity snapshot is a follow-up to the observer wiring PR.
@@ -24140,6 +24168,7 @@ async fn mob_runtime_parity_snapshot_summary(
         tasks_map,
         in_progress_task_ids,
         completed_task_ids,
+        member_restore_failures,
         member_session_bindings,
         pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
@@ -24175,6 +24204,10 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|id| format!("{id:?}"))
                     .collect::<BTreeSet<_>>(),
+                snap.member_restore_failures
+                    .into_iter()
+                    .map(|(k, v)| (format!("{k:?}"), v))
+                    .collect::<BTreeMap<_, _>>(),
                 snap.member_session_bindings
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
@@ -24226,6 +24259,7 @@ async fn mob_runtime_parity_snapshot_summary(
         tasks: tasks_map,
         in_progress_task_ids,
         completed_task_ids,
+        member_restore_failures,
         member_session_bindings,
         pending_spawn_sessions,
         pending_session_ingress_detach_runtime_ids,
@@ -24282,6 +24316,13 @@ fn mob_runtime_parity_field_value(
         )),
         "completed_task_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.completed_task_ids.clone(),
+        )),
+        "member_restore_failures" => Some(MobRuntimeParityExprValue::Map(
+            snapshot
+                .member_restore_failures
+                .keys()
+                .map(|k| (k.clone(), 0u64))
+                .collect(),
         )),
         "member_session_bindings" => Some(MobRuntimeParityExprValue::Map(
             snapshot

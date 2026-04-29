@@ -11,6 +11,9 @@ use crate::runtime::flow_frame_engine::FlowFrameLoopStorePlan;
 use crate::runtime::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus,
 };
+use crate::runtime::mob_member_lifecycle_projection::{
+    MobMemberLifecycleInput, MobMemberLifecycleProjection,
+};
 use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
     ReconcileStage,
@@ -719,6 +722,11 @@ pub struct MobHandle {
     #[cfg(feature = "runtime-adapter")]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics: Arc<RwLock<HashMap<MeerkatId, RestoreFailureDiagnostic>>>,
+    /// Read-only projection of the actor-owned MobMachine state. The actor is
+    /// the sole writer; handles use this only for non-blocking status/list
+    /// surfaces that must remain observable while a mutating command is
+    /// awaiting shell cleanup.
+    pub(super) machine_state_watch_rx: tokio::sync::watch::Receiver<mob_dsl::MobMachineState>,
     /// Read-only receiver for the actor's terminal-phase projection. The
     /// actor (sole writer) publishes the current DSL phase after every
     /// phase-changing transition and once more before exiting. Used by
@@ -1883,35 +1891,92 @@ impl MobHandle {
     /// live peer-connectivity fanout. Use [`member_status`](Self::member_status)
     /// for deep per-member inspection including live comms reachability.
     pub async fn list_members_including_retiring(&self) -> Vec<MobMemberListEntry> {
-        self.roster
-            .read()
+        if let Some(entries) = self.inflight_retiring_member_list().await {
+            return entries;
+        }
+        match self
+            .execute_machine_command(MobMachineCommand::ListMembersIncludingRetiring)
             .await
-            .list_all()
+        {
+            Ok(MobMachineCommandResult::ListMembersIncludingRetiring(entries)) => entries,
+            Ok(_) => {
+                tracing::error!("unexpected command result variant");
+                Default::default()
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    async fn inflight_retiring_member_list(&self) -> Option<Vec<MobMemberListEntry>> {
+        let entries: Vec<_> = {
+            let roster = self.roster.read().await;
+            let entries: Vec<_> = roster.list_all().cloned().collect();
+            if !entries
+                .iter()
+                .any(|entry| entry.state == crate::roster::MemberState::Retiring)
+            {
+                return None;
+            }
+            entries
+        };
+        let machine_state = self.machine_state_watch_rx.borrow().clone();
+        Some(self.project_member_list_entries_from_machine_state(entries, &machine_state))
+    }
+
+    fn project_member_list_entries_from_machine_state(
+        &self,
+        entries: Vec<RosterEntry>,
+        machine_state: &mob_dsl::MobMachineState,
+    ) -> Vec<MobMemberListEntry> {
+        entries
+            .into_iter()
             .map(|entry| {
-                let status = match entry.state {
-                    crate::roster::MemberState::Active => MobMemberStatus::Active,
-                    crate::roster::MemberState::Retiring => MobMemberStatus::Retiring,
-                };
-                MobMemberListEntry {
-                    agent_identity: entry.agent_identity.clone(),
+                let domain_identity =
+                    crate::ids::AgentIdentity::from(entry.agent_identity.as_str());
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+                let machine_bridge_session_id = machine_state
+                    .member_session_bindings
+                    .get(&dsl_identity)
+                    .and_then(|dsl_session_id| SessionId::parse(&dsl_session_id.0).ok());
+                let current_bridge_session_id = entry
+                    .member_ref
+                    .bridge_session_id()
+                    .cloned()
+                    .or(machine_bridge_session_id);
+                let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
+                    member_present: true,
+                    machine_lifecycle: machine_state
+                        .member_lifecycle_for_identity(&dsl_identity, true),
+                    output_preview: None,
+                    tokens_used: 0,
                     agent_runtime_id: entry.agent_runtime_id.clone(),
                     fence_token: entry.fence_token,
-                    role: entry.role.clone(),
+                    current_bridge_session_id,
+                    peer_connectivity: None,
+                    kickoff: entry.kickoff.clone(),
+                });
+                let snapshot = material.to_snapshot();
+                let current_bridge_session_id = snapshot.current_bridge_session_id().cloned();
+                MobMemberListEntry {
+                    agent_identity: entry.agent_identity,
+                    agent_runtime_id: entry.agent_runtime_id,
+                    fence_token: entry.fence_token,
+                    role: entry.role,
                     runtime_mode: entry.runtime_mode,
                     peer_id: entry.peer_id,
-                    transport_public_key: entry.transport_public_key.clone(),
+                    transport_public_key: entry.transport_public_key,
                     state: entry.state,
-                    wired_to: entry.wired_to.clone(),
-                    external_peer_specs: entry.external_peer_specs.clone(),
-                    labels: entry.labels.clone(),
-                    status,
-                    error: None,
-                    is_final: false,
+                    wired_to: entry.wired_to,
+                    external_peer_specs: entry.external_peer_specs,
+                    labels: entry.labels,
+                    status: snapshot.status,
+                    error: snapshot.error,
+                    is_final: snapshot.is_final,
                     current_session_id: None,
                     current_bridge_session_id: None,
-                    kickoff: entry.kickoff.clone(),
+                    kickoff: snapshot.kickoff,
                 }
-                .with_current_bridge_session_id(entry.member_ref.bridge_session_id().cloned())
+                .with_current_bridge_session_id(current_bridge_session_id)
             })
             .collect()
     }
@@ -4051,7 +4116,7 @@ mod tests {
         let snapshot = CanonicalMemberSnapshotMaterial {
             member_present: true,
             status: CanonicalMemberStatus::Active,
-            terminal_class: mob_dsl::MobMemberTerminalClass::Running,
+            is_terminal: false,
             error: None,
             output_preview: None,
             tokens_used: 0,

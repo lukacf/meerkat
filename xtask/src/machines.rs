@@ -702,6 +702,7 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
             format!("read flow reducer transition candidate {}", path.display())
         })?;
         let lines = contents.lines().collect::<Vec<_>>();
+        let test_only_lines = flow_reducer_test_only_lines(&rel, &lines);
         let mut module_aliases = BTreeMap::new();
         let mut bare_transition_aliases = BTreeMap::new();
         let mut bare_input_aliases = BTreeMap::new();
@@ -731,7 +732,7 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
         }
 
         for (line_index, line) in lines.iter().enumerate() {
-            if flow_reducer_line_is_test_only(&rel, &lines, line_index) {
+            if test_only_lines[line_index] {
                 continue;
             }
             for alias in module_aliases.keys() {
@@ -1097,13 +1098,20 @@ impl FlowReducerFamily {
     }
 }
 
-fn flow_reducer_line_is_test_only(path: &str, lines: &[&str], line_index: usize) -> bool {
+fn flow_reducer_test_only_lines(path: &str, lines: &[&str]) -> Vec<bool> {
     if path.ends_with("/tests.rs") {
-        return true;
+        return vec![true; lines.len()];
     }
-    lines[..=line_index]
-        .windows(2)
-        .any(|window| window[0].trim() == "#[cfg(test)]" && window[1].contains("mod tests"))
+
+    let mut test_only = Vec::with_capacity(lines.len());
+    let mut in_test_module = false;
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 && lines[index - 1].trim() == "#[cfg(test)]" && line.contains("mod tests") {
+            in_test_module = true;
+        }
+        test_only.push(in_test_module);
+    }
+    test_only
 }
 
 fn flow_reducer_direct_use_is_structurally_allowed(
@@ -2925,18 +2933,21 @@ fn verify_profile_name(profile: VerifyProfile) -> &'static str {
 
 fn merged_java_tool_options() -> String {
     let throughput_gc = "-XX:+UseParallelGC";
-    match env::var("JAVA_TOOL_OPTIONS") {
-        Ok(existing)
-            if existing
-                .split_whitespace()
-                .any(|flag| flag == throughput_gc) =>
-        {
-            existing
-        }
-        Ok(existing) if existing.trim().is_empty() => throughput_gc.into(),
-        Ok(existing) => format!("{throughput_gc} {existing}"),
-        Err(_) => throughput_gc.into(),
+    let stack_size = "-Xss16m";
+    let existing = env::var("JAVA_TOOL_OPTIONS").unwrap_or_default();
+    let mut flags = existing
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    if !flags.iter().any(|flag| flag == throughput_gc) {
+        flags.insert(0, throughput_gc.into());
     }
+    if !flags.iter().any(|flag| flag.starts_with("-Xss")) {
+        flags.insert(0, stack_size.into());
+    }
+
+    flags.join(" ")
 }
 
 fn write_generated(path: &Path, contents: &str) -> Result<()> {

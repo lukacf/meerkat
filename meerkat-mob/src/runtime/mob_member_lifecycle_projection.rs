@@ -19,7 +19,7 @@ pub(super) enum CanonicalMemberStatus {
 pub(super) struct CanonicalMemberSnapshotMaterial {
     pub(super) member_present: bool,
     pub(super) status: CanonicalMemberStatus,
-    pub(super) terminal_class: mob_dsl::MobMemberTerminalClass,
+    pub(super) is_terminal: bool,
     pub(super) error: Option<String>,
     pub(super) output_preview: Option<String>,
     pub(super) tokens_used: u64,
@@ -39,7 +39,6 @@ impl CanonicalMemberSnapshotMaterial {
             CanonicalMemberStatus::Broken => MobMemberStatus::Broken,
             CanonicalMemberStatus::Completed => MobMemberStatus::Completed,
         };
-        let is_final = MobMemberLifecycleProjection::is_terminal(self);
         MobMemberSnapshot {
             status,
             agent_runtime_id: self.agent_runtime_id.clone(),
@@ -47,7 +46,7 @@ impl CanonicalMemberSnapshotMaterial {
             output_preview: self.output_preview.clone(),
             error: self.error.clone(),
             tokens_used: self.tokens_used,
-            is_final,
+            is_final: self.is_terminal,
             realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
@@ -73,7 +72,6 @@ impl CanonicalMemberSnapshotMaterial {
 pub(super) struct MobMemberLifecycleInput {
     pub(super) member_present: bool,
     pub(super) machine_lifecycle: mob_dsl::MobMemberLifecycleMaterial,
-    pub(super) restore_failure: Option<String>,
     pub(super) output_preview: Option<String>,
     pub(super) tokens_used: u64,
     pub(super) agent_runtime_id: AgentRuntimeId,
@@ -91,36 +89,17 @@ impl MobMemberLifecycleProjection {
             mob_dsl::MobMemberLifecycleStatus::Unknown => CanonicalMemberStatus::Unknown,
             mob_dsl::MobMemberLifecycleStatus::Active => CanonicalMemberStatus::Active,
             mob_dsl::MobMemberLifecycleStatus::Retiring => CanonicalMemberStatus::Retiring,
+            mob_dsl::MobMemberLifecycleStatus::Broken => CanonicalMemberStatus::Broken,
             mob_dsl::MobMemberLifecycleStatus::Completed => CanonicalMemberStatus::Completed,
         }
     }
 
     pub(super) fn materialize(input: MobMemberLifecycleInput) -> CanonicalMemberSnapshotMaterial {
-        if let Some(reason) = input.restore_failure {
-            return CanonicalMemberSnapshotMaterial {
-                member_present: input.member_present,
-                status: if input.member_present {
-                    CanonicalMemberStatus::Broken
-                } else {
-                    CanonicalMemberStatus::Unknown
-                },
-                terminal_class: mob_dsl::MobMemberTerminalClass::TerminalFailure,
-                error: Some(reason),
-                output_preview: None,
-                tokens_used: 0,
-                agent_runtime_id: input.agent_runtime_id,
-                fence_token: input.fence_token,
-                current_bridge_session_id: input.current_bridge_session_id,
-                peer_connectivity: None,
-                kickoff: input.kickoff,
-            };
-        }
-
         CanonicalMemberSnapshotMaterial {
             member_present: input.member_present,
             status: Self::canonical_status(input.machine_lifecycle.status),
-            terminal_class: input.machine_lifecycle.terminal_class,
-            error: None,
+            is_terminal: input.machine_lifecycle.is_terminal(),
+            error: input.machine_lifecycle.error,
             output_preview: input.output_preview,
             tokens_used: input.tokens_used,
             agent_runtime_id: input.agent_runtime_id,
@@ -130,15 +109,6 @@ impl MobMemberLifecycleProjection {
             kickoff: input.kickoff,
         }
     }
-
-    pub(super) fn is_terminal(material: &CanonicalMemberSnapshotMaterial) -> bool {
-        matches!(
-            material.terminal_class,
-            mob_dsl::MobMemberTerminalClass::TerminalFailure
-                | mob_dsl::MobMemberTerminalClass::TerminalUnknown
-                | mob_dsl::MobMemberTerminalClass::TerminalCompleted
-        )
-    }
 }
 
 #[cfg(test)]
@@ -147,14 +117,14 @@ mod tests {
     use crate::ids::AgentIdentity;
 
     #[test]
-    fn restore_failure_breaks_present_member() {
+    fn machine_restore_failure_breaks_present_member() {
         let material = MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present: true,
             machine_lifecycle: mob_dsl::MobMemberLifecycleMaterial {
-                status: mob_dsl::MobMemberLifecycleStatus::Active,
-                terminal_class: mob_dsl::MobMemberTerminalClass::Running,
+                status: mob_dsl::MobMemberLifecycleStatus::Broken,
+                terminal_class: mob_dsl::MobMemberTerminalClass::TerminalFailure,
+                error: Some("restore mismatch".into()),
             },
-            restore_failure: Some("restore mismatch".into()),
             output_preview: Some("ignored".into()),
             tokens_used: 12,
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
@@ -164,6 +134,7 @@ mod tests {
             kickoff: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Broken);
+        assert!(material.is_terminal);
         assert_eq!(material.error.as_deref(), Some("restore mismatch"));
     }
 
@@ -174,8 +145,8 @@ mod tests {
             machine_lifecycle: mob_dsl::MobMemberLifecycleMaterial {
                 status: mob_dsl::MobMemberLifecycleStatus::Completed,
                 terminal_class: mob_dsl::MobMemberTerminalClass::TerminalCompleted,
+                error: None,
             },
-            restore_failure: None,
             output_preview: None,
             tokens_used: 0,
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
@@ -185,7 +156,7 @@ mod tests {
             kickoff: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Completed);
-        assert!(MobMemberLifecycleProjection::is_terminal(&material));
+        assert!(material.is_terminal);
     }
 
     #[test]
@@ -195,8 +166,8 @@ mod tests {
             machine_lifecycle: mob_dsl::MobMemberLifecycleMaterial {
                 status: mob_dsl::MobMemberLifecycleStatus::Active,
                 terminal_class: mob_dsl::MobMemberTerminalClass::Running,
+                error: None,
             },
-            restore_failure: None,
             output_preview: None,
             tokens_used: 0,
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
@@ -206,7 +177,7 @@ mod tests {
             kickoff: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Active);
-        assert!(!MobMemberLifecycleProjection::is_terminal(&material));
+        assert!(!material.is_terminal);
     }
 
     #[test]
@@ -216,8 +187,8 @@ mod tests {
             machine_lifecycle: mob_dsl::MobMemberLifecycleMaterial {
                 status: mob_dsl::MobMemberLifecycleStatus::Retiring,
                 terminal_class: mob_dsl::MobMemberTerminalClass::Running,
+                error: None,
             },
-            restore_failure: None,
             output_preview: None,
             tokens_used: 0,
             agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
@@ -227,6 +198,6 @@ mod tests {
             kickoff: None,
         });
         assert_eq!(material.status, CanonicalMemberStatus::Retiring);
-        assert!(!MobMemberLifecycleProjection::is_terminal(&material));
+        assert!(!material.is_terminal);
     }
 }

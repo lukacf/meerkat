@@ -117,6 +117,8 @@ pub(crate) struct MobDslT2Snapshot {
     >,
     pub in_progress_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
     pub completed_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
+    pub member_restore_failures:
+        std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     // W3-H-1: canonical identity→bridge-session binding map, projected from
     // `MobMachineAuthority.state.member_session_bindings`. Used by the
     // runtime-parity snapshot to expose the DSL's realtime binding map to

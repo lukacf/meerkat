@@ -3,8 +3,8 @@
 use meerkat_machine_codegen::{
     GENERATED_COVERAGE_END, GENERATED_COVERAGE_START, merge_mapping_document,
     render_composition_driver, render_composition_mapping_coverage, render_composition_module,
-    render_generated_kernel_mod, render_machine_kernel_module, render_machine_mapping_coverage,
-    render_machine_module,
+    render_composition_semantic_model, render_generated_kernel_mod, render_machine_kernel_module,
+    render_machine_mapping_coverage, render_machine_module,
 };
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -97,6 +97,27 @@ fn renders_kernel_seam_composition_with_routes() {
     ));
     assert!(rendered.contains("ROUTES"));
     assert!(rendered.ends_with("====\n"));
+}
+
+#[test]
+fn renders_kernel_seam_composition_with_namespaced_mob_native_helpers() {
+    let rendered = render_composition_semantic_model(&meerkat_mob_seam_composition());
+
+    for helper in [
+        "mob__mob_machine_node_terminal(status) ==",
+        "mob__mob_machine_step_status_from_frame_node_status(status) ==",
+        "mob__mob_machine_frame_node_status_after_admit(",
+        "mob__mob_machine_frame_ready_queue_after_admit(",
+        "mob__mob_machine_frame_node_status_after_terminal_branch(",
+        "mob__mob_machine_frame_node_status_after_terminal_dependencies(",
+        "mob__mob_machine_frame_node_status_after_terminal(",
+        "mob__mob_machine_frame_ready_queue_after_terminal(",
+    ] {
+        assert!(
+            rendered.contains(helper),
+            "composition model must define namespaced MobMachine native helper `{helper}`"
+        );
+    }
 }
 
 #[test]

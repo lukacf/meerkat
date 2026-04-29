@@ -327,6 +327,10 @@ pub(super) struct MobActor {
     pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) dsl_authority: mob_dsl::MobMachineAuthority,
+    /// Read-only MobMachine state projection for handle-side status/list
+    /// surfaces. The actor is the sole writer; handles can borrow the latest
+    /// state without enqueueing behind long shell cleanup work.
+    pub(super) machine_state_watch_tx: tokio::sync::watch::Sender<mob_dsl::MobMachineState>,
     /// Terminal-phase projection for external observers. Written by the
     /// actor after every DSL phase transition and once more right before
     /// the actor task exits. `MobHandle::status()` falls back to this
@@ -1058,7 +1062,22 @@ impl MobActor {
     }
 
     async fn ensure_member_not_broken(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
-        if let Some(diag) = self.restore_failure_for(agent_identity).await {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(
+            agent_identity.as_str(),
+        ));
+        let lifecycle = self
+            .dsl_authority
+            .state
+            .member_lifecycle_for_identity(&dsl_identity, true);
+        if lifecycle.status == mob_dsl::MobMemberLifecycleStatus::Broken {
+            let diag = self.restore_failure_for(agent_identity).await.unwrap_or(
+                super::handle::RestoreFailureDiagnostic {
+                    bridge_session_id: None,
+                    reason: lifecycle
+                        .error
+                        .unwrap_or_else(|| "member restore failed".to_string()),
+                },
+            );
             return Err(MobError::MemberRestoreFailed {
                 member_id: agent_identity.clone(),
                 session_id: diag.bridge_session_id,
@@ -1074,6 +1093,12 @@ impl MobActor {
     /// `MobCommand::QueryPhase` (dogma #1, #13, #17).
     fn state(&self) -> MobState {
         project_dsl_phase(self.dsl_authority.state.lifecycle_phase)
+    }
+
+    fn publish_machine_state_projection(&self) {
+        let _ = self
+            .machine_state_watch_tx
+            .send(self.dsl_authority.state.clone());
     }
 
     fn apply_dsl_input(
@@ -1105,6 +1130,7 @@ impl MobActor {
             // the sole write seam for the dogma-#13 projection watch.
             let _ = self.phase_watch_tx.send(self.state());
         }
+        self.publish_machine_state_projection();
         Ok(effects)
     }
 
@@ -1196,6 +1222,7 @@ impl MobActor {
         if phase_changed {
             let _ = self.phase_watch_tx.send(self.state());
         }
+        self.publish_machine_state_projection();
     }
 
     fn preview_dsl_input(
@@ -1238,6 +1265,7 @@ impl MobActor {
             self.dsl_authority.state.lifecycle_phase = transition.to_phase;
             let _ = self.phase_watch_tx.send(self.state());
         }
+        self.publish_machine_state_projection();
         Ok(())
     }
 
@@ -1415,40 +1443,6 @@ impl MobActor {
             .state
             .member_lifecycle_for_identity(&dsl_identity, member_present);
 
-        let restore_failure = {
-            self.restore_diagnostics
-                .read()
-                .await
-                .get(agent_identity)
-                .cloned()
-        };
-        if let Some(diag) = restore_failure {
-            return MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
-                member_present,
-                machine_lifecycle,
-                restore_failure: Some(diag.reason),
-                output_preview: None,
-                tokens_used: 0,
-                agent_runtime_id: roster_entry
-                    .as_ref()
-                    .map(|entry| entry.agent_runtime_id.clone())
-                    .unwrap_or_else(|| {
-                        crate::ids::AgentRuntimeId::initial(crate::ids::AgentIdentity::from(
-                            agent_identity.as_str(),
-                        ))
-                    }),
-                fence_token: roster_entry
-                    .as_ref()
-                    .map(|entry| entry.fence_token)
-                    .unwrap_or(crate::ids::FenceToken::new(0)),
-                current_bridge_session_id: diag.bridge_session_id,
-                peer_connectivity: None,
-                kickoff: roster_entry
-                    .as_ref()
-                    .and_then(|entry| entry.kickoff.clone()),
-            });
-        }
-
         let (output_preview, tokens_used) = match current_bridge_session_id.as_ref() {
             None => (None, 0),
             Some(bridge_session_id) if include_session_details => {
@@ -1467,7 +1461,6 @@ impl MobActor {
         MobMemberLifecycleProjection::materialize(MobMemberLifecycleInput {
             member_present,
             machine_lifecycle,
-            restore_failure: None,
             output_preview,
             tokens_used,
             agent_runtime_id: roster_entry
@@ -1545,6 +1538,7 @@ impl MobActor {
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter: self.runtime_adapter.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
+            machine_state_watch_rx: self.machine_state_watch_tx.subscribe(),
             phase_watch_rx: self.phase_watch_tx.subscribe(),
             // W2-E: the actor's internal handle-for-tools does not carry the
             // realtime factory — that seam lives on the caller-facing
@@ -1746,6 +1740,7 @@ impl MobActor {
         // prior `_ => {}` arm — they're lifted through
         // `lift_routed_effect` and await `flush_routed_effects`.
         self.queue_routed_effects_from(&transition.effects);
+        self.publish_machine_state_projection();
 
         for effect in transition.effects {
             match effect {
@@ -2848,11 +2843,11 @@ impl MobActor {
     /// member's session already has its conversation history.
     async fn ensure_autonomous_runtimes_from_roster(&self) -> Result<(), MobError> {
         let broken_members = self
-            .restore_diagnostics
-            .read()
-            .await
+            .dsl_authority
+            .state
+            .member_restore_failures
             .keys()
-            .cloned()
+            .map(|identity| MeerkatId::from(identity.0.as_str()))
             .collect::<HashSet<_>>();
         let entries = {
             let roster = self.roster.read().await;
@@ -3211,6 +3206,7 @@ impl MobActor {
                         tasks: dsl.tasks.clone(),
                         in_progress_task_ids: dsl.in_progress_task_ids.clone(),
                         completed_task_ids: dsl.completed_task_ids.clone(),
+                        member_restore_failures: dsl.member_restore_failures.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
                         pending_spawn_sessions: dsl.pending_spawn_sessions.clone(),
                         pending_session_ingress_detach_runtime_ids: dsl
@@ -5345,11 +5341,11 @@ impl MobActor {
     ) -> Vec<MeerkatId> {
         let mut targets = Vec::new();
         let broken_members = self
-            .restore_diagnostics
-            .read()
-            .await
+            .dsl_authority
+            .state
+            .member_restore_failures
             .keys()
-            .cloned()
+            .map(|identity| MeerkatId::from(identity.0.as_str()))
             .collect::<HashSet<_>>();
 
         if self.definition.wiring.auto_wire_orchestrator
@@ -5413,11 +5409,11 @@ impl MobActor {
     ) -> Option<MeerkatId> {
         let owner_bridge_session_id = owner_bridge_session_id?;
         let broken_members = self
-            .restore_diagnostics
-            .read()
-            .await
+            .dsl_authority
+            .state
+            .member_restore_failures
             .keys()
-            .cloned()
+            .map(|identity| MeerkatId::from(identity.0.as_str()))
             .collect::<HashSet<_>>();
         let roster = self.roster.read().await;
         roster
@@ -6978,6 +6974,7 @@ impl MobActor {
                             "MobMachine SessionIngressDetachedForMobDestroy transition rejected: {error}"
                         ))
                     })?;
+                self.publish_machine_state_projection();
                 Ok(())
             }
             Err(error) => {
@@ -6987,6 +6984,7 @@ impl MobActor {
                     obligation,
                     reason.clone(),
                 );
+                self.publish_machine_state_projection();
                 Err(MobError::Internal(format!(
                     "mob_destroying_session_ingress detach failed for {session_id}: {reason}"
                 )))
@@ -8884,6 +8882,7 @@ impl MobActor {
             self.dsl_authority.state.lifecycle_phase = transition.to_phase;
             let _ = self.phase_watch_tx.send(self.state());
         }
+        self.publish_machine_state_projection();
 
         // The MobMachine emits `RequestRuntimeIngress` whenever SubmitWork
         // is admitted. The shell realizes that routed-to-MeerkatMachine

@@ -964,6 +964,7 @@ pub enum MobMemberLifecycleStatus {
     Unknown,
     Active,
     Retiring,
+    Broken,
     Completed,
 }
 
@@ -976,19 +977,36 @@ pub enum MobMemberTerminalClass {
     TerminalCompleted,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MobMemberLifecycleMaterial {
     pub status: MobMemberLifecycleStatus,
     pub terminal_class: MobMemberTerminalClass,
+    pub error: Option<String>,
 }
 
 impl MobMemberLifecycleStatus {
     pub const fn terminal_class(self) -> MobMemberTerminalClass {
         match self {
             Self::Active | Self::Retiring => MobMemberTerminalClass::Running,
+            Self::Broken => MobMemberTerminalClass::TerminalFailure,
             Self::Completed => MobMemberTerminalClass::TerminalCompleted,
             Self::Unknown => MobMemberTerminalClass::TerminalUnknown,
         }
+    }
+}
+
+impl MobMemberTerminalClass {
+    pub const fn is_terminal(self) -> bool {
+        match self {
+            Self::Running => false,
+            Self::TerminalFailure | Self::TerminalUnknown | Self::TerminalCompleted => true,
+        }
+    }
+}
+
+impl MobMemberLifecycleMaterial {
+    pub const fn is_terminal(&self) -> bool {
+        self.terminal_class.is_terminal()
     }
 }
 
@@ -1002,8 +1020,13 @@ impl MobMachineState {
         agent_identity: &AgentIdentity,
         member_present: bool,
     ) -> MobMemberLifecycleMaterial {
+        let restore_failure = member_present
+            .then(|| self.member_restore_failures.get(agent_identity).cloned())
+            .flatten();
         let status = if !member_present {
             MobMemberLifecycleStatus::Unknown
+        } else if restore_failure.is_some() {
+            MobMemberLifecycleStatus::Broken
         } else if let Some(runtime_id) = self.identity_to_runtime.get(agent_identity) {
             if self.member_state_markers.get(runtime_id) == Some(&MobMemberState::Retiring) {
                 MobMemberLifecycleStatus::Retiring
@@ -1019,6 +1042,7 @@ impl MobMachineState {
         MobMemberLifecycleMaterial {
             status,
             terminal_class: status.terminal_class(),
+            error: restore_failure,
         }
     }
 }
@@ -1408,6 +1432,7 @@ mod tests {
             MobMemberLifecycleMaterial {
                 status: MobMemberLifecycleStatus::Unknown,
                 terminal_class: MobMemberTerminalClass::TerminalUnknown,
+                error: None,
             }
         );
 
@@ -1416,37 +1441,76 @@ mod tests {
             .identity_to_runtime
             .insert(identity.clone(), runtime_id.clone());
         authority.state.live_runtime_ids.insert(runtime_id.clone());
+        let active = authority
+            .state
+            .member_lifecycle_for_identity(&identity, true);
         assert_eq!(
-            authority
-                .state
-                .member_lifecycle_for_identity(&identity, true)
-                .status,
-            MobMemberLifecycleStatus::Active
+            active,
+            MobMemberLifecycleMaterial {
+                status: MobMemberLifecycleStatus::Active,
+                terminal_class: MobMemberTerminalClass::Running,
+                error: None,
+            }
         );
+        assert!(!active.is_terminal());
 
         authority
             .state
             .member_state_markers
             .insert(runtime_id.clone(), MobMemberState::Retiring);
+        let retiring = authority
+            .state
+            .member_lifecycle_for_identity(&identity, true);
         assert_eq!(
-            authority
-                .state
-                .member_lifecycle_for_identity(&identity, true),
+            retiring,
             MobMemberLifecycleMaterial {
                 status: MobMemberLifecycleStatus::Retiring,
                 terminal_class: MobMemberTerminalClass::Running,
+                error: None,
             }
         );
+        assert!(!retiring.is_terminal());
 
         authority.state.member_state_markers.remove(&runtime_id);
         authority.state.live_runtime_ids.remove(&runtime_id);
+        let completed = authority
+            .state
+            .member_lifecycle_for_identity(&identity, true);
+        assert_eq!(
+            completed,
+            MobMemberLifecycleMaterial {
+                status: MobMemberLifecycleStatus::Completed,
+                terminal_class: MobMemberTerminalClass::TerminalCompleted,
+                error: None,
+            }
+        );
+        assert!(completed.is_terminal());
+    }
+
+    #[test]
+    fn member_lifecycle_restore_failure_is_machine_terminal_truth() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("worker");
+        let runtime_id = AgentRuntimeId::from("worker:1");
+
+        authority
+            .state
+            .identity_to_runtime
+            .insert(identity.clone(), runtime_id.clone());
+        authority.state.live_runtime_ids.insert(runtime_id);
+        authority
+            .state
+            .member_restore_failures
+            .insert(identity.clone(), "missing durable session".to_string());
+
         assert_eq!(
             authority
                 .state
                 .member_lifecycle_for_identity(&identity, true),
             MobMemberLifecycleMaterial {
-                status: MobMemberLifecycleStatus::Completed,
-                terminal_class: MobMemberTerminalClass::TerminalCompleted,
+                status: MobMemberLifecycleStatus::Broken,
+                terminal_class: MobMemberTerminalClass::TerminalFailure,
+                error: Some("missing durable session".to_string()),
             }
         );
     }

@@ -96,6 +96,10 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_failed: Set<String>,
             member_kickoff_cancelled: Set<String>,
             member_kickoff_error: Map<String, String>,
+            // Identity-level restore failures are lifecycle facts owned by
+            // MobMachine. Projection code may surface the reason, but the
+            // Broken/terminal classification comes from this map.
+            member_restore_failures: Map<AgentIdentity, String>,
             // Per-runtime lifecycle marker (Active vs Retiring). Tracks the
             // draining/retiring sub-state independently of the mob-level
             // lifecycle phase so the shell can decide whether to route fresh
@@ -214,6 +218,7 @@ macro_rules! mob_catalog_machine_dsl {
             member_kickoff_failed = EmptySet,
             member_kickoff_cancelled = EmptySet,
             member_kickoff_error = EmptyMap,
+            member_restore_failures = EmptyMap,
             member_state_markers = EmptyMap,
             wiring_edges = EmptySet,
             external_peer_edges = EmptySet,
@@ -570,6 +575,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id);
+                self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -598,6 +604,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
                 self.member_session_bindings.insert(agent_identity, bridge_session_id);
+                self.member_restore_failures.remove(agent_identity);
                 self.topology_epoch += 1;
             }
             to Running
@@ -884,6 +891,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
+                self.member_restore_failures.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: session_id }
@@ -908,6 +916,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_binding_requested.insert(agent_runtime_id);
                 self.member_startup_runtime_ready.remove(agent_runtime_id);
                 self.member_startup_ready.remove(agent_runtime_id);
+                self.member_restore_failures.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeBinding { agent_identity: agent_identity, agent_runtime_id: agent_runtime_id, fence_token: fence_token, generation: generation, session_id: session_id }
@@ -938,6 +947,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.member_startup_runtime_ready = EmptySet;
                 self.member_startup_ready = EmptySet;
                 self.member_state_markers = EmptyMap;
+                self.member_restore_failures = EmptyMap;
                 self.pending_session_ingress_detach_runtime_ids = EmptySet;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
@@ -962,6 +972,7 @@ macro_rules! mob_catalog_machine_dsl {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
                 self.member_state_markers = EmptyMap;
+                self.member_restore_failures = EmptyMap;
                 self.active_run_count = 0;
                 self.pending_spawn_count = 0;
                 self.pending_spawn_sessions = EmptyMap;
@@ -2615,6 +2626,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -2633,6 +2645,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_restore_failures.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeRetire { session_id: session_id }
@@ -2647,6 +2660,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_restore_failures.remove(agent_identity);
             }
             to Running
             emit RequestRuntimeRetire { session_id: session_id }
@@ -2663,6 +2677,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
                 self.member_session_bindings.remove(agent_identity);
+                self.member_restore_failures.remove(agent_identity);
                 self.pending_session_ingress_detach_runtime_ids.insert(agent_runtime_id);
                 self.topology_epoch += 1;
             }
@@ -2720,6 +2735,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
             emit RequestRuntimeRetire { session_id: session_id }
@@ -2734,6 +2750,7 @@ macro_rules! mob_catalog_machine_dsl {
             guard "releasing_absent" { releasing == None }
             update {
                 self.member_state_markers.insert(agent_runtime_id, MobMemberState::Retiring);
+                self.member_restore_failures.remove(agent_identity);
             }
             to Stopped
             emit RequestRuntimeRetire { session_id: session_id }
@@ -2745,6 +2762,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_restore_failures = EmptyMap;
             }
             to Running
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }
@@ -2756,6 +2774,7 @@ macro_rules! mob_catalog_machine_dsl {
             update {
                 self.live_runtime_ids = EmptySet;
                 self.runtime_fence_tokens = EmptyMap;
+                self.member_restore_failures = EmptyMap;
             }
             to Stopped
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Retiring }

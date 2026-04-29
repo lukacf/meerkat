@@ -93,6 +93,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `member_kickoff_failed`: `Set<String>`
 - `member_kickoff_cancelled`: `Set<String>`
 - `member_kickoff_error`: `Map<String, String>`
+- `member_restore_failures`: `Map<AgentIdentity, String>`
 - `member_state_markers`: `Map<AgentRuntimeId, MobMemberState>`
 - `wiring_edges`: `Set<WiringEdge>`
 - `external_peer_edges`: `Set<ExternalPeerEdge>`

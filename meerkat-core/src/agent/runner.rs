@@ -417,8 +417,11 @@ where
             .map_err(|err| AgentError::InternalError(err.to_string()))?
             .into_iter()
             .collect::<ToolNameSet>();
-        precheck_visible_tool_call(self.tools.as_ref(), &visible_tool_names, call.name.as_str())
-            .map_err(|error| AgentError::ToolError(error.to_string()))?;
+        if let Err(error) =
+            precheck_visible_tool_call(self.tools.as_ref(), &visible_tool_names, call.name.as_str())
+        {
+            return Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error));
+        }
         let args = to_raw_value(&call.args).map_err(|err| {
             AgentError::InternalError(format!(
                 "failed to serialize external tool-call arguments: {err}"
@@ -444,7 +447,7 @@ where
             Err(crate::error::ToolError::CallbackPending { tool_name, args }) => {
                 Err(AgentError::CallbackPending { tool_name, args })
             }
-            Err(error) => Err(AgentError::ToolError(error.to_string())),
+            Err(error) => Ok(crate::ops::terminal_tool_outcome_for_error(call.id, error)),
         }
     }
 
@@ -655,7 +658,7 @@ where
         Ok(())
     }
 
-    async fn run_completed_hooks(
+    pub(super) async fn run_completed_hooks(
         &mut self,
         result: &mut RunResult,
         event_tx: Option<&mpsc::Sender<AgentEvent>>,
@@ -710,6 +713,7 @@ where
         if let Err(err) = self.store.save(&self.session).await {
             tracing::warn!("Failed to save session after run_completed hooks: {}", err);
         }
+        self.run_completed_hooks_applied = true;
         Ok(())
     }
 
@@ -891,6 +895,7 @@ where
             self.runtime_execution_kind = Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn);
         }
         self.extraction_state.reset();
+        self.run_completed_hooks_applied = false;
 
         // Apply canonical per-turn skill references staged by the surface.
         // Skill refs are text-only so they operate on the text projection.
@@ -935,9 +940,10 @@ where
 
         match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
-                if let Err(err) = self
-                    .run_completed_hooks(&mut result, event_tx.as_ref())
-                    .await
+                if !self.run_completed_hooks_applied
+                    && let Err(err) = self
+                        .run_completed_hooks(&mut result, event_tx.as_ref())
+                        .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
                     return Err(err);
@@ -990,6 +996,7 @@ where
                 Some(crate::lifecycle::RuntimeExecutionKind::ResumePending);
         }
         self.extraction_state.reset();
+        self.run_completed_hooks_applied = false;
 
         self.emit_run_started_event(ContentInput::Text(prompt.clone()), event_tx.as_ref())
             .await;
@@ -1004,9 +1011,10 @@ where
 
         match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
-                if let Err(err) = self
-                    .run_completed_hooks(&mut result, event_tx.as_ref())
-                    .await
+                if !self.run_completed_hooks_applied
+                    && let Err(err) = self
+                        .run_completed_hooks(&mut result, event_tx.as_ref())
+                        .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
                     return Err(err);

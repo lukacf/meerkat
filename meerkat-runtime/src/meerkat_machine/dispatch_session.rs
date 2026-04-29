@@ -589,9 +589,9 @@ impl MeerkatMachine {
                     )
                 };
                 // Delegate to the owner — `request_deferred_tools` fires
-                // the `StageDeferredNames` DSL input (with the extended set)
-                // to mint the revision and then projects onto owner state
-                // (dogma round 4, wave 2b #12).
+                // the witness-bearing `RequestDeferredTools` DSL input (with
+                // the extended set) to mint the revision and then projects
+                // onto owner state.
                 let revision = owner
                     .request_deferred_tools(names, witnesses)
                     .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;

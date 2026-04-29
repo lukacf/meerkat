@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use meerkat_core::{
-    AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
-    HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch, HookPoint,
-    HookReasonCode, LlmStreamResult, Message, StopReason, ToolCallView, ToolDef, ToolResult, Usage,
+    AgentBuilder, AgentError, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch,
+    HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason, ToolCallView, ToolDef,
+    ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
 #[derive(Clone, Copy)]
 enum ClientMode {
@@ -291,12 +292,60 @@ async fn pre_tool_deny_blocks_dispatch() {
         ClientMode::ToolThenText,
         hooks,
         seen_args.clone(),
-        seen_tokens,
+        seen_tokens.clone(),
     )
     .await;
 
-    let _ = agent.run("test".to_string().into()).await.unwrap();
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(32);
+    let err = agent
+        .run_with_events("test".to_string().into(), tx)
+        .await
+        .expect_err("PreToolExecution denial should terminalize the run");
+    assert!(matches!(
+        err,
+        AgentError::HookDenied {
+            point: HookPoint::PreToolExecution,
+            ..
+        }
+    ));
+
     assert!(seen_args.lock().await.is_empty());
+    assert_eq!(
+        seen_tokens.lock().await.len(),
+        1,
+        "pre-tool denial must not continue into a follow-up LLM turn"
+    );
+    assert!(
+        !agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::ToolResults { .. })),
+        "pre-tool denial must not fabricate a transcript ToolResult"
+    );
+
+    let snapshot = agent
+        .execution_snapshot()
+        .expect("test turn-state handle should expose a snapshot");
+    assert_eq!(snapshot.turn_phase, TurnPhase::Failed);
+    assert_eq!(snapshot.terminal_outcome, TurnTerminalOutcome::Failed);
+
+    let mut saw_run_failed = false;
+    let mut saw_tool_result_event = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::RunFailed { .. } => saw_run_failed = true,
+            AgentEvent::ToolExecutionCompleted { .. } | AgentEvent::ToolResultReceived { .. } => {
+                saw_tool_result_event = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_run_failed, "pre-tool denial should emit RunFailed");
+    assert!(
+        !saw_tool_result_event,
+        "pre-tool denial should not be emitted as a recoverable tool result"
+    );
 }
 
 #[tokio::test]

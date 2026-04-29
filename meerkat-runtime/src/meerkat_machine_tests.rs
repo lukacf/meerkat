@@ -11332,6 +11332,63 @@ async fn request_deferred_tools_updates_machine_owned_visibility_state() {
 }
 
 #[tokio::test]
+async fn request_deferred_tools_requires_machine_visible_witnesses() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let names = ["deferred_tool".to_string()].into_iter().collect();
+
+    let err = adapter
+        .request_deferred_tools(&session_id, names, Default::default())
+        .await
+        .expect_err("missing deferred-tool witnesses should fail");
+
+    assert!(
+        err.to_string().contains("deferred_tool"),
+        "missing-witness error should name the requested tool: {err}"
+    );
+    let state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should be readable");
+    assert!(
+        state.staged_requested_deferred_names.is_empty(),
+        "failed witness validation must not stage names"
+    );
+
+    let names = ["deferred_tool".to_string()].into_iter().collect();
+    let err = adapter
+        .request_deferred_tools(
+            &session_id,
+            names,
+            [(
+                "deferred_tool".to_string(),
+                meerkat_core::ToolVisibilityWitness::default(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .await
+        .expect_err("empty deferred-tool witnesses should fail");
+
+    assert!(
+        err.to_string().contains("deferred_tool"),
+        "empty-witness error should name the requested tool: {err}"
+    );
+    let state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should be readable");
+    assert!(
+        state.staged_requested_deferred_names.is_empty(),
+        "failed empty-witness validation must not stage names"
+    );
+}
+
+#[tokio::test]
 async fn machine_owned_visibility_owner_promotes_staged_state_at_boundary() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

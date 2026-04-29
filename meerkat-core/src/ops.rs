@@ -3,6 +3,7 @@
 //! Unified abstraction for tool calls, shell commands, and delegated branches.
 
 use crate::budget::BudgetLimits;
+use crate::error::ToolError;
 use crate::session::ToolVisibilityWitness;
 use crate::types::{Message, ToolNameSet};
 use serde::{Deserialize, Serialize};
@@ -128,6 +129,22 @@ impl From<crate::types::ToolResult> for ToolDispatchOutcome {
     fn from(result: crate::types::ToolResult) -> Self {
         Self::sync_result(result)
     }
+}
+
+/// Convert a denied/failed tool dispatch into the canonical terminal tool
+/// outcome shape used by both model-driven and external tool calls.
+pub fn terminal_tool_outcome_for_error(
+    tool_use_id: impl Into<String>,
+    error: ToolError,
+) -> ToolDispatchOutcome {
+    let payload = error.to_error_payload();
+    let serialized = serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "{\"error\":\"tool_error\",\"message\":\"tool error\"}".to_string());
+    ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
+        tool_use_id.into(),
+        serialized,
+        true,
+    ))
 }
 
 impl OperationId {

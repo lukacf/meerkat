@@ -2983,7 +2983,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RequestDeferredTools { names, witnesses }
             guard "session_registered" { self.session_id != None }
-            update {}
+            update {
+                self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
+                self.staged_deferred_names = names;
+                self.staged_visibility_revision = self.next_staged_visibility_revision;
+            }
             to Idle
         }
 

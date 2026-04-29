@@ -230,6 +230,12 @@ pub struct ToolVisibilityWitness {
     pub last_seen_provenance: Option<ToolProvenance>,
 }
 
+impl ToolVisibilityWitness {
+    pub fn has_identity_witness(&self) -> bool {
+        self.stable_owner_key.is_some() || self.last_seen_provenance.is_some()
+    }
+}
+
 /// Canonical durable session-local tool visibility intent.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

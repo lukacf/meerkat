@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use crate::live::{
     OpenAiLiveCallTarget, OpenAiLiveServerEvent, OpenAiLiveSession, OpenAiLiveSessionFactory,
-    openai_live_function_call_error_event, openai_live_function_call_success_events,
+    openai_live_function_call_error_event, openai_live_function_call_error_result_event,
+    openai_live_function_call_success_events,
 };
 use async_trait::async_trait;
 use meerkat_core::ToolDispatchOutcome;
@@ -262,12 +263,21 @@ async fn handle_openai_live_event(
             {
                 Ok(outcome) => {
                     let output = outcome.result.text_content();
-                    let events = openai_live_function_call_success_events(call_id, output);
-                    for event in events {
+                    if outcome.result.is_error {
                         session
-                            .send_raw(event)
+                            .send_raw(openai_live_function_call_error_result_event(
+                                call_id, output,
+                            ))
                             .await
                             .map_err(map_openai_live_error)?;
+                    } else {
+                        let events = openai_live_function_call_success_events(call_id, output);
+                        for event in events {
+                            session
+                                .send_raw(event)
+                                .await
+                                .map_err(map_openai_live_error)?;
+                        }
                     }
                     Ok(())
                 }
@@ -1169,6 +1179,89 @@ mod tests {
                     .as_str()
                     .expect("function-call output should serialize as text")
                     .contains("tool denied")
+            );
+        } else {
+            panic!("unexpected provider event: {:?}", sent[0]);
+        }
+
+        hold_open.notify_waiters();
+    }
+
+    #[tokio::test]
+    async fn openai_live_orchestrator_reports_terminal_tool_error_results_without_response_create()
+    {
+        let (runtime, session_id) = runtime_with_live_executor().await;
+        let hold_open = Arc::new(Notify::new());
+        let sent_events = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(FakeFactory {
+            sessions: Mutex::new(VecDeque::from([Ok(Box::new(FakeSession {
+                events: VecDeque::from([
+                    OpenAiLiveServerEvent::ResponseFunctionCallArgumentsDone {
+                        event_id: "evt_tool_terminal_err".to_string(),
+                        response_id: "resp_terminal_err".to_string(),
+                        item_id: "item_terminal_err".to_string(),
+                        output_index: 0,
+                        call_id: "call_terminal_err".to_string(),
+                        name: "hidden".to_string(),
+                        arguments: r#"{"hidden":true}"#.to_string(),
+                    },
+                ]),
+                event_gate: None,
+                close_gate: Some(hold_open.clone()),
+                sent_events: sent_events.clone(),
+            })
+                as Box<dyn OpenAiLiveSession>)])),
+        });
+        let host = Arc::new(FakeToolDispatchHost {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            outcomes: Mutex::new(VecDeque::from([Ok(ToolDispatchOutcome::sync_result(
+                ToolResult::new(
+                    "call_terminal_err".to_string(),
+                    serde_json::json!({
+                        "error": "access_denied",
+                        "message": "hidden tool denied"
+                    })
+                    .to_string(),
+                    true,
+                ),
+            ))])),
+        });
+        let orchestrator =
+            OpenAiRealtimeAttachmentOrchestrator::new(runtime.clone(), factory, host);
+        let target = OpenAiLiveCallTarget::new("call_terminal_tool_error")
+            .expect("call target should succeed");
+
+        orchestrator
+            .ensure_attached_for_capable_session(&session_id, &target)
+            .await
+            .expect("attach should succeed");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !sent_events.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("terminal tool error result should be reported back to provider");
+
+        let sent = sent_events.lock().await.clone();
+        assert_eq!(
+            sent.len(),
+            1,
+            "terminal tool error results must not be followed by ResponseCreate"
+        );
+        if let OpenAiLiveClientEvent::ConversationItemCreate { .. } = &sent[0] {
+            let payload =
+                serde_json::to_value(&sent[0]).expect("provider event should serialize for checks");
+            assert_eq!(payload["item"]["call_id"], "call_terminal_err");
+            assert!(
+                payload["item"]["output"]
+                    .as_str()
+                    .expect("function-call output should serialize as text")
+                    .contains("access_denied")
             );
         } else {
             panic!("unexpected provider event: {:?}", sent[0]);

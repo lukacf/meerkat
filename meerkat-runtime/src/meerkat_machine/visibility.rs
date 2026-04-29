@@ -98,6 +98,21 @@ pub fn formal_projection_value<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).unwrap_or_else(|err| format!("\"<serialization error: {err}>\""))
 }
 
+fn missing_visibility_witness_names(
+    names: &std::collections::BTreeSet<String>,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| {
+            witnesses
+                .get(name.as_str())
+                .is_none_or(|witness| !witness.has_identity_witness())
+        })
+        .cloned()
+        .collect()
+}
+
 impl ToolVisibilityOwner for MachineToolVisibilityOwner {
     fn visibility_state(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
         self.state
@@ -197,6 +212,11 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         &self,
         names: std::collections::BTreeSet<String>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        if !names.is_empty() {
+            return Err(ToolScopeStageError::MissingWitnesses {
+                names: names.into_iter().collect(),
+            });
+        }
         let revision = self.mint_revision_via_dsl(
             super::dsl::MeerkatMachineInput::StageDeferredNames {
                 names: names.clone(),
@@ -216,32 +236,51 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         names: std::collections::BTreeSet<String>,
         witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
-        // `request_deferred_tools` extends the staged set; compute the
-        // full extended set before firing the DSL input so the DSL state
-        // tracks the same logical post-condition as the owner state.
-        let extended: std::collections::BTreeSet<String> = {
+        // `request_deferred_tools` extends the staged set and carries the
+        // witness map through the DSL input so deferred admission is
+        // authority-visible, not a shell-only side projection.
+        let (extended, combined_witnesses): (
+            std::collections::BTreeSet<String>,
+            std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        ) = {
             let state = self.state.read().map_err(|_| ToolScopeStageError::Owner {
                 message: "machine visibility state lock poisoned".to_string(),
             })?;
-            state
+            let extended = state
                 .staged_requested_deferred_names
                 .union(&names)
                 .cloned()
-                .collect()
+                .collect();
+            let mut combined_witnesses = state.requested_witnesses.clone();
+            combined_witnesses.extend(witnesses);
+            (extended, combined_witnesses)
         };
+        let missing = missing_visibility_witness_names(&extended, &combined_witnesses);
+        if !missing.is_empty() {
+            return Err(ToolScopeStageError::MissingWitnesses { names: missing });
+        }
+        let dsl_witnesses = combined_witnesses
+            .iter()
+            .map(|(name, witness)| {
+                (
+                    name.clone(),
+                    super::dsl::ToolVisibilityWitness::from(witness),
+                )
+            })
+            .collect();
         let revision = self.mint_revision_via_dsl(
-            super::dsl::MeerkatMachineInput::StageDeferredNames {
+            super::dsl::MeerkatMachineInput::RequestDeferredTools {
                 names: extended.clone(),
+                witnesses: dsl_witnesses,
             },
-            "StageDeferredNames",
+            "RequestDeferredTools",
         )?;
         let mut state = self.state.write().map_err(|_| ToolScopeStageError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
         state.staged_requested_deferred_names = extended;
-        state.requested_witnesses.extend(witnesses);
+        state.requested_witnesses = combined_witnesses;
         state.staged_revision = revision.0;
-        let _ = names; // names merged via `extended`
         Ok(revision)
     }
 

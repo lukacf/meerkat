@@ -5406,6 +5406,51 @@ async fn test_query_string_bootstrap_token_fallback_is_rejected() {
 }
 
 #[tokio::test]
+async fn test_concurrent_terminal_lifecycle_commands_observe_live_state_drift() {
+    let (handle, _service) = create_test_mob(sample_definition_with_mcp_servers()).await;
+
+    let stop = {
+        let handle = handle.clone();
+        tokio::spawn(async move { ("stop", handle.stop().await) })
+    };
+    let complete = {
+        let handle = handle.clone();
+        tokio::spawn(async move { ("complete", handle.complete().await) })
+    };
+
+    let (stop, complete) = tokio::join!(stop, complete);
+    let results = [stop.expect("stop join"), complete.expect("complete join")];
+    let successes = results.iter().filter(|(_, result)| result.is_ok()).count();
+    assert_eq!(
+        successes, 1,
+        "only the first admitted terminal lifecycle command may run shell mechanics: {results:?}"
+    );
+
+    let failed = results
+        .iter()
+        .find_map(|(_, result)| result.as_ref().err())
+        .expect("one command should observe live-state drift");
+    assert!(
+        matches!(failed, MobError::InvalidTransition { .. }),
+        "losing lifecycle command must fail at live admission, got {failed:?}"
+    );
+
+    let state = handle.status().await.expect("status after lifecycle race");
+    assert!(
+        matches!(state, MobState::Stopped | MobState::Completed),
+        "terminal lifecycle race should leave a terminal lifecycle phase, got {state:?}"
+    );
+    assert!(
+        handle
+            .mcp_server_states()
+            .await
+            .values()
+            .all(|running| !*running),
+        "terminal lifecycle shell mechanics should stop mcp servers exactly once"
+    );
+}
+
+#[tokio::test]
 async fn test_lifecycle_updates_mcp_server_states() {
     let (handle, _service) = create_test_mob(sample_definition_with_mcp_servers()).await;
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -14286,6 +14331,7 @@ async fn test_stop_fails_pending_spawns_and_cleans_up_provisioned_session() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     handle.stop().await.expect("stop should succeed");
+    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
 
     let spawn_error = pending_spawn
         .await
@@ -15651,6 +15697,44 @@ fn test_flow_cleanup_uses_terminal_projection_not_authority_clone_probe() {
         !body.contains("authorities_expect_completion"),
         "flow cleanup must not infer terminality by probing whether authority signals would be accepted"
     );
+}
+
+#[test]
+fn test_lifecycle_commands_admit_on_live_authority_not_clone_probe() {
+    let source = include_str!("actor.rs");
+    let start = source
+        .find("MobCommand::Stop { reply_tx }")
+        .expect("Stop command arm exists");
+    let end = source[start..]
+        .find("MobCommand::TaskCreate")
+        .expect("TaskCreate command arm follows lifecycle command arms");
+    let lifecycle_arms = &source[start..start + end];
+
+    for command in ["Stop", "ResumeLifecycle", "Complete", "Reset"] {
+        let command_start = lifecycle_arms
+            .find(&format!("MobCommand::{command}"))
+            .unwrap_or_else(|| panic!("{command} command arm exists"));
+        let command_end = [
+            "MobCommand::ResumeLifecycle",
+            "MobCommand::Complete",
+            "MobCommand::Destroy",
+            "MobCommand::Reset",
+            "MobCommand::TaskCreate",
+        ]
+        .into_iter()
+        .filter_map(|marker| {
+            lifecycle_arms[command_start + 1..]
+                .find(marker)
+                .map(|offset| command_start + 1 + offset)
+        })
+        .min()
+        .unwrap_or(lifecycle_arms.len());
+        let arm = &lifecycle_arms[command_start..command_end];
+        assert!(
+            !arm.contains("probe_mob_machine_input"),
+            "{command} lifecycle admission must not be decided by cloned MobMachine probe truth"
+        );
+    }
 }
 
 #[test]

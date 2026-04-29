@@ -1108,6 +1108,48 @@ impl MobActor {
         Ok(effects)
     }
 
+    fn require_live_lifecycle_phase(
+        &self,
+        required: mob_dsl::MobPhase,
+        target: MobState,
+    ) -> Result<(), MobError> {
+        if self.dsl_authority.state.lifecycle_phase == required {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: target,
+            })
+        }
+    }
+
+    fn require_live_reset_admission(&self) -> Result<(), MobError> {
+        if matches!(
+            self.dsl_authority.state.lifecycle_phase,
+            mob_dsl::MobPhase::Running | mob_dsl::MobPhase::Stopped | mob_dsl::MobPhase::Completed
+        ) {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            })
+        }
+    }
+
+    fn require_live_stop_admission(&self) -> Result<(), MobError> {
+        if self.dsl_authority.state.lifecycle_phase == mob_dsl::MobPhase::Running
+            && self.dsl_authority.state.active_run_count == 0
+        {
+            Ok(())
+        } else {
+            Err(MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Stopped,
+            })
+        }
+    }
+
     fn prepare_dsl_input(
         &self,
         input: mob_dsl::MobMachineInput,
@@ -1795,9 +1837,9 @@ impl MobActor {
 
     /// Probe a DSL input against a clone of current state — returns
     /// `InvalidTransition` if the DSL rejects the input, without
-    /// mutating the live authority. Used as the pre-admission gate for
-    /// simple lifecycle commands whose side effects can only run after the
-    /// target transition is known to be accepted.
+    /// mutating the live authority. This remains only for non-lifecycle
+    /// policy lookahead paths where the shell must avoid staging unrelated
+    /// side effects before a later live admission seam.
     ///
     /// `target` is used purely for the `InvalidTransition` error hint
     /// (the phase the caller is trying to reach). The DSL rejects on the
@@ -3224,9 +3266,7 @@ impl MobActor {
                     let _ = reply_tx.send(binding);
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let result = match self
-                        .probe_mob_machine_input(mob_dsl::MobMachineInput::Stop, MobState::Stopped)
-                    {
+                    let result = match self.require_live_stop_admission() {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is stopping").await;
                             self.notify_orchestrator_lifecycle(format!(
@@ -3284,7 +3324,6 @@ impl MobActor {
                                 }
                             }
                             if stop_result.is_err() {
-                                // Restore checkpointer state — mob stays Running.
                                 self.provisioner.rearm_all_checkpointers().await;
                             }
                             stop_result
@@ -3294,10 +3333,9 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ResumeLifecycle { reply_tx } => {
-                    let result = match self.probe_mob_machine_input(
-                        mob_dsl::MobMachineInput::Resume,
-                        MobState::Running,
-                    ) {
+                    let result = match self
+                        .require_live_lifecycle_phase(mob_dsl::MobPhase::Stopped, MobState::Running)
+                    {
                         Ok(()) => {
                             // Re-enable checkpointers cancelled during stop.
                             self.provisioner.rearm_all_checkpointers().await;
@@ -3309,6 +3347,7 @@ impl MobActor {
                                         "resume cleanup failed while stopping mcp servers"
                                     );
                                 }
+                                self.provisioner.cancel_all_checkpointers().await;
                                 Err(error)
                             } else if let Err(error) =
                                 self.ensure_autonomous_runtimes_from_roster().await
@@ -3327,6 +3366,7 @@ impl MobActor {
                                         "resume cleanup failed while stopping mcp servers"
                                     );
                                 }
+                                self.provisioner.cancel_all_checkpointers().await;
                                 Err(error)
                             } else {
                                 let mut resume_result: Result<(), MobError> = Ok(());
@@ -3379,8 +3419,8 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Complete { reply_tx } => {
-                    let result = match self.probe_mob_machine_input(
-                        mob_dsl::MobMachineInput::Complete,
+                    let result = match self.require_live_lifecycle_phase(
+                        mob_dsl::MobPhase::Running,
                         MobState::Completed,
                     ) {
                         Ok(()) => {
@@ -3405,14 +3445,13 @@ impl MobActor {
                     }
                 }
                 MobCommand::Reset { reply_tx } => {
-                    if let Err(error) = self
-                        .probe_mob_machine_input(mob_dsl::MobMachineInput::Reset, MobState::Running)
-                    {
+                    let prior_state = self.state();
+                    if let Err(error) = self.require_live_reset_admission() {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
                     self.fail_all_pending_spawns("mob is resetting").await;
-                    let result = self.handle_reset().await;
+                    let result = self.handle_reset(prior_state).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::TaskCreate {
@@ -3728,11 +3767,20 @@ impl MobActor {
         for slot in self.pending_spawns.drain_all() {
             let spawn_ticket = slot.ticket;
             let agent_identity = slot.spawn.agent_identity.clone();
-            self.complete_orchestrator_spawn(
-                Some(spawn_ticket),
-                &agent_identity,
-                "lifecycle transition cleared pending spawn",
-            );
+            let dsl_identity =
+                mob_dsl::AgentIdentity::from_domain(&AgentIdentity::from(agent_identity.as_str()));
+            if self
+                .dsl_authority
+                .state
+                .pending_spawn_sessions
+                .contains_key(&dsl_identity)
+            {
+                self.complete_orchestrator_spawn(
+                    Some(spawn_ticket),
+                    &agent_identity,
+                    "lifecycle transition cleared pending spawn",
+                );
+            }
             self.abort_pending_spawn_slot(&slot, reason).await;
             slot.fail(&format!("spawn canceled for '{agent_identity}': {reason}"));
             tracing::debug!(
@@ -8462,11 +8510,10 @@ impl MobActor {
         }
     }
 
-    async fn handle_reset(&mut self) -> Result<(), MobError> {
+    async fn handle_reset(&mut self, prior_state: MobState) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("handle_reset preflight")?;
         self.ensure_flow_tracker_alignment("handle_reset preflight")
             .await?;
-        let prior_state = self.state();
         let was_stopped = prior_state == MobState::Stopped;
         self.cancel_all_flow_tasks().await?;
 
@@ -8538,12 +8585,12 @@ impl MobActor {
             return Err(error);
         }
 
-        // The command handler already probes Reset before the destructive phase.
-        // Once side effects and epoch events have succeeded, realize that same
-        // typed transition as the single authority-owned lifecycle landing. The
-        // ResetToRunning transition owns active/pending run counters and
-        // coordinator binding, so reset does not need shell Stop/Resume or
-        // orchestrator stop/resume choreography.
+        // The command handler already checked Reset's live MobMachine phase
+        // guard before destructive shell work began. Once side effects and
+        // epoch events have succeeded, commit the typed ResetToRunning
+        // transition on the live authority. ResetToRunning owns active/pending
+        // run counters and coordinator binding, so reset does not need shell
+        // Stop/Resume or orchestrator stop/resume choreography.
         self.apply_dsl_input(mob_dsl::MobMachineInput::Reset, "reset_to_running")
             .map_err(|error| {
                 MobError::Internal(format!(

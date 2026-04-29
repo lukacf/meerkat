@@ -381,12 +381,6 @@ impl SessionRuntimeLlmReconfigureHost {
             .unwrap_or_else(|| current.model.clone());
         let provider = if let Some(provider_name) = request.provider.as_ref() {
             meerkat_core::Provider::from_name(provider_name)
-        } else if request.model.is_some() {
-            registry
-                .entry(&model)
-                .map(|entry| entry.provider)
-                .or_else(|| meerkat_core::Provider::infer_from_model(&model))
-                .unwrap_or(current.provider)
         } else {
             current.provider
         };
@@ -402,12 +396,12 @@ impl SessionRuntimeLlmReconfigureHost {
             if request.model.is_none() {
                 current.self_hosted_server_id.clone().or_else(|| {
                     registry
-                        .entry(&model)
+                        .entry_for_provider(meerkat_core::Provider::SelfHosted, &model)
                         .and_then(|entry| entry.self_hosted.as_ref())
                         .map(|server| server.server_id.clone())
                 })
             } else {
-                match registry.entry(&model) {
+                match registry.entry_for_provider(meerkat_core::Provider::SelfHosted, &model) {
                     Some(entry) => entry
                         .self_hosted
                         .as_ref()
@@ -477,14 +471,15 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .collect();
 
         let registry = self.model_registry().await?;
-        let (current_capability_surface, capability_surface_status) =
-            match registry.profile_for(&current_identity.model) {
-                Some(profile) => (
-                    Some(profile_to_capability_surface(&profile)),
-                    SessionLlmCapabilitySurfaceStatus::Resolved,
-                ),
-                None => (None, SessionLlmCapabilitySurfaceStatus::Unresolved),
-            };
+        let (current_capability_surface, capability_surface_status) = match registry
+            .profile_for_provider(current_identity.provider, &current_identity.model)
+        {
+            Some(profile) => (
+                Some(profile_to_capability_surface(&profile)),
+                SessionLlmCapabilitySurfaceStatus::Resolved,
+            ),
+            None => (None, SessionLlmCapabilitySurfaceStatus::Unresolved),
+        };
 
         Ok(HydratedSessionLlmState {
             current_identity,
@@ -505,10 +500,11 @@ impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
             .await?;
         let registry = self.model_registry().await?;
         let profile = registry
-            .profile_for(&target_identity.model)
+            .profile_for_provider(target_identity.provider, &target_identity.model)
             .ok_or_else(|| RuntimeDriverError::ValidationFailed {
                 reason: format!(
-                    "no capability profile is registered for model '{}'",
+                    "no capability profile is registered for provider '{}' and model '{}'",
+                    target_identity.provider.as_str(),
                     target_identity.model
                 ),
             })?;
@@ -1273,7 +1269,6 @@ impl SessionRuntime {
             registry
                 .entry(&model)
                 .map(|entry| entry.provider)
-                .or_else(|| meerkat_core::Provider::infer_from_model(&model))
                 .unwrap_or(meerkat_core::Provider::Other)
         };
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
@@ -1285,7 +1280,9 @@ impl SessionRuntime {
                 .and_then(Session::session_metadata)
             {
                 metadata.self_hosted_server_id
-            } else if let Some(entry) = registry.entry(&model) {
+            } else if let Some(entry) =
+                registry.entry_for_provider(meerkat_core::Provider::SelfHosted, &model)
+            {
                 entry
                     .self_hosted
                     .as_ref()
@@ -1315,7 +1312,7 @@ impl SessionRuntime {
         self.model_registry()
             .await
             .ok()
-            .and_then(|registry| registry.profile_for(&identity.model))
+            .and_then(|registry| registry.profile_for_provider(identity.provider, &identity.model))
             .map(|profile| profile.inline_video)
             .unwrap_or(false)
     }
@@ -1383,12 +1380,6 @@ impl SessionRuntime {
         let model = ov.model.clone().unwrap_or_else(|| current.model.clone());
         let provider = if let Some(provider_name) = ov.provider.as_ref() {
             meerkat_core::Provider::from_name(provider_name)
-        } else if ov.model.is_some() {
-            registry
-                .entry(&model)
-                .map(|entry| entry.provider)
-                .or_else(|| meerkat_core::Provider::infer_from_model(&model))
-                .unwrap_or(current.provider)
         } else {
             current.provider
         };
@@ -1403,12 +1394,12 @@ impl SessionRuntime {
             if ov.model.is_none() {
                 current.self_hosted_server_id.clone().or_else(|| {
                     registry
-                        .entry(&model)
+                        .entry_for_provider(meerkat_core::Provider::SelfHosted, &model)
                         .and_then(|entry| entry.self_hosted.as_ref())
                         .map(|server| server.server_id.clone())
                 })
             } else {
-                match registry.entry(&model) {
+                match registry.entry_for_provider(meerkat_core::Provider::SelfHosted, &model) {
                     Some(entry) => entry
                         .self_hosted
                         .as_ref()
@@ -5918,6 +5909,113 @@ mod tests {
                 data: "AAAA".to_string(),
             },
         }])
+    }
+
+    #[tokio::test]
+    async fn provider_supports_inline_video_requires_provider_owned_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let gemini_video_model_on_openai = SessionLlmIdentity {
+            model: "gemini-3-flash-preview".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let gemini_video_model_on_gemini = SessionLlmIdentity {
+            provider: meerkat_core::Provider::Gemini,
+            ..gemini_video_model_on_openai.clone()
+        };
+
+        assert!(
+            !runtime
+                .provider_supports_inline_video(&gemini_video_model_on_openai)
+                .await,
+            "OpenAI identity must not inherit Gemini inline-video capability from model id alone"
+        );
+        assert!(
+            runtime
+                .provider_supports_inline_video(&gemini_video_model_on_gemini)
+                .await,
+            "owned Gemini inline-video capability should still resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconfigure_capability_lookup_rejects_provider_model_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let host = runtime.llm_reconfigure_host();
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let request = SessionLlmReconfigureRequest {
+            model: Some("gpt-5.4".to_string()),
+            provider: Some("anthropic".to_string()),
+            provider_params: None,
+            clear_provider_params: false,
+            connection_ref: None,
+            clear_connection_ref: false,
+        };
+
+        let err = host
+            .resolve_target_session_llm_identity(&request, &current)
+            .await
+            .expect_err("target model not owned by provider must fail closed");
+        assert!(
+            err.to_string().contains("anthropic") && err.to_string().contains("gpt-5.4"),
+            "error should identify the rejected provider/model pair: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_model_override_without_provider_preserves_current_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: meerkat_core::Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = runtime
+            .resolve_target_llm_identity(&current, &overrides)
+            .await
+            .expect("model-only override should resolve against the current provider");
+
+        assert_eq!(
+            resolved.provider,
+            meerkat_core::Provider::Anthropic,
+            "model-only turn overrides must not infer a new provider from model id alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_model_only_build_preserves_catalog_provider_inference_compatibility() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let build_config = AgentBuildConfig {
+            llm_client_override: Some(Arc::new(MockLlmClient)),
+            ..AgentBuildConfig::new("gpt-5.4")
+        };
+
+        let identity = runtime
+            .llm_identity_from_pending_build(&build_config)
+            .await
+            .expect("initial model-only build should infer catalog provider");
+
+        assert_eq!(identity.provider, meerkat_core::Provider::OpenAI);
+        assert_eq!(identity.model, "gpt-5.4");
     }
 
     #[cfg(feature = "mcp")]

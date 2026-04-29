@@ -1816,7 +1816,7 @@ impl AgentFactory {
         let registry = config
             .model_registry()
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
-        let model_profile = registry.profile_for(&identity.model);
+        let model_profile = registry.profile_for_provider(identity.provider, &identity.model);
         Ok(meerkat_core::SessionLlmRequestPolicy {
             model: identity.model.clone(),
             provider_params: identity.provider_params.clone(),
@@ -1843,12 +1843,14 @@ impl AgentFactory {
         if let Some(provider) = build_config.provider {
             return match provider {
                 Provider::SelfHosted => {
-                    let entry = registry.entry(&build_config.model).ok_or_else(|| {
-                        BuildAgentError::Config(format!(
-                            "self-hosted model '{}' is not registered in config",
-                            build_config.model
-                        ))
-                    })?;
+                    let entry = registry
+                        .entry_for_provider(Provider::SelfHosted, &build_config.model)
+                        .ok_or_else(|| {
+                            BuildAgentError::Config(format!(
+                                "self-hosted model '{}' is not registered in config",
+                                build_config.model
+                            ))
+                        })?;
                     let server_id = entry
                         .self_hosted
                         .as_ref()
@@ -1920,9 +1922,14 @@ impl AgentFactory {
 
         #[cfg(feature = "openai")]
         {
-            let entry = registry.entry(&identity.model).ok_or_else(|| {
-                FactoryError::ClientCreationFailed(format!("unknown model '{}'", identity.model))
-            })?;
+            let entry = registry
+                .entry_for_provider(Provider::SelfHosted, &identity.model)
+                .ok_or_else(|| {
+                    FactoryError::ClientCreationFailed(format!(
+                        "unknown model '{}'",
+                        identity.model
+                    ))
+                })?;
             let self_hosted = entry.self_hosted.as_ref().ok_or_else(|| {
                 FactoryError::ClientCreationFailed(format!(
                     "model '{}' is not self-hosted",
@@ -2470,7 +2477,7 @@ impl AgentFactory {
 
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
         let model = build_config.model.clone();
-        let model_profile = registry.profile_for(&model);
+        let model_profile = registry.profile_for_provider(provider, &model);
         if let meerkat_core::RuntimeBuildMode::SessionOwned(bindings) =
             &build_config.runtime_build_mode
         {
@@ -3567,6 +3574,41 @@ mod tests {
             ),
             None,
             "provider-aware default lookup must not reuse OpenAI defaults for Anthropic"
+        );
+    }
+
+    #[test]
+    fn request_policy_tool_defaults_require_provider_owned_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let openai_identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let mismatched_identity = SessionLlmIdentity {
+            provider: Provider::Anthropic,
+            ..openai_identity.clone()
+        };
+
+        let openai_policy = factory
+            .request_policy_for_llm_identity(&config, &openai_identity, false)
+            .expect("OpenAI request policy");
+        assert_eq!(
+            openai_policy.provider_tool_defaults,
+            Some(serde_json::json!({"web_search": {"type": "web_search"}})),
+            "owned OpenAI web-search defaults should still resolve"
+        );
+
+        let mismatched_policy = factory
+            .request_policy_for_llm_identity(&config, &mismatched_identity, false)
+            .expect("mismatched request policy should fail closed, not error");
+        assert!(
+            mismatched_policy.provider_tool_defaults.is_none(),
+            "Anthropic policy must not reuse OpenAI model defaults from model id alone"
         );
     }
 

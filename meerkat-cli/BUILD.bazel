@@ -186,6 +186,7 @@ rust_test(
         ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//meerkat:package_runfiles",
         "//meerkat-cli:rkat",
         "//meerkat-cli:rkat_mini_bin",
     ],

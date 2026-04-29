@@ -19,8 +19,10 @@ pub use lease::{
     ResolvedAuthEnvelope, ResolvedAuthKind,
 };
 pub use lifecycle::{
+    PublishedAuthStatus, TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
     lease_snapshot_expires_at_datetime, persisted_token_expires_at_epoch_secs,
-    publish_token_lifecycle_acquired, publish_token_lifecycle_released,
+    project_published_auth_status, publish_token_lifecycle_acquired,
+    publish_token_lifecycle_released,
 };
 pub use metadata::{
     AnthropicAuthMetadata, AnthropicRouteHints, AuthMetadata, AuthMetadataDefaults, AuthRouteHints,

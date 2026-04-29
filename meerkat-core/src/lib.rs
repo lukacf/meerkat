@@ -288,9 +288,11 @@ pub use auth::{
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
     AuthRouteHints, AuthStatus, AuthStatusPhase, GoogleAuthMetadata, GoogleRouteHints,
     HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints,
-    ProviderAuthMetadata, ResolvedAuthEnvelope, ResolvedAuthKind,
+    ProviderAuthMetadata, PublishedAuthStatus, ResolvedAuthEnvelope, ResolvedAuthKind,
+    TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
     lease_snapshot_expires_at_datetime, persisted_token_expires_at_epoch_secs,
-    publish_token_lifecycle_acquired, publish_token_lifecycle_released,
+    project_published_auth_status, publish_token_lifecycle_acquired,
+    publish_token_lifecycle_released,
 };
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,

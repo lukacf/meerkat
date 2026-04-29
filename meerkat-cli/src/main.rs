@@ -2936,6 +2936,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             // TokenStore lookup: `<realm>:<profile_id>` is the canonical key.
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
+                use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
                 use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
                 let store = TokenStoreBackend::default_auto()
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
@@ -2943,13 +2944,25 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
                 let key = TokenKey::parse(&realm, &profile_id)
                     .map_err(|e| anyhow::anyhow!("invalid token-key realm/profile: {e}"))?;
-                match store
+                let stored = store
                     .load(&key)
                     .await
-                    .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?
-                {
+                    .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
+                let connection_ref = meerkat_core::ConnectionRef {
+                    realm: key.realm.clone(),
+                    binding: key.binding.clone(),
+                    profile: key.profile.clone(),
+                };
+                let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+                let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+                let projection = meerkat_core::project_published_auth_status(
+                    chrono::Utc::now(),
+                    stored.as_ref(),
+                    &snapshot,
+                );
+                match projection.tokens {
                     Some(tokens) => {
-                        println!("state:       {}", AuthStatusPhase::Unknown.as_public_str());
+                        println!("state:       {}", projection.phase.as_public_str());
                         println!("auth_mode:   {:?}", tokens.auth_mode);
                         println!(
                             "has_secret:  {}",
@@ -2982,15 +2995,21 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                         println!("backend:     {}", store.backend_name());
                     }
                     None => {
-                        println!("state:       {}", AuthStatusPhase::Unknown.as_public_str());
+                        println!("state:       {}", projection.phase.as_public_str());
                         println!("backend:     {}", store.backend_name());
-                        println!(
-                            "note:        no persisted credential for '{realm}:{profile_id}';"
-                        );
-                        println!(
-                            "             run `rkat auth login {}` or rely on env-var fallback.",
-                            profile.provider.as_str(),
-                        );
+                        if stored.is_none() {
+                            println!(
+                                "note:        no persisted credential for '{realm}:{profile_id}';"
+                            );
+                            println!(
+                                "             run `rkat auth login {}` or rely on env-var fallback.",
+                                profile.provider.as_str(),
+                            );
+                        } else {
+                            println!(
+                                "note:        persisted credential metadata hidden until AuthMachine lifecycle is live."
+                            );
+                        }
                     }
                 }
             }
@@ -3040,15 +3059,25 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
                 let key = TokenKey::parse(&realm, &profile_id)
                     .map_err(|e| anyhow::anyhow!("invalid token-key realm/profile: {e}"))?;
-                let present = store
-                    .load(&key)
+                let should_clear = match store.load(&key).await {
+                    Ok(present) => present.is_some(),
+                    Err(e) if token_store_load_error_allows_clear(&e) => true,
+                    Err(e) => return Err(anyhow::anyhow!("TokenStore load failed: {e}")),
+                };
+                if should_clear {
+                    let connection_ref = meerkat_core::ConnectionRef {
+                        realm: key.realm.clone(),
+                        binding: key.binding.clone(),
+                        profile: key.profile.clone(),
+                    };
+                    let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+                    meerkat_core::clear_tokens_and_publish_lifecycle_released(
+                        store.as_ref(),
+                        &auth_lease,
+                        &connection_ref,
+                    )
                     .await
-                    .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
-                if present.is_some() {
-                    store
-                        .clear(&key)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("TokenStore clear failed: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
                     println!("deleted: {}:{}", key.realm.as_str(), key.binding.as_str());
                 } else {
                     println!(
@@ -3882,6 +3911,11 @@ async fn interactive_login(
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn token_store_load_error_allows_clear(e: &meerkat_providers::auth_store::TokenStoreError) -> bool {
+    matches!(e, meerkat_providers::auth_store::TokenStoreError::Serde(_))
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::Result<()> {
     use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
 
@@ -3905,16 +3939,26 @@ async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::
         ],
     };
     let mut cleared = 0;
+    let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
     for key in keys {
-        let present = store
-            .load(&key)
+        let should_clear = match store.load(&key).await {
+            Ok(present) => present.is_some(),
+            Err(e) if token_store_load_error_allows_clear(&e) => true,
+            Err(e) => return Err(anyhow::anyhow!("TokenStore load failed: {e}")),
+        };
+        if should_clear {
+            let connection_ref = meerkat_core::ConnectionRef {
+                realm: key.realm.clone(),
+                binding: key.binding.clone(),
+                profile: key.profile.clone(),
+            };
+            meerkat_core::clear_tokens_and_publish_lifecycle_released(
+                store.as_ref(),
+                &auth_lease,
+                &connection_ref,
+            )
             .await
-            .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
-        if present.is_some() {
-            store
-                .clear(&key)
-                .await
-                .map_err(|e| anyhow::anyhow!("TokenStore clear failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Token lifecycle clear failed: {e}"))?;
             eprintln!(
                 "{} Cleared {}:{}",
                 auth_green("✓"),

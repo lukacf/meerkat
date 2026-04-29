@@ -15,6 +15,51 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+fn seed_managed_openai_realm_config(root: &std::path::Path) {
+    let realm_dir = root.join("realms").join("dev");
+    std::fs::create_dir_all(&realm_dir).expect("mkdir realm config dir");
+    std::fs::write(
+        realm_dir.join("config.toml"),
+        r#"
+[realm.dev]
+default_binding = "default_openai"
+
+[realm.dev.backend.openai_backend]
+provider = "openai"
+backend_kind = "openai_api"
+
+[realm.dev.auth.default_openai]
+provider = "openai"
+auth_method = "api_key"
+source = { kind = "managed_store" }
+
+[realm.dev.binding.default_openai]
+backend_profile = "openai_backend"
+auth_profile = "default_openai"
+"#,
+    )
+    .expect("write realm config");
+}
+
+fn seed_token_file(root: &std::path::Path, body: &str) {
+    let token_dir = root
+        .join("config")
+        .join("meerkat")
+        .join("credentials")
+        .join("dev");
+    std::fs::create_dir_all(&token_dir).expect("mkdir token dir");
+    std::fs::write(token_dir.join("default_openai.json"), body).expect("write token file");
+}
+
+fn token_file_exists(root: &std::path::Path) -> bool {
+    root.join("config")
+        .join("meerkat")
+        .join("credentials")
+        .join("dev")
+        .join("default_openai.json")
+        .exists()
+}
+
 fn rkat_binary() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rkat") {
         let p = PathBuf::from(path);
@@ -68,6 +113,153 @@ fn rkat_auth_help_lists_all_subcommands() {
         assert!(
             stdout.contains(subcommand),
             "rkat auth --help must mention `{subcommand}` subcommand; stdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn rkat_auth_logout_clears_malformed_token_file() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_token_file(tmp.path(), "{ malformed token json");
+
+    let logout = Command::new(&rkat)
+        .args(["auth", "logout", "default_openai"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth logout must spawn");
+    if !logout.status.success() {
+        let stderr = String::from_utf8_lossy(&logout.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("logout must clear malformed token file; stderr={stderr}");
+    }
+
+    assert!(
+        !token_file_exists(tmp.path()),
+        "logout must remove malformed persisted credentials"
+    );
+}
+
+#[test]
+fn rkat_auth_profile_delete_clears_malformed_token_file() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_managed_openai_realm_config(tmp.path());
+    seed_token_file(tmp.path(), "{ malformed token json");
+
+    let delete = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "profile-delete",
+            "--realm",
+            "dev",
+            "default_openai",
+            "--yes",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth profile-delete must spawn");
+    if !delete.status.success() {
+        let stderr = String::from_utf8_lossy(&delete.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("profile delete must clear malformed token file; stderr={stderr}");
+    }
+
+    assert!(
+        !token_file_exists(tmp.path()),
+        "profile delete must remove malformed persisted credentials"
+    );
+}
+
+#[test]
+fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_managed_openai_realm_config(tmp.path());
+    seed_token_file(
+        tmp.path(),
+        r#"{
+  "auth_mode": "api_key",
+  "primary_secret": "sk-stale",
+  "refresh_token": "refresh-stale",
+  "expires_at": 1800000000,
+  "last_refresh": 1700000000,
+  "scopes": ["email"],
+  "account_id": "acct-stale"
+}"#,
+    );
+
+    let status = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "status",
+            "--realm",
+            "dev",
+            "default_openai",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth status must spawn");
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("status must succeed with seeded config; stderr={stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("state:       unknown"),
+        "status should report unknown without a live AuthMachine lifecycle; stdout:\n{stdout}"
+    );
+    for forbidden in [
+        "auth_mode:",
+        "has_secret:",
+        "has_refresh:",
+        "expires_at:",
+        "last_refresh:",
+        "account_id:",
+        "scopes:",
+        "acct-stale",
+        "email",
+    ] {
+        assert!(
+            !stdout.contains(forbidden),
+            "status must not expose token-derived `{forbidden}` without lifecycle; stdout:\n{stdout}"
         );
     }
 }
@@ -146,5 +338,74 @@ fn rkat_run_connection_ref_flag_is_registered_and_routes() {
     assert!(
         !stderr.contains("thread 'main' panicked"),
         "rkat run must not panic on unknown realm; stderr:\n{stderr}"
+    );
+}
+
+/// `rkat auth logout` clears the same TokenStore key written by scripted login
+/// and fails closed on a repeat clear instead of reporting success for stale
+/// credentials.
+#[test]
+fn rkat_auth_logout_clears_scripted_login_token_key() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let login = Command::new(&rkat)
+        .args([
+            "auth",
+            "login",
+            "openai",
+            "--non-interactive",
+            "--secret",
+            "sk-test",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth login must spawn");
+    if !login.status.success() {
+        let stderr = String::from_utf8_lossy(&login.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("scripted login failed: {stderr}");
+    }
+
+    let logout = Command::new(&rkat)
+        .args(["auth", "logout", "default_openai"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth logout must spawn");
+    assert!(
+        logout.status.success(),
+        "logout must clear scripted login token; stderr={}",
+        String::from_utf8_lossy(&logout.stderr)
+    );
+
+    let repeat = Command::new(&rkat)
+        .args(["auth", "logout", "default_openai"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("repeat rkat auth logout must spawn");
+    assert!(
+        !repeat.status.success(),
+        "repeat logout must not report success for already-cleared credentials"
+    );
+    let stderr = String::from_utf8_lossy(&repeat.stderr);
+    assert!(
+        stderr.contains("No credentials found"),
+        "repeat logout should explain that no token remains; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("thread 'main' panicked"),
+        "repeat logout must not panic; stderr={stderr}"
     );
 }

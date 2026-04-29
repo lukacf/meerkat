@@ -98,6 +98,7 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
+    pub(crate) from_peer_id: Option<meerkat_core::comms::PeerId>,
     pub(crate) lifecycle_peer: Option<String>,
     pub(crate) request_id: Option<InteractionId>,
     pub(crate) admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
@@ -554,6 +555,7 @@ impl InboxSender {
             auth: result.auth,
             kind,
             from_peer: result.from_peer,
+            from_peer_id: result.from_peer_id,
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
             admission_diagnostic: decision.admission_diagnostic,
@@ -729,6 +731,7 @@ impl InboxSender {
             auth: result.auth,
             kind,
             from_peer: result.from_peer,
+            from_peer_id: result.from_peer_id,
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
             admission_diagnostic: decision.admission_diagnostic,
@@ -807,6 +810,7 @@ fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
             .from_peer
             .as_ref()
             .map(|peer| PeerIngressDiagnosticDisplay::new(peer.clone())),
+        from_peer_id: entry.from_peer_id,
         lifecycle_peer_display: entry
             .lifecycle_peer
             .as_ref()

@@ -22,7 +22,7 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeAck, BridgeBindResponse, BridgeCapabilities, BridgeCommand, BridgeDeliveryOutcome,
     BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
     BridgeDestroyResponse, BridgeMemberRuntimeState, BridgeObservationResponse,
-    BridgePeerConnectivity, BridgePeerSpec, BridgeRejectionCause, BridgeReply,
+    BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec, BridgeRejectionCause, BridgeReply,
     BridgeRetireResponse, BridgeSupervisorPayload, SUPERVISOR_BRIDGE_INTENT,
     canonicalize_bridge_address, supervisor_bridge_default_protocol_version,
     supervisor_bridge_protocol_version_supported, supervisor_bridge_supported_protocol_versions,
@@ -361,22 +361,42 @@ pub fn spawn_comms_drain(
     })
 }
 
-fn sender_matches_bound_supervisor(sender: &str, name: &str, peer_id: &str) -> bool {
-    sender == name || sender == peer_id
+fn bridge_peer_identity(
+    peer: &BridgePeerSpec,
+    context: &str,
+) -> Result<BridgePeerIdentity, (BridgeRejectionCause, String)> {
+    BridgePeerIdentity::try_from(peer).map_err(|error| {
+        (
+            BridgeRejectionCause::InvalidSupervisorSpec,
+            format!("{context}: invalid supervisor peer spec: {error}"),
+        )
+    })
 }
 
-fn sender_matches_bridge_peer(sender: &str, peer: &BridgePeerSpec) -> bool {
-    sender == peer.name
-        || sender == peer.peer_id
-        || bridge_peer_pubkey_sender(peer).is_some_and(|pubkey| sender == pubkey)
+fn bound_supervisor_peer_id(
+    peer_id: &str,
+    context: &str,
+) -> Result<PeerId, (BridgeRejectionCause, String)> {
+    PeerId::parse(peer_id).map_err(|error| {
+        (
+            BridgeRejectionCause::Internal,
+            format!("{context}: invalid bound supervisor peer_id: {error}"),
+        )
+    })
 }
 
-fn bridge_peer_pubkey_sender(peer: &BridgePeerSpec) -> Option<String> {
-    if peer.pubkey == [0u8; 32] {
-        return None;
-    }
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    Some(format!("ed25519:{}", BASE64.encode(peer.pubkey)))
+fn sender_peer_label(sender: Option<PeerId>) -> String {
+    sender
+        .map(|peer_id| peer_id.to_string())
+        .unwrap_or_else(|| "<missing typed peer id>".to_string())
+}
+
+fn sender_matches_bound_supervisor(sender: Option<PeerId>, peer_id: &PeerId) -> bool {
+    sender.is_some_and(|sender| sender == *peer_id)
+}
+
+fn sender_matches_bridge_peer(sender: Option<PeerId>, peer: &BridgePeerIdentity) -> bool {
+    sender.is_some_and(|sender| sender == peer.peer_id)
 }
 
 fn unsupported_bridge_protocol_version_message(context: &str, protocol_version: u32) -> String {
@@ -395,10 +415,10 @@ fn unsupported_bridge_protocol_version_message(context: &str, protocol_version: 
 /// The current binding snapshot is read from DSL state by the caller and
 /// passed in; the validator itself is pure so it remains test-friendly.
 fn require_authorized_supervisor(
-    sender: &str,
+    sender: Option<PeerId>,
     payload: &BridgeSupervisorPayload,
     current: &SupervisorBinding,
-) -> Result<(), (BridgeRejectionCause, String)> {
+) -> Result<BridgePeerIdentity, (BridgeRejectionCause, String)> {
     if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
         return Err((
             BridgeRejectionCause::UnsupportedProtocolVersion,
@@ -409,7 +429,6 @@ fn require_authorized_supervisor(
         ));
     }
     let SupervisorBinding::Bound {
-        name: current_name,
         peer_id: current_peer_id,
         epoch: current_epoch,
         ..
@@ -420,6 +439,8 @@ fn require_authorized_supervisor(
             "no authorized supervisor registered".to_string(),
         ));
     };
+    let supervisor = bridge_peer_identity(&payload.supervisor, "supervisor bridge request")?;
+    let current_peer_id = bound_supervisor_peer_id(current_peer_id, "supervisor bridge request")?;
     if payload.epoch < *current_epoch {
         return Err((
             BridgeRejectionCause::StaleSupervisor,
@@ -438,16 +459,17 @@ fn require_authorized_supervisor(
             ),
         ));
     }
-    if payload.supervisor.peer_id != *current_peer_id {
+    if supervisor.peer_id != current_peer_id {
         return Err((
             BridgeRejectionCause::StaleSupervisor,
             format!(
                 "stale supervisor peer '{}' (current '{current_peer_id}')",
-                payload.supervisor.peer_id
+                supervisor.peer_id
             ),
         ));
     }
-    if !sender_matches_bound_supervisor(sender, current_name, current_peer_id) {
+    if !sender_matches_bound_supervisor(sender, &current_peer_id) {
+        let sender = sender_peer_label(sender);
         return Err((
             BridgeRejectionCause::SenderMismatch,
             format!(
@@ -455,7 +477,7 @@ fn require_authorized_supervisor(
             ),
         ));
     }
-    Ok(())
+    Ok(supervisor)
 }
 
 fn bridge_capabilities() -> BridgeCapabilities {
@@ -473,7 +495,7 @@ fn bridge_capabilities() -> BridgeCapabilities {
 
 fn peer_input_from_delivery_payload(
     session_id: &SessionId,
-    sender: &str,
+    sender_peer_id: PeerId,
     request_id: meerkat_core::interaction::InteractionId,
     payload: BridgeDeliveryPayload,
 ) -> Input {
@@ -490,7 +512,7 @@ fn peer_input_from_delivery_payload(
             id: meerkat_core::lifecycle::InputId::new(),
             timestamp: chrono::Utc::now(),
             source: InputOrigin::Peer {
-                peer_id: sender.to_string(),
+                peer_id: sender_peer_id.as_str(),
                 runtime_id: Some(LogicalRuntimeId::new(session_id.to_string())),
             },
             durability: InputDurability::Durable,
@@ -549,7 +571,7 @@ fn advertised_bind_bootstrap_token(
 
 fn validate_bind_request(
     comms_runtime: &Arc<dyn CommsRuntime>,
-    sender: &str,
+    sender: Option<PeerId>,
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
 ) -> Result<(TrustedPeerDescriptor, String), (BridgeRejectionCause, String)> {
     if !supervisor_bridge_protocol_version_supported(payload.protocol_version) {
@@ -579,12 +601,14 @@ fn validate_bind_request(
             ),
         ));
     }
-    if !sender_matches_bridge_peer(sender, &payload.supervisor) {
+    let supervisor = bridge_peer_identity(&payload.supervisor, "bind member failed")?;
+    if !sender_matches_bridge_peer(sender, &supervisor) {
+        let sender = sender_peer_label(sender);
         return Err((
             BridgeRejectionCause::SenderMismatch,
             format!(
                 "request sender '{sender}' does not match supervisor '{}'",
-                payload.supervisor.peer_id
+                supervisor.peer_id
             ),
         ));
     }
@@ -613,14 +637,10 @@ fn validate_bind_request(
             "bind member failed: invalid bootstrap token".to_string(),
         ));
     }
-    let supervisor =
-        TrustedPeerDescriptor::try_from(payload.supervisor.clone()).map_err(|error| {
-            (
-                BridgeRejectionCause::InvalidSupervisorSpec,
-                format!("bind member failed: invalid supervisor peer spec: {error}"),
-            )
-        })?;
-    Ok((supervisor, advertised_address))
+    Ok((
+        supervisor.into_trusted_peer_descriptor(),
+        advertised_address,
+    ))
 }
 
 #[derive(Debug)]
@@ -707,7 +727,7 @@ enum BindMemberGate {
 }
 
 fn validate_bind_request_against_state(
-    sender: &str,
+    sender: Option<PeerId>,
     payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
     current: &SupervisorBinding,
 ) -> Result<BindMemberGate, (BridgeRejectionCause, String)> {
@@ -721,7 +741,6 @@ fn validate_bind_request_against_state(
         ));
     }
     let SupervisorBinding::Bound {
-        name: current_name,
         peer_id: current_peer_id,
         epoch: current_epoch,
         ..
@@ -729,7 +748,9 @@ fn validate_bind_request_against_state(
     else {
         return Ok(BindMemberGate::Bootstrap);
     };
-    if payload.supervisor.peer_id != *current_peer_id {
+    let supervisor = bridge_peer_identity(&payload.supervisor, "bind member failed")?;
+    let current_peer_id = bound_supervisor_peer_id(current_peer_id, "bind member failed")?;
+    if supervisor.peer_id != current_peer_id {
         return Err((
             BridgeRejectionCause::AlreadyBound,
             format!(
@@ -746,7 +767,8 @@ fn validate_bind_request_against_state(
             ),
         ));
     }
-    if !sender_matches_bound_supervisor(sender, current_name, current_peer_id) {
+    if !sender_matches_bound_supervisor(sender, &current_peer_id) {
+        let sender = sender_peer_label(sender);
         return Err((
             BridgeRejectionCause::SenderMismatch,
             format!(
@@ -758,7 +780,7 @@ fn validate_bind_request_against_state(
 }
 
 fn validate_authorize_supervisor_request(
-    sender: &str,
+    sender: Option<PeerId>,
     payload: &BridgeSupervisorPayload,
     current: &SupervisorBinding,
 ) -> Result<AuthorizeSupervisorGate, (BridgeRejectionCause, String)> {
@@ -771,8 +793,8 @@ fn validate_authorize_supervisor_request(
             ),
         ));
     }
+    let supervisor = bridge_peer_identity(&payload.supervisor, "authorize supervisor failed")?;
     if let SupervisorBinding::Bound {
-        name: current_name,
         peer_id: current_peer_id,
         epoch: current_epoch,
         ..
@@ -787,7 +809,10 @@ fn validate_authorize_supervisor_request(
                 ),
             ));
         }
-        if !sender_matches_bound_supervisor(sender, current_name, current_peer_id) {
+        let current_peer_id =
+            bound_supervisor_peer_id(current_peer_id, "authorize supervisor failed")?;
+        if !sender_matches_bound_supervisor(sender, &current_peer_id) {
+            let sender = sender_peer_label(sender);
             return Err((
                 BridgeRejectionCause::SenderMismatch,
                 format!(
@@ -795,18 +820,19 @@ fn validate_authorize_supervisor_request(
                 ),
             ));
         }
-        if payload.epoch == *current_epoch && payload.supervisor.peer_id == *current_peer_id {
+        if payload.epoch == *current_epoch && supervisor.peer_id == current_peer_id {
             return Ok(AuthorizeSupervisorGate::IdempotentAck);
         }
         return Ok(AuthorizeSupervisorGate::Proceed);
     }
 
-    if !sender_matches_bridge_peer(sender, &payload.supervisor) {
+    if !sender_matches_bridge_peer(sender, &supervisor) {
+        let sender = sender_peer_label(sender);
         return Err((
             BridgeRejectionCause::SenderMismatch,
             format!(
                 "authorize supervisor failed: request sender '{sender}' does not match supervisor '{}'",
-                payload.supervisor.peer_id
+                supervisor.peer_id
             ),
         ));
     }
@@ -873,95 +899,20 @@ async fn resolve_bridge_response_route(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
 ) -> Option<PeerRoute> {
-    if let Some(supervisor) = bridge_response_supervisor(candidate)
-        && let Some(sender_route) =
-            bridge_response_route_from_sender(&candidate.interaction.from, &supervisor)
-    {
-        let sender_peer_id = sender_route.peer_id.as_str();
-        if let Some(route) = resolve_peer_route(comms_runtime, &sender_peer_id).await {
-            return Some(route);
-        }
-        return Some(sender_route);
-    }
-    if let Some(supervisor) = bridge_response_supervisor(candidate)
-        && let Some(route) = resolve_bridge_display_name_sender_route(
-            comms_runtime,
-            &candidate.interaction.from,
-            &supervisor,
-        )
+    let sender_peer_id = candidate.from_peer_id?;
+    resolve_peer_route(comms_runtime, sender_peer_id)
         .await
-    {
-        return Some(route);
-    }
-
-    resolve_peer_route(comms_runtime, &candidate.interaction.from).await
-}
-
-fn bridge_response_route_from_sender(sender: &str, peer: &BridgePeerSpec) -> Option<PeerRoute> {
-    if sender == peer.peer_id {
-        return PeerId::parse(sender).ok().map(PeerRoute::new);
-    }
-
-    let sender_pubkey = bridge_peer_pubkey_sender(peer)?;
-    if sender != sender_pubkey {
-        return None;
-    }
-    Some(PeerRoute::new(PeerId::from_ed25519_pubkey(&peer.pubkey)))
-}
-
-async fn resolve_bridge_display_name_sender_route(
-    comms_runtime: &Arc<dyn CommsRuntime>,
-    sender: &str,
-    peer: &BridgePeerSpec,
-) -> Option<PeerRoute> {
-    if sender != peer.name {
-        return None;
-    }
-    let expected_peer_id = PeerId::parse(&peer.peer_id).ok()?;
-    let peers = comms_runtime.peers().await;
-    let mut matches = peers.iter().filter(|entry| entry.name.as_str() == sender);
-    let entry = matches.next()?;
-    if matches.next().is_some() || entry.peer_id != expected_peer_id {
-        return None;
-    }
-    Some(PeerRoute::with_display_name(
-        entry.peer_id,
-        entry.name.clone(),
-    ))
-}
-
-fn bridge_response_supervisor(candidate: &PeerInputCandidate) -> Option<BridgePeerSpec> {
-    let InteractionContent::Request { intent, params } = &candidate.interaction.content else {
-        return None;
-    };
-    if intent != SUPERVISOR_BRIDGE_INTENT {
-        return None;
-    }
-    let command: BridgeCommand = serde_json::from_value(params.clone()).ok()?;
-    Some(match command {
-        BridgeCommand::BindMember(payload) => payload.supervisor,
-        BridgeCommand::AuthorizeSupervisor(payload)
-        | BridgeCommand::RevokeSupervisor(payload)
-        | BridgeCommand::ObserveMember(payload)
-        | BridgeCommand::InterruptMember(payload)
-        | BridgeCommand::RetireMember(payload)
-        | BridgeCommand::DestroyMember(payload) => payload.supervisor,
-        BridgeCommand::DeliverMemberInput(payload) => payload.supervisor,
-        BridgeCommand::WireMember(payload) | BridgeCommand::UnwireMember(payload) => {
-            payload.supervisor
-        }
-        _ => return None,
-    })
+        .or_else(|| Some(PeerRoute::new(sender_peer_id)))
 }
 
 async fn resolve_peer_route(
     comms_runtime: &Arc<dyn CommsRuntime>,
-    from: &str,
+    peer_id: PeerId,
 ) -> Option<PeerRoute> {
     let peers = comms_runtime.peers().await;
     peers
         .iter()
-        .find(|entry| entry.peer_id.as_str() == from)
+        .find(|entry| entry.peer_id == peer_id)
         .map(|entry| PeerRoute::with_display_name(entry.peer_id, entry.name.clone()))
 }
 
@@ -1023,7 +974,7 @@ async fn try_handle_supervisor_bridge_command(
         }
     };
 
-    let sender = &candidate.interaction.from;
+    let sender_peer_id = candidate.from_peer_id;
 
     // Snapshot the DSL-owned supervisor binding for this dispatch.
     // Every bridge command reads through this snapshot; within a single
@@ -1040,8 +991,11 @@ async fn try_handle_supervisor_bridge_command(
             // token from seizing authority without going through
             // AuthorizeSupervisor/rotation (which requires the current
             // supervisor to sign).
-            let gate = match validate_bind_request_against_state(sender, &payload, &current_binding)
-            {
+            let gate = match validate_bind_request_against_state(
+                sender_peer_id,
+                &payload,
+                &current_binding,
+            ) {
                 Ok(gate) => gate,
                 Err((cause, reason)) => {
                     send_bridge_failure(comms_runtime, candidate, cause, reason).await;
@@ -1093,7 +1047,7 @@ async fn try_handle_supervisor_bridge_command(
                 BindMemberGate::Bootstrap => {}
             }
             let (supervisor_spec, advertised_address) =
-                match validate_bind_request(comms_runtime, sender, &payload) {
+                match validate_bind_request(comms_runtime, sender_peer_id, &payload) {
                     Ok(binding) => binding,
                     Err((cause, reason)) => {
                         send_bridge_failure(comms_runtime, candidate, cause, reason).await;
@@ -1214,7 +1168,8 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::AuthorizeSupervisor(payload) => {
-            match validate_authorize_supervisor_request(sender, &payload, &current_binding) {
+            match validate_authorize_supervisor_request(sender_peer_id, &payload, &current_binding)
+            {
                 Ok(AuthorizeSupervisorGate::IdempotentAck) => {
                     send_bridge_response(
                         comms_runtime,
@@ -1376,16 +1331,16 @@ async fn try_handle_supervisor_bridge_command(
             true
         }
         BridgeCommand::RevokeSupervisor(payload) => {
-            if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &payload, &current_binding)
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                return true;
-            }
-            if let Err(error) = comms_runtime
-                .remove_trusted_peer(&payload.supervisor.peer_id)
-                .await
-            {
+            let authorized_supervisor =
+                match require_authorized_supervisor(sender_peer_id, &payload, &current_binding) {
+                    Ok(supervisor) => supervisor,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                        return true;
+                    }
+                };
+            let supervisor_peer_id = authorized_supervisor.peer_id.as_str();
+            if let Err(error) = comms_runtime.remove_trusted_peer(&supervisor_peer_id).await {
                 send_bridge_failure(
                     comms_runtime,
                     candidate,
@@ -1406,7 +1361,7 @@ async fn try_handle_supervisor_bridge_command(
             if let Err(error) = adapter
                 .stage_supervisor_trust_revoked(
                     session_id,
-                    payload.supervisor.peer_id.clone(),
+                    supervisor_peer_id.clone(),
                     payload.epoch,
                 )
                 .await
@@ -1419,11 +1374,7 @@ async fn try_handle_supervisor_bridge_command(
                 );
             }
             if let Err(error) = adapter
-                .stage_supervisor_revoke(
-                    session_id,
-                    payload.supervisor.peer_id.clone(),
-                    payload.epoch,
-                )
+                .stage_supervisor_revoke(session_id, supervisor_peer_id, payload.epoch)
                 .await
             {
                 send_bridge_failure(
@@ -1450,16 +1401,19 @@ async fn try_handle_supervisor_bridge_command(
                 epoch: payload.epoch,
                 protocol_version: payload.protocol_version,
             };
-            if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &sup_payload, &current_binding)
-            {
-                send_bridge_failure(comms_runtime, candidate, cause, reason).await;
-                return true;
-            }
+            let authorized_supervisor =
+                match require_authorized_supervisor(sender_peer_id, &sup_payload, &current_binding)
+                {
+                    Ok(supervisor) => supervisor,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                        return true;
+                    }
+                };
             let request_input_id = payload.input_id.clone();
             let input = peer_input_from_delivery_payload(
                 session_id,
-                sender,
+                authorized_supervisor.peer_id,
                 candidate.interaction.id,
                 payload,
             );
@@ -1517,7 +1471,7 @@ async fn try_handle_supervisor_bridge_command(
         }
         BridgeCommand::InterruptMember(payload) => {
             if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &payload, &current_binding)
+                require_authorized_supervisor(sender_peer_id, &payload, &current_binding)
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -1546,7 +1500,7 @@ async fn try_handle_supervisor_bridge_command(
         }
         BridgeCommand::RetireMember(payload) => {
             if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &payload, &current_binding)
+                require_authorized_supervisor(sender_peer_id, &payload, &current_binding)
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -1578,7 +1532,7 @@ async fn try_handle_supervisor_bridge_command(
         }
         BridgeCommand::DestroyMember(payload) => {
             if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &payload, &current_binding)
+                require_authorized_supervisor(sender_peer_id, &payload, &current_binding)
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -1610,7 +1564,7 @@ async fn try_handle_supervisor_bridge_command(
         }
         BridgeCommand::ObserveMember(payload) => {
             if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &payload, &current_binding)
+                require_authorized_supervisor(sender_peer_id, &payload, &current_binding)
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -1666,7 +1620,7 @@ async fn try_handle_supervisor_bridge_command(
                 protocol_version: payload.protocol_version,
             };
             if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &sup_payload, &current_binding)
+                require_authorized_supervisor(sender_peer_id, &sup_payload, &current_binding)
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -1725,7 +1679,7 @@ async fn try_handle_supervisor_bridge_command(
                 protocol_version: payload.protocol_version,
             };
             if let Err((cause, reason)) =
-                require_authorized_supervisor(sender, &sup_payload, &current_binding)
+                require_authorized_supervisor(sender_peer_id, &sup_payload, &current_binding)
             {
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
@@ -1862,6 +1816,10 @@ mod tests {
     const PEER_ID_CURRENT_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000cccc"; // "current-supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
 
+    fn typed_peer_id(raw: &str) -> PeerId {
+        PeerId::parse(raw).expect("test peer id must be valid")
+    }
+
     #[tokio::test]
     async fn bridge_response_route_requires_known_canonical_peer_id() {
         let peer = meerkat_comms::Keypair::generate();
@@ -1881,59 +1839,32 @@ mod tests {
             .await
             .expect("trust peer");
 
-        let peer_id = peer_spec.peer_id.as_str();
-        let route = resolve_peer_route(&runtime, &peer_id)
+        let route = resolve_peer_route(&runtime, peer_spec.peer_id)
             .await
             .expect("canonical peer id should resolve through the peer directory");
 
         assert_eq!(route.peer_id, peer_spec.peer_id);
+        let unknown_peer_id = PeerId::new();
         assert!(
-            resolve_peer_route(&runtime, &peer_pubkey.to_pubkey_string())
+            resolve_peer_route(&runtime, unknown_peer_id)
                 .await
                 .is_none(),
-            "raw public-key strings must not synthesize bridge response routes"
-        );
-        assert!(
-            resolve_peer_route(&runtime, peer_spec.name.as_str())
-                .await
-                .is_none(),
-            "display names must not be routing keys"
-        );
-        let unknown_peer_id = PeerId::new().as_str();
-        assert!(
-            resolve_peer_route(&runtime, &unknown_peer_id)
-                .await
-                .is_none(),
-            "arbitrary UUID strings must not synthesize bridge response routes"
+            "unknown PeerIds must not synthesize bridge response routes"
         );
     }
 
     #[tokio::test]
-    async fn bridge_response_route_uses_pubkey_sender_not_spoofed_payload_peer_id() {
+    async fn bridge_response_route_rejects_pubkey_string_sender_without_typed_identity() {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(
-            meerkat_comms::CommsRuntime::inproc_only("bridge-response-spoof").expect("runtime"),
+            meerkat_comms::CommsRuntime::inproc_only("bridge-response-pubkey").expect("runtime"),
         );
-        let spoofed_peer_id = PeerId::new();
-        runtime
-            .add_trusted_peer(
-                TrustedPeerDescriptor::test_only_unsigned_typed(
-                    "spoofed-target",
-                    spoofed_peer_id.clone(),
-                    "inproc://spoofed-target",
-                )
-                .expect("valid spoofed target"),
-            )
-            .await
-            .expect("trust spoofed target");
-
         let sender_key = meerkat_comms::Keypair::generate();
         let sender_pubkey = sender_key.public_key();
-        let spoofed_peer_id = spoofed_peer_id.as_str();
         let command = BridgeCommand::BindMember(
             meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload {
                 supervisor: BridgePeerSpec {
                     name: "mob/__mob_supervisor__".to_string(),
-                    peer_id: spoofed_peer_id.clone(),
+                    peer_id: sender_pubkey.to_peer_id().as_str(),
                     address: "inproc://mob/__mob_supervisor__".to_string(),
                     pubkey: *sender_pubkey.as_bytes(),
                 },
@@ -1960,23 +1891,20 @@ mod tests {
             auth: Some(meerkat_core::PeerIngressAuthDecision::Exempt(
                 meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
             )),
+            from_peer_id: None,
             lifecycle_peer: None,
         };
 
-        let route = resolve_bridge_response_route(&runtime, &candidate)
-            .await
-            .expect("raw pubkey sender should resolve to its derived route");
-
-        assert_eq!(route.peer_id, sender_pubkey.to_peer_id());
-        assert_ne!(
-            route.peer_id.as_str(),
-            spoofed_peer_id,
-            "bridge replies must not route to the caller-supplied supervisor.peer_id"
+        assert!(
+            resolve_bridge_response_route(&runtime, &candidate)
+                .await
+                .is_none(),
+            "raw pubkey strings must not synthesize bridge response routes"
         );
     }
 
     #[tokio::test]
-    async fn bridge_response_route_accepts_trusted_display_name_sender() {
+    async fn bridge_response_route_rejects_display_name_sender_without_typed_identity() {
         let peer = meerkat_comms::Keypair::generate();
         let peer_pubkey = peer.public_key();
         let peer_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
@@ -1999,32 +1927,126 @@ mod tests {
             epoch: 1,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         });
-        let candidate = bridge_candidate(peer_spec.name.as_str(), &command);
-        let route = resolve_bridge_response_route(&runtime, &candidate)
-            .await
-            .expect("trusted display-name sender should resolve through peer directory");
-
-        assert_eq!(route.peer_id, peer_spec.peer_id);
-        assert_eq!(
-            route.display_name.as_ref().map(|name| name.as_str()),
-            Some(peer_spec.name.as_str())
+        let candidate = bridge_candidate_with_typed_sender(peer_spec.name.as_str(), None, &command);
+        assert!(
+            resolve_bridge_response_route(&runtime, &candidate)
+                .await
+                .is_none(),
+            "display names must not be bridge response route authority"
         );
+    }
 
-        let spoofed = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+    #[tokio::test]
+    async fn bridge_response_route_rejects_peer_id_string_sender_without_typed_identity() {
+        let peer = meerkat_comms::Keypair::generate();
+        let peer_pubkey = peer.public_key();
+        let peer_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "mob/__mob_supervisor__",
+            peer_pubkey.to_peer_id().as_str(),
+            *peer_pubkey.as_bytes(),
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid peer spec");
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("bridge-response-peer-id").expect("runtime"),
+        );
+        runtime
+            .add_trusted_peer(peer_spec.clone())
+            .await
+            .expect("trust peer");
+
+        let command = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec::from(peer_spec.clone()),
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        });
+        let candidate =
+            bridge_candidate_with_typed_sender(&peer_spec.peer_id.as_str(), None, &command);
+
+        assert!(
+            resolve_bridge_response_route(&runtime, &candidate)
+                .await
+                .is_none(),
+            "raw peer-id strings must not be bridge response route authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_response_route_uses_typed_sender_peer_id_not_display_or_payload_identity() {
+        let peer = meerkat_comms::Keypair::generate();
+        let peer_pubkey = peer.public_key();
+        let peer_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            "mob/__mob_supervisor__",
+            peer_pubkey.to_peer_id().as_str(),
+            *peer_pubkey.as_bytes(),
+            "inproc://mob/__mob_supervisor__",
+        )
+        .expect("valid peer spec");
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only("bridge-response-typed-sender")
+                .expect("runtime"),
+        );
+        runtime
+            .add_trusted_peer(peer_spec.clone())
+            .await
+            .expect("trust peer");
+
+        let payload_pubkey = meerkat_comms::Keypair::generate().public_key();
+        let spoofed_payload_peer_id = PeerId::new();
+        let command = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
             supervisor: BridgePeerSpec {
-                peer_id: PeerId::new().as_str(),
-                ..BridgePeerSpec::from(peer_spec.clone())
+                name: peer_spec.name.to_string(),
+                peer_id: spoofed_payload_peer_id.as_str(),
+                address: "inproc://mob/__mob_supervisor__".to_string(),
+                pubkey: *payload_pubkey.as_bytes(),
             },
             epoch: 1,
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
         });
-        let spoofed_candidate = bridge_candidate(peer_spec.name.as_str(), &spoofed);
-        assert!(
-            resolve_bridge_response_route(&runtime, &spoofed_candidate)
-                .await
-                .is_none(),
-            "display-name senders must not route to a spoofed payload peer_id"
+        let candidate = bridge_candidate_with_typed_sender(
+            peer_spec.name.as_str(),
+            Some(peer_spec.peer_id),
+            &command,
         );
+
+        let route = resolve_bridge_response_route(&runtime, &candidate)
+            .await
+            .expect("typed sender PeerId should route");
+
+        assert_eq!(route.peer_id, peer_spec.peer_id);
+        assert_ne!(route.peer_id, spoofed_payload_peer_id);
+        assert_eq!(
+            route.display_name.as_ref().map(|name| name.as_str()),
+            Some(peer_spec.name.as_str())
+        );
+    }
+
+    #[test]
+    fn bridge_response_route_source_does_not_use_interaction_from_ladder() {
+        let source = include_str!("comms_drain.rs");
+        let route_start = source
+            .find("async fn resolve_bridge_response_route")
+            .expect("route function exists");
+        let route_end = source[route_start..]
+            .find("async fn resolve_peer_route")
+            .map(|offset| route_start + offset)
+            .expect("peer route function follows bridge response route");
+        let route_source = &source[route_start..route_end];
+        let forbidden_from = ["candidate", "interaction", "from"].join(".");
+        assert!(
+            !route_source.contains(&forbidden_from),
+            "bridge response routing must use typed candidate.from_peer_id, not candidate.interaction.from"
+        );
+
+        for removed_helper in [
+            ["bridge_response", "route_from_sender"].join("_"),
+            ["resolve_bridge", "display_name_sender_route"].join("_"),
+        ] {
+            assert!(
+                !source.contains(&format!("fn {removed_helper}")),
+                "bridge response routing must not revive {removed_helper}"
+            );
+        }
     }
 
     struct BootstrapRuntime {
@@ -2111,6 +2133,7 @@ mod tests {
             },
             class,
             auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
+            from_peer_id: None,
             lifecycle_peer: Some("peer-1".to_string()),
         }
     }
@@ -2270,8 +2293,9 @@ mod tests {
             bootstrap_token: "wrong-token".into(),
         };
 
-        let (cause, error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
-            .expect_err("bind must reject incorrect bootstrap token");
+        let (cause, error) =
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
+                .expect_err("bind must reject incorrect bootstrap token");
         assert_eq!(cause, BridgeRejectionCause::InvalidBootstrapToken);
         assert!(
             error.contains("invalid bootstrap token"),
@@ -2302,7 +2326,7 @@ mod tests {
         };
 
         let (authorized, advertised_address) =
-            validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
                 .expect("bind should accept the configured bootstrap token");
         assert_eq!(authorized.peer_id.as_str(), supervisor.peer_id);
         assert_eq!(advertised_address, runtime.advertised_address().unwrap());
@@ -2333,8 +2357,8 @@ mod tests {
         };
 
         let (authorized, advertised_address) =
-            validate_bind_request(&runtime, &supervisor_pubkey.to_pubkey_string(), &payload)
-                .expect("bind should accept raw transport sender when payload carries pubkey");
+            validate_bind_request(&runtime, Some(supervisor_pubkey.to_peer_id()), &payload)
+                .expect("bind should accept typed sender when payload carries pubkey");
         assert_eq!(authorized.peer_id.as_str(), supervisor.peer_id);
         assert_eq!(authorized.pubkey, supervisor.pubkey);
         assert_eq!(advertised_address, runtime.advertised_address().unwrap());
@@ -2365,7 +2389,7 @@ mod tests {
         };
 
         let (_, advertised_address) =
-            validate_bind_request(&runtime, &supervisor.peer_id, &payload)
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
                 .expect("bind should canonicalize to the callee's advertised address");
         assert_eq!(advertised_address, runtime.advertised_address().unwrap());
     }
@@ -2392,8 +2416,9 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (cause, error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
-            .expect_err("bind should reject mismatched expected addresses");
+        let (cause, error) =
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
+                .expect_err("bind should reject mismatched expected addresses");
         assert_eq!(cause, BridgeRejectionCause::AddressMismatch);
         assert!(
             error.contains("bind address mismatch"),
@@ -2423,8 +2448,9 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (cause, error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
-            .expect_err("bind should reject unsupported protocol versions");
+        let (cause, error) =
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
+                .expect_err("bind should reject unsupported protocol versions");
         assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
         assert!(
             error.contains("unsupported bridge protocol version"),
@@ -2458,8 +2484,9 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (cause, _error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
-            .expect_err("v1 bind must be rejected under v2+");
+        let (cause, _error) =
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
+                .expect_err("v1 bind must be rejected under v2+");
         assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
     }
 
@@ -2484,8 +2511,12 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (cause, error) = validate_bind_request(&runtime, &payload.supervisor.peer_id, &payload)
-            .expect_err("bind should reject invalid supervisor peer names");
+        let (cause, error) = validate_bind_request(
+            &runtime,
+            Some(typed_peer_id(&payload.supervisor.peer_id)),
+            &payload,
+        )
+        .expect_err("bind should reject invalid supervisor peer names");
         assert_eq!(cause, BridgeRejectionCause::InvalidSupervisorSpec);
         assert!(
             error.contains("invalid supervisor peer spec"),
@@ -2526,7 +2557,7 @@ mod tests {
     fn validate_bind_request_against_state_allows_bootstrap_when_unbound() {
         let payload = sample_bind_payload();
         let gate = validate_bind_request_against_state(
-            &payload.supervisor.peer_id,
+            Some(typed_peer_id(&payload.supervisor.peer_id)),
             &payload,
             &SupervisorBinding::Unbound,
         )
@@ -2549,9 +2580,12 @@ mod tests {
             address: "inproc://mob/__mob_supervisor__".to_string(),
             pubkey: [0u8; 32],
         };
-        let (cause, error) =
-            validate_bind_request_against_state(&takeover.supervisor.peer_id, &takeover, &state)
-                .expect_err("rebind with a different supervisor must be rejected");
+        let (cause, error) = validate_bind_request_against_state(
+            Some(typed_peer_id(&takeover.supervisor.peer_id)),
+            &takeover,
+            &state,
+        )
+        .expect_err("rebind with a different supervisor must be rejected");
         assert_eq!(cause, BridgeRejectionCause::AlreadyBound);
         assert!(
             error.contains("supervisor already bound"),
@@ -2572,9 +2606,12 @@ mod tests {
         let state = authorized_state_for(&current_payload);
         let mut replay = sample_bind_payload();
         replay.epoch = current_payload.epoch - 1;
-        let (cause, error) =
-            validate_bind_request_against_state(&replay.supervisor.peer_id, &replay, &state)
-                .expect_err("lower-epoch rebind must be rejected as a stale replay");
+        let (cause, error) = validate_bind_request_against_state(
+            Some(typed_peer_id(&replay.supervisor.peer_id)),
+            &replay,
+            &state,
+        )
+        .expect_err("lower-epoch rebind must be rejected as a stale replay");
         assert_eq!(cause, BridgeRejectionCause::AlreadyBound);
         assert!(
             error.contains("does not match bound supervisor epoch"),
@@ -2591,9 +2628,12 @@ mod tests {
         let state = authorized_state_for(&current_payload);
         let mut advance = sample_bind_payload();
         advance.epoch = current_payload.epoch + 5;
-        let (cause, error) =
-            validate_bind_request_against_state(&advance.supervisor.peer_id, &advance, &state)
-                .expect_err("higher-epoch rebind with same supervisor must be rejected");
+        let (cause, error) = validate_bind_request_against_state(
+            Some(typed_peer_id(&advance.supervisor.peer_id)),
+            &advance,
+            &state,
+        )
+        .expect_err("higher-epoch rebind with same supervisor must be rejected");
         assert_eq!(cause, BridgeRejectionCause::AlreadyBound);
         assert!(
             error.contains("does not match bound supervisor epoch"),
@@ -2610,8 +2650,12 @@ mod tests {
         let state = authorized_state_for(&current_payload);
         let retry = sample_bind_payload();
         let attacker_peer_id = PeerId::new().as_str();
-        let (cause, error) = validate_bind_request_against_state(&attacker_peer_id, &retry, &state)
-            .expect_err("bind from an unauthorized sender must be rejected");
+        let (cause, error) = validate_bind_request_against_state(
+            Some(typed_peer_id(&attacker_peer_id)),
+            &retry,
+            &state,
+        )
+        .expect_err("bind from an unauthorized sender must be rejected");
         assert_eq!(cause, BridgeRejectionCause::SenderMismatch);
         assert!(
             error.contains("request sender"),
@@ -2627,8 +2671,12 @@ mod tests {
         let current_payload = sample_bind_payload();
         let state = authorized_state_for(&current_payload);
         let retry = sample_bind_payload();
-        let gate = validate_bind_request_against_state(&retry.supervisor.peer_id, &retry, &state)
-            .expect("exact-match retry should be idempotent");
+        let gate = validate_bind_request_against_state(
+            Some(typed_peer_id(&retry.supervisor.peer_id)),
+            &retry,
+            &state,
+        )
+        .expect("exact-match retry should be idempotent");
         assert!(matches!(gate, BindMemberGate::IdempotentAck));
     }
 
@@ -2640,9 +2688,12 @@ mod tests {
         let state = authorized_state_for(&current_payload);
         let mut stale = sample_bind_payload();
         stale.protocol_version = SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1;
-        let (cause, error) =
-            validate_bind_request_against_state(&stale.supervisor.peer_id, &stale, &state)
-                .expect_err("stale protocol version must be rejected");
+        let (cause, error) = validate_bind_request_against_state(
+            Some(typed_peer_id(&stale.supervisor.peer_id)),
+            &stale,
+            &state,
+        )
+        .expect_err("stale protocol version must be rejected");
         assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
         assert!(
             error.contains("unsupported bridge protocol version"),
@@ -3102,7 +3153,7 @@ mod tests {
         };
 
         let (cause, error) = validate_authorize_supervisor_request(
-            &payload.supervisor.peer_id,
+            Some(typed_peer_id(&payload.supervisor.peer_id)),
             &payload,
             &SupervisorBinding::Unbound,
         )
@@ -3128,7 +3179,7 @@ mod tests {
         };
 
         let (cause, error) = validate_authorize_supervisor_request(
-            &payload.supervisor.peer_id,
+            Some(typed_peer_id(&payload.supervisor.peer_id)),
             &payload,
             &SupervisorBinding::Unbound,
         )
@@ -3171,8 +3222,9 @@ mod tests {
             bootstrap_token: "whatever".into(),
         };
 
-        let (cause, _error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
-            .expect_err("runtime with empty token must refuse to validate");
+        let (cause, _error) =
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
+                .expect_err("runtime with empty token must refuse to validate");
         assert_eq!(cause, BridgeRejectionCause::InvalidBootstrapToken);
     }
 
@@ -3198,8 +3250,9 @@ mod tests {
             bootstrap_token: "expected-token".into(),
         };
 
-        let (cause, error) = validate_bind_request(&runtime, &supervisor.peer_id, &payload)
-            .expect_err("query-string token must not satisfy typed bootstrap proof");
+        let (cause, error) =
+            validate_bind_request(&runtime, Some(typed_peer_id(&supervisor.peer_id)), &payload)
+                .expect_err("query-string token must not satisfy typed bootstrap proof");
         assert_eq!(cause, BridgeRejectionCause::InvalidBootstrapToken);
         assert!(
             error.contains("typed bridge bootstrap token"),
@@ -3231,7 +3284,7 @@ mod tests {
             protocol_version: 1,
         };
         let (cause, _error) = validate_authorize_supervisor_request(
-            &payload.supervisor.peer_id,
+            Some(typed_peer_id(&payload.supervisor.peer_id)),
             &payload,
             &SupervisorBinding::Unbound,
         )
@@ -3267,12 +3320,20 @@ mod tests {
             protocol_version: 1,
         };
         let (cause, _error) =
-            require_authorized_supervisor(&supervisor.peer_id.as_str(), &payload, &state)
+            require_authorized_supervisor(Some(supervisor.peer_id), &payload, &state)
                 .expect_err("v1 authorized-supervisor payload must be rejected");
         assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
     }
 
     fn bridge_candidate(sender: &str, command: &BridgeCommand) -> PeerInputCandidate {
+        bridge_candidate_with_typed_sender(sender, PeerId::parse(sender).ok(), command)
+    }
+
+    fn bridge_candidate_with_typed_sender(
+        sender: &str,
+        from_peer_id: Option<PeerId>,
+        command: &BridgeCommand,
+    ) -> PeerInputCandidate {
         PeerInputCandidate {
             interaction: InboxInteraction {
                 id: InteractionId(Uuid::new_v4()),
@@ -3289,6 +3350,7 @@ mod tests {
             auth: Some(meerkat_core::PeerIngressAuthDecision::Exempt(
                 meerkat_core::PeerIngressAuthExemption::SupervisorBridge,
             )),
+            from_peer_id,
             lifecycle_peer: None,
         }
     }

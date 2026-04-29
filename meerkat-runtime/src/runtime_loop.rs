@@ -1524,6 +1524,7 @@ mod tests {
             &PeerInputCandidate {
                 class: PeerInputClass::PlainEvent,
                 auth: None,
+                from_peer_id: None,
                 lifecycle_peer: None,
                 interaction: InboxInteraction {
                     id: meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4()),

@@ -3797,6 +3797,7 @@ mod tests {
                     },
                     class: crate::interaction::PeerInputClass::ActionableMessage,
                     auth: Some(crate::interaction::PeerIngressAuthDecision::Required),
+                    from_peer_id: None,
                     lifecycle_peer: None,
                 })
                 .collect()

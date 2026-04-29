@@ -910,6 +910,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             },
                             class: entry.class,
                             auth: Some(entry.auth),
+                            from_peer_id: entry.from_peer_id,
                             lifecycle_peer: entry.lifecycle_peer,
                         })
                     }
@@ -934,6 +935,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         },
                         class: entry.class,
                         auth: None,
+                        from_peer_id: None,
                         lifecycle_peer: entry.lifecycle_peer,
                     }),
                 }

@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-use crate::comms::{PeerLifecycleKind, SUPERVISOR_BRIDGE_INTENT, TrustedPeerDescriptor};
+use crate::comms::{PeerId, PeerLifecycleKind, SUPERVISOR_BRIDGE_INTENT, TrustedPeerDescriptor};
 use crate::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Unique identifier for an interaction.
@@ -414,6 +414,12 @@ pub struct PeerInputCandidate {
     /// Auth decision that admitted this candidate when it came from peer
     /// transport. Plain events and legacy producers may leave this unset.
     pub auth: Option<PeerIngressAuthDecision>,
+    /// Canonical sender routing identity captured at peer ingress.
+    ///
+    /// `interaction.from` is a display projection. Bridge response routing and
+    /// other authority-sensitive paths must use this typed identity instead of
+    /// reinterpreting the display string.
+    pub from_peer_id: Option<PeerId>,
     /// For lifecycle events, the peer name that was added/retired.
     pub lifecycle_peer: Option<String>,
 }
@@ -502,6 +508,8 @@ pub struct PeerIngressEntrySnapshot {
     pub kind: PeerIngressKind,
     /// Display-only sender label, if applicable. Not route/trust authority.
     pub from_peer_display: Option<PeerIngressDiagnosticDisplay>,
+    /// Canonical sender routing identity fixed at ingress time, if applicable.
+    pub from_peer_id: Option<PeerId>,
     /// Display-only lifecycle peer label, if applicable. Not route/trust authority.
     pub lifecycle_peer_display: Option<PeerIngressDiagnosticDisplay>,
     /// Request envelope id or reply-to correlation when one exists.

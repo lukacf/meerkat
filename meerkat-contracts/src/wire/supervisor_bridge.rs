@@ -5,6 +5,7 @@
 //! (sender) and `meerkat-runtime` (receiver) consume these types. Neither
 //! crate depends on the other — the contracts crate owns the vocabulary.
 
+use meerkat_core::comms::{PeerAddress, PeerId, PeerName, TrustedPeerDescriptor};
 use serde::{Deserialize, Serialize};
 
 /// Comms intent used for all supervisor bridge commands.
@@ -351,6 +352,65 @@ pub struct BridgePeerSpec {
     pub pubkey: [u8; 32],
 }
 
+/// Typed Ed25519 signing/trust subject carried by a bridge peer spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BridgePeerPubKey([u8; 32]);
+
+impl BridgePeerPubKey {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub const fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+
+    pub const fn is_zero(&self) -> bool {
+        let mut index = 0;
+        while index < self.0.len() {
+            if self.0[index] != 0 {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+
+    pub fn derived_peer_id(&self) -> PeerId {
+        PeerId::from_ed25519_pubkey(&self.0)
+    }
+}
+
+impl From<[u8; 32]> for BridgePeerPubKey {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self::new(bytes)
+    }
+}
+
+/// Bridge peer identity after the stringly wire spec has crossed the boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgePeerIdentity {
+    pub name: PeerName,
+    pub peer_id: PeerId,
+    pub address: PeerAddress,
+    pub pubkey: BridgePeerPubKey,
+}
+
+impl BridgePeerIdentity {
+    pub fn into_trusted_peer_descriptor(self) -> TrustedPeerDescriptor {
+        TrustedPeerDescriptor {
+            peer_id: self.peer_id,
+            name: self.name,
+            address: self.address,
+            pubkey: self.pubkey.into_bytes(),
+        }
+    }
+}
+
 /// Connectivity class observed for the bridged member runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -361,8 +421,8 @@ pub enum BridgePeerConnectivity {
     Unknown,
 }
 
-impl From<meerkat_core::comms::TrustedPeerDescriptor> for BridgePeerSpec {
-    fn from(spec: meerkat_core::comms::TrustedPeerDescriptor) -> Self {
+impl From<TrustedPeerDescriptor> for BridgePeerSpec {
+    fn from(spec: TrustedPeerDescriptor) -> Self {
         Self {
             name: spec.name.as_str().to_string(),
             peer_id: spec.peer_id.as_str(),
@@ -380,26 +440,42 @@ impl TryFrom<BridgePeerSpec> for meerkat_core::comms::TrustedPeerDescriptor {
     }
 }
 
-impl TryFrom<&BridgePeerSpec> for meerkat_core::comms::TrustedPeerDescriptor {
+impl TryFrom<&BridgePeerSpec> for BridgePeerIdentity {
     type Error = String;
 
     fn try_from(spec: &BridgePeerSpec) -> Result<Self, Self::Error> {
-        let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id)
-            .map_err(|e| format!("invalid peer_id: {e}"))?;
-        let name = meerkat_core::comms::PeerName::new(spec.name.clone())
-            .map_err(|e| format!("invalid peer name: {e}"))?;
+        let peer_id = PeerId::parse(&spec.peer_id).map_err(|e| format!("invalid peer_id: {e}"))?;
+        let name =
+            PeerName::new(spec.name.clone()).map_err(|e| format!("invalid peer name: {e}"))?;
         let address = parse_peer_address(&spec.address)?;
-        Ok(meerkat_core::comms::TrustedPeerDescriptor {
-            peer_id,
+        let pubkey = BridgePeerPubKey::new(spec.pubkey);
+        if !pubkey.is_zero() {
+            let derived = pubkey.derived_peer_id();
+            if derived != peer_id {
+                return Err(format!(
+                    "peer_id {peer_id} does not match pubkey-derived id {derived}"
+                ));
+            }
+        }
+        Ok(Self {
             name,
+            peer_id,
             address,
-            pubkey: spec.pubkey,
+            pubkey,
         })
     }
 }
 
-fn parse_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
-    meerkat_core::comms::PeerAddress::parse(raw).map_err(|err| err.to_string())
+impl TryFrom<&BridgePeerSpec> for TrustedPeerDescriptor {
+    type Error = String;
+
+    fn try_from(spec: &BridgePeerSpec) -> Result<Self, Self::Error> {
+        BridgePeerIdentity::try_from(spec).map(BridgePeerIdentity::into_trusted_peer_descriptor)
+    }
+}
+
+fn parse_peer_address(raw: &str) -> Result<PeerAddress, String> {
+    PeerAddress::parse(raw).map_err(|err| err.to_string())
 }
 
 // ---------------------------------------------------------------------------

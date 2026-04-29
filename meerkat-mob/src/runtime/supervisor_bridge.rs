@@ -318,6 +318,7 @@ mod tests {
             },
             class: PeerInputClass::Response,
             auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
+            from_peer_id: None,
             lifecycle_peer: None,
         }
     }

@@ -51,6 +51,7 @@ pub(crate) struct PreparedIngressItem {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) trusted_sender: bool,
     pub(crate) from_peer: Option<String>,
+    pub(crate) from_peer_id: Option<meerkat_core::comms::PeerId>,
     pub(crate) lifecycle_peer: Option<String>,
     pub(crate) text_projection: String,
     #[allow(dead_code)]
@@ -217,6 +218,7 @@ impl IngressClassificationContext {
                     auth: classification.auth,
                     trusted_sender,
                     from_peer: Some(from_name),
+                    from_peer_id: Some(envelope.from.to_peer_id()),
                     lifecycle_peer,
                     text_projection,
                     content_shape,
@@ -250,6 +252,7 @@ impl IngressClassificationContext {
                     auth: classification.auth,
                     trusted_sender: true,
                     from_peer: None,
+                    from_peer_id: None,
                     lifecycle_peer: None,
                     text_projection,
                     content_shape,

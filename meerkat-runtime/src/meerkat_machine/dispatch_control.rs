@@ -214,22 +214,30 @@ impl MeerkatMachine {
                 };
                 drop(drv);
 
+                let mut commit_error = None;
                 if let Some(staged_dsl) = staged_dsl
                     && let Err(reason) = self
-                        .commit_session_dsl_transition(&session_id, staged_dsl, "Retire")
+                        .commit_session_dsl_transition_preserving_committed_state(
+                            &session_id,
+                            staged_dsl,
+                            "Retire",
+                        )
                         .await
                 {
                     driver
                         .lock()
                         .await
                         .sync_control_projection_from_dsl_authority();
-                    return Err(RuntimeControlPlaneError::Internal(reason));
+                    commit_error = Some(reason);
                 }
 
                 if report.inputs_pending_drain > 0 {
                     if let Some(ref tx) = wake_tx
                         && tx.send(()).await.is_ok()
                     {
+                        if let Some(reason) = commit_error {
+                            return Err(RuntimeControlPlaneError::Internal(reason));
+                        }
                         return Ok(MeerkatMachineCommandResult::RetireReport(report));
                     }
 
@@ -243,6 +251,9 @@ impl MeerkatMachine {
                     comp.resolve_all_terminated("retired without runtime loop");
                     report.inputs_abandoned += abandoned;
                     report.inputs_pending_drain = 0;
+                }
+                if let Some(reason) = commit_error {
+                    return Err(RuntimeControlPlaneError::Internal(reason));
                 }
                 Ok(MeerkatMachineCommandResult::RetireReport(report))
             }

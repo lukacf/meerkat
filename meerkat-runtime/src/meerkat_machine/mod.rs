@@ -527,12 +527,48 @@ impl MeerkatMachine {
         staged: StagedSessionDslInput,
         context: &str,
     ) -> Result<(), String> {
+        self.commit_session_dsl_transition_with_dispatch_failure(
+            session_id,
+            staged,
+            context,
+            CommittedEffectDispatchFailure::RestorePreviousDslState,
+        )
+        .await
+    }
+
+    async fn commit_session_dsl_transition_preserving_committed_state(
+        &self,
+        session_id: &SessionId,
+        staged: StagedSessionDslInput,
+        context: &str,
+    ) -> Result<(), String> {
+        self.commit_session_dsl_transition_with_dispatch_failure(
+            session_id,
+            staged,
+            context,
+            CommittedEffectDispatchFailure::PreserveCommittedDslState,
+        )
+        .await
+    }
+
+    async fn commit_session_dsl_transition_with_dispatch_failure(
+        &self,
+        session_id: &SessionId,
+        staged: StagedSessionDslInput,
+        context: &str,
+        dispatch_failure: CommittedEffectDispatchFailure,
+    ) -> Result<(), String> {
         if let Err(error) = self
             .dispatch_routed_signals_from_effects(&staged.effects)
             .await
         {
-            self.restore_session_dsl_state(session_id, staged.previous_state)
-                .await;
+            match dispatch_failure {
+                CommittedEffectDispatchFailure::PreserveCommittedDslState => {}
+                CommittedEffectDispatchFailure::RestorePreviousDslState => {
+                    self.restore_session_dsl_state(session_id, staged.previous_state)
+                        .await;
+                }
+            }
             return Err(format!(
                 "DSL authority ({context}): committed effect dispatch failed: {error}"
             ));

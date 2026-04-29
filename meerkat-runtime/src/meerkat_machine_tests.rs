@@ -308,6 +308,50 @@ async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatc
 }
 
 #[tokio::test]
+async fn persistent_retire_keeps_committed_dsl_state_when_runtime_retired_signal_dispatch_fails() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    install_rejecting_meerkat_signal_dispatcher(&machine);
+
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let err = crate::traits::RuntimeControlPlane::retire(&machine, &runtime_id)
+        .await
+        .expect_err("signal dispatch failure should surface");
+    assert!(
+        err.to_string().contains("injected signal commit failure"),
+        "{err}"
+    );
+    assert_eq!(
+        machine.existing_session_runtime_state(&session_id).await,
+        Some(RuntimeState::Retired),
+        "durably committed retire must not roll live DSL authority back to an earlier phase"
+    );
+    assert_eq!(
+        crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load persisted runtime state"),
+        Some(RuntimeState::Retired),
+        "persistent retire shell commit remains authoritative after routed-effect failure"
+    );
+
+    let recovered = MeerkatMachine::persistent(
+        store as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    recovered.register_session(session_id.clone()).await;
+    assert_eq!(
+        recovered.existing_session_runtime_state(&session_id).await,
+        Some(RuntimeState::Retired),
+        "cold restart must agree with the live process after failed retire signal dispatch"
+    );
+}
+
+#[tokio::test]
 async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();

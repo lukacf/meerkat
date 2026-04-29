@@ -1141,6 +1141,7 @@ pub async fn logout(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
     use meerkat_providers::auth_store::EphemeralTokenStore;
     use meerkat_runtime::RuntimeAuthLeaseHandle;
@@ -1167,6 +1168,49 @@ mod tests {
         }
     }
 
+    fn config_with_openai_managed_store_binding() -> meerkat_core::Config {
+        let mut config = meerkat_core::Config::default();
+        let mut section = meerkat_core::RealmConfigSection::default();
+        section.backend.insert(
+            "openai_backend".into(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".into(),
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::json!({}),
+            },
+        );
+        section.auth.insert(
+            "openai_managed".into(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".into(),
+                auth_method: "api_key".into(),
+                source: CredentialSourceSpec::ManagedStore,
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "default_openai".into(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "openai_backend".into(),
+                auth_profile: "openai_managed".into(),
+                default_model: None,
+                policy: Default::default(),
+            },
+        );
+        section.default_binding = Some("default_openai".into());
+        config.realm.insert("dev".into(), section);
+        config
+    }
+
+    async fn auth_status_detail(response: impl IntoResponse) -> WireAuthStatusDetail {
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     #[tokio::test]
     async fn rest_token_write_helpers_publish_auth_machine_lifecycle() {
         let store = EphemeralTokenStore::new();
@@ -1191,6 +1235,72 @@ mod tests {
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, None);
         assert_eq!(snapshot.expires_at, None);
+    }
+
+    #[tokio::test]
+    async fn rest_auth_status_observes_session_runtime_binding_lifecycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .config_runtime
+            .set(config_with_openai_managed_store_binding(), None)
+            .await
+            .unwrap();
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("dev").unwrap(),
+            binding: BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        let now = chrono::Utc::now().timestamp() as u64;
+        let query = || RealmQuery {
+            realm_id: RealmId::parse("dev").unwrap(),
+            profile_id: None,
+        };
+        let binding_id = || BindingId::parse("default_openai").unwrap();
+
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(meerkat_core::SessionId::new())
+            .await
+            .unwrap();
+        bindings
+            .auth_lease
+            .acquire_lease(&lease_key, now + 3600)
+            .unwrap();
+        let detail = auth_status_detail(
+            get_auth_status(State(state.clone()), Path(binding_id()), Query(query())).await,
+        )
+        .await;
+        assert_eq!(detail.state, "valid");
+
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(meerkat_core::SessionId::new())
+            .await
+            .unwrap();
+        bindings.auth_lease.begin_refresh(&lease_key).unwrap();
+        let detail = auth_status_detail(
+            get_auth_status(State(state.clone()), Path(binding_id()), Query(query())).await,
+        )
+        .await;
+        assert_eq!(detail.state, "expiring");
+
+        bindings
+            .auth_lease
+            .complete_refresh(&lease_key, now + 7200, now)
+            .unwrap();
+        bindings
+            .auth_lease
+            .mark_reauth_required(&lease_key)
+            .unwrap();
+        let detail = auth_status_detail(
+            get_auth_status(State(state), Path(binding_id()), Query(query())).await,
+        )
+        .await;
+        assert_eq!(detail.state, "reauth_required");
     }
 
     #[test]

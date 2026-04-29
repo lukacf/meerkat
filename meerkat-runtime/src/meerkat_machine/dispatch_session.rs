@@ -76,6 +76,7 @@ impl MeerkatMachine {
         let shared_handle_authority = Arc::new(crate::handles::HandleDslAuthority::from_shared(
             dsl_authority_shared,
         ));
+        let auth_lease = self.auth_lease_handle();
         Ok(MeerkatMachineCommandResult::Bindings(
             meerkat_core::SessionRuntimeBindings {
                 session_id,
@@ -104,7 +105,7 @@ impl MeerkatMachine {
                 model_routing: Arc::new(crate::handles::RuntimeModelRoutingHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                auth_lease: Arc::new(crate::handles::RuntimeAuthLeaseHandle::new()),
+                auth_lease,
                 mcp_server_lifecycle: Arc::new(
                     crate::handles::RuntimeMcpServerLifecycleHandle::new(Arc::clone(
                         &shared_handle_authority,

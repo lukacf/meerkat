@@ -671,7 +671,6 @@ pub struct SessionRuntime {
     backend: Option<String>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
     runtime_adapter: Arc<MeerkatMachine>,
-    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
     /// connects (each connection has its own transport sink).
@@ -876,6 +875,7 @@ impl SessionRuntime {
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
+        runtime_adapter.set_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
@@ -901,7 +901,6 @@ impl SessionRuntime {
             backend: None,
             config_runtime,
             runtime_adapter,
-            auth_lease,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
@@ -953,6 +952,7 @@ impl SessionRuntime {
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
+        runtime_adapter.set_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
@@ -978,7 +978,6 @@ impl SessionRuntime {
             backend: None,
             config_runtime,
             runtime_adapter,
-            auth_lease,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
@@ -1081,7 +1080,7 @@ impl SessionRuntime {
     }
 
     pub fn auth_lease_handle(&self) -> Arc<dyn meerkat_core::handles::AuthLeaseHandle> {
-        Arc::clone(&self.auth_lease)
+        self.runtime_adapter.auth_lease_handle()
     }
 
     /// Override the shared default LLM client used by this runtime.

@@ -354,6 +354,7 @@ impl AppState {
         );
         let (session_service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
+        runtime_adapter.set_auth_lease_handle(Arc::clone(&auth_lease));
         let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();

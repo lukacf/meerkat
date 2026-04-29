@@ -1459,6 +1459,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auth_status_observes_session_runtime_binding_lifecycle() {
+        let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
+        let connection_ref = ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        let now = chrono::Utc::now().timestamp() as u64;
+        let params = raw_params(serde_json::json!({
+            "realm_id": "dev",
+            "binding_id": "default_openai"
+        }));
+
+        let bindings = runtime
+            .runtime_adapter()
+            .prepare_bindings(meerkat_core::SessionId::new())
+            .await
+            .unwrap();
+        bindings
+            .auth_lease
+            .acquire_lease(&lease_key, now + 3600)
+            .unwrap();
+        let status =
+            handle_auth_status_get(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+        assert_eq!(auth_status_state(status), "valid");
+
+        let bindings = runtime
+            .runtime_adapter()
+            .prepare_bindings(meerkat_core::SessionId::new())
+            .await
+            .unwrap();
+        bindings.auth_lease.begin_refresh(&lease_key).unwrap();
+        let status =
+            handle_auth_status_get(Some(RpcId::Num(2)), Some(params.as_ref()), &runtime).await;
+        assert_eq!(auth_status_state(status), "expiring");
+
+        bindings
+            .auth_lease
+            .complete_refresh(&lease_key, now + 7200, now)
+            .unwrap();
+        bindings
+            .auth_lease
+            .mark_reauth_required(&lease_key)
+            .unwrap();
+        let status =
+            handle_auth_status_get(Some(RpcId::Num(3)), Some(params.as_ref()), &runtime).await;
+        assert_eq!(auth_status_state(status), "reauth_required");
+    }
+
+    #[tokio::test]
     async fn oauth_completion_requires_binding_when_realm_is_present() {
         let runtime = test_runtime();
         let params = raw_params(serde_json::json!({

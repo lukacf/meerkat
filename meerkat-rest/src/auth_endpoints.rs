@@ -182,6 +182,12 @@ async fn save_tokens_and_publish_lifecycle(
     tokens: &PersistedTokens,
 ) -> Result<(), (StatusCode, String)> {
     let key = TokenKey::from_connection_ref(connection_ref);
+    let previous = token_store.load(&key).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("TokenStore load failed: {e}"),
+        )
+    })?;
     token_store.save(&key, tokens).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -191,13 +197,33 @@ async fn save_tokens_and_publish_lifecycle(
     if let Err(e) =
         meerkat_core::publish_token_lifecycle_acquired(auth_lease, connection_ref, tokens)
     {
-        let _ = token_store.clear(&key).await;
+        if let Err(rollback_error) =
+            restore_tokens_after_lifecycle_failure(token_store, &key, previous.as_ref()).await
+        {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
+                ),
+            ));
+        }
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("AuthMachine lifecycle acquire failed: {e}"),
         ));
     }
     Ok(())
+}
+
+async fn restore_tokens_after_lifecycle_failure(
+    token_store: &dyn TokenStore,
+    key: &TokenKey,
+    previous: Option<&PersistedTokens>,
+) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+    match previous {
+        Some(tokens) => token_store.save(key, tokens).await,
+        None => token_store.clear(key).await,
+    }
 }
 
 async fn clear_tokens_and_publish_lifecycle(
@@ -1142,7 +1168,9 @@ pub async fn logout(
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+    use meerkat_core::handles::{
+        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
+    };
     use meerkat_providers::auth_store::EphemeralTokenStore;
     use meerkat_runtime::RuntimeAuthLeaseHandle;
 
@@ -1155,9 +1183,13 @@ mod tests {
     }
 
     fn api_key_tokens() -> PersistedTokens {
+        api_key_tokens_with_secret("sk-test")
+    }
+
+    fn api_key_tokens_with_secret(secret: &str) -> PersistedTokens {
         PersistedTokens {
             auth_mode: PersistedAuthMode::ApiKey,
-            primary_secret: Some("sk-test".to_string()),
+            primary_secret: Some(secret.to_string()),
             refresh_token: None,
             id_token: None,
             expires_at: None,
@@ -1165,6 +1197,61 @@ mod tests {
             scopes: Vec::new(),
             account_id: None,
             metadata: serde_json::Value::Null,
+        }
+    }
+
+    struct RejectingAuthLeaseHandle;
+
+    impl AuthLeaseHandle for RejectingAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            _lease_key: &LeaseKey,
+            _expires_at: u64,
+        ) -> Result<(), DslTransitionError> {
+            Err(DslTransitionError::guard_rejected(
+                "acquire_lease",
+                "test rejection",
+            ))
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn complete_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+            _new_expires_at: u64,
+            _now: u64,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            AuthLeaseSnapshot {
+                phase: None,
+                expires_at: None,
+            }
         }
     }
 
@@ -1235,6 +1322,27 @@ mod tests {
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, None);
         assert_eq!(snapshot.expires_at, None);
+    }
+
+    #[tokio::test]
+    async fn rest_token_save_lifecycle_failure_restores_existing_credentials() {
+        let store = EphemeralTokenStore::new();
+        let auth_lease = RejectingAuthLeaseHandle;
+        let connection_ref = managed_connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let previous = api_key_tokens_with_secret("sk-old");
+        let replacement = api_key_tokens_with_secret("sk-new");
+        store.save(&key, &previous).await.unwrap();
+
+        let err =
+            save_tokens_and_publish_lifecycle(&store, &auth_lease, &connection_ref, &replacement)
+                .await
+                .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("AuthMachine lifecycle acquire failed"));
+        let stored = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(stored.primary_secret.as_deref(), Some("sk-old"));
     }
 
     #[tokio::test]

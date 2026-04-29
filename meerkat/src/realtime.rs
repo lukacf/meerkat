@@ -4,9 +4,11 @@ use crate::contracts::{
     RealtimeServerFrame,
 };
 use crate::contracts::{
-    RealtimeChannelRole, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeProtocolVersion,
-    RealtimeReconnectPolicy, RealtimeTurningMode,
+    RealtimeChannelRole, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeReconnectPolicy,
+    RealtimeTurningMode,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::contracts::RealtimeProtocolVersion;
 
 #[cfg(not(target_arch = "wasm32"))]
 use futures::stream::{SplitSink, SplitStream};

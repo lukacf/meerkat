@@ -1,7 +1,10 @@
 //! Comms tool surface - provides comms tools as a ToolDispatcher
 
 use async_trait::async_trait;
-use meerkat_comms::{Router, ToolContext, TrustedPeers, comms_tool_defs, handle_tools_call};
+use meerkat_comms::{
+    Router, RuntimeCommsCommandHandle, ToolContext, TrustedPeers, comms_tool_defs,
+    comms_tool_unavailable_reason, handle_tools_call,
+};
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
@@ -41,7 +44,7 @@ impl CommsToolSurface {
         let tool_context = ToolContext {
             router,
             trusted_peers,
-            runtime: Some(runtime),
+            runtime: Some(RuntimeCommsCommandHandle::new(runtime)),
         };
         let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
@@ -58,9 +61,10 @@ impl CommsToolSurface {
             .unwrap_or(false)
     }
 
-    fn callability(&self) -> ToolCallability {
+    fn callability_for_tool(&self, name: &str) -> ToolCallability {
         if self.has_peers() {
-            ToolCallability::callable()
+            comms_tool_unavailable_reason(&self.tool_context, name)
+                .map_or_else(ToolCallability::callable, ToolCallability::unavailable)
         } else {
             ToolCallability::unavailable(ToolUnavailableReason::NoPeersConfigured)
         }
@@ -101,11 +105,13 @@ impl AgentToolDispatcher for CommsToolSurface {
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-        let callability = self.callability();
         self.tool_defs
             .iter()
             .map(|tool| {
-                ToolCatalogEntry::session_inline_with_callability(Arc::clone(tool), callability)
+                ToolCatalogEntry::session_inline_with_callability(
+                    Arc::clone(tool),
+                    self.callability_for_tool(&tool.name),
+                )
             })
             .collect::<Vec<_>>()
             .into()
@@ -121,7 +127,7 @@ impl AgentToolDispatcher for CommsToolSurface {
                 name: call.name.to_string(),
             });
         }
-        if let Some(reason) = self.callability().unavailable_reason() {
+        if let Some(reason) = self.callability_for_tool(call.name).unavailable_reason() {
             return Err(ToolError::unavailable(call.name, reason));
         }
 
@@ -173,7 +179,10 @@ mod tests {
         let surface = CommsToolSurface::new(router, trusted_peers);
         assert!(surface.tool_catalog_capabilities().exact_catalog);
         let catalog = surface.tool_catalog();
-        assert_eq!(catalog.len(), surface.tools().len());
+        assert_eq!(catalog.len(), surface.tool_defs.len());
+        assert!(catalog.iter().any(|entry| entry.tool.name == "send_request"
+            && entry.callability.unavailable_reason()
+                == Some(ToolUnavailableReason::RuntimeCommandAuthorityUnavailable)));
     }
 
     #[test]
@@ -210,13 +219,12 @@ mod tests {
         }));
         let router = make_tool_context().0;
         let surface = CommsToolSurface::new(router, trusted_peers);
-        assert_eq!(surface.tools().len(), surface.tool_defs.len());
-        assert!(
-            surface
-                .tool_catalog()
-                .iter()
-                .all(meerkat_core::ToolCatalogEntry::currently_callable)
-        );
+        let tools = surface.tools();
+        let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert!(tool_names.contains(&"send_message"));
+        assert!(tool_names.contains(&"peers"));
+        assert!(!tool_names.contains(&"send_request"));
+        assert!(!tool_names.contains(&"send_response"));
     }
 
     #[tokio::test]
@@ -240,5 +248,38 @@ mod tests {
         };
         let result = surface.dispatch(call).await;
         assert!(matches!(result, Err(ToolError::Unavailable { .. })));
+    }
+
+    #[tokio::test]
+    async fn send_request_without_runtime_returns_typed_unavailable_reason() {
+        let (router, trusted_peers) = make_tool_context();
+        let surface = CommsToolSurface::new(router, trusted_peers);
+        let peer_id = surface.tool_context.trusted_peers.read().peers[0]
+            .pubkey
+            .to_peer_id();
+        let args_raw = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "peer_id": peer_id,
+                "intent": "review",
+                "params": {"file": "main.rs"},
+                "handling_mode": "steer"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let call = ToolCallView {
+            id: "test-1",
+            name: "send_request",
+            args: &args_raw,
+        };
+
+        let result = surface.dispatch(call).await;
+        assert!(matches!(
+            result,
+            Err(ToolError::Unavailable {
+                reason: ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                ..
+            })
+        ));
     }
 }

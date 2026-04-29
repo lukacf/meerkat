@@ -60,7 +60,10 @@ pub use agent::CommsAgent;
 pub use agent::dispatcher::{
     CommsToolDispatcher, DynCommsToolDispatcher, NoOpDispatcher, comms_tool_defs, wrap_with_comms,
 };
-pub use mcp::tools::{ToolContext, handle_tools_call, tools_list};
+pub use mcp::tools::{
+    RuntimeCommsCommandHandle, ToolContext, comms_tool_unavailable_reason, handle_tools_call,
+    tools_list,
+};
 
 // Capability registration
 inventory::submit! {

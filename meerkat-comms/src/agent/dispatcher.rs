@@ -1,10 +1,14 @@
 //! CommsToolDispatcher - Implements AgentToolDispatcher for comms tools.
 
-use crate::mcp::tools::{ToolContext, handle_tools_call, tools_list};
+use crate::mcp::tools::{
+    RuntimeCommsCommandHandle, ToolContext, comms_tool_unavailable_reason, handle_tools_call,
+    tools_list,
+};
 use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolCallability;
 use meerkat_core::ToolCatalogCapabilities;
 use meerkat_core::ToolCatalogEntry;
 use meerkat_core::ToolDispatchOutcome;
@@ -45,7 +49,7 @@ impl CommsToolDispatcher<NoOpDispatcher> {
         let tool_context = ToolContext {
             router,
             trusted_peers,
-            runtime: Some(runtime),
+            runtime: Some(RuntimeCommsCommandHandle::new(runtime)),
         };
         let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
@@ -98,6 +102,11 @@ fn is_comms_tool(name: &str) -> bool {
     )
 }
 
+fn callability_for_context(ctx: &ToolContext, name: &str) -> ToolCallability {
+    comms_tool_unavailable_reason(ctx, name)
+        .map_or_else(ToolCallability::callable, ToolCallability::unavailable)
+}
+
 /// Canonical JSON-to-ToolDef conversion for comms tools.
 pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
     tools_list()
@@ -121,11 +130,25 @@ pub fn comms_tool_defs() -> Vec<Arc<ToolDef>> {
 impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatcher<T> {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         if let Some(inner) = &self.inner {
-            let mut tools = self.tool_defs.iter().cloned().collect::<Vec<_>>();
+            let mut tools = self
+                .tool_defs
+                .iter()
+                .filter(|tool| {
+                    callability_for_context(&self.tool_context, &tool.name).is_callable()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             tools.extend(inner.tools().iter().map(Arc::clone));
             tools.into()
         } else {
-            Arc::clone(&self.tool_defs)
+            self.tool_defs
+                .iter()
+                .filter(|tool| {
+                    callability_for_context(&self.tool_context, &tool.name).is_callable()
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .into()
         }
     }
 
@@ -133,6 +156,11 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
+            if let Some(reason) =
+                callability_for_context(&self.tool_context, call.name).unavailable_reason()
+            {
+                return Err(ToolError::unavailable(call.name, reason));
+            }
             let result = handle_tools_call(&self.tool_context, call.name, &args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
@@ -177,7 +205,12 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         let mut catalog = self
             .tool_defs
             .iter()
-            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .map(|tool| {
+                ToolCatalogEntry::session_inline_with_callability(
+                    Arc::clone(tool),
+                    callability_for_context(&self.tool_context, &tool.name),
+                )
+            })
             .collect::<Vec<_>>();
         if let Some(inner) = &self.inner {
             if inner.tool_catalog_capabilities().exact_catalog {
@@ -229,7 +262,7 @@ impl DynCommsToolDispatcher {
         let tool_context = ToolContext {
             router,
             trusted_peers,
-            runtime: Some(runtime),
+            runtime: Some(RuntimeCommsCommandHandle::new(runtime)),
         };
         let tool_defs: Arc<[Arc<ToolDef>]> = comms_tool_defs().into();
         Self {
@@ -244,7 +277,12 @@ impl DynCommsToolDispatcher {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl AgentToolDispatcher for DynCommsToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        let mut tools = self.tool_defs.iter().cloned().collect::<Vec<_>>();
+        let mut tools = self
+            .tool_defs
+            .iter()
+            .filter(|tool| callability_for_context(&self.tool_context, &tool.name).is_callable())
+            .cloned()
+            .collect::<Vec<_>>();
         tools.extend(self.inner.tools().iter().map(Arc::clone));
         tools.into()
     }
@@ -253,6 +291,11 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
+            if let Some(reason) =
+                callability_for_context(&self.tool_context, call.name).unavailable_reason()
+            {
+                return Err(ToolError::unavailable(call.name, reason));
+            }
             let result = handle_tools_call(&self.tool_context, call.name, &args)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed { message: e })?;
@@ -282,7 +325,12 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         let mut catalog = self
             .tool_defs
             .iter()
-            .map(|tool| ToolCatalogEntry::session_inline(Arc::clone(tool), true))
+            .map(|tool| {
+                ToolCatalogEntry::session_inline_with_callability(
+                    Arc::clone(tool),
+                    callability_for_context(&self.tool_context, &tool.name),
+                )
+            })
             .collect::<Vec<_>>();
         if self.inner.tool_catalog_capabilities().exact_catalog {
             catalog.extend(self.inner.tool_catalog().iter().cloned());
@@ -427,5 +475,51 @@ mod tests {
 
         dispatcher.poll_external_updates().await;
         assert!(inner.polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn runtime_less_semantic_send_request_returns_typed_unavailable() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
+        let args_raw = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "peer_id": meerkat_core::comms::PeerId::new(),
+                "intent": "review",
+                "params": {"file": "main.rs"},
+                "handling_mode": "steer"
+            })
+            .to_string(),
+        )
+        .expect("valid args");
+        let call = ToolCallView {
+            id: "test-1",
+            name: "send_request",
+            args: &args_raw,
+        };
+
+        let result = dispatcher.dispatch(call).await;
+        assert!(matches!(
+            result,
+            Err(ToolError::Unavailable {
+                reason: meerkat_core::ToolUnavailableReason::RuntimeCommandAuthorityUnavailable,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn runtime_less_tools_hide_semantic_request_response_tools() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
+        let tools = dispatcher.tools();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"send_message"));
+        assert!(names.contains(&"peers"));
+        assert!(!names.contains(&"send_request"));
+        assert!(!names.contains(&"send_response"));
     }
 }

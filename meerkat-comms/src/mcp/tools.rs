@@ -18,11 +18,17 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
-use crate::{Router, Status, TrustedPeers};
+use crate::{Router, TrustedPeers};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
-use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerId, PeerName, PeerRoute};
+use meerkat_core::comms::{
+    CommsCommand, InputStreamMode, PeerDirectoryEntry, PeerId, PeerName, PeerRoute, SendError,
+    SendReceipt,
+};
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
+use meerkat_core::tool_catalog::ToolUnavailableReason;
 use meerkat_core::types::HandlingMode;
+
+const RUNTIME_COMMAND_AUTHORITY_UNAVAILABLE_CODE: &str = "runtime_command_authority_unavailable";
 
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
@@ -110,7 +116,39 @@ pub struct PeersInput {}
 pub struct ToolContext {
     pub router: Arc<Router>,
     pub trusted_peers: Arc<RwLock<TrustedPeers>>,
-    pub runtime: Option<Arc<dyn CoreCommsRuntime>>,
+    pub runtime: Option<RuntimeCommsCommandHandle>,
+}
+
+/// Runtime-bound authority for semantic comms command execution.
+#[derive(Clone)]
+pub struct RuntimeCommsCommandHandle {
+    runtime: Arc<dyn CoreCommsRuntime>,
+}
+
+impl RuntimeCommsCommandHandle {
+    pub fn new(runtime: Arc<dyn CoreCommsRuntime>) -> Self {
+        Self { runtime }
+    }
+
+    pub async fn send(&self, command: CommsCommand) -> Result<SendReceipt, SendError> {
+        self.runtime.send(command).await
+    }
+
+    pub async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+        self.runtime.peers().await
+    }
+}
+
+pub fn requires_runtime_command_authority(name: &str) -> bool {
+    matches!(name, "send_request" | "send_response")
+}
+
+pub fn comms_tool_unavailable_reason(
+    ctx: &ToolContext,
+    name: &str,
+) -> Option<ToolUnavailableReason> {
+    (requires_runtime_command_authority(name) && ctx.runtime.is_none())
+        .then_some(ToolUnavailableReason::RuntimeCommandAuthorityUnavailable)
 }
 
 /// Returns the list of comms tools.
@@ -145,6 +183,10 @@ pub async fn handle_tools_call(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    if comms_tool_unavailable_reason(ctx, name).is_some() {
+        return Err(runtime_command_authority_unavailable_message());
+    }
+
     match name {
         "send_message" => {
             let input: SendMessageInput = serde_json::from_value(args.clone())
@@ -232,15 +274,15 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
     let cmd_kind = command.command_kind().to_string();
 
     if let Some(runtime) = &ctx.runtime {
-        runtime.send(command).await.map_err(|error| match error {
-            meerkat_core::comms::SendError::PeerNotFound(p) => {
+        let receipt = runtime.send(command).await.map_err(|error| match error {
+            SendError::PeerNotFound(p) => {
                 format!("peer_not_found_or_not_trusted: peer '{p}' is not found or not trusted")
             }
-            meerkat_core::comms::SendError::PeerOffline => format!(
+            SendError::PeerOffline => format!(
                 "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
                 peer_for_errors.as_deref().unwrap_or("<unknown>")
             ),
-            meerkat_core::comms::SendError::Internal(inner) if is_transport_internal(&inner) => {
+            SendError::Internal(inner) if is_transport_internal(&inner) => {
                 format!(
                     "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
                     peer_for_errors.as_deref().unwrap_or("<unknown>")
@@ -248,12 +290,20 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
             }
             other => other.to_string(),
         })?;
-        return Ok(json!({ "status": "sent", "kind": cmd_kind }));
+        return Ok(sent_result(&cmd_kind, receipt));
+    }
+
+    if matches!(
+        command,
+        CommsCommand::PeerRequest { .. } | CommsCommand::PeerResponse { .. }
+    ) {
+        return Err(runtime_command_authority_unavailable_message());
     }
 
     // Fallback path (no runtime): dispatch directly through the router.
-    // This is used by unit tests and minimal host configurations. The
-    // destination was resolved to `PeerId` at the tool boundary.
+    // This is transport-only and intentionally excludes semantic
+    // request/response traffic, which must be owned by a runtime command
+    // authority.
     let dest_display = peer_for_errors
         .as_deref()
         .unwrap_or("<unknown>")
@@ -299,51 +349,60 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
                 .map_err(|e| format_router_send_error(&dest_display, e))?;
             Ok(json!({ "status": "sent", "kind": cmd_kind }))
         }
-        CommsCommand::PeerRequest {
-            intent,
-            params,
-            handling_mode,
-            ..
-        } => {
-            ctx.router
-                .send(
-                    dest_peer_id,
-                    crate::types::MessageKind::Request {
-                        intent,
-                        params,
-                        handling_mode: Some(handling_mode),
-                    },
-                )
-                .await
-                .map_err(|e| format_router_send_error(&dest_display, e))?;
-            Ok(json!({ "status": "sent", "kind": cmd_kind }))
-        }
-        CommsCommand::PeerResponse {
+        CommsCommand::PeerRequest { .. } => Err(runtime_command_authority_unavailable_message()),
+        CommsCommand::PeerResponse { .. } => Err(runtime_command_authority_unavailable_message()),
+    }
+}
+
+fn runtime_command_authority_unavailable_message() -> String {
+    format!("tool_unavailable: {RUNTIME_COMMAND_AUTHORITY_UNAVAILABLE_CODE}")
+}
+
+fn sent_result(kind: &str, receipt: SendReceipt) -> Value {
+    json!({
+        "status": "sent",
+        "kind": kind,
+        "receipt": receipt_to_json(receipt),
+    })
+}
+
+fn receipt_to_json(receipt: SendReceipt) -> Value {
+    match receipt {
+        SendReceipt::InputAccepted {
+            interaction_id,
+            stream_reserved,
+        } => json!({
+            "type": "input_accepted",
+            "interaction_id": interaction_id.0,
+            "stream_reserved": stream_reserved,
+        }),
+        SendReceipt::PeerMessageSent { envelope_id, acked } => json!({
+            "type": "peer_message_sent",
+            "envelope_id": envelope_id,
+            "acked": acked,
+        }),
+        SendReceipt::PeerLifecycleSent { envelope_id } => json!({
+            "type": "peer_lifecycle_sent",
+            "envelope_id": envelope_id,
+        }),
+        SendReceipt::PeerRequestSent {
+            envelope_id,
+            interaction_id,
+            stream_reserved,
+        } => json!({
+            "type": "peer_request_sent",
+            "envelope_id": envelope_id,
+            "interaction_id": interaction_id.0,
+            "stream_reserved": stream_reserved,
+        }),
+        SendReceipt::PeerResponseSent {
+            envelope_id,
             in_reply_to,
-            status,
-            result,
-            handling_mode,
-            ..
-        } => {
-            let status = match status {
-                ResponseStatus::Accepted => Status::Accepted,
-                ResponseStatus::Completed => Status::Completed,
-                ResponseStatus::Failed => Status::Failed,
-            };
-            ctx.router
-                .send(
-                    dest_peer_id,
-                    crate::types::MessageKind::Response {
-                        in_reply_to: in_reply_to.0,
-                        status,
-                        result,
-                        handling_mode,
-                    },
-                )
-                .await
-                .map_err(|e| format_router_send_error(&dest_display, e))?;
-            Ok(json!({ "status": "sent", "kind": cmd_kind }))
-        }
+        } => json!({
+            "type": "peer_response_sent",
+            "envelope_id": envelope_id,
+            "in_reply_to": in_reply_to.0,
+        }),
     }
 }
 
@@ -448,6 +507,118 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 mod tests {
     use super::*;
     use crate::{PubKey, TrustedPeer};
+    use parking_lot::Mutex;
+    use std::sync::LazyLock;
+    use tokio::sync::Notify;
+
+    static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    struct RecordingRuntime {
+        sent: Mutex<Vec<CommsCommand>>,
+        notify: Arc<Notify>,
+    }
+
+    impl RecordingRuntime {
+        fn new() -> Self {
+            Self {
+                sent: Mutex::new(Vec::new()),
+                notify: Arc::new(Notify::new()),
+            }
+        }
+
+        fn sent_len(&self) -> usize {
+            self.sent.lock().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreCommsRuntime for RecordingRuntime {
+        async fn send(
+            &self,
+            cmd: CommsCommand,
+        ) -> Result<meerkat_core::comms::SendReceipt, meerkat_core::comms::SendError> {
+            let receipt = match &cmd {
+                CommsCommand::PeerRequest { .. } => {
+                    meerkat_core::comms::SendReceipt::PeerRequestSent {
+                        envelope_id: uuid::Uuid::from_u128(1),
+                        interaction_id: InteractionId(uuid::Uuid::from_u128(2)),
+                        stream_reserved: false,
+                    }
+                }
+                CommsCommand::PeerResponse { in_reply_to, .. } => {
+                    meerkat_core::comms::SendReceipt::PeerResponseSent {
+                        envelope_id: uuid::Uuid::from_u128(3),
+                        in_reply_to: *in_reply_to,
+                    }
+                }
+                other => {
+                    return Err(meerkat_core::comms::SendError::Unsupported(format!(
+                        "unexpected command in test: {}",
+                        other.command_kind()
+                    )));
+                }
+            };
+            self.sent.lock().push(cmd);
+            Ok(receipt)
+        }
+
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<Notify> {
+            Arc::clone(&self.notify)
+        }
+    }
+
+    fn make_trusted_runtime_less_context(
+        peer_keypair: &Keypair,
+    ) -> (ToolContext, meerkat_core::comms::PeerId) {
+        let sender_keypair = Keypair::generate();
+        let peer_id = peer_keypair.public_key().to_peer_id();
+        let trusted_peers = TrustedPeers {
+            peers: vec![TrustedPeer {
+                name: "test-peer".to_string(),
+                pubkey: peer_keypair.public_key(),
+                addr: "inproc://test-peer".to_string(),
+                meta: crate::PeerMeta::default(),
+            }],
+        };
+        let trusted_peers = Arc::new(RwLock::new(trusted_peers));
+        let (_, inbox_sender) = crate::Inbox::new();
+        let router = Arc::new(Router::with_shared_peers(
+            sender_keypair,
+            trusted_peers.clone(),
+            CommsConfig::default(),
+            inbox_sender,
+            true,
+        ));
+
+        (
+            ToolContext {
+                router,
+                trusted_peers,
+                runtime: None,
+            },
+            peer_id,
+        )
+    }
+
+    async fn make_runtime_less_inproc_context() -> (ToolContext, meerkat_core::comms::PeerId) {
+        let _lock = INPROC_REGISTRY_LOCK.lock().await;
+        crate::InprocRegistry::global().clear();
+
+        let peer_keypair = Keypair::generate();
+        let (_receiver_inbox, receiver_sender) = crate::Inbox::new();
+        crate::InprocRegistry::global().register(
+            "test-peer",
+            peer_keypair.public_key(),
+            receiver_sender,
+        );
+
+        make_trusted_runtime_less_context(&peer_keypair)
+    }
 
     #[test]
     fn test_tools_list_has_four_tools() {
@@ -655,5 +826,123 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_send_request_without_runtime_command_authority_fails_closed() {
+        let (ctx, peer_id) = make_runtime_less_inproc_context().await;
+
+        let error = handle_tools_call(
+            &ctx,
+            "send_request",
+            &json!({
+                "peer_id": peer_id,
+                "intent": "review",
+                "params": {"file": "main.rs"},
+                "handling_mode": "steer"
+            }),
+        )
+        .await
+        .expect_err("runtime-less send_request must not fall back to router send");
+
+        assert!(
+            error.contains("runtime_command_authority_unavailable"),
+            "expected runtime command authority error, got: {error}"
+        );
+
+        crate::InprocRegistry::global().clear();
+    }
+
+    #[tokio::test]
+    async fn test_send_response_without_runtime_command_authority_fails_closed() {
+        let (ctx, peer_id) = make_runtime_less_inproc_context().await;
+        let request_id = uuid::Uuid::new_v4();
+
+        let error = handle_tools_call(
+            &ctx,
+            "send_response",
+            &json!({
+                "peer_id": peer_id,
+                "in_reply_to": request_id.to_string(),
+                "status": "completed",
+                "result": {"ok": true}
+            }),
+        )
+        .await
+        .expect_err("runtime-less send_response must not fall back to router send");
+
+        assert!(
+            error.contains("runtime_command_authority_unavailable"),
+            "expected runtime command authority error, got: {error}"
+        );
+
+        crate::InprocRegistry::global().clear();
+    }
+
+    #[tokio::test]
+    async fn test_runtime_bound_send_request_returns_typed_receipt() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        let result = handle_tools_call(
+            &ctx,
+            "send_request",
+            &json!({
+                "peer_id": peer_id,
+                "intent": "review",
+                "params": {"file": "main.rs"},
+                "handling_mode": "queue"
+            }),
+        )
+        .await
+        .expect("runtime-backed send_request should succeed");
+
+        assert_eq!(runtime.sent_len(), 1);
+        assert_eq!(result["status"], "sent");
+        assert_eq!(result["kind"], "peer_request");
+        assert_eq!(result["receipt"]["type"], "peer_request_sent");
+        assert_eq!(
+            result["receipt"]["envelope_id"],
+            uuid::Uuid::from_u128(1).to_string()
+        );
+        assert_eq!(
+            result["receipt"]["interaction_id"],
+            uuid::Uuid::from_u128(2).to_string()
+        );
+        assert_eq!(result["receipt"]["stream_reserved"], false);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_bound_send_response_returns_typed_receipt() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let request_id = uuid::Uuid::from_u128(4);
+
+        let result = handle_tools_call(
+            &ctx,
+            "send_response",
+            &json!({
+                "peer_id": peer_id,
+                "in_reply_to": request_id.to_string(),
+                "status": "completed",
+                "result": {"ok": true}
+            }),
+        )
+        .await
+        .expect("runtime-backed send_response should succeed");
+
+        assert_eq!(runtime.sent_len(), 1);
+        assert_eq!(result["status"], "sent");
+        assert_eq!(result["kind"], "peer_response");
+        assert_eq!(result["receipt"]["type"], "peer_response_sent");
+        assert_eq!(
+            result["receipt"]["envelope_id"],
+            uuid::Uuid::from_u128(3).to_string()
+        );
+        assert_eq!(result["receipt"]["in_reply_to"], request_id.to_string());
     }
 }

@@ -111,6 +111,7 @@ impl ToolCatalogEntry {
 pub enum ToolUnavailableReason {
     NotCurrentlyCallable,
     NoPeersConfigured,
+    RuntimeCommandAuthorityUnavailable,
     TemporarilyUnavailable,
 }
 
@@ -121,6 +122,9 @@ impl std::fmt::Display for ToolUnavailableReason {
                 f.write_str("tool is not currently callable")
             }
             ToolUnavailableReason::NoPeersConfigured => f.write_str("no peers configured"),
+            ToolUnavailableReason::RuntimeCommandAuthorityUnavailable => {
+                f.write_str("runtime command authority unavailable")
+            }
             ToolUnavailableReason::TemporarilyUnavailable => {
                 f.write_str("tool is temporarily unavailable")
             }

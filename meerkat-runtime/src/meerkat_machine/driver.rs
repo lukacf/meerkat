@@ -858,11 +858,15 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         }
         let target_boundary = machine_input_boundary(driver, first);
         let target_execution_kind = machine_input_execution_kind(driver, first);
+        let target_peer_response_terminal_apply_intent =
+            machine_input_peer_response_terminal_apply_intent(driver, first);
         return steer
             .iter()
             .take_while(|id| {
                 machine_input_boundary(driver, id) == target_boundary
                     && machine_input_execution_kind(driver, id) == target_execution_kind
+                    && machine_input_peer_response_terminal_apply_intent(driver, id)
+                        == target_peer_response_terminal_apply_intent
             })
             .cloned()
             .collect();
@@ -875,12 +879,16 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         if ingress.is_prompt(first) {
             return prefix.to_vec();
         }
+        let target_peer_response_terminal_apply_intent =
+            machine_input_peer_response_terminal_apply_intent(driver, first);
         return queue[..]
             .iter()
             .take_while(|id| {
                 !ingress.is_prompt(id)
                     && machine_input_execution_kind(driver, id)
                         == meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+                    && machine_input_peer_response_terminal_apply_intent(driver, id)
+                        == target_peer_response_terminal_apply_intent
             })
             .cloned()
             .collect();

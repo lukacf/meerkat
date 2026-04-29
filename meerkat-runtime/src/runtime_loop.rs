@@ -1369,6 +1369,125 @@ mod tests {
         Ok(())
     }
 
+    fn make_peer_message(peer_id: &str, body: &str) -> Input {
+        Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: peer_id.into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::Message),
+            body: body.into(),
+            payload: None,
+            blocks: None,
+            handling_mode: None,
+        })
+    }
+
+    fn make_terminal_peer_response(peer_id: &str, request_id: &str) -> Input {
+        Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: peer_id.into(),
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: request_id.into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            body: String::new(),
+            payload: Some(serde_json::json!({"ok": true})),
+            blocks: None,
+            handling_mode: None,
+        })
+    }
+
+    async fn accept_queued_input_id(
+        driver: &crate::meerkat_machine::SharedDriver,
+        input: Input,
+    ) -> InputId {
+        let mut guard = driver.lock().await;
+        match guard
+            .as_driver_mut()
+            .accept_input(input)
+            .await
+            .expect("input should be accepted")
+        {
+            crate::accept::AcceptOutcome::Accepted { input_id, .. } => input_id,
+            other => panic!("expected accepted queued input, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_peer_response_batches_do_not_mix_with_peer_messages() {
+        let terminal_first = make_shared_ephemeral_driver("terminal-first");
+        let terminal_id = accept_queued_input_id(
+            &terminal_first,
+            make_terminal_peer_response("analyst-rt", "req-terminal-first"),
+        )
+        .await;
+        let _message_id = accept_queued_input_id(
+            &terminal_first,
+            make_peer_message("analyst-rt", "follow-up"),
+        )
+        .await;
+
+        {
+            let guard = terminal_first.lock().await;
+            let batch = crate::meerkat_machine::machine_select_runtime_loop_batch(&guard);
+            assert_eq!(
+                batch,
+                vec![terminal_id],
+                "terminal response batch must not absorb later normal peer messages"
+            );
+            assert_eq!(
+                crate::meerkat_machine::machine_batch_peer_response_terminal_apply_intent(
+                    &guard, &batch,
+                ),
+                Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
+            );
+        }
+
+        let message_first = make_shared_ephemeral_driver("message-first");
+        let message_id =
+            accept_queued_input_id(&message_first, make_peer_message("analyst-rt", "first")).await;
+        let _terminal_id = accept_queued_input_id(
+            &message_first,
+            make_terminal_peer_response("analyst-rt", "req-message-first"),
+        )
+        .await;
+
+        let guard = message_first.lock().await;
+        let batch = crate::meerkat_machine::machine_select_runtime_loop_batch(&guard);
+        assert_eq!(
+            batch,
+            vec![message_id],
+            "normal peer message batch must not absorb later terminal responses"
+        );
+        assert_eq!(
+            crate::meerkat_machine::machine_batch_peer_response_terminal_apply_intent(
+                &guard, &batch,
+            ),
+            None
+        );
+    }
+
     #[test]
     fn peer_input_with_blocks_produces_blocks_renderable() -> Result<(), String> {
         let blocks = vec![

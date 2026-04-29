@@ -6,7 +6,7 @@
 //! core builder remains available as [`crate::CoreAgentBuilder`] for tests and
 //! embeddings that intentionally own all agent loop primitives themselves.
 
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use meerkat_client::LlmClient;
 use meerkat_core::{
@@ -19,6 +19,12 @@ use tokio::sync::mpsc;
 use tokio_with_wasm::alias::sync::mpsc;
 
 use crate::{AgentBuildConfig, AgentFactory, BuildAgentError, DynAgent};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type AgentBuilderBuildFuture =
+    Pin<Box<dyn Future<Output = Result<DynAgent, BuildAgentError>> + Send>>;
+#[cfg(target_arch = "wasm32")]
+pub type AgentBuilderBuildFuture = Pin<Box<dyn Future<Output = Result<DynAgent, BuildAgentError>>>>;
 
 /// Public builder for creating agents through the canonical facade pipeline.
 pub struct AgentBuilder {
@@ -243,19 +249,21 @@ impl AgentBuilder {
     /// The supplied resources are treated as explicit overrides, then the build
     /// still routes through [`AgentFactory::build_agent`] for shared session,
     /// provider, runtime, hook, and metadata semantics.
-    pub async fn build(
+    pub fn build(
         mut self,
         client: Arc<dyn AgentLlmClient>,
         tools: Arc<dyn AgentToolDispatcher>,
         store: Arc<dyn AgentSessionStore>,
-    ) -> Result<DynAgent, BuildAgentError> {
-        if !self.model_explicit {
-            self.build_config.model = client.model().to_string();
-        }
-        self.build_config.agent_llm_client_override = Some(client);
-        self.build_config.tool_dispatcher_override = Some(tools);
-        self.build_config.session_store_override = Some(store);
-        self.try_build().await
+    ) -> AgentBuilderBuildFuture {
+        Box::pin(async move {
+            if !self.model_explicit {
+                self.build_config.model = client.model().to_string();
+            }
+            self.build_config.agent_llm_client_override = Some(client);
+            self.build_config.tool_dispatcher_override = Some(tools);
+            self.build_config.session_store_override = Some(store);
+            self.try_build().await
+        })
     }
 
     /// Build an agent using the factory resources already set on this builder.

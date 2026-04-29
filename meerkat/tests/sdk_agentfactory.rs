@@ -147,7 +147,7 @@ impl AgentLlmClient for ImageAgentLlmClient {
         "anthropic"
     }
 
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "claude-sonnet-4-6"
     }
 }
@@ -178,7 +178,7 @@ impl AgentLlmClient for CustomAgentLlmClient {
         "custom-provider"
     }
 
-    fn model(&self) -> &str {
+    fn model(&self) -> &'static str {
         "custom-agent-model"
     }
 }
@@ -190,7 +190,7 @@ impl meerkat_core::compact::Compactor for NoopCompactor {
         false
     }
 
-    fn compaction_prompt(&self) -> &str {
+    fn compaction_prompt(&self) -> &'static str {
         ""
     }
 

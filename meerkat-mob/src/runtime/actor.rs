@@ -9001,12 +9001,14 @@ impl MobActor {
                     "RunFlow CompleteFlow rollback failed: {rollback_error}"
                 ));
             }
+            let terminalize_reason =
+                format!("lifecycle StartRun transition failed during flow admission: {error}");
             if let Err(terminalize_error) = self
-                .flow_engine
-                .terminalize_failed(
+                .terminalize_failed_in_actor(
                     run_id.clone(),
                     config.flow_id.clone(),
-                    format!("lifecycle StartRun transition failed during flow admission: {error}"),
+                    terminalize_reason,
+                    "run_flow_start_signal_terminalize_failed",
                 )
                 .await
             {
@@ -9216,9 +9218,12 @@ impl MobActor {
 
         let Some(mut handle) = self.run_tasks.remove(&run_id) else {
             self.flow_engine.cancel_unfinished_steps(&run_id).await?;
-            self.flow_engine
-                .terminalize_canceled(run_id.clone(), flow_id)
-                .await?;
+            self.terminalize_canceled_in_actor(
+                run_id.clone(),
+                flow_id,
+                "cancel_flow_no_handle_terminalize_canceled",
+            )
+            .await?;
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "cancel_flow_no_handle")
                 .map_err(|error| {
                     MobError::Internal(format!(
@@ -9786,6 +9791,25 @@ impl MobActor {
                 MobMachineFlowRunCommand::TerminalizeCanceled(
                     flow_run::inputs::TerminalizeCanceled {},
                 ),
+                context,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn terminalize_failed_in_actor(
+        &mut self,
+        run_id: RunId,
+        flow_id: FlowId,
+        reason: String,
+        context: &'static str,
+    ) -> Result<(), MobError> {
+        let _ = self
+            .commit_flow_terminalization_in_actor(
+                run_id,
+                flow_id,
+                TerminalizationTarget::Failed { reason },
+                MobMachineFlowRunCommand::TerminalizeFailed(flow_run::inputs::TerminalizeFailed {}),
                 context,
             )
             .await?;

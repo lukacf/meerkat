@@ -15327,6 +15327,42 @@ fn test_flow_frame_scheduler_start_run_routes_through_actor_authority() {
     }
 }
 
+#[test]
+fn test_actor_owned_terminalization_paths_do_not_reenter_actor_mailbox() {
+    let source = include_str!("actor.rs");
+    let run_flow_start = source
+        .find("async fn handle_run_flow")
+        .expect("handle_run_flow exists");
+    let run_flow_pre_spawn_end = source[run_flow_start..]
+        .find("let cancel_token = tokio_util::sync::CancellationToken::new();")
+        .expect("handle_run_flow creates cancel token after admission");
+    let run_flow_pre_spawn = &source[run_flow_start..run_flow_start + run_flow_pre_spawn_end];
+    assert!(
+        !run_flow_pre_spawn.contains(".flow_engine\n                .terminalize_failed("),
+        "actor-owned run admission failure must terminalize through the in-actor helper, not by sending to its own actor mailbox"
+    );
+    assert!(
+        run_flow_pre_spawn.contains("terminalize_failed_in_actor"),
+        "actor-owned run admission failure must use the in-actor failed terminalization helper"
+    );
+
+    let cancel_start = source
+        .find("async fn handle_cancel_flow")
+        .expect("handle_cancel_flow exists");
+    let cancel_body_end = source[cancel_start..]
+        .find("let flow_engine = self.flow_engine.clone();")
+        .expect("handle_cancel_flow spawns async cancellation cleanup after no-handle path");
+    let cancel_no_handle_body = &source[cancel_start..cancel_start + cancel_body_end];
+    assert!(
+        !cancel_no_handle_body.contains(".flow_engine\n                .terminalize_canceled("),
+        "actor-owned no-task cancel path must terminalize through the in-actor helper, not by sending to its own actor mailbox"
+    );
+    assert!(
+        cancel_no_handle_body.contains("terminalize_canceled_in_actor"),
+        "actor-owned no-task cancel path must use the in-actor canceled terminalization helper"
+    );
+}
+
 #[tokio::test]
 async fn test_stale_flow_frame_store_plan_loses_cas_before_authority_prepare() {
     use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};

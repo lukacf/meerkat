@@ -5905,6 +5905,58 @@ async fn test_stopped_empty_task_create_is_rejected_by_machine_admission() {
     );
 }
 
+#[tokio::test]
+async fn test_stopped_unknown_profile_spawn_is_rejected_by_machine_admission() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle.stop().await.expect("stop");
+
+    let result = handle
+        .spawn(
+            ProfileName::from("missing-profile"),
+            MeerkatId::from("w-missing-profile"),
+            None,
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "unknown profile must not shadow MobMachine stopped-phase admission: {result:?}"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "stopped rejected spawn must not provision a session"
+    );
+}
+
+#[tokio::test]
+async fn test_stopped_unknown_flow_run_flow_is_rejected_by_machine_admission() {
+    let (handle, _service) =
+        create_test_mob(sample_definition_with_single_step_flow(60_000, 8)).await;
+    handle.stop().await.expect("stop");
+
+    let result = handle
+        .run_flow(FlowId::from("missing-flow"), serde_json::json!({}))
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "unknown flow must not shadow MobMachine stopped-phase admission: {result:?}"
+    );
+}
+
 fn mob_command_arm_source<'a>(source: &'a str, command: &str) -> &'a str {
     let marker = format!("                MobCommand::{command}");
     let start = source

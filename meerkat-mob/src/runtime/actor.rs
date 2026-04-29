@@ -2167,6 +2167,37 @@ impl MobActor {
         .map_err(|_| self.invalid_transition_to(MobState::Running))
     }
 
+    fn preview_spawn_command_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
+        // This is only the command-admission barrier; the real spawn payload is
+        // previewed again after profile resolution and before provisioning.
+        let placeholder_bridge_session_id = SessionId::new();
+        self.preview_spawn_admission(agent_identity, false, &placeholder_bridge_session_id)
+    }
+
+    fn preview_run_flow_command_admission(&self, run_id: &RunId) -> Result<(), MobError> {
+        self.prepare_command_admission(
+            mob_dsl::MobMachineInput::RunFlow {
+                run_id: mob_dsl::RunId::from(run_id.to_string()),
+                step_ids: Default::default(),
+                ordered_steps: Vec::new(),
+                step_has_conditions: Default::default(),
+                step_dependencies: Default::default(),
+                step_dependency_modes: Default::default(),
+                step_branches: Default::default(),
+                step_collection_policies: Default::default(),
+                step_quorum_thresholds: Default::default(),
+                escalation_threshold: 0,
+                max_step_retries: 0,
+                max_active_nodes: 0,
+                max_active_frames: 0,
+                max_frame_depth: 0,
+            },
+            MobState::Running,
+            "run_flow_command_admission",
+        )
+        .map(|_| ())
+    }
+
     fn submit_work_rejection_for_machine_state(
         &self,
         machine_state: &mob_dsl::MobMachineState,
@@ -3976,6 +4007,10 @@ impl MobActor {
             connection_ref,
         } = spec;
         let agent_identity = MeerkatId::from(identity.as_str());
+        if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
         // Normalize launch-mode resume/fork details for the provisioning path.
         let resume_bridge_session_id = launch_mode.resume_bridge_session_id().cloned();
         let fork_spec = match launch_mode {
@@ -9055,8 +9090,9 @@ impl MobActor {
         self.ensure_pending_spawn_alignment("handle_run_flow preflight")?;
         self.ensure_flow_tracker_alignment("handle_run_flow preflight")
             .await?;
-        let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
         let run_id = RunId::new();
+        self.preview_run_flow_command_admission(&run_id)?;
+        let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;
         debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));
         let prepared_run_flow = self

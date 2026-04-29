@@ -37,7 +37,7 @@ use meerkat_runtime::store::SessionDelta;
 use meerkat_runtime::{RuntimeMode, RuntimeStore};
 use meerkat_store::{SessionFilter, SessionStore};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -752,8 +752,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Err(err) => return Err(err),
         };
 
-        let Some(stored) = self.load_authoritative_session_base(id).await? else {
-            return Ok(false);
+        let stored = if let Some(runtime_store) = self.runtime_store.as_ref() {
+            let runtime_id = Self::runtime_id_for_session(id);
+            let Some(runtime) =
+                Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await?
+            else {
+                return Ok(false);
+            };
+            runtime
+        } else {
+            let Some(stored) = self
+                .store
+                .load(id)
+                .await
+                .map_err(|e| SessionError::Store(Box::new(e)))?
+            else {
+                return Ok(false);
+            };
+            stored
         };
 
         let stored_has_more_transcript = stored.messages().len() > live.messages().len();
@@ -1521,8 +1537,16 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             .list(SessionFilter::default())
             .await
             .map_err(|e| SessionError::Store(Box::new(e)))?;
+        let live_summaries = self.inner.list(SessionQuery::default()).await?;
+        let live_ids: HashSet<SessionId> = live_summaries
+            .iter()
+            .map(|summary| summary.session_id.clone())
+            .collect();
         let mut summaries_by_id: IndexMap<SessionId, SessionSummary> = IndexMap::new();
         for meta in stored {
+            if live_ids.contains(&meta.id) {
+                continue;
+            }
             if let Some(session) = self.load_authoritative_session_base(&meta.id).await? {
                 if metadata_marks_archived(session.metadata()) {
                     continue;
@@ -1532,7 +1556,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             }
         }
 
-        for summary in self.inner.list(SessionQuery::default()).await? {
+        for summary in live_summaries {
             summaries_by_id.insert(summary.session_id.clone(), summary);
         }
 
@@ -2216,7 +2240,7 @@ mod tests {
     use meerkat_core::{RunId, lifecycle::run_primitive::RunApplyBoundary};
     use meerkat_runtime::{InMemoryRuntimeStore, RuntimeStore};
     use meerkat_store::{MemoryBlobStore, MemoryStore, SessionStoreError};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
         Arc::new(MemoryBlobStore::new())
@@ -2385,6 +2409,178 @@ mod tests {
 
         async fn delete(&self, id: &SessionId) -> Result<(), SessionStoreError> {
             self.inner.delete(id).await
+        }
+    }
+
+    struct GatedSnapshotRuntimeStore {
+        inner: InMemoryRuntimeStore,
+        hidden_snapshot_loads: AtomicUsize,
+    }
+
+    impl GatedSnapshotRuntimeStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryRuntimeStore::new(),
+                hidden_snapshot_loads: AtomicUsize::new(0),
+            }
+        }
+
+        fn hide_next_session_snapshot_loads(&self, count: usize) {
+            self.hidden_snapshot_loads.store(count, Ordering::Release);
+        }
+
+        fn should_hide_session_snapshot_load(&self) -> bool {
+            let mut remaining = self.hidden_snapshot_loads.load(Ordering::Acquire);
+            while remaining > 0 {
+                match self.hidden_snapshot_loads.compare_exchange(
+                    remaining,
+                    remaining - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return true,
+                    Err(current) => remaining = current,
+                }
+            }
+            false
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStore for GatedSnapshotRuntimeStore {
+        async fn commit_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: meerkat_runtime::store::SessionDelta,
+            run_id: RunId,
+            boundary: RunApplyBoundary,
+            contributing_input_ids: Vec<InputId>,
+            input_updates: Vec<StoredInputState>,
+        ) -> Result<
+            meerkat_core::lifecycle::RunBoundaryReceipt,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .commit_session_boundary(
+                    runtime_id,
+                    session_delta,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    input_updates,
+                )
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<meerkat_runtime::store::SessionDelta>,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            input_updates: Vec<StoredInputState>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<
+            Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
+            if self.should_hide_session_snapshot_load() {
+                return Ok(None);
+            }
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &StoredInputState,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn persist_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: meerkat_runtime::RuntimeState,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_runtime_state(runtime_id, state).await
+        }
+
+        async fn load_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<meerkat_runtime::RuntimeState>, meerkat_runtime::store::RuntimeStoreError>
+        {
+            self.inner.load_runtime_state(runtime_id).await
+        }
+
+        async fn atomic_lifecycle_commit(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            runtime_state: meerkat_runtime::RuntimeState,
+            input_states: &[StoredInputState],
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+                .await
+        }
+
+        async fn persist_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            snapshot: &meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
+        }
+
+        async fn load_ops_lifecycle(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<
+            Option<meerkat_runtime::ops_lifecycle::PersistedOpsSnapshot>,
+            meerkat_runtime::store::RuntimeStoreError,
+        > {
+            self.inner.load_ops_lifecycle(runtime_id).await
         }
     }
 
@@ -4706,6 +4902,193 @@ mod tests {
             authoritative.messages().len(),
             runtime_authority.messages().len(),
             "raw session-store rows must not override an existing runtime authority snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_runtime_read_ignores_stale_raw_store_fallback_when_snapshot_load_misses() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        service
+            .start_turn(&result.session_id, start_turn_request("live runtime truth"))
+            .await
+            .expect("live turn should succeed");
+        let live = service
+            .export_live_session(&result.session_id)
+            .await
+            .expect("live session should export");
+
+        let mut raw_store_projection = live.clone();
+        raw_store_projection.push(Message::User(UserMessage::text(
+            "stale raw compatibility row".to_string(),
+        )));
+        raw_store_projection.set_metadata(
+            SESSION_LABELS_KEY,
+            serde_json::json!({
+                "source": "raw-store",
+            }),
+        );
+        store
+            .save(&raw_store_projection)
+            .await
+            .expect("test should seed a stale raw store projection");
+
+        runtime_store.hide_next_session_snapshot_loads(1);
+        let view = service
+            .read(&result.session_id)
+            .await
+            .expect("read should preserve live runtime truth");
+        assert_eq!(
+            view.state.message_count,
+            live.messages().len(),
+            "read() must not expose a raw store row when live runtime truth exists"
+        );
+        assert!(
+            view.state.labels.is_empty(),
+            "read() must not expose raw store metadata when live runtime truth exists"
+        );
+        assert!(
+            service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed"),
+            "status must not let raw fallback evict a live runtime session"
+        );
+
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should remain present");
+        assert_eq!(
+            authoritative.messages().len(),
+            live.messages().len(),
+            "raw fallback must not replace durable runtime authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_runtime_list_status_and_resume_ignore_stale_raw_store_metadata() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        service
+            .start_turn(&result.session_id, start_turn_request("live runtime truth"))
+            .await
+            .expect("live turn should succeed");
+        let live = service
+            .export_live_session(&result.session_id)
+            .await
+            .expect("live session should export");
+
+        let mut raw_store_projection = live.clone();
+        raw_store_projection.push(Message::User(UserMessage::text(
+            "stale raw compatibility row".to_string(),
+        )));
+        raw_store_projection.set_metadata(
+            SESSION_LABELS_KEY,
+            serde_json::json!({
+                "source": "raw-store",
+            }),
+        );
+        store
+            .save(&raw_store_projection)
+            .await
+            .expect("test should seed a stale raw store projection");
+
+        runtime_store.hide_next_session_snapshot_loads(1);
+        let listed = service
+            .list(SessionQuery::default())
+            .await
+            .expect("list should succeed");
+        let summary = listed
+            .iter()
+            .find(|summary| summary.session_id == result.session_id)
+            .expect("list should include the live runtime-backed session");
+        assert_eq!(
+            summary.message_count,
+            live.messages().len(),
+            "list() must report live/runtime metadata instead of raw store fallback"
+        );
+        assert!(
+            summary.labels.is_empty(),
+            "list() must not expose labels from a stale raw store projection"
+        );
+        assert!(
+            service
+                .has_live_session(&result.session_id)
+                .await
+                .expect("status should succeed"),
+            "status must remain live after list inspects stale raw projections"
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("test should evict the live handle before resume");
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+        let resume_source = restarted
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("resume source should load from runtime authority")
+            .expect("runtime authority should remain present");
+        assert_eq!(
+            resume_source.messages().len(),
+            live.messages().len(),
+            "resume source must not be rebuilt from stale raw store fallback"
+        );
+        assert!(
+            !resume_source.metadata().contains_key(SESSION_LABELS_KEY),
+            "resume source must not inherit raw store metadata"
+        );
+        let resumed = restarted
+            .create_session(resume_request(resume_source))
+            .await
+            .expect("resume should materialize runtime truth");
+        assert_eq!(resumed.session_id, result.session_id);
+        let resumed_live = restarted
+            .export_live_session(&result.session_id)
+            .await
+            .expect("resumed live session should export");
+        assert_eq!(
+            resumed_live.messages().len(),
+            live.messages().len(),
+            "resumed live session must preserve runtime-authoritative metadata"
         );
     }
 

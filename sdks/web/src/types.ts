@@ -366,8 +366,11 @@ export interface MobMember {
 export interface ExternalPeerTarget {
   external: {
     name: string;
-    peer_id: string;
     address: string;
+    identity: {
+      kind: "ed25519_public_key";
+      public_key: string;
+    };
   };
 }
 

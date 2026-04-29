@@ -341,6 +341,7 @@ pub use wire::{
     WireToolCall,
     WireToolResult,
     WireToolResultContent,
+    WireTrustedPeerIdentity,
     WireTrustedPeerSpec,
     WireUsage,
     WireWorkOrigin,

@@ -1009,45 +1009,110 @@ mod tests {
     use super::*;
     use crate::MobMcpState;
 
-    fn external_peer_target(peer_id: String, pubkey: [u8; 32]) -> meerkat_contracts::MobPeerTarget {
+    const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+    const ED25519_PUBLIC_KEY_ZERO: &str = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    fn canonical_external_peer_target() -> meerkat_contracts::MobPeerTarget {
+        serde_json::from_value(serde_json::json!({
+            "external": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": ED25519_PUBLIC_KEY_7
+                }
+            }
+        }))
+        .expect("canonical external peer target should deserialize")
+    }
+
+    fn external_peer_target(public_key: &str) -> meerkat_contracts::MobPeerTarget {
         meerkat_contracts::MobPeerTarget::External(meerkat_contracts::WireTrustedPeerSpec {
             name: "external-worker".to_string(),
-            peer_id,
             address: "inproc://external-worker".to_string(),
-            pubkey,
+            identity: meerkat_contracts::WireTrustedPeerIdentity::Ed25519PublicKey {
+                public_key: public_key.to_string(),
+            },
         })
     }
 
     #[test]
+    fn public_mcp_wire_accepts_canonical_external_peer_identity() {
+        let target = peer_target_from_wire(canonical_external_peer_target())
+            .expect("canonical external peer identity should resolve");
+
+        let meerkat_mob::PeerTarget::External(descriptor) = target else {
+            panic!("canonical external peer should resolve to an external descriptor");
+        };
+        let pubkey = [7u8; 32];
+        assert_eq!(descriptor.name.as_str(), "external-worker");
+        assert_eq!(descriptor.address.to_string(), "inproc://external-worker");
+        assert_eq!(descriptor.pubkey, pubkey);
+        assert_eq!(
+            descriptor.peer_id,
+            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey)
+        );
+    }
+
+    #[test]
+    fn public_mcp_wire_rejects_external_peer_raw_peer_id_shape() {
+        let err = serde_json::from_value::<meerkat_contracts::MobPeerTarget>(serde_json::json!({
+            "external": {
+                "name": "external-worker",
+                "peer_id": meerkat_core::comms::PeerId::from_ed25519_pubkey(&[7u8; 32]).to_string(),
+                "address": "inproc://external-worker",
+                "pubkey": vec![7u8; 32]
+            }
+        }))
+        .expect_err("raw peer_id/pubkey external peer shape must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("peer_id") || msg.contains("identity"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn public_mcp_wire_rejects_external_peer_missing_pubkey_material() {
+        let err = serde_json::from_value::<meerkat_contracts::MobPeerTarget>(serde_json::json!({
+            "external": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key"
+                }
+            }
+        }))
+        .expect_err("external peer identity must not default missing pubkey material");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("public_key") || msg.contains("identity"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
     fn public_mcp_wire_rejects_external_peer_zero_pubkey() {
-        let err = peer_target_from_wire(external_peer_target(
-            meerkat_core::comms::PeerId::new().to_string(),
-            [0u8; 32],
-        ))
-        .expect_err("zero pubkey external peers must be rejected");
+        let err = peer_target_from_wire(external_peer_target(ED25519_PUBLIC_KEY_ZERO))
+            .expect_err("zero pubkey external peers must be rejected");
 
         assert!(
-            err.message.contains("pubkey"),
+            err.message.contains("public_key") || err.message.contains("non-zero"),
             "expected pubkey validation error, got: {}",
             err.message
         );
     }
 
     #[test]
-    fn public_mcp_wire_rejects_external_peer_pubkey_peer_id_mismatch() {
-        let pubkey = [7u8; 32];
-        let mismatched_peer_id = meerkat_core::comms::PeerId::new().to_string();
-        assert_ne!(
-            mismatched_peer_id,
-            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey).to_string()
-        );
-
-        let err = peer_target_from_wire(external_peer_target(mismatched_peer_id, pubkey))
-            .expect_err("external peer_id must match the supplied pubkey");
+    fn public_mcp_wire_rejects_invalid_external_peer_identity() {
+        let err = peer_target_from_wire(external_peer_target("not-a-typed-public-key"))
+            .expect_err("invalid canonical external peer identity must be rejected");
 
         assert!(
-            err.message.contains("peer_id") && err.message.contains("pubkey"),
-            "expected peer_id/pubkey validation error, got: {}",
+            err.message.contains("public_key") || err.message.contains("ed25519"),
+            "expected typed identity validation error, got: {}",
             err.message
         );
     }

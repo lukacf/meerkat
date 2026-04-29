@@ -543,11 +543,17 @@ export interface WireRenderMetadata {
   salience?: "background" | "normal" | "important" | "urgent";
 }
 
+export interface WireTrustedPeerIdentityEd25519PublicKey {
+  kind: "ed25519_public_key";
+  public_key: string;
+}
+
+export type WireTrustedPeerIdentity = WireTrustedPeerIdentityEd25519PublicKey;
+
 export interface WireTrustedPeerSpec {
   address: string;
+  identity: WireTrustedPeerIdentity;
   name: string;
-  peer_id: string;
-  pubkey?: number[];
 }
 
 export interface MobWireResult {

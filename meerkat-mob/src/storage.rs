@@ -24,7 +24,7 @@ pub struct MobStorage {
     pub runs: Arc<dyn MobRunStore>,
     /// Flow spec persistence store.
     pub specs: Arc<dyn MobSpecStore>,
-    /// Authoritative runtime metadata store for supervisor and normalization state.
+    /// Runtime metadata store for supervisor authority and compatibility projections.
     pub runtime_metadata: Arc<dyn MobRuntimeMetadataStore>,
     /// Realm-scoped reusable profile store.
     pub realm_profiles: Option<Arc<dyn RealmProfileStore>>,

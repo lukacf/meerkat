@@ -544,10 +544,10 @@ impl MobBuilder {
             .into_iter()
             .filter(|event| event.mob_id == definition.id)
             .collect();
-        // Runtime metadata owns supervisor authority and carries
-        // external-binding reconciliation facts. Roster membership still
-        // comes from the event log, then MobMachine is seeded from that
-        // reconciled projection.
+        // Runtime metadata owns supervisor authority. External-binding
+        // overlays are compatibility projections only: restart authority for
+        // member material, bridge bindings, and lifecycle status comes from
+        // the event-projected roster seeded into MobMachine below.
         Self::ensure_supervisor_authority(storage.runtime_metadata.clone(), definition.id.clone())
             .await?;
         let supervisor_authority = storage
@@ -567,15 +567,6 @@ impl MobBuilder {
         let mut roster = Roster::project(&mob_events);
         #[cfg(not(target_arch = "wasm32"))]
         Self::normalize_sessionless_backend_runtime_modes(&mut roster);
-        #[cfg(not(target_arch = "wasm32"))]
-        let seeded_restore_diagnostics = {
-            let binding_overlays = storage
-                .runtime_metadata
-                .list_external_binding_overlays(&definition.id)
-                .await?;
-            Self::reconcile_external_binding_overlays(&mut roster, &binding_overlays)
-        };
-        #[cfg(target_arch = "wasm32")]
         let seeded_restore_diagnostics = HashMap::new();
         let task_board = TaskBoard::project(&mob_events);
         // Determine resumed state from events in the current epoch (after the
@@ -747,80 +738,6 @@ impl MobBuilder {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn reconcile_external_binding_overlays(
-        roster: &mut Roster,
-        overlays: &[crate::store::ExternalBindingOverlayRecord],
-    ) -> HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic> {
-        let overlay_index = overlays
-            .iter()
-            .map(|overlay| {
-                (
-                    (overlay.agent_identity.clone(), overlay.generation),
-                    overlay.clone(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let mut diagnostics = HashMap::new();
-
-        let identities = roster
-            .list_all()
-            .map(|entry| entry.agent_identity.clone())
-            .collect::<Vec<_>>();
-        for identity in identities {
-            let Some(entry) = roster.get_by_identity_mut(&identity) else {
-                continue;
-            };
-            let Some(overlay) =
-                overlay_index.get(&(entry.agent_identity.clone(), entry.generation))
-            else {
-                entry.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
-                    entry.runtime_mode,
-                    Some(&entry.member_ref),
-                );
-                continue;
-            };
-
-            let original_member_ref = entry.member_ref.clone();
-            match &overlay.status {
-                crate::store::ExternalBindingOverlayStatus::Normalized => {
-                    if let Some(normalized_member_ref) = overlay.normalized_member_ref.clone() {
-                        entry.member_ref = Self::member_ref_with_bootstrap_token(
-                            normalized_member_ref,
-                            overlay.bootstrap_token.clone(),
-                        );
-                    }
-                }
-                crate::store::ExternalBindingOverlayStatus::Failed { reason } => {
-                    let normalized_member_ref = overlay
-                        .normalized_member_ref
-                        .clone()
-                        .or_else(|| Self::sessionless_member_ref(&original_member_ref));
-                    if let Some(normalized_member_ref) = normalized_member_ref {
-                        entry.member_ref = Self::member_ref_with_bootstrap_token(
-                            normalized_member_ref,
-                            overlay.bootstrap_token.clone(),
-                        );
-                    }
-                    diagnostics.insert(
-                        MeerkatId::from(entry.agent_identity.as_str()),
-                        super::handle::RestoreFailureDiagnostic {
-                            bridge_session_id: original_member_ref.bridge_session_id().cloned(),
-                            reason: reason.clone(),
-                        },
-                    );
-                }
-            }
-
-            entry.runtime_mode = Self::normalize_runtime_mode_for_member_ref(
-                entry.runtime_mode,
-                Some(&entry.member_ref),
-            );
-        }
-
-        diagnostics
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
     fn normalize_sessionless_backend_runtime_modes(roster: &mut Roster) {
         let identities = roster
             .list_all()
@@ -846,49 +763,6 @@ impl MobBuilder {
                 session_id: None, ..
             }) => crate::MobRuntimeMode::TurnDriven,
             _ => runtime_mode,
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn sessionless_member_ref(
-        member_ref: &crate::event::MemberRef,
-    ) -> Option<crate::event::MemberRef> {
-        match member_ref {
-            crate::event::MemberRef::BackendPeer {
-                peer_id,
-                address,
-                bootstrap_token,
-                session_id: _,
-            } => Some(crate::event::MemberRef::BackendPeer {
-                peer_id: peer_id.clone(),
-                address: super::bridge_protocol::canonicalize_bridge_address(address),
-                bootstrap_token: bootstrap_token.clone(),
-                session_id: None,
-            }),
-            crate::event::MemberRef::Session { .. } => None,
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn member_ref_with_bootstrap_token(
-        member_ref: crate::event::MemberRef,
-        bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
-    ) -> crate::event::MemberRef {
-        match member_ref {
-            crate::event::MemberRef::BackendPeer {
-                peer_id,
-                address,
-                session_id,
-                ..
-            } => crate::event::MemberRef::BackendPeer {
-                peer_id,
-                address: super::bridge_protocol::canonicalize_bridge_address(&address),
-                bootstrap_token,
-                session_id,
-            },
-            crate::event::MemberRef::Session { session_id } => {
-                crate::event::MemberRef::Session { session_id }
-            }
         }
     }
 

@@ -8520,7 +8520,7 @@ async fn test_resume_recreates_missing_external_bridge_preserving_backend_identi
 }
 
 #[tokio::test]
-async fn test_resume_reconciles_normalized_external_binding_overlay_after_event_projection() {
+async fn test_resume_treats_normalized_external_binding_overlay_as_projection_only() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let definition = sample_definition_with_external_backend();
@@ -8599,33 +8599,42 @@ async fn test_resume_reconciles_normalized_external_binding_overlay_after_event_
             session_id,
             ..
         } => {
-            assert_eq!(peer_id, old_peer_id, "overlay must preserve peer identity");
-            assert_eq!(address, old_address, "overlay must preserve peer address");
             assert_eq!(
-                session_id, None,
-                "normalized overlay must remove the legacy bridge session from the effective binding"
+                peer_id, old_peer_id,
+                "event replay must preserve peer identity"
+            );
+            assert_eq!(
+                address, old_address,
+                "event replay must preserve peer address"
+            );
+            assert!(
+                session_id.is_some(),
+                "normalized overlay must not remove the replay-owned bridge binding"
             );
         }
-        other => panic!("expected backend peer after overlay reconciliation, got {other:?}"),
+        other => panic!("expected backend peer after resume, got {other:?}"),
     }
 
     let snapshot = resumed
         .member_status(&AgentIdentity::from("w-ext"))
         .await
-        .expect("sessionless external status");
+        .expect("external status");
     assert_eq!(
         snapshot.status,
         crate::runtime::handle::MobMemberStatus::Active
     );
     assert!(
         !snapshot.is_final,
-        "peer-only external member should stay non-terminal without a bridge session"
+        "external member should stay non-terminal under MobMachine lifecycle truth"
     );
-    assert_eq!(snapshot.current_bridge_session_id(), None);
+    assert!(
+        snapshot.current_bridge_session_id().is_some(),
+        "status must report replay/reconcile-owned bridge binding"
+    );
     let external = snapshot
         .external_member
         .as_ref()
-        .expect("peer-only external member should expose observation snapshot");
+        .expect("external member should expose observation snapshot");
     assert_eq!(
         external.owner.agent_identity,
         AgentIdentity::from("w-ext"),
@@ -8634,14 +8643,12 @@ async fn test_resume_reconciles_normalized_external_binding_overlay_after_event_
     assert_eq!(external.owner.mob_id, mob_id);
     assert_eq!(
         external.binding_mode,
-        crate::runtime::ExternalMemberBindingMode::PeerOnly
+        crate::runtime::ExternalMemberBindingMode::BridgeSessionBacked
     );
-    assert!(!external.bridge_session_present);
+    assert!(external.bridge_session_present);
     assert_eq!(
         external.rebind,
-        crate::runtime::ExternalMemberRebindStatus::Unavailable {
-            reason: "missing bootstrap_token for supervisor rebind".to_string()
-        }
+        crate::runtime::ExternalMemberRebindStatus::NotRequired
     );
     let serialized_external =
         serde_json::to_value(external).expect("serialize external observation");
@@ -8668,7 +8675,7 @@ async fn test_resume_reconciles_normalized_external_binding_overlay_after_event_
 }
 
 #[tokio::test]
-async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
+async fn test_resume_treats_failed_external_binding_overlay_as_projection_only() {
     let service = Arc::new(MockSessionService::new());
     let _ = service.enable_runtime_adapter();
     let definition = sample_definition_with_external_backend();
@@ -8730,50 +8737,45 @@ async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
     .with_session_service(service.clone())
     .resume()
     .await
-    .expect("resume should project broken external member");
+    .expect("resume should ignore stale failed overlay authority");
     let resumed_entry = resumed
         .get_member(&AgentIdentity::from("w-ext"))
         .await
         .expect("resumed external entry");
     match resumed_entry.member_ref {
         MemberRef::BackendPeer { session_id, .. } => {
-            assert_eq!(
-                session_id, None,
-                "failed normalization should still strip the legacy bridge session from replay"
+            assert!(
+                session_id.is_some(),
+                "failed overlay must not strip the replay-owned bridge binding"
             );
         }
-        other => panic!("expected backend peer after failed overlay reconciliation, got {other:?}"),
+        other => panic!("expected backend peer after resume, got {other:?}"),
     }
 
     let snapshot = resumed
         .member_status(&AgentIdentity::from("w-ext"))
         .await
-        .expect("broken external status");
+        .expect("external status");
     assert_eq!(
         snapshot.status,
-        crate::runtime::handle::MobMemberStatus::Broken
+        crate::runtime::handle::MobMemberStatus::Active
     );
     assert!(
-        snapshot
-            .error
-            .as_deref()
-            .is_some_and(|message| message.contains("normalization failed")),
-        "overlay failure reason should surface as a broken-member error"
+        snapshot.error.is_none(),
+        "failed overlay reason must not surface as member status truth"
     );
     let external = snapshot
         .external_member
         .as_ref()
-        .expect("broken external member should still expose observation snapshot");
+        .expect("external member should still expose observation snapshot");
     assert_eq!(
         external.reachability,
-        crate::runtime::ExternalMemberReachability::Unavailable {
-            reason: snapshot.error.clone().expect("restore error")
-        }
+        crate::runtime::ExternalMemberReachability::Unknown
     );
-    assert!(matches!(
+    assert_eq!(
         external.rebind,
-        crate::runtime::ExternalMemberRebindStatus::Failed { .. }
-    ));
+        crate::runtime::ExternalMemberRebindStatus::NotRequired
+    );
     assert_eq!(
         external.forwarding.approvals.owner.agent_identity,
         AgentIdentity::from("w-ext"),
@@ -8785,24 +8787,246 @@ async fn test_resume_failed_external_binding_overlay_marks_member_broken() {
         "artifact forwarding hook should be stable-identity owned"
     );
 
-    let error = resumed
+    resumed
         .internal_turn(
             AgentIdentity::from("w-ext"),
             ContentInput::from("repair me".to_string()),
         )
         .await
-        .expect_err("broken overlay members must reject turn delivery");
-    match error {
-        MobError::MemberRestoreFailed {
-            member_id,
-            session_id,
-            ..
-        } => {
-            assert_eq!(member_id, MeerkatId::from("w-ext"));
-            assert_eq!(session_id, Some(old_sid));
-        }
-        other => panic!("expected MemberRestoreFailed, got {other:?}"),
-    }
+        .expect("stale failed overlay must not reject turn delivery");
+}
+
+async fn resume_with_stale_external_binding_overlay(
+    label: &str,
+    status: ExternalBindingOverlayStatus,
+    overlay_member_ref: Option<MemberRef>,
+) -> MobHandle {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = with_unique_mob_id(sample_definition_with_external_backend(), label);
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.stop().await.expect("stop");
+
+    let old_sid = SessionId::new();
+    let generation = crate::ids::Generation::INITIAL;
+    events
+        .append(crate::event::NewMobEvent {
+            mob_id: mob_id.clone(),
+            timestamp: None,
+            kind: crate::event::MobEventKind::MemberSpawned(
+                crate::event::MemberSpawnedEvent::new(
+                    AgentIdentity::from("w-ext"),
+                    generation,
+                    FenceToken::new(0),
+                    AgentRuntimeId::initial(AgentIdentity::from("w-ext")),
+                    ProfileName::from("worker"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::BackendPeer {
+                    peer_id: "ed25519:test-key:w-ext".to_string(),
+                    address: "tcp://test.invalid/w-ext".to_string(),
+                    bootstrap_token: None,
+                    session_id: Some(old_sid),
+                })),
+            ),
+        })
+        .await
+        .expect("append external member event");
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("w-ext"),
+                generation,
+                normalized_member_ref: overlay_member_ref,
+                bootstrap_token: None,
+                status,
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist stale overlay");
+
+    MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume must be driven by event/MobMachine authority")
+}
+
+#[tokio::test]
+async fn test_resume_ignores_stale_normalized_external_binding_overlay_for_member_material() {
+    let resumed = resume_with_stale_external_binding_overlay(
+        "stale-normalized-overlay",
+        ExternalBindingOverlayStatus::Normalized,
+        Some(MemberRef::BackendPeer {
+            peer_id: "ed25519:test-key:w-ext".to_string(),
+            address: "tcp://test.invalid/w-ext".to_string(),
+            bootstrap_token: None,
+            session_id: None,
+        }),
+    )
+    .await;
+
+    let entry = resumed
+        .get_member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("replayed member must remain visible");
+    assert!(
+        entry.member_ref.bridge_session_id().is_some(),
+        "stale overlay-only normalization must not hide the replayed bridge binding"
+    );
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "stale overlay-only facts must not override MobMachine lifecycle truth"
+    );
+    assert!(
+        snapshot.current_bridge_session_id().is_some(),
+        "status must report the MobMachine/replay-owned bridge binding, not overlay-only absence"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_ignores_stale_failed_external_binding_overlay_for_status_truth() {
+    let resumed = resume_with_stale_external_binding_overlay(
+        "stale-failed-overlay",
+        ExternalBindingOverlayStatus::Failed {
+            reason: "stale overlay failure".to_string(),
+        },
+        None,
+    )
+    .await;
+
+    let snapshot = resumed
+        .member_status(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("member status");
+    assert_eq!(
+        snapshot.status,
+        crate::runtime::handle::MobMemberStatus::Active,
+        "stale overlay-only failure must not mark a replayed live member broken"
+    );
+    assert!(
+        snapshot.error.is_none(),
+        "stale overlay-only failure must not surface as member status truth"
+    );
+    resumed
+        .member(&AgentIdentity::from("w-ext"))
+        .await
+        .expect("stale overlay failure must not block member access");
+}
+
+#[tokio::test]
+async fn test_resume_does_not_require_external_binding_overlay_load_for_authority() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let events = Arc::new(InMemoryMobEventStore::new());
+    let runtime_metadata = Arc::new(FaultInjectedRuntimeMetadataStore::new());
+    let storage =
+        MobStorage::with_events_and_runtime_metadata(events.clone(), runtime_metadata.clone());
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.stop().await.expect("stop");
+    runtime_metadata
+        .fail_list_overlays
+        .store(true, Ordering::Relaxed);
+
+    MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("overlay projection load failure must not block MobMachine-owned resume");
+}
+
+#[tokio::test]
+async fn test_reconcile_spawns_member_despite_stale_overlay_only_record() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let definition = with_unique_mob_id(sample_definition(), "overlay-only-reconcile");
+    let mob_id = definition.id.clone();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle.stop().await.expect("stop");
+    runtime_metadata
+        .upsert_external_binding_overlay(
+            &mob_id,
+            &ExternalBindingOverlayRecord {
+                agent_identity: AgentIdentity::from("ghost"),
+                generation: crate::ids::Generation::INITIAL,
+                normalized_member_ref: Some(MemberRef::BackendPeer {
+                    peer_id: "ed25519:test-key:ghost".to_string(),
+                    address: "tcp://test.invalid/ghost".to_string(),
+                    bootstrap_token: None,
+                    session_id: None,
+                }),
+                bootstrap_token: None,
+                status: ExternalBindingOverlayStatus::Normalized,
+                updated_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("persist overlay-only record");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service)
+    .resume()
+    .await
+    .expect("resume");
+    assert!(
+        resumed
+            .get_member(&AgentIdentity::from("ghost"))
+            .await
+            .is_none(),
+        "overlay-only records must not materialize members on restart"
+    );
+
+    let report = resumed
+        .reconcile(
+            vec![SpawnMemberSpec::new("worker", "ghost")],
+            crate::runtime::reconcile::ReconcileOptions::default(),
+        )
+        .await
+        .expect("reconcile");
+    assert_eq!(
+        report.spawned.len(),
+        1,
+        "reconcile must spawn desired members that exist only as stale overlays"
+    );
+    assert!(
+        report.retained.is_empty(),
+        "overlay-only records must not be retained as existing roster members"
+    );
 }
 
 #[tokio::test]
@@ -8822,7 +9046,6 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
     handle.stop().await.expect("stop");
     let peer_id = "ed25519:test-key:w-ext".to_string();
     let address = "tcp://test.invalid/w-ext".to_string();
-    let old_sid = SessionId::new();
     let generation = crate::ids::Generation::INITIAL;
     events
         .append(crate::event::NewMobEvent {
@@ -8840,12 +9063,12 @@ async fn test_peer_only_members_reject_agent_event_subscriptions_explicitly() {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
                     bootstrap_token: None,
-                    session_id: Some(old_sid.clone()),
+                    session_id: None,
                 })),
             ),
         })
         .await
-        .expect("append legacy external member event");
+        .expect("append peer-only external member event");
     runtime_metadata
         .upsert_external_binding_overlay(
             &mob_id,
@@ -8939,7 +9162,6 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
     else {
         panic!("live external peer must produce external binding");
     };
-    let old_sid = SessionId::new();
     let generation = crate::ids::Generation::INITIAL;
     events
         .append(crate::event::NewMobEvent {
@@ -8957,12 +9179,12 @@ async fn test_peer_only_members_accept_direct_turn_delivery_without_bridge_sessi
                     peer_id: peer_id.clone(),
                     address: address.clone(),
                     bootstrap_token: bootstrap_token.clone(),
-                    session_id: Some(old_sid.clone()),
+                    session_id: None,
                 })),
             ),
         })
         .await
-        .expect("append legacy external member event");
+        .expect("append peer-only external member event");
     runtime_metadata
         .upsert_external_binding_overlay(
             &mob_id,

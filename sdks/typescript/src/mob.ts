@@ -88,8 +88,11 @@ export type MobReadyMemberSnapshot = MobKickoffMemberSnapshot;
 export interface ExternalPeerTarget {
   readonly external: {
     readonly name: string;
-    readonly peer_id: string;
     readonly address: string;
+    readonly identity: {
+      readonly kind: "ed25519_public_key";
+      readonly public_key: string;
+    };
   };
 }
 

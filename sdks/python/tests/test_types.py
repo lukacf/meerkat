@@ -1474,7 +1474,16 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     await client.unwire_mob_members(
         "mob-1",
         "a",
-        {"external": {"name": "remote", "peer_id": "ed25519:remote", "address": "inproc://remote"}},
+        {
+            "external": {
+                "name": "remote",
+                "address": "inproc://remote",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+                },
+            }
+        },
     )
     await client.mob_lifecycle("mob-1", "start")
     wait_members = await client.wait_mob_kickoff(
@@ -1540,8 +1549,11 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "peer": {
             "external": {
                 "name": "remote",
-                "peer_id": "ed25519:remote",
                 "address": "inproc://remote",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+                },
             }
         },
     }

@@ -101,8 +101,8 @@ pub use mob::{
     MobWireParams, MobWireResult, MobWiringRulesInput, WireAgentRuntimeId, WireHandlingMode,
     WireMemberRef, WireMemberRefError, WireMemberState, WireMobBackendKind, WireMobLifecycleAction,
     WireMobMemberStatus, WireMobReconcileStage, WireMobRuntimeMode, WireRenderClass,
-    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireTrustedPeerSpec,
-    WireWorkOrigin,
+    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireTrustedPeerIdentity,
+    WireTrustedPeerSpec, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,

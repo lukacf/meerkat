@@ -3199,9 +3199,10 @@
         "type": "string"
       },
       "WireRuntimeBinding": {
-        "description": "Runtime binding for spawn requests.\n\nFirst step toward identity-first mobs. Carries backend-specific binding\ndetails at spawn time. `External` requires real process identity.",
+        "description": "Runtime binding for spawn requests.\n\nFirst step toward identity-first mobs. Carries backend-specific binding\ndetails at spawn time. `External` requires typed process identity; callers\ndo not supply raw comms peer IDs.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "session",
@@ -3214,6 +3215,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "address": {
                 "type": "string"
@@ -3228,33 +3230,42 @@
                   }
                 ]
               },
+              "identity": {
+                "$ref": "#/$defs/WireTrustedPeerIdentity",
+                "description": "Typed Ed25519 signing identity for the external process. The\ncanonical comms `PeerId` is derived from this key after the wire\nboundary, so callers cannot spoof an unrelated raw peer id."
+              },
               "kind": {
                 "const": "external",
                 "type": "string"
-              },
-              "peer_id": {
-                "type": "string"
-              },
-              "pubkey": {
-                "description": "Ed25519 signing pubkey (32 bytes) of the external peer. Required\nfor the supervisor to install a non-zero-pubkey trust entry so\nreal-comms signed-envelope replies admit past ingress trust\ncheck. Absent on legacy bindings that pre-date pubkey plumbing.",
-                "items": {
-                  "format": "uint8",
-                  "maximum": 255,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "maxItems": 32,
-                "minItems": 32,
-                "type": [
-                  "array",
-                  "null"
-                ]
               }
             },
             "required": [
               "kind",
-              "peer_id",
-              "address"
+              "address",
+              "identity"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
             ],
             "type": "object"
           }
@@ -4039,68 +4050,47 @@
   },
   "MobPeerTarget": {
     "$defs": {
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireTrustedPeerSpec": {
-        "description": "Minimal trusted peer spec for public mob wiring surfaces.\n\n`pubkey` is the Ed25519 signing public key (32 bytes) required so the\nreceiver can verify envelope signatures after trust registration.\nSerialized as a 32-element JSON array of numbers (matching\n`BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —\nthe corresponding `TrustedPeerDescriptor::pubkey` will then be all\nzeros, which makes signature verification fail closed. Production\nclients MUST send the real pubkey.",
+        "additionalProperties": false,
+        "description": "Minimal trusted peer spec for public mob wiring surfaces.\n\n`identity` is required and resolves to the Ed25519 signing public key\nplus the canonical comms `PeerId` derived from that key. MCP callers do\nnot provide raw peer IDs, and missing key material fails at the boundary.",
         "properties": {
           "address": {
             "type": "string"
           },
+          "identity": {
+            "$ref": "#/$defs/WireTrustedPeerIdentity"
+          },
           "name": {
             "type": "string"
-          },
-          "peer_id": {
-            "type": "string"
-          },
-          "pubkey": {
-            "default": [
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0
-            ],
-            "items": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "maxItems": 32,
-            "minItems": 32,
-            "type": "array"
           }
         },
         "required": [
           "name",
-          "peer_id",
-          "address"
+          "address",
+          "identity"
         ],
         "type": "object"
       }
@@ -21119,68 +21109,49 @@
     "title": "WireToolResultContent"
   },
   "WireTrustedPeerSpec": {
+    "$defs": {
+      "WireTrustedPeerIdentity": {
+        "description": "Typed external peer identity for public mob wiring surfaces.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Recoverable Ed25519 public key string in `ed25519:<base64>` form.",
+            "properties": {
+              "kind": {
+                "const": "ed25519_public_key",
+                "type": "string"
+              },
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "public_key"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Minimal trusted peer spec for public mob wiring surfaces.\n\n`pubkey` is the Ed25519 signing public key (32 bytes) required so the\nreceiver can verify envelope signatures after trust registration.\nSerialized as a 32-element JSON array of numbers (matching\n`BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —\nthe corresponding `TrustedPeerDescriptor::pubkey` will then be all\nzeros, which makes signature verification fail closed. Production\nclients MUST send the real pubkey.",
+    "additionalProperties": false,
+    "description": "Minimal trusted peer spec for public mob wiring surfaces.\n\n`identity` is required and resolves to the Ed25519 signing public key\nplus the canonical comms `PeerId` derived from that key. MCP callers do\nnot provide raw peer IDs, and missing key material fails at the boundary.",
     "properties": {
       "address": {
         "type": "string"
       },
+      "identity": {
+        "$ref": "#/$defs/WireTrustedPeerIdentity"
+      },
       "name": {
         "type": "string"
-      },
-      "peer_id": {
-        "type": "string"
-      },
-      "pubkey": {
-        "default": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "items": {
-          "format": "uint8",
-          "maximum": 255,
-          "minimum": 0,
-          "type": "integer"
-        },
-        "maxItems": 32,
-        "minItems": 32,
-        "type": "array"
       }
     },
     "required": [
       "name",
-      "peer_id",
-      "address"
+      "address",
+      "identity"
     ],
     "title": "WireTrustedPeerSpec",
     "type": "object"

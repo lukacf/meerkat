@@ -74,6 +74,27 @@ fn project_member_status(status: MobMemberStatus) -> WireMobMemberStatus {
     }
 }
 
+fn runtime_binding_from_wire(
+    binding: meerkat_contracts::WireRuntimeBinding,
+) -> Result<meerkat_mob::RuntimeBinding, String> {
+    match binding {
+        meerkat_contracts::WireRuntimeBinding::Session => Ok(meerkat_mob::RuntimeBinding::Session),
+        meerkat_contracts::WireRuntimeBinding::External {
+            address,
+            bootstrap_token,
+            identity,
+        } => {
+            let resolved = identity.resolve().map_err(|err| err.to_string())?;
+            Ok(meerkat_mob::RuntimeBinding::External {
+                peer_id: resolved.peer_id.to_string(),
+                address,
+                bootstrap_token,
+                pubkey: Some(resolved.pubkey),
+            })
+        }
+    }
+}
+
 /// Convert a mob roster entry into the public typed wire shape. Used for
 /// `mob/ensure_member`'s `Existed` outcome and for typed member-list
 /// responses.
@@ -318,20 +339,10 @@ pub async fn handle_spawn(
     spec.labels = params.labels;
     spec.additional_instructions = params.additional_instructions;
     if let Some(binding) = params.binding {
-        spec.binding = Some(match binding {
-            meerkat_contracts::WireRuntimeBinding::Session => meerkat_mob::RuntimeBinding::Session,
-            meerkat_contracts::WireRuntimeBinding::External {
-                peer_id,
-                address,
-                bootstrap_token,
-                pubkey,
-            } => meerkat_mob::RuntimeBinding::External {
-                peer_id,
-                address,
-                bootstrap_token,
-                pubkey,
-            },
-        });
+        match runtime_binding_from_wire(binding) {
+            Ok(binding) => spec.binding = Some(binding),
+            Err(err) => return invalid_params(id, err),
+        }
     }
     if let Some(shell_env) = params.shell_env {
         spec.shell_env = Some(shell_env);
@@ -1824,20 +1835,7 @@ fn spawn_spec_from_wire(
     spec.labels = spec_wire.labels.clone();
     spec.additional_instructions = spec_wire.additional_instructions.clone();
     if let Some(binding) = spec_wire.binding.clone() {
-        spec.binding = Some(match binding {
-            meerkat_contracts::WireRuntimeBinding::Session => meerkat_mob::RuntimeBinding::Session,
-            meerkat_contracts::WireRuntimeBinding::External {
-                peer_id,
-                address,
-                bootstrap_token,
-                pubkey,
-            } => meerkat_mob::RuntimeBinding::External {
-                peer_id,
-                address,
-                bootstrap_token,
-                pubkey,
-            },
-        });
+        spec.binding = Some(runtime_binding_from_wire(binding)?);
     }
     if let Some(auto_wire_parent) = spec_wire.auto_wire_parent {
         spec.auto_wire_parent = auto_wire_parent;

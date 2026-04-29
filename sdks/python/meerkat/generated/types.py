@@ -290,21 +290,23 @@ class WireRenderMetadata:
     salience: Optional[Literal['background', 'normal', 'important', 'urgent']] = None
 
 
+# Typed external peer identity for public mob wiring surfaces.
+class WireTrustedPeerIdentityEd25519PublicKey(TypedDict, total=False):
+    kind: Required[Literal['ed25519_public_key']]
+    public_key: Required[str]
+
+WireTrustedPeerIdentity = WireTrustedPeerIdentityEd25519PublicKey
+
 @dataclass
 class WireTrustedPeerSpec:
     """Minimal trusted peer spec for public mob wiring surfaces.
 
-`pubkey` is the Ed25519 signing public key (32 bytes) required so the
-receiver can verify envelope signatures after trust registration.
-Serialized as a 32-element JSON array of numbers (matching
-`BridgePeerSpec`). Defaults to a zero pubkey for legacy clients —
-the corresponding `TrustedPeerDescriptor::pubkey` will then be all
-zeros, which makes signature verification fail closed. Production
-clients MUST send the real pubkey."""
+`identity` is required and resolves to the Ed25519 signing public key
+plus the canonical comms `PeerId` derived from that key. MCP callers do
+not provide raw peer IDs, and missing key material fails at the boundary."""
     address: str
+    identity: WireTrustedPeerIdentity
     name: str
-    peer_id: str
-    pubkey: Optional[list[int]] = None
 
 
 @dataclass

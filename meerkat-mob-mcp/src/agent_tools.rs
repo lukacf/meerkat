@@ -1446,8 +1446,9 @@ fn build_tool_defs_with_profile_support(
              For external peers (outside the roster), trust is added on the local member's side.\n\n\
              PEER TARGET TYPES:\n\
              - {\"local\": \"member-id\"} — another member in the same mob roster.\n\
-             - {\"external\": {\"name\": \"peer-name\", \"peer_id\": \"ed25519:...\", \
-               \"address\": \"tcp://host:port\"}} — a trusted peer outside the roster.",
+             - {\"external\": {\"name\": \"peer-name\", \"address\": \"tcp://host:port\", \
+               \"identity\": {\"kind\": \"ed25519_public_key\", \"public_key\": \"ed25519:...\"}}} \
+               — a trusted peer outside the roster.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1469,10 +1470,19 @@ fn build_tool_defs_with_profile_support(
                                         "type": "object",
                                         "properties": {
                                             "name": {"type": "string"},
-                                            "peer_id": {"type": "string"},
-                                            "address": {"type": "string"}
+                                            "address": {"type": "string"},
+                                            "identity": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "kind": {"type": "string", "enum": ["ed25519_public_key"]},
+                                                    "public_key": {"type": "string"}
+                                                },
+                                                "required": ["kind", "public_key"],
+                                                "additionalProperties": false
+                                            }
                                         },
-                                        "required": ["name", "peer_id", "address"]
+                                        "required": ["name", "address", "identity"],
+                                        "additionalProperties": false
                                     }
                                 },
                                 "required": ["external"]
@@ -1510,10 +1520,19 @@ fn build_tool_defs_with_profile_support(
                                         "type": "object",
                                         "properties": {
                                             "name": {"type": "string"},
-                                            "peer_id": {"type": "string"},
-                                            "address": {"type": "string"}
+                                            "address": {"type": "string"},
+                                            "identity": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "kind": {"type": "string", "enum": ["ed25519_public_key"]},
+                                                    "public_key": {"type": "string"}
+                                                },
+                                                "required": ["kind", "public_key"],
+                                                "additionalProperties": false
+                                            }
                                         },
-                                        "required": ["name", "peer_id", "address"]
+                                        "required": ["name", "address", "identity"],
+                                        "additionalProperties": false
                                     }
                                 },
                                 "required": ["external"]
@@ -1728,31 +1747,26 @@ struct MemberArgs {
     member_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct WireArgs {
     mob_id: String,
     member_id: String,
     peer: WirePeerArg,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum WirePeerArg {
     Local { local: String },
     External { external: ExternalPeerArg },
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExternalPeerArg {
     name: String,
-    peer_id: String,
     address: String,
-    /// Ed25519 signing public key (32 bytes). Defaults to zero — the
-    /// resulting descriptor will fail envelope signature verification,
-    /// which is the correct fail-closed property for agents that do
-    /// not supply a real key.
-    #[serde(default)]
-    pubkey: [u8; 32],
+    identity: meerkat_contracts::WireTrustedPeerIdentity,
 }
 
 fn peer_target_from_args(
@@ -1761,43 +1775,15 @@ fn peer_target_from_args(
     match peer {
         WirePeerArg::Local { local } => Ok(meerkat_mob::PeerTarget::Local(local.into())),
         WirePeerArg::External { external } => {
-            let name = meerkat_core::comms::PeerName::new(external.name.clone()).map_err(|e| {
-                meerkat_core::error::ToolError::invalid_arguments(
-                    "mob_wire",
-                    format!("invalid peer name '{}': {e}", external.name),
-                )
-            })?;
-            let peer_id = meerkat_core::comms::PeerId::parse(&external.peer_id).map_err(|e| {
-                meerkat_core::error::ToolError::invalid_arguments(
-                    "mob_wire",
-                    format!("invalid peer_id '{}': {e}", external.peer_id),
-                )
-            })?;
-            let address = parse_agent_peer_address(&external.address)
-                .map_err(|e| meerkat_core::error::ToolError::invalid_arguments("mob_wire", e))?;
-            Ok(meerkat_mob::PeerTarget::External(
-                meerkat_core::comms::TrustedPeerDescriptor {
-                    name,
-                    peer_id,
-                    address,
-                    pubkey: external.pubkey,
-                },
-            ))
+            let descriptor = crate::trusted_peer_descriptor_from_wire_parts(
+                external.name,
+                external.address,
+                external.identity,
+            )
+            .map_err(|e| meerkat_core::error::ToolError::invalid_arguments("mob_wire", e))?;
+            Ok(meerkat_mob::PeerTarget::External(descriptor))
         }
     }
-}
-
-fn parse_agent_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
-    let (scheme, endpoint) = raw
-        .split_once("://")
-        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
-    let transport = match scheme {
-        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
-        "uds" => meerkat_core::comms::PeerTransport::Uds,
-        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
-        other => return Err(format!("unknown peer address transport: {other}")),
-    };
-    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 
 #[derive(Deserialize)]
@@ -1877,6 +1863,79 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    const ED25519_PUBLIC_KEY_7: &str = "ed25519:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+    fn canonical_agent_wire_peer_arg() -> WirePeerArg {
+        serde_json::from_value(serde_json::json!({
+            "external": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key",
+                    "public_key": ED25519_PUBLIC_KEY_7
+                }
+            }
+        }))
+        .expect("canonical agent external peer target should deserialize")
+    }
+
+    #[test]
+    fn agent_mcp_wire_accepts_canonical_external_peer_identity() {
+        let target = peer_target_from_args(canonical_agent_wire_peer_arg())
+            .expect("canonical agent external peer identity should resolve");
+
+        let meerkat_mob::PeerTarget::External(descriptor) = target else {
+            panic!("canonical agent external peer should resolve to an external descriptor");
+        };
+        let pubkey = [7u8; 32];
+        assert_eq!(descriptor.name.as_str(), "external-worker");
+        assert_eq!(descriptor.address.to_string(), "inproc://external-worker");
+        assert_eq!(descriptor.pubkey, pubkey);
+        assert_eq!(
+            descriptor.peer_id,
+            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey)
+        );
+    }
+
+    #[test]
+    fn agent_mcp_wire_rejects_external_peer_raw_peer_id_shape() {
+        let err = serde_json::from_value::<WirePeerArg>(serde_json::json!({
+            "external": {
+                "name": "external-worker",
+                "peer_id": meerkat_core::comms::PeerId::from_ed25519_pubkey(&[7u8; 32]).to_string(),
+                "address": "inproc://external-worker",
+                "pubkey": vec![7u8; 32]
+            }
+        }))
+        .expect_err("agent MCP raw peer_id/pubkey external peer shape must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("peer_id") || msg.contains("identity") || msg.contains("did not match"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn agent_mcp_wire_rejects_external_peer_missing_pubkey_material() {
+        let err = serde_json::from_value::<WirePeerArg>(serde_json::json!({
+            "external": {
+                "name": "external-worker",
+                "address": "inproc://external-worker",
+                "identity": {
+                    "kind": "ed25519_public_key"
+                }
+            }
+        }))
+        .expect_err("agent MCP external peer identity must not default missing pubkey material");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("public_key") || msg.contains("identity") || msg.contains("did not match"),
+            "unexpected error: {msg}"
+        );
+    }
 
     #[derive(Default)]
     struct TestCommsRegistry {

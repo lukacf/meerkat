@@ -90,6 +90,7 @@ def _promote_nested_schema_def(name: str) -> bool:
     return name.startswith("Realtime") or name in {
         "AudioFormatMismatchContext",
         "ToolCallTimeoutContext",
+        "WireTrustedPeerIdentity",
     }
 
 
@@ -579,6 +580,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("UpdateScheduleParams", params_schema, "Request payload for schedule/update.")
     append_python_dataclass("McpLiveOpResponse", wire_schema, "Response payload for mcp/add|remove|reload.")
     append_python_dataclass("WireRenderMetadata", wire_schema, "Render metadata for mob member delivery.")
+    append_python_alias("WireTrustedPeerIdentity", wire_schema, "Typed external peer identity.")
     append_python_dataclass("WireTrustedPeerSpec", wire_schema, "Minimal trusted peer spec for mob wiring.")
     append_python_dataclass("MobWireResult", wire_schema, "Response payload for mob/wire.")
     append_python_dataclass("MobUnwireResult", wire_schema, "Response payload for mob/unwire.")
@@ -931,6 +933,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireModelTier", schemas.get("models", {}))
     append_typescript_alias("CommsCommandRequest", wire_schema)
     append_typescript_interface("WireRenderMetadata", wire_schema)
+    append_typescript_alias("WireTrustedPeerIdentity", wire_schema)
     append_typescript_interface("WireTrustedPeerSpec", wire_schema)
     append_typescript_interface("MobWireResult", wire_schema)
     append_typescript_interface("MobUnwireResult", wire_schema)

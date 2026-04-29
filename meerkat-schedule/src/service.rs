@@ -38,6 +38,9 @@ impl ScheduleService {
         &self,
         request: CreateScheduleRequest,
     ) -> Result<Schedule, ScheduleDomainError> {
+        request
+            .validate_public_api()
+            .map_err(ScheduleDomainError::InvalidSchedule)?;
         let _planning_guard = self.planning_lock.lock().await;
         let mut mutator = Schedule::apply(None, ScheduleLifecycleInput::Create(request))
             .map_err(|error| ScheduleDomainError::InvalidSchedule(error.to_string()))?;
@@ -83,6 +86,9 @@ impl ScheduleService {
         schedule_id: &ScheduleId,
         request: UpdateScheduleRequest,
     ) -> Result<Schedule, ScheduleDomainError> {
+        request
+            .validate_public_api()
+            .map_err(ScheduleDomainError::InvalidSchedule)?;
         let _planning_guard = self.planning_lock.lock().await;
         let current = self.get(schedule_id).await?;
         let mut mutator =
@@ -371,12 +377,13 @@ mod tests {
     use super::*;
     use crate::OccurrenceLifecycleInput;
     use crate::types::{
-        DeliveryReceipt, IntervalTriggerSpec, MisfirePolicy, OccurrenceId, ScheduledSessionAction,
+        DeliveryReceipt, HelperOptionsSpec, IntervalTriggerSpec, MisfirePolicy, MobTargetBinding,
+        OccurrenceId, ResolvedSpawnSnapshot, ScheduleSpawnTooling, ScheduledSessionAction,
         SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TriggerSpec,
     };
     use crate::{MemoryScheduleStore, OverlapPolicy};
     use chrono::Duration;
-    use meerkat_core::ContentInput;
+    use meerkat_core::{ContentInput, ToolNameSet};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
@@ -497,6 +504,132 @@ mod tests {
                 )
                 .await
         }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_parent_context_mob_helper_tooling() {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+
+        let error = service
+            .create(CreateScheduleRequest {
+                name: Some("bad-helper".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() + Duration::minutes(1),
+                    every_seconds: 60,
+                    end_at_utc: None,
+                }),
+                target: TargetBinding::Mob(Box::new(MobTargetBinding::SpawnHelper {
+                    mob_id: "ops".to_string(),
+                    member_id: "helper".to_string(),
+                    prompt: "check state".to_string(),
+                    options: HelperOptionsSpec {
+                        tooling: Some(ScheduleSpawnTooling::InheritParent {
+                            allow_overlay: None,
+                            deny_overlay: None,
+                        }),
+                        ..HelperOptionsSpec::default()
+                    },
+                })),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect_err("parent-context helper tooling should be rejected");
+
+        assert!(matches!(
+            error,
+            ScheduleDomainError::InvalidSchedule(message)
+                if message.contains("requires parent agent context")
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_untrusted_mob_helper_resolved_snapshot() {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+
+        let error = service
+            .create(CreateScheduleRequest {
+                name: Some("bad-helper-snapshot".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() + Duration::minutes(1),
+                    every_seconds: 60,
+                    end_at_utc: None,
+                }),
+                target: mob_helper_target(HelperOptionsSpec {
+                    resolved_spawn_snapshot: Some(resolved_spawn_snapshot_fixture()),
+                    ..HelperOptionsSpec::default()
+                }),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await
+            .expect_err("untrusted helper snapshot should be rejected");
+
+        assert!(matches!(
+            error,
+            ScheduleDomainError::InvalidSchedule(message)
+                if message.contains("trusted internal schedule state")
+        ));
+    }
+
+    #[tokio::test]
+    async fn update_rejects_untrusted_mob_helper_resolved_snapshot()
+    -> Result<(), ScheduleDomainError> {
+        let store = Arc::new(MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
+        let service = ScheduleService::new(store);
+
+        let created = service
+            .create(CreateScheduleRequest {
+                name: Some("snapshot-update".into()),
+                description: None,
+                trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                    start_at_utc: Utc::now() + Duration::minutes(1),
+                    every_seconds: 60,
+                    end_at_utc: None,
+                }),
+                target: materialize_on_demand_target("initial prompt"),
+                misfire_policy: MisfirePolicy::Skip,
+                overlap_policy: OverlapPolicy::SkipIfRunning,
+                missing_target_policy: crate::MissingTargetPolicy::MarkMisfired,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(1),
+            })
+            .await?;
+
+        let error = service
+            .update(
+                &created.schedule_id,
+                UpdateScheduleRequest {
+                    expected_revision: Some(created.revision),
+                    target: Some(mob_helper_target(HelperOptionsSpec {
+                        resolved_spawn_snapshot: Some(resolved_spawn_snapshot_fixture()),
+                        ..HelperOptionsSpec::default()
+                    })),
+                    ..UpdateScheduleRequest::default()
+                },
+            )
+            .await
+            .expect_err("untrusted helper snapshot update should be rejected");
+
+        assert!(matches!(
+            error,
+            ScheduleDomainError::InvalidSchedule(message)
+                if message.contains("trusted internal schedule state")
+        ));
+        Ok(())
     }
 
     #[tokio::test]
@@ -774,6 +907,25 @@ mod tests {
                 additional_instructions: Vec::new(),
             },
         ))
+    }
+
+    fn mob_helper_target(options: HelperOptionsSpec) -> TargetBinding {
+        TargetBinding::Mob(Box::new(MobTargetBinding::SpawnHelper {
+            mob_id: "ops".to_string(),
+            member_id: "helper".to_string(),
+            prompt: "check state".to_string(),
+            options,
+        }))
+    }
+
+    fn resolved_spawn_snapshot_fixture() -> ResolvedSpawnSnapshot {
+        ResolvedSpawnSnapshot {
+            tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
+                "shell".to_string(),
+            ])),
+            model: "claude-sonnet-4-6".into(),
+            provider_params: None,
+        }
     }
 
     #[test]

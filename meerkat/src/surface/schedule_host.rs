@@ -528,4 +528,48 @@ mod tests {
         occurrence.attempt_count = 1;
         occurrence
     }
+
+    #[tokio::test]
+    async fn noop_mob_host_reports_clear_feature_required_failure() {
+        let host = NoopScheduleMobHost::new(
+            "scheduled mob targets require the mob feature on the CLI host",
+        );
+        let binding = MobTargetBinding::Member {
+            mob_id: "ops".to_string(),
+            member_id: "deploy-monitor".to_string(),
+            action: meerkat_schedule::ScheduledMobAction::Send {
+                content: ContentInput::Text("Check deploy state.".to_string()),
+                render_metadata: None,
+            },
+        };
+
+        let probe = host
+            .probe_mob_target(&binding)
+            .await
+            .expect("probe should succeed");
+        let TargetProbeOutcome::Missing { detail } = probe else {
+            panic!("expected no-op mob host to report missing, got {probe:?}");
+        };
+        assert_eq!(
+            detail.as_deref(),
+            Some("scheduled mob targets require the mob feature on the CLI host")
+        );
+
+        let occurrence = sample_occurrence();
+        let dispatch = host
+            .deliver_mob_target(&occurrence, &binding)
+            .await
+            .expect("delivery dispatch");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.detail.as_deref(),
+            Some("scheduled mob targets require the mob feature on the CLI host")
+        );
+        assert_eq!(
+            terminal.failure_class,
+            Some(OccurrenceFailureClass::MobRejected)
+        );
+    }
 }

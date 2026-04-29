@@ -11417,7 +11417,7 @@
   },
   "WireAuthProfile": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected — callers that want to read secret\nmaterial have to go through the server-side\n`auth.profile.get` / `/auth/profiles/:id` endpoints which return\ntyped redacted shapes. `source_kind` is a discriminator for the\ncredential-source variant.",
+    "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected; callers that inspect profile metadata use\nthe server-side `auth.profile.get` RPC or the\n`GET /auth/bindings/{binding_id}` REST path; both return typed redacted\nshapes. `source_kind` is a\ndiscriminator for the credential-source variant.",
     "properties": {
       "auth_method": {
         "type": "string"
@@ -11484,7 +11484,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`DELETE /auth/profiles/:binding_id` / `POST /auth/logout` success body.",
+    "description": "`DELETE /auth/bindings/{binding_id}` /\n`POST /auth/bindings/{binding_id}/logout` success body.",
     "properties": {
       "binding_id": {
         "type": "string"
@@ -11605,7 +11605,7 @@
         "type": "string"
       },
       "WireAuthProfile": {
-        "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected — callers that want to read secret\nmaterial have to go through the server-side\n`auth.profile.get` / `/auth/profiles/:id` endpoints which return\ntyped redacted shapes. `source_kind` is a discriminator for the\ncredential-source variant.",
+        "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected; callers that inspect profile metadata use\nthe server-side `auth.profile.get` RPC or the\n`GET /auth/bindings/{binding_id}` REST path; both return typed redacted\nshapes. `source_kind` is a\ndiscriminator for the credential-source variant.",
         "properties": {
           "auth_method": {
             "type": "string"
@@ -11657,7 +11657,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`GET /auth/profiles/:binding_id` success body.",
+    "description": "`GET /auth/bindings/{binding_id}` success body.",
     "properties": {
       "auth_profile": {
         "$ref": "#/$defs/WireAuthProfile"
@@ -11684,7 +11684,7 @@
   "WireAuthProfilesList": {
     "$defs": {
       "WireAuthProfile": {
-        "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected — callers that want to read secret\nmaterial have to go through the server-side\n`auth.profile.get` / `/auth/profiles/:id` endpoints which return\ntyped redacted shapes. `source_kind` is a discriminator for the\ncredential-source variant.",
+        "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected; callers that inspect profile metadata use\nthe server-side `auth.profile.get` RPC or the\n`GET /auth/bindings/{binding_id}` REST path; both return typed redacted\nshapes. `source_kind` is a\ndiscriminator for the credential-source variant.",
         "properties": {
           "auth_method": {
             "type": "string"
@@ -11962,7 +11962,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Wire projection of the auth-profile status. Returned from\n`auth.status.get` / `GET /auth/status/:id`.",
+    "description": "Wire projection of the auth-profile status. Returned from\n`auth.status.get` / `GET /auth/bindings/{binding_id}/status`.",
     "properties": {
       "account_id": {
         "type": [
@@ -12058,7 +12058,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "`GET /auth/status/:binding_id` success body. Richer than\n[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /\n`connection_ref` / `has_refresh_token` so the caller can key by\nbinding directly.",
+    "description": "`GET /auth/bindings/{binding_id}/status` success body. Richer than\n[`WireAuthStatus`] — also carries `realm_id` / `binding_id` /\n`connection_ref` / `has_refresh_token` so the caller can key by\nbinding directly.",
     "properties": {
       "account_id": {
         "type": [
@@ -15625,7 +15625,7 @@
   "WireRealmConnectionSet": {
     "$defs": {
       "WireAuthProfile": {
-        "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected — callers that want to read secret\nmaterial have to go through the server-side\n`auth.profile.get` / `/auth/profiles/:id` endpoints which return\ntyped redacted shapes. `source_kind` is a discriminator for the\ncredential-source variant.",
+        "description": "Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential\nmaterial is NOT wire-projected; callers that inspect profile metadata use\nthe server-side `auth.profile.get` RPC or the\n`GET /auth/bindings/{binding_id}` REST path; both return typed redacted\nshapes. `source_kind` is a\ndiscriminator for the credential-source variant.",
         "properties": {
           "auth_method": {
             "type": "string"

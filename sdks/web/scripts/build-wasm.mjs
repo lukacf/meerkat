@@ -23,6 +23,15 @@ const REQUIRED_OUTPUTS = [
 const FORCE_REBUILD =
   process.env.MEERKAT_WEB_WASM_FORCE_REBUILD === "1" ||
   process.env.MEERKAT_WEB_WASM_CACHE === "0";
+const BUILD_PROFILE = (() => {
+  const value = process.env.MEERKAT_WEB_WASM_PROFILE ?? "release";
+  if (value === "release" || value === "dev" || value === "profiling") {
+    return value;
+  }
+  throw new Error(
+    `invalid MEERKAT_WEB_WASM_PROFILE=${value}; expected release, dev, or profiling`,
+  );
+})();
 // Lock timeout must exceed (wasm_build_seconds * max_parallel_tests). A cold
 // wasm-pack build takes ~60s on M-series; the e2e-smoke lane can run ~5 browser
 // tests that all compete for this lock. 15 minutes gives comfortable headroom
@@ -254,6 +263,7 @@ async function computeSourceHash() {
   const hash = createHash("sha256");
   hash.update("meerkat-web-runtime-wasm-v1\n");
   hash.update(`rustflags=--cfg getrandom_backend="wasm_js"\n`);
+  hash.update(`profile=${BUILD_PROFILE}\n`);
   hash.update(`wasm-pack=${(await runCapture("wasm-pack", ["--version"])).trim()}\n`);
   const inputs = await localCargoGraphInputs();
   for (const filePath of inputs) {
@@ -296,9 +306,19 @@ async function run() {
     await rm(OUT_DIR, { recursive: true, force: true });
 
     await new Promise((resolve, reject) => {
+      const profileArgs =
+        BUILD_PROFILE === "release" ? [] : [`--${BUILD_PROFILE}`];
       const child = spawn(
         "wasm-pack",
-        ["build", CRATE_DIR, "--target", "web", "--out-dir", OUT_DIR],
+        [
+          "build",
+          CRATE_DIR,
+          "--target",
+          "web",
+          "--out-dir",
+          OUT_DIR,
+          ...profileArgs,
+        ],
         {
           cwd: SDK_DIR,
           stdio: "inherit",

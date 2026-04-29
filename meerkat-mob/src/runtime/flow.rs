@@ -1158,31 +1158,11 @@ impl FlowEngine {
             return Ok(false);
         }
         let command = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
-        let authority_input = command.authority_input(run_id);
-        let machine_state = self
+        Ok(self
             .handle
-            .project_machine_input(authority_input.clone())
-            .await?;
-        let authority =
-            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
-        let next_state = apply_mob_machine_flow_run_command(
-            &run.flow_state,
-            &machine_state,
-            run_id,
-            command,
-            authority,
-        )?
-        .next_state;
-        self.run_store
-            .cas_run_snapshot(
-                run_id,
-                MobRunStatus::Pending,
-                &run.flow_state,
-                MobRunStatus::Running,
-                &next_state,
-            )
-            .await
-            .map_err(MobError::from)
+            .commit_flow_run_command(run_id, command, "flow_start_run")
+            .await?
+            .is_some())
     }
 
     async fn ordered_steps(&self, run_id: &RunId) -> Result<Vec<StepId>, MobError> {
@@ -1206,15 +1186,24 @@ impl FlowEngine {
         run_id: &RunId,
         command: MobMachineFlowRunCommand,
     ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
-        let authority_input = command.authority_input(run_id);
-        let machine_state = self
-            .handle
-            .project_machine_input(authority_input.clone())
-            .await?;
-        let authority =
-            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
+        self.handle
+            .commit_flow_run_command(run_id, command, "flow_run_command")
+            .await
+    }
+
+    pub(super) async fn start_run_state_with_machine_state(
+        &self,
+        run_id: &RunId,
+        machine_state: mob_dsl::MobMachineState,
+        authority: MobMachineFlowAuthorityToken,
+        context: &'static str,
+    ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
+        let command = MobMachineFlowRunCommand::StartRun(flow_run::inputs::StartRun {});
         for attempt in 0..5u32 {
             let run = self.run_snapshot(run_id).await?;
+            if run.status != MobRunStatus::Pending {
+                return Ok(None);
+            }
             let outcome = apply_mob_machine_flow_run_command(
                 &run.flow_state,
                 &machine_state,
@@ -1224,17 +1213,23 @@ impl FlowEngine {
             )?;
             let transitioned = self
                 .run_store
-                .cas_flow_state(run_id, &run.flow_state, &outcome.next_state)
+                .cas_run_snapshot(
+                    run_id,
+                    MobRunStatus::Pending,
+                    &run.flow_state,
+                    MobRunStatus::Running,
+                    &outcome.next_state,
+                )
                 .await?;
             if transitioned {
                 return Ok(Some(outcome.effects));
             }
             if attempt < 4 {
-                tracing::debug!(attempt, "flow.rs CAS contention, retrying");
+                tracing::debug!(attempt, context, "flow start CAS contention, retrying");
             }
         }
         Err(MobError::Internal(format!(
-            "CAS contention after 5 attempts for run {run_id}"
+            "{context}: CAS contention after 5 attempts for run {run_id}"
         )))
     }
 
@@ -1621,26 +1616,12 @@ impl FlowEngine {
                 flow_run::inputs::TerminalizeCanceled {},
             ),
         };
-        let next_status = target.status();
-        let authority_input = input.authority_input(&run_id);
-        let machine_state = self
-            .handle
-            .project_machine_input(authority_input.clone())
-            .await?;
-        let authority =
-            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
-        self.terminalize_with_machine_state(
-            run_id,
-            flow_id,
-            target,
-            input,
-            machine_state,
-            authority,
-        )
-        .await
+        self.handle
+            .commit_flow_terminalization(run_id, flow_id, target, input, "flow_terminalize")
+            .await
     }
 
-    async fn terminalize_with_machine_state(
+    pub(super) async fn terminalize_with_machine_state(
         &self,
         run_id: RunId,
         flow_id: FlowId,

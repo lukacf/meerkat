@@ -79,8 +79,8 @@ If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
 | `POST` | `/realtime/status` | Read product-layer realtime status |
-| `GET` | `/auth/profiles` | List auth profiles |
-| `POST` | `/auth/profiles` | Create an auth profile |
+| `GET` | `/auth/profiles` | List realm auth profiles, backend profiles, and bindings |
+| `POST` | `/auth/profiles` | Store binding-scoped credentials |
 | `GET` | `/auth/bindings/{binding_id}` | Read a binding-scoped auth profile |
 | `DELETE` | `/auth/bindings/{binding_id}` | Delete binding-scoped credentials |
 | `POST` | `/auth/bindings/{binding_id}/test` | Test a binding resolve path |
@@ -764,6 +764,252 @@ Accepted request forms:
 
 If `expected_generation` is stale, the server returns `400` with a generation-conflict message.
 
+### GET /auth/profiles
+
+List the auth profiles, backend profiles, and provider bindings for a realm.
+
+<ParamField query="realm_id" type="string" required>
+  Realm to read.
+</ParamField>
+
+<ParamField query="profile_id" type="string | null">
+  Optional profile selector accepted by the shared auth query shape.
+</ParamField>
+
+```json Response
+{
+  "realm_id": "prod",
+  "auth_profiles": [],
+  "backend_profiles": [],
+  "bindings": []
+}
+```
+
+### POST /auth/profiles
+
+Store credentials for an existing binding-scoped auth profile. The binding must
+resolve to an auth profile whose source is `managed_store`; inline, env,
+external resolver, platform-default, command, and file-descriptor sources are
+configured outside this endpoint.
+
+```json Request
+{
+  "realm_id": "prod",
+  "binding_id": "openai",
+  "profile_id": "prod_openai",
+  "provider": "openai",
+  "auth_method": "api_key",
+  "secret": "sk-..."
+}
+```
+
+```json Response (201 Created)
+{
+  "realm_id": "prod",
+  "binding_id": "openai",
+  "connection_ref": {
+    "realm": "prod",
+    "binding": "openai",
+    "profile": "prod_openai"
+  },
+  "profile_id": "prod_openai",
+  "provider": "openai",
+  "auth_method": "api_key",
+  "stored": true
+}
+```
+
+<ParamField body="realm_id" type="string" required>
+  Realm containing the binding.
+</ParamField>
+
+<ParamField body="binding_id" type="string" required>
+  Binding whose configured auth profile will receive the stored credential.
+</ParamField>
+
+<ParamField body="profile_id" type="string | null">
+  Optional explicit profile override for the binding.
+</ParamField>
+
+<ParamField body="provider" type="string" required>
+  Provider expected from the resolved auth profile.
+</ParamField>
+
+<ParamField body="auth_method" type="string" required>
+  Stored-secret method: `"api_key"` or `"static_bearer"`.
+</ParamField>
+
+<ParamField body="secret" type="string" required>
+  Secret material to persist in the token store.
+</ParamField>
+
+### GET /auth/bindings/\{binding_id\}
+
+Read the auth profile resolved by a binding.
+
+<ParamField path="binding_id" type="string" required>
+  Binding to resolve.
+</ParamField>
+
+<ParamField query="realm_id" type="string" required>
+  Realm containing the binding.
+</ParamField>
+
+<ParamField query="profile_id" type="string | null">
+  Optional explicit profile override for the binding.
+</ParamField>
+
+### DELETE /auth/bindings/\{binding_id\}
+
+Clear stored credentials for the resolved binding-scoped auth profile.
+
+<ParamField path="binding_id" type="string" required>
+  Binding whose stored credentials should be cleared.
+</ParamField>
+
+<ParamField query="realm_id" type="string" required>
+  Realm containing the binding.
+</ParamField>
+
+<ParamField query="profile_id" type="string | null">
+  Optional explicit profile override for the binding.
+</ParamField>
+
+### POST /auth/bindings/\{binding_id\}/test
+
+Resolve a binding through the provider registry and report whether credential
+material or a dynamic authorizer is available.
+
+```json Request
+{
+  "realm_id": "prod",
+  "profile_id": "prod_openai"
+}
+```
+
+<ParamField path="binding_id" type="string" required>
+  Binding to test.
+</ParamField>
+
+<ParamField body="realm_id" type="string" required>
+  Realm containing the binding.
+</ParamField>
+
+<ParamField body="profile_id" type="string | null">
+  Optional explicit profile override for the binding.
+</ParamField>
+
+### POST /auth/login/start
+
+Begin a loopback OAuth login. The server owns the OAuth state and PKCE verifier.
+
+```json Request
+{
+  "provider": "anthropic",
+  "redirect_uri": "http://127.0.0.1:53682/callback"
+}
+```
+
+### POST /auth/login/complete
+
+Complete a loopback OAuth login and store the resulting tokens under an explicit
+binding-scoped `ConnectionRef`.
+
+```json Request
+{
+  "provider": "anthropic",
+  "code": "provider-code",
+  "state": "state-from-start",
+  "redirect_uri": "http://127.0.0.1:53682/callback",
+  "realm_id": "prod",
+  "binding_id": "anthropic",
+  "profile_id": "claude_oauth"
+}
+```
+
+<ParamField body="realm_id" type="string" required>
+  Realm containing the binding.
+</ParamField>
+
+<ParamField body="binding_id" type="string" required>
+  Binding that owns the stored OAuth tokens.
+</ParamField>
+
+<ParamField body="profile_id" type="string | null">
+  Optional explicit profile override for the binding.
+</ParamField>
+
+### POST /auth/login/device/start
+
+Begin a device-code OAuth login.
+
+```json Request
+{
+  "provider": "google"
+}
+```
+
+### POST /auth/login/device/complete
+
+Poll one device-code OAuth completion attempt and, when ready, store the tokens
+under an explicit binding-scoped `ConnectionRef`.
+
+```json Request
+{
+  "provider": "google",
+  "device_code": "device-code-from-start",
+  "realm_id": "prod",
+  "binding_id": "google",
+  "profile_id": "gemini_oauth"
+}
+```
+
+Returns `202` with `{ "state": "pending" }` when the provider has not finished,
+`429` with `{ "state": "slow_down" }` when the caller should back off, and `200`
+with a `ready` payload after tokens are persisted.
+
+### GET /auth/bindings/\{binding_id\}/status
+
+Read binding-scoped auth status. The response includes the flattened binding
+identity plus `profile_id`, `provider`, `auth_method`, public state,
+expiration, refresh timestamp, account ID, and refresh-token presence.
+
+<ParamField path="binding_id" type="string" required>
+  Binding whose status should be read.
+</ParamField>
+
+<ParamField query="realm_id" type="string" required>
+  Realm containing the binding.
+</ParamField>
+
+<ParamField query="profile_id" type="string | null">
+  Optional explicit profile override for the binding.
+</ParamField>
+
+### POST /auth/bindings/\{binding_id\}/logout
+
+Clear stored credentials for the binding and publish the auth lifecycle release.
+
+<ParamField path="binding_id" type="string" required>
+  Binding to log out.
+</ParamField>
+
+<ParamField query="realm_id" type="string" required>
+  Realm containing the binding.
+</ParamField>
+
+<ParamField query="profile_id" type="string | null">
+  Optional explicit profile override for the binding.
+</ParamField>
+
+### GET /realms
+
+List configured realm summaries.
+
+### GET /realms/\{id\}
+
+Read one realm connection set.
+
 ### POST /comms/send
 
 Push a canonical comms command into a running session. Requires the `comms` feature.
@@ -871,13 +1117,13 @@ List discoverable peers for a session. Requires the `comms` feature.
 ## Realtime attachment
 
 Realtime is a delivery mode of the session's LLM, driven by
-`ModelCapabilities.realtime`. To enable realtime audio on a session,
+`ModelCapabilities.realtime`. To run a session through the realtime transport,
 create it with a realtime-capable model (for example `gpt-realtime-1.5`):
 
 ```bash
 curl -X POST http://127.0.0.1:8080/sessions \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Ready for voice.","model":"gpt-realtime-1.5","provider":"openai"}'
+  -d '{"prompt":"Ready for realtime interaction.","model":"gpt-realtime-1.5","provider":"openai"}'
 ```
 
 The runtime attaches the OpenAI Realtime transport automatically and

@@ -2850,6 +2850,7 @@ dependencies = [
  "chrono",
  "futures",
  "indexmap",
+ "meerkat",
  "meerkat-client",
  "meerkat-contracts",
  "meerkat-core",

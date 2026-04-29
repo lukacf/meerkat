@@ -1,17 +1,19 @@
 use super::disposal::{
     BulkBestEffort, DisposalContext, DisposalReport, DisposalStep, ErrorPolicy, WarnAndContinue,
 };
+use super::flow_frame_engine::FlowFrameLoopStorePlan;
 use super::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, MobMemberLifecycleInput, MobMemberLifecycleProjection,
 };
 use super::mob_runtime_bridge_authority::{MobRuntimeBridgeAuthority, MobRuntimeBridgeEffect};
 use super::provision_guard::PendingProvision;
+use super::terminalization::{TerminalizationOutcome, TerminalizationTarget};
 use super::transaction::LifecycleRollback;
 use super::*;
 use crate::generated::protocol_mob_destroying_session_ingress::MobDestroyingSessionIngressObligation;
 use crate::ids::{AgentIdentity, Generation};
 use crate::machines::mob_machine as mob_dsl;
-use crate::run::{MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, flow_run};
+use crate::run::{MobMachineFlowAuthorityToken, MobMachineFlowRunCommand, MobRunStatus, flow_run};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use futures::FutureExt;
@@ -57,6 +59,12 @@ struct SupervisorPrivateTrustInstall {
     peer_id: String,
     epoch: u64,
     removal_key: String,
+}
+
+struct PreparedDslInput {
+    authority: mob_dsl::MobMachineAuthority,
+    effects: Vec<mob_dsl::MobMachineEffect>,
+    phase_changed: bool,
 }
 
 /// Resolve the runtime binding for a spawn request.
@@ -461,6 +469,8 @@ impl MobActor {
 
         #[cfg(feature = "runtime-adapter")]
         {
+            use meerkat_runtime::protocol_supervisor_trust_publish;
+
             let next_name = spec.name.as_str().to_owned();
             let next_peer_id = spec.peer_id.as_str().to_owned();
             let next_address = spec.address.to_string();
@@ -479,8 +489,10 @@ impl MobActor {
                     && *epoch == next_epoch
             );
 
-            if !already_bound {
-                match &previous {
+            let publish_obligation = if already_bound {
+                None
+            } else {
+                let stage_effects = match &previous {
                     meerkat_runtime::meerkat_machine::SupervisorBinding::Unbound => {
                         adapter
                             .stage_supervisor_bind(
@@ -495,7 +507,7 @@ impl MobActor {
                                 MobError::WiringError(format!(
                                     "supervisor private trust bind rejected for session '{session_id}': {error}"
                                 ))
-                            })?;
+                            })?
                     }
                     meerkat_runtime::meerkat_machine::SupervisorBinding::Bound { .. } => {
                         adapter
@@ -511,22 +523,55 @@ impl MobActor {
                                 MobError::WiringError(format!(
                                     "supervisor private trust rotation rejected for session '{session_id}': {error}"
                                 ))
-                            })?;
+                            })?
                     }
                     _ => {
                         return Err(MobError::WiringError(format!(
                             "supervisor private trust publication for session '{session_id}' saw an unknown supervisor binding variant"
                         )));
                     }
+                };
+                let obligations =
+                    protocol_supervisor_trust_publish::extract_obligations(&stage_effects);
+                let obligation = match obligations.as_slice() {
+                    [obligation] => obligation.clone(),
+                    [] => {
+                        return Err(MobError::WiringError(format!(
+                            "supervisor private trust publication for session '{session_id}' produced no generated publish obligation"
+                        )));
+                    }
+                    _ => {
+                        return Err(MobError::WiringError(format!(
+                            "supervisor private trust publication for session '{session_id}' produced multiple generated publish obligations"
+                        )));
+                    }
+                };
+                if obligation.name != next_name
+                    || obligation.peer_id != next_peer_id
+                    || obligation.address != next_address
+                    || obligation.epoch != next_epoch
+                {
+                    return Err(MobError::WiringError(format!(
+                        "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding"
+                    )));
                 }
-            }
+                Some(obligation)
+            };
+            let publish_peer_id = publish_obligation
+                .as_ref()
+                .map(|obligation| obligation.peer_id.clone())
+                .unwrap_or_else(|| next_peer_id.clone());
+            let publish_epoch = publish_obligation
+                .as_ref()
+                .map(|obligation| obligation.epoch)
+                .unwrap_or(next_epoch);
 
             if let Err(error) = comms.add_private_trusted_peer(spec.clone()).await {
                 let _ = adapter
                     .stage_supervisor_trust_publish_failed(
                         session_id,
-                        next_peer_id.clone(),
-                        next_epoch,
+                        publish_peer_id.clone(),
+                        publish_epoch,
                         error.to_string(),
                     )
                     .await;
@@ -535,8 +580,8 @@ impl MobActor {
                         adapter,
                         session_id,
                         &previous,
-                        &next_peer_id,
-                        next_epoch,
+                        &publish_peer_id,
+                        publish_epoch,
                     )
                     .await;
                 let mut reason = format!(
@@ -549,7 +594,11 @@ impl MobActor {
             }
 
             adapter
-                .stage_supervisor_trust_published(session_id, next_peer_id.clone(), next_epoch)
+                .stage_supervisor_trust_published(
+                    session_id,
+                    publish_peer_id.clone(),
+                    publish_epoch,
+                )
                 .await
                 .map_err(|error| {
                     MobError::WiringError(format!(
@@ -661,6 +710,7 @@ impl MobActor {
                     *epoch,
                 )
                 .await
+                .map(|_| ())
                 .map_err(|error| MobError::WiringError(error.to_string())),
             _ => Err(MobError::WiringError(
                 "unknown supervisor binding variant during rollback".to_string(),
@@ -1056,6 +1106,54 @@ impl MobActor {
             let _ = self.phase_watch_tx.send(self.state());
         }
         Ok(effects)
+    }
+
+    fn prepare_dsl_input(
+        &self,
+        input: mob_dsl::MobMachineInput,
+        context: &str,
+    ) -> Result<PreparedDslInput, MobError> {
+        self.prepare_dsl_inputs(std::slice::from_ref(&input), context)
+    }
+
+    fn prepare_dsl_inputs(
+        &self,
+        inputs: &[mob_dsl::MobMachineInput],
+        context: &str,
+    ) -> Result<PreparedDslInput, MobError> {
+        let mut authority =
+            mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+        let mut effects = Vec::new();
+        let mut phase_changed = false;
+        for input in inputs {
+            let input_debug = format!("{input:?}");
+            let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input.clone())
+                .map_err(|e| {
+                    MobError::Internal(format!(
+                        "DSL authority prepare ({context}) rejected {input_debug}: {e}"
+                    ))
+                })?;
+            if transition.from_phase != transition.to_phase {
+                authority.state.lifecycle_phase = transition.to_phase;
+                phase_changed = true;
+            }
+            effects.extend(transition.effects);
+        }
+        Ok(PreparedDslInput {
+            authority,
+            effects,
+            phase_changed,
+        })
+    }
+
+    fn commit_prepared_dsl_input(&mut self, prepared: PreparedDslInput) {
+        let effects = prepared.effects;
+        let phase_changed = prepared.phase_changed;
+        self.dsl_authority = prepared.authority;
+        self.queue_routed_effects_from(&effects);
+        if phase_changed {
+            let _ = self.phase_watch_tx.send(self.state());
+        }
     }
 
     fn preview_dsl_input(
@@ -2964,6 +3062,42 @@ impl MobActor {
                         .map_err(MobError::from);
                     let _ = reply_tx.send(result);
                 }
+                MobCommand::CommitFlowRunCommand {
+                    run_id,
+                    command,
+                    context,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .commit_flow_run_command_in_actor(&run_id, *command, context)
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CommitFlowTerminalization {
+                    run_id,
+                    flow_id,
+                    target,
+                    command,
+                    context,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .commit_flow_terminalization_in_actor(
+                            run_id, flow_id, target, *command, context,
+                        )
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::CommitFlowFrameStorePlan {
+                    run_id,
+                    plan,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .commit_flow_frame_store_plan_in_actor(&run_id, *plan)
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
                 MobCommand::ProjectMachineInput { input, reply_tx } => {
                     let result = self
                         .apply_dsl_input(*input, "project_machine_input")
@@ -3773,6 +3907,8 @@ impl MobActor {
             shell_env,
             inherited_tool_filter,
             override_profile,
+            model_override,
+            provider_params_override,
             connection_ref,
         } = spec;
         let agent_identity = MeerkatId::from(identity.as_str());
@@ -3831,13 +3967,19 @@ impl MobActor {
 
             // Use override_profile if provided (from SpawnTooling::Profile resolution),
             // otherwise resolve from the mob definition.
-            let profile = if let Some(p) = override_profile {
+            let mut profile = if let Some(p) = override_profile {
                 p
             } else {
                 self.definition
                     .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
                     .await?
             };
+            if let Some(model) = model_override {
+                profile.model = model;
+            }
+            if provider_params_override.is_some() {
+                profile.provider_params = provider_params_override;
+            }
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
             let profile_external_addressable = profile.external_addressable;
@@ -8838,15 +8980,25 @@ impl MobActor {
         let run_id = RunId::new();
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;
         debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));
-        self.apply_dsl_input(run_flow, "run_flow")
+        let prepared_run_flow = self
+            .prepare_dsl_input(run_flow, "run_flow")
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
         self.create_pending_run(
             run_id.clone(),
             &config,
-            &self.dsl_authority.state,
+            &prepared_run_flow.authority.state,
             activation_params.clone(),
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(
+                run_id = %run_id,
+                flow_id = %config.flow_id,
+                error = %error,
+                "flow admission run-store create failed before committing MobMachine RunFlow"
+            );
+        })?;
+        self.commit_prepared_dsl_input(prepared_run_flow);
         if let Err(error) = self.apply_dsl_signal(mob_dsl::MobMachineSignal::StartRun, "start_run")
         {
             let mut details = Vec::new();
@@ -8858,12 +9010,14 @@ impl MobActor {
                     "RunFlow CompleteFlow rollback failed: {rollback_error}"
                 ));
             }
+            let terminalize_reason =
+                format!("lifecycle StartRun transition failed during flow admission: {error}");
             if let Err(terminalize_error) = self
-                .flow_engine
-                .terminalize_failed(
+                .terminalize_failed_in_actor(
                     run_id.clone(),
                     config.flow_id.clone(),
-                    format!("lifecycle StartRun transition failed during flow admission: {error}"),
+                    terminalize_reason,
+                    "run_flow_start_signal_terminalize_failed",
                 )
                 .await
             {
@@ -9020,20 +9174,9 @@ impl MobActor {
                 .await?
                 .as_ref()
                 .is_some_and(|run| run.status.is_terminal());
-            let _phase = self.state();
-            let authorities_expect_completion = {
-                let mut probe =
-                    mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
-                probe
-                    .apply_signal(mob_dsl::MobMachineSignal::CompleteFlow)
-                    .is_ok()
-                    || probe
-                        .apply_signal(mob_dsl::MobMachineSignal::FinishRun)
-                        .is_ok()
-            };
-            if authorities_expect_completion && !run_terminal {
+            if !run_terminal {
                 return Err(MobError::Internal(format!(
-                    "{context}: received cleanup for run {run_id} with no local trackers while flow authorities still accept completion"
+                    "{context}: received cleanup for run {run_id} with no local trackers before the persisted run reached a terminal status"
                 )));
             }
             tracing::debug!(
@@ -9084,9 +9227,12 @@ impl MobActor {
 
         let Some(mut handle) = self.run_tasks.remove(&run_id) else {
             self.flow_engine.cancel_unfinished_steps(&run_id).await?;
-            self.flow_engine
-                .terminalize_canceled(run_id.clone(), flow_id)
-                .await?;
+            self.terminalize_canceled_in_actor(
+                run_id.clone(),
+                flow_id,
+                "cancel_flow_no_handle_terminalize_canceled",
+            )
+            .await?;
             self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "cancel_flow_no_handle")
                 .map_err(|error| {
                     MobError::Internal(format!(
@@ -9194,17 +9340,424 @@ impl MobActor {
         run_id: &RunId,
         command: MobMachineFlowRunCommand,
         context: &'static str,
-    ) -> Result<(), MobError> {
+    ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
         let authority_input = command.authority_input(run_id);
-        self.apply_dsl_input(authority_input.clone(), context)?;
-        let machine_state = self.dsl_authority.state.clone();
+        let prepared = self.prepare_dsl_input(authority_input.clone(), context)?;
+        let machine_state = prepared.authority.state.clone();
         let authority =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
-        let _ = self
+        let effects = if matches!(command, MobMachineFlowRunCommand::StartRun(_)) {
+            self.flow_engine
+                .start_run_state_with_machine_state(run_id, machine_state, authority, context)
+                .await?
+        } else {
+            Some(
+                self.flow_engine
+                    .apply_command_with_machine_state(
+                        run_id,
+                        command,
+                        machine_state,
+                        authority,
+                        context,
+                    )
+                    .await?,
+            )
+        };
+        if effects.is_some() {
+            self.commit_prepared_dsl_input(prepared);
+        }
+        Ok(effects)
+    }
+
+    async fn commit_flow_run_command_in_actor(
+        &mut self,
+        run_id: &RunId,
+        command: MobMachineFlowRunCommand,
+        context: &'static str,
+    ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
+        self.apply_flow_run_command_in_actor(run_id, command, context)
+            .await
+    }
+
+    async fn commit_flow_frame_store_plan_in_actor(
+        &mut self,
+        run_id: &RunId,
+        plan: FlowFrameLoopStorePlan,
+    ) -> Result<bool, MobError> {
+        if !self
+            .flow_frame_store_plan_expected_matches(run_id, &plan)
+            .await?
+        {
+            return Ok(false);
+        }
+        let prepared =
+            self.prepare_dsl_inputs(plan.machine_inputs(), "flow_frame_loop_store_plan")?;
+        let won = match &plan {
+            FlowFrameLoopStorePlan::InsertFrame {
+                frame_id,
+                initial_frame,
+                ..
+            } => self
+                .run_store
+                .cas_frame_state(run_id, frame_id, None, initial_frame.clone())
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::FrameState {
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => self
+                .run_store
+                .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::CompleteStepAndRecordOutput {
+                frame_id,
+                expected_frame,
+                next_frame,
+                step_output_key,
+                step_output,
+                loop_context,
+                ..
+            } => self
+                .run_store
+                .cas_complete_step_and_record_output(
+                    run_id,
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    step_output_key.clone(),
+                    step_output.clone(),
+                    loop_context
+                        .as_ref()
+                        .map(|(loop_id, iteration)| (loop_id, *iteration)),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::GrantNodeSlot {
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => self
+                .run_store
+                .cas_grant_node_slot(
+                    run_id,
+                    expected_run_state,
+                    next_run_state.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::StartLoop {
+                loop_instance_id,
+                expected_run_state,
+                next_run_state,
+                frame_id,
+                expected_frame,
+                next_frame,
+                initial_loop,
+                ..
+            } => self
+                .run_store
+                .cas_start_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_run_state,
+                    next_run_state.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    initial_loop.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::GrantBodyFrameStart {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                initial_frame,
+                ledger_entry,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_grant_body_frame_start(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    initial_frame.clone(),
+                    ledger_entry.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::RunStateOnly {
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_flow_state(run_id, expected_run_state, next_run_state)
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::SealFrame {
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => self
+                .run_store
+                .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::CompleteBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_complete_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::LoopRequestBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_loop_request_body_frame(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::CompleteLoop {
+                loop_instance_id,
+                expected_loop,
+                next_loop,
+                frame_id,
+                expected_frame,
+                next_frame,
+                expected_run_state,
+                next_run_state,
+                ..
+            } => self
+                .run_store
+                .cas_complete_loop(
+                    run_id,
+                    loop_instance_id,
+                    expected_loop,
+                    next_loop.clone(),
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    expected_run_state,
+                    next_run_state.clone(),
+                )
+                .await
+                .map_err(MobError::from)?,
+        };
+        if won {
+            self.commit_prepared_dsl_input(prepared);
+        }
+        Ok(won)
+    }
+
+    async fn flow_frame_store_plan_expected_matches(
+        &self,
+        run_id: &RunId,
+        plan: &FlowFrameLoopStorePlan,
+    ) -> Result<bool, MobError> {
+        let run = self
+            .run_store
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+        Ok(match plan {
+            FlowFrameLoopStorePlan::InsertFrame { frame_id, .. } => {
+                !run.frames.contains_key(frame_id)
+            }
+            FlowFrameLoopStorePlan::FrameState {
+                frame_id,
+                expected_frame,
+                ..
+            }
+            | FlowFrameLoopStorePlan::CompleteStepAndRecordOutput {
+                frame_id,
+                expected_frame,
+                ..
+            }
+            | FlowFrameLoopStorePlan::SealFrame {
+                frame_id,
+                expected_frame,
+                ..
+            } => run.frames.get(frame_id) == Some(expected_frame),
+            FlowFrameLoopStorePlan::GrantNodeSlot {
+                expected_run_state,
+                frame_id,
+                expected_frame,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.frames.get(frame_id) == Some(expected_frame)
+            }
+            FlowFrameLoopStorePlan::StartLoop {
+                loop_instance_id,
+                expected_run_state,
+                frame_id,
+                expected_frame,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.frames.get(frame_id) == Some(expected_frame)
+                    && !run.loops.contains_key(loop_instance_id)
+            }
+            FlowFrameLoopStorePlan::GrantBodyFrameStart {
+                loop_instance_id,
+                expected_loop,
+                frame_id,
+                expected_run_state,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.loops.get(loop_instance_id) == Some(expected_loop)
+                    && !run.frames.contains_key(frame_id)
+            }
+            FlowFrameLoopStorePlan::RunStateOnly {
+                expected_run_state, ..
+            } => &run.flow_state == expected_run_state,
+            FlowFrameLoopStorePlan::CompleteBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                frame_id,
+                expected_frame,
+                expected_run_state,
+                ..
+            }
+            | FlowFrameLoopStorePlan::CompleteLoop {
+                loop_instance_id,
+                expected_loop,
+                frame_id,
+                expected_frame,
+                expected_run_state,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.loops.get(loop_instance_id) == Some(expected_loop)
+                    && run.frames.get(frame_id) == Some(expected_frame)
+            }
+            FlowFrameLoopStorePlan::LoopRequestBodyFrame {
+                loop_instance_id,
+                expected_loop,
+                expected_run_state,
+                ..
+            } => {
+                &run.flow_state == expected_run_state
+                    && run.loops.get(loop_instance_id) == Some(expected_loop)
+            }
+        })
+    }
+
+    async fn commit_flow_terminalization_in_actor(
+        &mut self,
+        run_id: RunId,
+        flow_id: FlowId,
+        target: TerminalizationTarget,
+        command: MobMachineFlowRunCommand,
+        context: &'static str,
+    ) -> Result<TerminalizationOutcome, MobError> {
+        let run = self
+            .run_store
+            .get_run(&run_id)
+            .await?
+            .ok_or_else(|| MobError::RunNotFound(run_id.clone()))?;
+        if run.status.is_terminal()
+            && !matches!(
+                (&target, &run.status),
+                (TerminalizationTarget::Canceled, MobRunStatus::Failed)
+            )
+        {
+            return Ok(TerminalizationOutcome::Noop);
+        }
+
+        let authority_input = command.authority_input(&run_id);
+        let prepared = self.prepare_dsl_input(authority_input.clone(), context)?;
+        let machine_state = prepared.authority.state.clone();
+        let authority =
+            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&authority_input)?;
+        let outcome = self
             .flow_engine
-            .apply_command_with_machine_state(run_id, command, machine_state, authority, context)
-            .await?;
-        Ok(())
+            .terminalize_with_machine_state(
+                run_id.clone(),
+                flow_id,
+                target.clone(),
+                command,
+                machine_state,
+                authority,
+            )
+            .await;
+        match outcome {
+            Ok(TerminalizationOutcome::Transitioned) => {
+                self.commit_prepared_dsl_input(prepared);
+                Ok(TerminalizationOutcome::Transitioned)
+            }
+            Ok(TerminalizationOutcome::Noop) => Ok(TerminalizationOutcome::Noop),
+            Err(error) => {
+                if self
+                    .persisted_terminal_status_matches_target(&run_id, &target)
+                    .await?
+                {
+                    self.commit_prepared_dsl_input(prepared);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn persisted_terminal_status_matches_target(
+        &self,
+        run_id: &RunId,
+        target: &TerminalizationTarget,
+    ) -> Result<bool, MobError> {
+        Ok(self
+            .run_store
+            .get_run(run_id)
+            .await?
+            .is_some_and(|run| run.status == target.status()))
     }
 
     async fn cancel_unfinished_steps_in_actor(&mut self, run_id: &RunId) -> Result<(), MobError> {
@@ -9239,14 +9792,35 @@ impl MobActor {
         flow_id: FlowId,
         context: &'static str,
     ) -> Result<(), MobError> {
-        let authority_input =
-            MobMachineFlowRunCommand::TerminalizeCanceled(flow_run::inputs::TerminalizeCanceled {})
-                .authority_input(&run_id);
-        self.apply_dsl_input(authority_input, context)?;
-        let machine_state = self.dsl_authority.state.clone();
         let _ = self
-            .flow_engine
-            .terminalize_canceled_with_machine_state(run_id, flow_id, machine_state)
+            .commit_flow_terminalization_in_actor(
+                run_id,
+                flow_id,
+                TerminalizationTarget::Canceled,
+                MobMachineFlowRunCommand::TerminalizeCanceled(
+                    flow_run::inputs::TerminalizeCanceled {},
+                ),
+                context,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn terminalize_failed_in_actor(
+        &mut self,
+        run_id: RunId,
+        flow_id: FlowId,
+        reason: String,
+        context: &'static str,
+    ) -> Result<(), MobError> {
+        let _ = self
+            .commit_flow_terminalization_in_actor(
+                run_id,
+                flow_id,
+                TerminalizationTarget::Failed { reason },
+                MobMachineFlowRunCommand::TerminalizeFailed(flow_run::inputs::TerminalizeFailed {}),
+                context,
+            )
             .await?;
         Ok(())
     }

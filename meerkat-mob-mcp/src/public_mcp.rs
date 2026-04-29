@@ -918,38 +918,10 @@ fn content_input_from_wire(
 fn peer_target_from_wire(peer: MobPeerTarget) -> Result<meerkat_mob::PeerTarget, McpToolError> {
     match peer {
         MobPeerTarget::Local(member_id) => Ok(meerkat_mob::PeerTarget::Local(member_id.into())),
-        MobPeerTarget::External(spec) => {
-            let name = meerkat_core::comms::PeerName::new(spec.name.clone()).map_err(|e| {
-                McpToolError::invalid_params(format!("invalid peer name '{}': {e}", spec.name))
-            })?;
-            let peer_id = meerkat_core::comms::PeerId::parse(&spec.peer_id).map_err(|e| {
-                McpToolError::invalid_params(format!("invalid peer_id '{}': {e}", spec.peer_id))
-            })?;
-            let address =
-                parse_public_peer_address(&spec.address).map_err(McpToolError::invalid_params)?;
-            Ok(meerkat_mob::PeerTarget::External(
-                meerkat_core::comms::TrustedPeerDescriptor {
-                    name,
-                    peer_id,
-                    address,
-                    pubkey: spec.pubkey,
-                },
-            ))
-        }
+        MobPeerTarget::External(spec) => crate::trusted_peer_descriptor_from_wire_spec(spec)
+            .map(meerkat_mob::PeerTarget::External)
+            .map_err(McpToolError::invalid_params),
     }
-}
-
-fn parse_public_peer_address(raw: &str) -> Result<meerkat_core::comms::PeerAddress, String> {
-    let (scheme, endpoint) = raw
-        .split_once("://")
-        .ok_or_else(|| format!("peer address missing transport scheme: {raw}"))?;
-    let transport = match scheme {
-        "inproc" => meerkat_core::comms::PeerTransport::Inproc,
-        "uds" => meerkat_core::comms::PeerTransport::Uds,
-        "tcp" => meerkat_core::comms::PeerTransport::Tcp,
-        other => return Err(format!("unknown peer address transport: {other}")),
-    };
-    Ok(meerkat_core::comms::PeerAddress::new(transport, endpoint))
 }
 
 fn runtime_mode_from_wire(mode: WireMobRuntimeMode) -> meerkat_mob::MobRuntimeMode {
@@ -1036,6 +1008,49 @@ fn runtime_binding_from_wire(wb: WireRuntimeBinding) -> meerkat_mob::RuntimeBind
 mod tests {
     use super::*;
     use crate::MobMcpState;
+
+    fn external_peer_target(peer_id: String, pubkey: [u8; 32]) -> meerkat_contracts::MobPeerTarget {
+        meerkat_contracts::MobPeerTarget::External(meerkat_contracts::WireTrustedPeerSpec {
+            name: "external-worker".to_string(),
+            peer_id,
+            address: "inproc://external-worker".to_string(),
+            pubkey,
+        })
+    }
+
+    #[test]
+    fn public_mcp_wire_rejects_external_peer_zero_pubkey() {
+        let err = peer_target_from_wire(external_peer_target(
+            meerkat_core::comms::PeerId::new().to_string(),
+            [0u8; 32],
+        ))
+        .expect_err("zero pubkey external peers must be rejected");
+
+        assert!(
+            err.message.contains("pubkey"),
+            "expected pubkey validation error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn public_mcp_wire_rejects_external_peer_pubkey_peer_id_mismatch() {
+        let pubkey = [7u8; 32];
+        let mismatched_peer_id = meerkat_core::comms::PeerId::new().to_string();
+        assert_ne!(
+            mismatched_peer_id,
+            meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey).to_string()
+        );
+
+        let err = peer_target_from_wire(external_peer_target(mismatched_peer_id, pubkey))
+            .expect_err("external peer_id must match the supplied pubkey");
+
+        assert!(
+            err.message.contains("peer_id") && err.message.contains("pubkey"),
+            "expected peer_id/pubkey validation error, got: {}",
+            err.message
+        );
+    }
 
     #[allow(dead_code)]
     async fn spawn_realtime_open_info_stub(

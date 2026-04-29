@@ -1649,6 +1649,7 @@ impl MobEventStore for FaultInjectedMobEventStore {
 
 struct RecordingRunStore {
     inner: InMemoryMobRunStore,
+    fail_create_run_once: AtomicBool,
     cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
     snapshot_cas_history: RwLock<Vec<(RunId, MobRunStatus, MobRunStatus)>>,
 }
@@ -1657,9 +1658,14 @@ impl RecordingRunStore {
     fn new() -> Self {
         Self {
             inner: InMemoryMobRunStore::new(),
+            fail_create_run_once: AtomicBool::new(false),
             cas_history: RwLock::new(Vec::new()),
             snapshot_cas_history: RwLock::new(Vec::new()),
         }
+    }
+
+    fn fail_next_create_run(&self) {
+        self.fail_create_run_once.store(true, Ordering::Relaxed);
     }
 
     async fn snapshot_cas_history(&self) -> Vec<(RunId, MobRunStatus, MobRunStatus)> {
@@ -1670,6 +1676,11 @@ impl RecordingRunStore {
 #[async_trait]
 impl MobRunStore for RecordingRunStore {
     async fn create_run(&self, run: MobRun) -> Result<(), MobStoreError> {
+        if self.fail_create_run_once.swap(false, Ordering::Relaxed) {
+            return Err(MobStoreError::Internal(
+                "fault-injected create_run failure".to_string(),
+            ));
+        }
         self.inner.create_run(run).await
     }
 
@@ -15208,6 +15219,294 @@ async fn test_destroy_cancels_inflight_flow_run() {
 }
 
 #[tokio::test]
+async fn test_run_flow_store_admission_failure_does_not_commit_mob_machine_authority() {
+    let run_store = Arc::new(RecordingRunStore::new());
+    let definition = sample_definition_with_single_step_flow(60_000, 8);
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_run_store(definition, run_store.clone()).await;
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker before flow admission");
+
+    run_store.fail_next_create_run();
+    let error = handle
+        .run_flow(FlowId::from("demo"), serde_json::json!({}))
+        .await
+        .expect_err("fault-injected create_run failure should fail RunFlow admission");
+    assert!(
+        error
+            .to_string()
+            .contains("fault-injected create_run failure"),
+        "admission error should surface run-store failure, got: {error}"
+    );
+
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after failed admission");
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "RunFlow store failure must not leave MobMachine active_run_count advanced"
+    );
+    assert!(
+        machine_state.run_status.is_empty(),
+        "RunFlow store failure must not leave MobMachine run projections behind"
+    );
+    let persisted_runs = run_store
+        .list_runs(&mob_id, Some(&FlowId::from("demo")))
+        .await
+        .expect("list persisted runs");
+    assert!(
+        persisted_runs.is_empty(),
+        "fault-injected admission failure must not persist a run"
+    );
+}
+
+#[test]
+fn test_flow_cleanup_uses_terminal_projection_not_authority_clone_probe() {
+    let source = include_str!("actor.rs");
+    let start = source
+        .find("async fn handle_flow_cleanup")
+        .expect("handle_flow_cleanup exists");
+    let end = source[start..]
+        .find("async fn handle_cancel_flow")
+        .expect("handle_cancel_flow follows cleanup");
+    let body = &source[start..start + end];
+    assert!(
+        !body.contains("MobMachineAuthority::from_state(self.dsl_authority.state.clone())"),
+        "flow cleanup must use run terminality and live authority state directly, not clone-probe MobMachine"
+    );
+    assert!(
+        !body.contains("authorities_expect_completion"),
+        "flow cleanup must not infer terminality by probing whether authority signals would be accepted"
+    );
+}
+
+#[test]
+fn test_flow_frame_store_plan_commits_authority_with_store_in_actor() {
+    let source = include_str!("flow_frame_engine.rs");
+    let start = source
+        .find("async fn execute_store_plan")
+        .expect("execute_store_plan exists");
+    let end = source[start..]
+        .find("async fn project_store_plan")
+        .expect("project_store_plan follows execute_store_plan");
+    let body = &source[start..start + end];
+    assert!(
+        body.contains("commit_flow_frame_store_plan"),
+        "frame loop store plans must be committed through the actor authority/store seam"
+    );
+    assert!(
+        !body.contains("commit_mob_machine_inputs(machine_inputs)"),
+        "frame loop store plans must not persist store state before separately committing MobMachine inputs"
+    );
+}
+
+#[test]
+fn test_flow_frame_kernel_mutations_route_store_and_authority_through_actor() {
+    let source = include_str!("flow_frame_engine.rs");
+    let start = source
+        .find("impl FlowFrameMutator for FlowFrameKernel")
+        .expect("FlowFrameKernel mutator impl exists");
+    let end = source[start..]
+        .find("// ─── FlowFrameEngine")
+        .expect("FlowFrameEngine section follows kernel mutator impl");
+    let body = &source[start..start + end];
+    for disallowed in [
+        ".cas_frame_state(",
+        ".cas_complete_step_and_record_output(",
+        ".cas_run_snapshot(",
+        "commit_mob_machine_inputs(",
+    ] {
+        assert!(
+            !body.contains(disallowed),
+            "FlowFrameKernel store mutation '{disallowed}' must be committed through the actor authority/store seam"
+        );
+    }
+    assert!(
+        body.contains("commit_flow_frame_store_plan"),
+        "FlowFrameKernel frame store mutations must route through actor-owned prepared authority commits"
+    );
+}
+
+#[test]
+fn test_flow_frame_scheduler_start_run_routes_through_actor_authority() {
+    let source = include_str!("flow_frame_engine.rs");
+    let start = source
+        .find("async fn ensure_scheduler_state_initialized")
+        .expect("ensure_scheduler_state_initialized exists");
+    let end = source[start..]
+        .find("async fn heal_orphaned_running_nodes")
+        .expect("heal helper follows scheduler initialization");
+    let body = &source[start..start + end];
+    assert!(
+        body.contains("commit_flow_run_command"),
+        "scheduler initialization must use the actor-owned flow run command seam"
+    );
+    for disallowed in [".cas_run_snapshot(", "commit_mob_machine_inputs("] {
+        assert!(
+            !body.contains(disallowed),
+            "scheduler initialization must not persist run state before a separate MobMachine authority commit"
+        );
+    }
+}
+
+#[test]
+fn test_actor_owned_terminalization_paths_do_not_reenter_actor_mailbox() {
+    let source = include_str!("actor.rs");
+    let run_flow_start = source
+        .find("async fn handle_run_flow")
+        .expect("handle_run_flow exists");
+    let run_flow_pre_spawn_end = source[run_flow_start..]
+        .find("let cancel_token = tokio_util::sync::CancellationToken::new();")
+        .expect("handle_run_flow creates cancel token after admission");
+    let run_flow_pre_spawn = &source[run_flow_start..run_flow_start + run_flow_pre_spawn_end];
+    assert!(
+        !run_flow_pre_spawn.contains(".flow_engine\n                .terminalize_failed("),
+        "actor-owned run admission failure must terminalize through the in-actor helper, not by sending to its own actor mailbox"
+    );
+    assert!(
+        run_flow_pre_spawn.contains("terminalize_failed_in_actor"),
+        "actor-owned run admission failure must use the in-actor failed terminalization helper"
+    );
+
+    let cancel_start = source
+        .find("async fn handle_cancel_flow")
+        .expect("handle_cancel_flow exists");
+    let cancel_body_end = source[cancel_start..]
+        .find("let flow_engine = self.flow_engine.clone();")
+        .expect("handle_cancel_flow spawns async cancellation cleanup after no-handle path");
+    let cancel_no_handle_body = &source[cancel_start..cancel_start + cancel_body_end];
+    assert!(
+        !cancel_no_handle_body.contains(".flow_engine\n                .terminalize_canceled("),
+        "actor-owned no-task cancel path must terminalize through the in-actor helper, not by sending to its own actor mailbox"
+    );
+    assert!(
+        cancel_no_handle_body.contains("terminalize_canceled_in_actor"),
+        "actor-owned no-task cancel path must use the in-actor canceled terminalization helper"
+    );
+}
+
+#[tokio::test]
+async fn test_stale_flow_frame_store_plan_loses_cas_before_authority_prepare() {
+    use crate::definition::{FlowNodeSpec, FrameSpec, FrameStepSpec};
+    use crate::ids::{FlowNodeId, FrameId};
+    use crate::runtime::flow_frame_engine::{FlowFrameKernel, FlowFrameLoopStorePlan};
+
+    let store = Arc::new(InMemoryMobRunStore::new());
+    let run = MobRun::pending(
+        crate::ids::MobId::from("test-mob"),
+        FlowId::from("test-flow"),
+        crate::run::flow_run::initial_state(),
+        serde_json::json!({}),
+    );
+    let run_id = run.run_id.clone();
+    store.create_run(run).await.expect("create run");
+
+    let (handle, _) = create_test_mob_with_run_store(sample_definition(), store.clone()).await;
+    seed_test_run_in_mob_machine(&handle, &run_id).await;
+
+    let node_id = FlowNodeId::from("start-node");
+    let mut nodes = IndexMap::new();
+    nodes.insert(
+        node_id.clone(),
+        FlowNodeSpec::Step(FrameStepSpec {
+            step_id: step_id("start"),
+            depends_on: Vec::new(),
+            depends_on_mode: DependencyMode::All,
+            branch: None,
+        }),
+    );
+    let root_spec = FrameSpec { nodes };
+
+    let frame_id = FrameId::from(format!("{run_id}-root").as_str());
+    let frame_kernel = FlowFrameKernel::new(store.clone(), handle.clone());
+    let initial_frame = frame_kernel
+        .start_frame(&run_id, &frame_id, &root_spec)
+        .await
+        .expect("start root frame");
+    frame_kernel
+        .admit_next_ready_node_with_retry(&run_id, &frame_id, 5)
+        .await
+        .expect("admit next ready node")
+        .expect("admission effects");
+
+    let advanced_frame = store
+        .get_run(&run_id)
+        .await
+        .expect("get run")
+        .expect("run exists")
+        .frames
+        .get(&frame_id)
+        .cloned()
+        .expect("advanced frame exists");
+    assert_ne!(
+        advanced_frame, initial_frame,
+        "admission should advance the persisted frame before replaying stale plan"
+    );
+
+    let stale_admit = crate::run::MobMachineFlowFrameCommand::AdmitNextReadyNode(
+        crate::run::flow_frame::inputs::AdmitNextReadyNode {
+            node_id,
+            ready_queue: Vec::new(),
+        },
+    );
+    let won = handle
+        .commit_flow_frame_store_plan(
+            &run_id,
+            FlowFrameLoopStorePlan::FrameState {
+                machine_inputs: vec![stale_admit.authority_input(&frame_id)],
+                frame_id: frame_id.clone(),
+                expected_frame: initial_frame,
+                next_frame: advanced_frame.clone(),
+            },
+        )
+        .await
+        .expect("stale frame plan should lose through store expectation, not authority prepare");
+    assert!(
+        !won,
+        "stale frame plan must return a clean CAS miss so callers can retry/revisit"
+    );
+
+    let after_replay = store
+        .get_run(&run_id)
+        .await
+        .expect("get run after replay")
+        .expect("run exists after replay")
+        .frames
+        .get(&frame_id)
+        .cloned()
+        .expect("frame exists after replay");
+    assert_eq!(
+        after_replay, advanced_frame,
+        "losing stale plan must not mutate the persisted frame"
+    );
+}
+
+#[test]
+fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
+    let source = include_str!("actor.rs");
+    let start = source
+        .find("async fn install_supervisor_private_trust_for_session")
+        .expect("install_supervisor_private_trust_for_session exists");
+    let end = source[start..]
+        .find("async fn cleanup_supervisor_private_trust_for_session")
+        .expect("cleanup helper follows install helper");
+    let body = &source[start..start + end];
+    assert!(
+        body.contains("protocol_supervisor_trust_publish::extract_obligations"),
+        "supervisor private trust publication must realize the generated supervisor_trust_publish handoff obligation"
+    );
+    assert!(
+        !body.contains(
+            "stage_supervisor_trust_published(session_id, next_peer_id.clone(), next_epoch)"
+        ),
+        "publish feedback must use the generated obligation fields, not locally reconstructed peer/epoch atoms"
+    );
+}
+
+#[tokio::test]
 async fn test_cancel_flow_cooperative_path_finishes_before_fallback_window() {
     let (handle, service) = create_test_mob(sample_definition_with_two_step_flow(5_000)).await;
     handle
@@ -15648,6 +15947,20 @@ async fn test_flow_failed_append_failure_records_coherence_failure_ledger_entry(
         }),
         "failed terminal event append should be recorded in failure ledger"
     );
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after failed append failure");
+    let run_key = crate::machines::mob_machine::RunId::from(run_id.to_string());
+    assert_eq!(
+        machine_state.run_status.get(&run_key),
+        Some(&crate::machines::mob_machine::FlowRunStatus::Failed),
+        "MobMachine run_status must still be Failed when durable run status CAS wins before terminal event append fails"
+    );
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "failed terminal append failure must not leave MobMachine active_run_count running"
+    );
 }
 
 #[tokio::test]
@@ -15673,6 +15986,20 @@ async fn test_flow_completed_append_failure_records_coherence_failure_ledger_ent
                 && entry.reason.contains("FlowCompleted append failed")
         }),
         "failed terminal event append should be recorded in failure ledger"
+    );
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after terminal append failure");
+    let run_key = crate::machines::mob_machine::RunId::from(run_id.to_string());
+    assert_eq!(
+        machine_state.run_status.get(&run_key),
+        Some(&crate::machines::mob_machine::FlowRunStatus::Completed),
+        "MobMachine run_status must still be terminal when durable run status CAS wins before terminal event append fails"
+    );
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "terminal append failure must not leave MobMachine active_run_count running"
     );
 }
 
@@ -15707,6 +16034,20 @@ async fn test_flow_canceled_append_failure_records_coherence_failure_ledger_entr
                 && entry.reason.contains("FlowCanceled append failed")
         }),
         "failed terminal event append should be recorded in failure ledger"
+    );
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after canceled append failure");
+    let run_key = crate::machines::mob_machine::RunId::from(run_id.to_string());
+    assert_eq!(
+        machine_state.run_status.get(&run_key),
+        Some(&crate::machines::mob_machine::FlowRunStatus::Canceled),
+        "MobMachine run_status must still be Canceled when durable run status CAS wins before terminal event append fails"
+    );
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "canceled terminal append failure must not leave MobMachine active_run_count running"
     );
 }
 

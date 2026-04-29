@@ -3,8 +3,10 @@ use crate::MobRuntimeMode;
 use crate::machines::mob_machine as mob_dsl;
 use crate::mob_machine::{MobMachineCommand, MobMachineCommandResult};
 use crate::roster::MobMemberKickoffSnapshot;
+use crate::run::{MobMachineFlowRunCommand, flow_run};
 #[cfg(test)]
 use crate::runtime::MobLifecycleSnapshot;
+use crate::runtime::flow_frame_engine::FlowFrameLoopStorePlan;
 #[cfg(test)]
 use crate::runtime::mob_member_lifecycle_projection::{
     CanonicalMemberSnapshotMaterial, CanonicalMemberStatus,
@@ -13,6 +15,7 @@ use crate::runtime::reconcile::{
     EnsureMemberOutcome, MemberFilter, ReconcileFailure, ReconcileOptions, ReconcileReport,
     ReconcileStage,
 };
+use crate::runtime::terminalization::{TerminalizationOutcome, TerminalizationTarget};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use meerkat_core::comms::{
@@ -640,6 +643,14 @@ pub struct HelperOptions {
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
     /// Explicit auth binding used for the helper member's agent build.
     pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    /// Pre-resolved inherited tool filter from scheduled or agent-owned tooling resolution.
+    pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
+    /// Override profile resolved from scheduled or agent-owned tooling resolution.
+    pub override_profile: Option<crate::profile::Profile>,
+    /// Model override resolved from scheduled helper tooling.
+    pub model_override: Option<String>,
+    /// Provider params override resolved from scheduled helper tooling.
+    pub provider_params_override: Option<serde_json::Value>,
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -896,6 +907,10 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
+    /// Model override resolved outside the mob runtime while keeping the selected role profile.
+    pub model_override: Option<String>,
+    /// Provider params override resolved outside the mob runtime while keeping the selected role profile.
+    pub provider_params_override: Option<serde_json::Value>,
     /// Per-member auth binding. When set, this member's agent builds with
     /// `AgentBuildConfig.connection_ref = Some(this)`, scoping credential
     /// resolution to the named realm + binding. `None` means the caller did not
@@ -923,6 +938,8 @@ impl SpawnMemberSpec {
             shell_env: None,
             inherited_tool_filter: None,
             override_profile: None,
+            model_override: None,
+            provider_params_override: None,
             connection_ref: None,
         }
     }
@@ -3702,6 +3719,10 @@ impl MobHandle {
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
         spec.connection_ref = options.connection_ref;
+        spec.inherited_tool_filter = options.inherited_tool_filter;
+        spec.override_profile = options.override_profile;
+        spec.model_override = options.model_override;
+        spec.provider_params_override = options.provider_params_override;
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
@@ -3748,6 +3769,10 @@ impl MobHandle {
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
         spec.connection_ref = options.connection_ref;
+        spec.inherited_tool_filter = options.inherited_tool_filter;
+        spec.override_profile = options.override_profile;
+        spec.model_override = options.model_override;
+        spec.provider_params_override = options.provider_params_override;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,
@@ -3773,6 +3798,53 @@ impl MobHandle {
     ) -> Result<crate::machines::mob_machine::MobMachineState, MobError> {
         self.send_actor_command(|reply_tx| MobCommand::ProjectMachineInput {
             input: Box::new(input),
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(super) async fn commit_flow_run_command(
+        &self,
+        run_id: &RunId,
+        command: MobMachineFlowRunCommand,
+        context: &'static str,
+    ) -> Result<Option<Vec<flow_run::Effect>>, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CommitFlowRunCommand {
+            run_id: run_id.clone(),
+            command: Box::new(command),
+            context,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(super) async fn commit_flow_terminalization(
+        &self,
+        run_id: RunId,
+        flow_id: FlowId,
+        target: TerminalizationTarget,
+        command: MobMachineFlowRunCommand,
+        context: &'static str,
+    ) -> Result<TerminalizationOutcome, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CommitFlowTerminalization {
+            run_id,
+            flow_id,
+            target,
+            command: Box::new(command),
+            context,
+            reply_tx,
+        })
+        .await?
+    }
+
+    pub(super) async fn commit_flow_frame_store_plan(
+        &self,
+        run_id: &RunId,
+        plan: FlowFrameLoopStorePlan,
+    ) -> Result<bool, MobError> {
+        self.send_actor_command(|reply_tx| MobCommand::CommitFlowFrameStorePlan {
+            run_id: run_id.clone(),
+            plan: Box::new(plan),
             reply_tx,
         })
         .await?

@@ -5,8 +5,8 @@
 //! reachable through the router and return well-formed responses
 //! (status code + JSON content-type) even without live credentials.
 //!
-//! Plan choke point K6 reads: "POST /auth/profiles → GET
-//! /auth/profiles/:id → POST /sessions with connection_ref". The
+//! Plan choke point K6 reads: "POST /auth/profiles -> GET
+//! /auth/bindings/{binding_id} -> POST /sessions with connection_ref". The
 //! live-provider half belongs in the `e2e-auth` lane; this file
 //! exercises the offline router half: each route is registered,
 //! dispatches, and returns a structured response.
@@ -20,7 +20,7 @@
 )]
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
 use http_body_util::BodyExt;
 use meerkat::{
     AgentFactory, Config, FactoryAgentBuilder, MemoryStore, PersistenceBundle,
@@ -156,11 +156,14 @@ async fn auth_routes_are_registered_and_dispatch() {
     }
 
     // Per-resource routes: must match the router (not return 404 for
-    // unknown-route reasons) — body content may still indicate
-    // resource-not-found via a 4xx/5xx, which is fine.
+    // unknown-route reasons) — structured handler 404s for missing
+    // resources are fine.
     for (method, path) in [
-        ("GET", "/auth/profiles/nonexistent"),
-        ("GET", "/auth/status/nonexistent"),
+        ("GET", "/auth/bindings/nonexistent?realm_id=test-realm"),
+        (
+            "GET",
+            "/auth/bindings/nonexistent/status?realm_id=test-realm",
+        ),
         ("GET", "/realms/test-realm"),
     ] {
         let req = Request::builder()
@@ -169,13 +172,33 @@ async fn auth_routes_are_registered_and_dispatch() {
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
-        // Accept any valid HTTP status (including 404 with a structured
-        // JSON body); the important thing is the handler ran.
         let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert!(
-            status.as_u16() >= 200 && status.as_u16() < 600,
+            status.is_success() || status.is_client_error() || status.is_server_error(),
             "route {method} {path} must return a valid HTTP status, got {status}"
         );
+
+        if status == StatusCode::NOT_FOUND {
+            assert!(
+                content_type
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("application/json")),
+                "route {method} {path} returned 404 without a JSON handler body; \
+                 this looks like an unknown-route 404"
+            );
+            let body: Value =
+                serde_json::from_slice(&bytes).expect("handler 404 body must be structured JSON");
+            assert!(
+                body.get("error").is_some(),
+                "route {method} {path} returned 404 JSON without an error field: {body}"
+            );
+        }
     }
 }
 

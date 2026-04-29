@@ -17,8 +17,10 @@ mod stream_renderer;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
+#[cfg(not(feature = "mob"))]
+use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::{
-    NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
     SurfaceScheduleSessionHost, schedule_attempt_idempotency_key, schedule_host_supported,
     spawn_schedule_host,
 };
@@ -4930,6 +4932,27 @@ async fn prepare_run_mob_tools(
     })
 }
 
+#[cfg(all(feature = "mob", feature = "session-store"))]
+async fn prepare_run_mob_tools_from_surface(
+    scope: &RuntimeScope,
+    surface: Arc<CliPersistentSurfaceState>,
+) -> anyhow::Result<RunMobToolsContext> {
+    let _lock = acquire_mob_registry_lock(scope).await?;
+    let state = hydrate_cli_mob_state_cached(
+        scope,
+        Arc::clone(&surface.service),
+        Arc::clone(&surface.runtime_adapter),
+        Arc::clone(&surface.mob_state_cache),
+    )
+    .await?;
+    let registry = load_mob_registry(scope).await?;
+    let known_mob_ids = registry.mobs.keys().cloned().collect();
+    Ok(RunMobToolsContext {
+        state,
+        known_mob_ids,
+    })
+}
+
 #[cfg(test)]
 fn compose_external_tool_dispatchers(
     primary: Option<Arc<dyn AgentToolDispatcher>>,
@@ -5037,7 +5060,8 @@ async fn build_deploy_mob_session_service(
 ) -> anyhow::Result<Arc<dyn meerkat_mob::MobSessionService>> {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
     let surface =
-        get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)?;
+        get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)
+            .await?;
     Ok(Arc::new(MobCliSessionService::new(Arc::clone(
         &surface.service,
     ))))
@@ -5376,15 +5400,14 @@ async fn run_agent(
 
         #[cfg(feature = "mob")]
         let mut run_mob_tools = if effective_mob {
-            let mob_persistent = get_or_create_mob_persistent_service_from_bundle(
+            let mob_surface = get_or_create_cli_persistent_surface_from_bundle(
                 scope,
                 config.clone(),
                 manifest.clone(),
                 persistence.clone(),
-            )?;
-            let run_mob_service: Arc<dyn meerkat_mob::MobSessionService> =
-                Arc::new(MobCliSessionService::new(mob_persistent));
-            Some(prepare_run_mob_tools(scope, run_mob_service).await?)
+            )
+            .await?;
+            Some(prepare_run_mob_tools_from_surface(scope, mob_surface).await?)
         } else {
             None
         };
@@ -6356,11 +6379,11 @@ async fn build_cli_persistent_service(
     Arc<meerkat_runtime::MeerkatMachine>,
 )> {
     let (manifest, persistence) = create_persistence_bundle(scope).await?;
-    build_cli_persistent_service_from_bundle(scope, config, manifest, persistence)
+    build_cli_persistent_service_from_bundle(scope, config, manifest, persistence).await
 }
 
 #[cfg(feature = "session-store")]
-fn build_cli_persistent_service_from_bundle(
+async fn build_cli_persistent_service_from_bundle(
     scope: &RuntimeScope,
     config: Config,
     manifest: meerkat_store::RealmManifest,
@@ -6370,7 +6393,8 @@ fn build_cli_persistent_service_from_bundle(
     Arc<meerkat_runtime::MeerkatMachine>,
 )> {
     let surface =
-        get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)?;
+        get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)
+            .await?;
     Ok((
         Arc::clone(&surface.service),
         Arc::clone(&surface.runtime_adapter),
@@ -6378,7 +6402,7 @@ fn build_cli_persistent_service_from_bundle(
 }
 
 #[cfg(feature = "session-store")]
-fn get_or_create_cli_persistent_surface_from_bundle(
+async fn get_or_create_cli_persistent_surface_from_bundle(
     scope: &RuntimeScope,
     config: Config,
     manifest: meerkat_store::RealmManifest,
@@ -6426,7 +6450,23 @@ fn get_or_create_cli_persistent_surface_from_bundle(
         default_schedule_tools,
     );
     let service = Arc::new(service);
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    let mob_state_cache = Arc::new(CliMobStateCache::default());
     let schedule_host = if schedule_host_supported(schedule_service.store().kind()) {
+        #[cfg(all(feature = "mob", feature = "session-store"))]
+        let mob_host = build_cli_schedule_mob_host(
+            scope.clone(),
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            Arc::clone(&mob_state_cache),
+        );
+        #[cfg(all(not(feature = "mob"), feature = "session-store"))]
+        let mob_host = build_cli_schedule_mob_host(
+            scope,
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            (),
+        );
         let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(CliScheduleSessionHost {
             service: Arc::clone(&service),
             runtime_adapter: Arc::clone(&runtime_adapter),
@@ -6434,9 +6474,7 @@ fn get_or_create_cli_persistent_surface_from_bundle(
         let shared_adapter = Arc::new(SharedScheduleTargetAdapter::new(
             schedule_service.clone(),
             session_host,
-            Arc::new(NoopScheduleMobHost::new(
-                "scheduled mob targets are not enabled in the CLI host",
-            )),
+            mob_host,
         ));
         Some(spawn_schedule_host(
             schedule_service,
@@ -6452,6 +6490,8 @@ fn get_or_create_cli_persistent_surface_from_bundle(
         Arc::new(CliPersistentSurfaceState {
             service,
             runtime_adapter,
+            #[cfg(all(feature = "mob", feature = "session-store"))]
+            mob_state_cache,
             _schedule_host: schedule_host,
         }),
     )
@@ -6494,7 +6534,134 @@ type CliPersistentService = meerkat::PersistentSessionService<FactoryAgentBuilde
 struct CliPersistentSurfaceState {
     service: Arc<CliPersistentService>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    mob_state_cache: Arc<CliMobStateCache>,
     _schedule_host: Option<meerkat::surface::ScheduleHostHandle>,
+}
+
+#[cfg(all(feature = "mob", feature = "session-store"))]
+#[derive(Default)]
+struct CliMobStateCache {
+    state: tokio::sync::Mutex<Option<Arc<meerkat_mob_mcp::MobMcpState>>>,
+}
+
+#[cfg(all(feature = "mob", feature = "session-store"))]
+async fn hydrate_cli_mob_state_cached(
+    scope: &RuntimeScope,
+    service: Arc<CliPersistentService>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    mob_state_cache: Arc<CliMobStateCache>,
+) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
+    let mut cached = mob_state_cache.state.lock().await;
+    if let Some(state) = cached.as_ref() {
+        return Ok(Arc::clone(state));
+    }
+
+    let mob_service: Arc<dyn meerkat_mob::MobSessionService> =
+        Arc::new(MobCliSessionService::new(service));
+    let (mob_state, _) = hydrate_mob_state(
+        scope,
+        mob_service,
+        Some(runtime_adapter),
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+    )
+    .await?;
+    *cached = Some(Arc::clone(&mob_state));
+    Ok(mob_state)
+}
+
+#[cfg(all(feature = "mob", feature = "session-store"))]
+async fn get_or_hydrate_cli_mob_state(
+    scope: &RuntimeScope,
+    service: Arc<CliPersistentService>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    mob_state_cache: Arc<CliMobStateCache>,
+) -> anyhow::Result<Arc<meerkat_mob_mcp::MobMcpState>> {
+    let _lock = acquire_mob_registry_lock(scope).await?;
+    hydrate_cli_mob_state_cached(scope, service, runtime_adapter, mob_state_cache).await
+}
+
+#[cfg(all(feature = "mob", feature = "session-store"))]
+struct CliScheduleMobHost {
+    scope: RuntimeScope,
+    service: Arc<CliPersistentService>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    mob_state_cache: Arc<CliMobStateCache>,
+}
+
+#[cfg(all(feature = "mob", feature = "session-store"))]
+fn build_cli_schedule_mob_host(
+    scope: RuntimeScope,
+    service: Arc<CliPersistentService>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    mob_state_cache: Arc<CliMobStateCache>,
+) -> Arc<dyn SurfaceScheduleMobHost> {
+    Arc::new(CliScheduleMobHost {
+        scope,
+        service,
+        runtime_adapter,
+        mob_state_cache,
+    })
+}
+
+#[cfg(all(feature = "mob", feature = "session-store", test))]
+fn cli_schedule_mob_host_from_state(
+    mob_state: Arc<meerkat_mob_mcp::MobMcpState>,
+) -> Arc<dyn SurfaceScheduleMobHost> {
+    Arc::new(meerkat_mob_mcp::MobMcpScheduleHost::new(mob_state))
+}
+
+#[cfg(all(feature = "mob", feature = "session-store"))]
+#[async_trait::async_trait]
+impl SurfaceScheduleMobHost for CliScheduleMobHost {
+    async fn probe_mob_target(
+        &self,
+        binding: &meerkat::MobTargetBinding,
+    ) -> Result<meerkat::TargetProbeOutcome, meerkat::ScheduleDomainError> {
+        let state = get_or_hydrate_cli_mob_state(
+            &self.scope,
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            Arc::clone(&self.mob_state_cache),
+        )
+        .await
+        .map_err(|error| meerkat::ScheduleDomainError::ProbeFailed(error.to_string()))?;
+        meerkat_mob_mcp::MobMcpScheduleHost::new(state)
+            .probe_mob_target(binding)
+            .await
+    }
+
+    async fn deliver_mob_target(
+        &self,
+        occurrence: &meerkat::Occurrence,
+        binding: &meerkat::MobTargetBinding,
+    ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
+        let state = get_or_hydrate_cli_mob_state(
+            &self.scope,
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            Arc::clone(&self.mob_state_cache),
+        )
+        .await
+        .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+        meerkat_mob_mcp::MobMcpScheduleHost::new(state)
+            .deliver_mob_target(occurrence, binding)
+            .await
+    }
+}
+
+#[cfg(all(not(feature = "mob"), feature = "session-store"))]
+fn build_cli_schedule_mob_host(
+    _scope: &RuntimeScope,
+    _service: Arc<CliPersistentService>,
+    _runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
+    _mob_state_cache: (),
+) -> Arc<dyn SurfaceScheduleMobHost> {
+    Arc::new(NoopScheduleMobHost::new(
+        "scheduled mob targets require the mob feature on the CLI host",
+    ))
 }
 
 #[cfg(feature = "session-store")]
@@ -6860,18 +7027,6 @@ fn mob_persistent_service_key(scope: &RuntimeScope) -> String {
 }
 
 #[cfg(all(feature = "mob", feature = "session-store"))]
-fn cached_mob_persistent_service(
-    scope: &RuntimeScope,
-) -> anyhow::Result<Option<Arc<CliPersistentService>>> {
-    let key = mob_persistent_service_key(scope);
-    Ok(mob_persistent_service_cache()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("mob persistent service cache poisoned"))?
-        .get(&key)
-        .and_then(Weak::upgrade))
-}
-
-#[cfg(all(feature = "mob", feature = "session-store"))]
 fn remember_mob_persistent_service(
     scope: &RuntimeScope,
     created: Arc<CliPersistentService>,
@@ -6886,45 +7041,6 @@ fn remember_mob_persistent_service(
         cache.insert(key, Arc::downgrade(&created));
         Ok(created)
     }
-}
-
-#[cfg(all(feature = "mob", feature = "session-store"))]
-fn build_mob_persistent_service_from_bundle(
-    scope: &RuntimeScope,
-    config: Config,
-    manifest: meerkat_store::RealmManifest,
-    persistence: PersistenceBundle,
-) -> anyhow::Result<Arc<CliPersistentService>> {
-    let (persistent_service, _runtime_adapter) =
-        build_cli_persistent_service_from_bundle(scope, config, manifest, persistence)?;
-    remember_mob_persistent_service(scope, persistent_service)
-}
-
-#[cfg(all(feature = "mob", feature = "session-store"))]
-async fn get_or_create_mob_persistent_service(
-    scope: &RuntimeScope,
-    config: Config,
-) -> anyhow::Result<Arc<CliPersistentService>> {
-    if let Some(existing) = cached_mob_persistent_service(scope)? {
-        return Ok(existing);
-    }
-
-    let (manifest, persistence) = create_persistence_bundle(scope).await?;
-    build_mob_persistent_service_from_bundle(scope, config, manifest, persistence)
-}
-
-#[cfg(all(feature = "mob", feature = "session-store"))]
-fn get_or_create_mob_persistent_service_from_bundle(
-    scope: &RuntimeScope,
-    config: Config,
-    manifest: meerkat_store::RealmManifest,
-    persistence: PersistenceBundle,
-) -> anyhow::Result<Arc<CliPersistentService>> {
-    if let Some(existing) = cached_mob_persistent_service(scope)? {
-        return Ok(existing);
-    }
-
-    build_mob_persistent_service_from_bundle(scope, config, manifest, persistence)
 }
 
 /// Mob-facing session service wrapper for CLI orchestration.
@@ -7303,23 +7419,25 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         let session_id = resolve_scoped_session_id(id, scope)?;
 
         let (config, _) = load_config(scope).await?;
-        let (service, _runtime_adapter) =
-            build_cli_persistent_service(scope, config.clone()).await?;
+        let (manifest, persistence) = create_persistence_bundle(scope).await?;
+        let surface = get_or_create_cli_persistent_surface_from_bundle(
+            scope,
+            config.clone(),
+            manifest,
+            persistence,
+        )
+        .await?;
+        let service = Arc::clone(&surface.service);
 
         #[cfg(feature = "mob")]
         {
             // Archive and clean up any session-owned mobs.
             if config.tools.mob_enabled
-                && let Ok(mob_persistent) =
-                    remember_mob_persistent_service(scope, Arc::clone(&service))
-                && let Ok((state, _registry)) = hydrate_mob_state(
+                && let Ok(state) = get_or_hydrate_cli_mob_state(
                     scope,
-                    Arc::new(MobCliSessionService::new(mob_persistent))
-                        as Arc<dyn meerkat_mob::MobSessionService>,
-                    None,
-                    None,
-                    None,
-                    std::collections::BTreeMap::new(),
+                    Arc::clone(&surface.service),
+                    Arc::clone(&surface.runtime_adapter),
+                    Arc::clone(&surface.mob_state_cache),
                 )
                 .await
             {
@@ -8441,18 +8559,18 @@ async fn handle_mob_command(command: MobCommands, scope: &RuntimeScope) -> anyho
 
     let _lock = acquire_mob_registry_lock(scope).await?;
     let (config, _) = load_config(scope).await?;
-    let persistent = get_or_create_mob_persistent_service(scope, config).await?;
-    let session_service: Arc<dyn meerkat_mob::MobSessionService> =
-        Arc::new(MobCliSessionService::new(persistent.clone()));
-    let (state, mut registry) = hydrate_mob_state(
+    let (manifest, persistence) = create_persistence_bundle(scope).await?;
+    let surface =
+        get_or_create_cli_persistent_surface_from_bundle(scope, config, manifest, persistence)
+            .await?;
+    let state = hydrate_cli_mob_state_cached(
         scope,
-        session_service,
-        None,
-        None,
-        None,
-        std::collections::BTreeMap::new(),
+        Arc::clone(&surface.service),
+        Arc::clone(&surface.runtime_adapter),
+        Arc::clone(&surface.mob_state_cache),
     )
     .await?;
+    let mut registry = load_mob_registry(scope).await?;
     let result = match command {
         MobCommands::RunFlow {
             mob_id,
@@ -12888,6 +13006,35 @@ capabilities = ["definitely_missing_capability"]
         assert!(system_prompt.contains("mob_list"));
         assert!(system_prompt.contains("mob_create"));
         assert!(system_prompt.contains("delegate"));
+    }
+
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[tokio::test]
+    async fn test_cli_schedule_mob_host_uses_mob_adapter_when_available() {
+        let host = cli_schedule_mob_host_from_state(meerkat_mob_mcp::MobMcpState::new_in_memory());
+        let binding = meerkat::MobTargetBinding::Member {
+            mob_id: "ops".to_string(),
+            member_id: "deploy-monitor".to_string(),
+            action: meerkat::ScheduledMobAction::Send {
+                content: "Check deploy state.".to_string().into(),
+                render_metadata: None,
+            },
+        };
+
+        let outcome = host
+            .probe_mob_target(&binding)
+            .await
+            .expect("mob probe should be delegated to the mob adapter");
+
+        let meerkat::TargetProbeOutcome::Missing { detail } = outcome else {
+            panic!("empty in-memory mob state should report missing mob, got {outcome:?}");
+        };
+        let detail = detail.expect("missing detail");
+        assert!(
+            !detail.contains("not enabled in the CLI host")
+                && !detail.contains("require the mob feature"),
+            "CLI mob-enabled schedule host should not use the no-op fallback: {detail}"
+        );
     }
 
     #[tokio::test]

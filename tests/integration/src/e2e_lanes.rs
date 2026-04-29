@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
@@ -5,11 +6,13 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::process::Stdio;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio::time::{Duration, timeout};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -373,6 +376,224 @@ pub async fn run_named_suite(name: &str) -> Result<(), String> {
         return Err(format!("unknown lane suite '{name}'"));
     };
     run_spec(spec).await
+}
+
+pub async fn run_prebuilt_smoke_selection(
+    selection: &E2eSelection,
+    manifest_path: &Path,
+) -> Result<(), String> {
+    let mut selected = select_specs(selection)?;
+    order_smoke_specs_for_runtime(&mut selected);
+    let manifest = Arc::new(ArtifactManifest::from_path(manifest_path)?);
+    let scheduler = Arc::new(SmokeScheduler::from_env(selected.len()));
+    eprintln!(
+        "e2e smoke scheduler: specs={}, jobs={}, realtime_jobs={}, media_jobs={}, mob_suite_jobs={}",
+        selected.len(),
+        scheduler.jobs,
+        scheduler.realtime_jobs,
+        scheduler.media_jobs,
+        scheduler.mob_suite_jobs
+    );
+
+    let mut pending = FuturesUnordered::new();
+    for selected_spec in selected {
+        if selected_spec.spec.lane != Lane::Smoke {
+            return Err(format!(
+                "{} belongs to {:?}, not the e2e-smoke lane",
+                run_label(selected_spec.spec),
+                selected_spec.spec.lane
+            ));
+        }
+        let manifest = Arc::clone(&manifest);
+        let scheduler = Arc::clone(&scheduler);
+        pending.push(run_prebuilt_smoke_spec(
+            selected_spec.spec,
+            scheduler,
+            manifest,
+        ));
+    }
+
+    let mut failures = Vec::new();
+    while let Some(result) = pending.next().await {
+        match result {
+            Ok(()) => {}
+            Err(error) => failures.push(error),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} e2e-smoke spec(s) failed:\n{}",
+            failures.len(),
+            failures
+                .into_iter()
+                .map(|failure| format!("- {failure}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+    }
+}
+
+async fn run_prebuilt_smoke_spec(
+    spec: &'static Spec,
+    scheduler: Arc<SmokeScheduler>,
+    manifest: Arc<ArtifactManifest>,
+) -> Result<(), String> {
+    let _permits = scheduler.acquire(spec).await?;
+    run_spec_with_mode(spec, ExecutionMode::Prebuilt, Some(manifest.as_ref())).await
+}
+
+struct SmokeScheduler {
+    jobs: usize,
+    realtime_jobs: usize,
+    media_jobs: usize,
+    mob_suite_jobs: usize,
+    global: Arc<Semaphore>,
+    realtime: Arc<Semaphore>,
+    media: Arc<Semaphore>,
+    mob_suite: Arc<Semaphore>,
+}
+
+impl SmokeScheduler {
+    fn from_env(selected_count: usize) -> Self {
+        let jobs = smoke_scheduler_limit("MEERKAT_E2E_SMOKE_JOBS", 12, selected_count);
+        let realtime_jobs =
+            smoke_scheduler_limit("MEERKAT_E2E_SMOKE_REALTIME_JOBS", 4, selected_count);
+        let media_jobs = smoke_scheduler_limit("MEERKAT_E2E_SMOKE_MEDIA_JOBS", 6, selected_count);
+        let mob_suite_jobs =
+            smoke_scheduler_limit("MEERKAT_E2E_SMOKE_MOB_SUITE_JOBS", 2, selected_count);
+        Self {
+            jobs,
+            realtime_jobs,
+            media_jobs,
+            mob_suite_jobs,
+            global: Arc::new(Semaphore::new(jobs)),
+            realtime: Arc::new(Semaphore::new(realtime_jobs)),
+            media: Arc::new(Semaphore::new(media_jobs)),
+            mob_suite: Arc::new(Semaphore::new(mob_suite_jobs)),
+        }
+    }
+
+    async fn acquire(&self, spec: &'static Spec) -> Result<SmokePermits, String> {
+        let class = smoke_runtime_class(spec);
+        let class_permit =
+            match class {
+                SmokeRuntimeClass::Realtime => {
+                    Some(self.realtime.clone().acquire_owned().await.map_err(|_| {
+                        format!("realtime scheduler closed for {}", run_label(spec))
+                    })?)
+                }
+                SmokeRuntimeClass::Media => {
+                    Some(
+                        self.media.clone().acquire_owned().await.map_err(|_| {
+                            format!("media scheduler closed for {}", run_label(spec))
+                        })?,
+                    )
+                }
+                SmokeRuntimeClass::MobSuite => {
+                    Some(self.mob_suite.clone().acquire_owned().await.map_err(|_| {
+                        format!("mob-suite scheduler closed for {}", run_label(spec))
+                    })?)
+                }
+                SmokeRuntimeClass::Standard => None,
+            };
+        let global = self.global.clone().acquire_owned().await.map_err(|_| {
+            format!(
+                "e2e smoke scheduler closed before starting {}",
+                run_label(spec)
+            )
+        })?;
+        eprintln!(
+            "e2e smoke scheduler dispatch: {} [{class:?}]",
+            run_label(spec)
+        );
+        Ok(SmokePermits {
+            _global: global,
+            _class: class_permit,
+        })
+    }
+}
+
+struct SmokePermits {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    _class: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SmokeRuntimeClass {
+    Standard,
+    Realtime,
+    Media,
+    MobSuite,
+}
+
+fn smoke_runtime_class(spec: &Spec) -> SmokeRuntimeClass {
+    let label = run_label(spec).to_ascii_lowercase();
+    if label.contains("mob flow runtime")
+        || label.contains("pictionary")
+        || label.contains("partial resume collaborative joke")
+    {
+        return SmokeRuntimeClass::MobSuite;
+    }
+    if label.contains("image") || label.contains("audio") {
+        return SmokeRuntimeClass::Media;
+    }
+    if label.contains("realtime") {
+        return SmokeRuntimeClass::Realtime;
+    }
+    SmokeRuntimeClass::Standard
+}
+
+fn smoke_scheduler_limit(name: &str, default: usize, selected_count: usize) -> usize {
+    let parsed = std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default);
+    parsed.min(selected_count.max(1))
+}
+
+fn order_smoke_specs_for_runtime(selected: &mut [SelectedSpec]) {
+    selected.sort_by_key(|selected_spec| Reverse(smoke_runtime_priority(selected_spec.spec)));
+}
+
+fn smoke_runtime_priority(spec: &Spec) -> u16 {
+    match spec.id {
+        Some(71) => return 900,
+        Some(73) => return 880,
+        Some(74) => return 870,
+        Some(76) => return 860,
+        Some(77) => return 850,
+        Some(75) => return 840,
+        Some(79) => return 830,
+        Some(80) => return 820,
+        Some(82) => return 810,
+        Some(81) => return 800,
+        Some(78) => return 790,
+        Some(54) => return 700,
+        Some(55) => return 690,
+        Some(49) | Some(51) | Some(61) => return 680,
+        _ => {}
+    }
+
+    let label = run_label(spec).to_ascii_lowercase();
+    if label.contains("pictionary") {
+        return 1_000;
+    }
+    if label.contains("mob flow runtime") {
+        return 760;
+    }
+    if label.contains("partial resume collaborative joke") {
+        return 750;
+    }
+    match smoke_runtime_class(spec) {
+        SmokeRuntimeClass::Realtime => 600,
+        SmokeRuntimeClass::Media => 500,
+        SmokeRuntimeClass::MobSuite => 400,
+        SmokeRuntimeClass::Standard => 100,
+    }
 }
 
 fn select_specs(selection: &E2eSelection) -> Result<Vec<SelectedSpec>, String> {
@@ -822,12 +1043,24 @@ fn run_label(spec: &Spec) -> String {
 }
 
 async fn run_spec(spec: &'static Spec) -> Result<(), String> {
+    run_spec_with_mode(spec, ExecutionMode::from_env()?, None).await
+}
+
+async fn run_spec_with_mode(
+    spec: &'static Spec,
+    execution_mode: ExecutionMode,
+    manifest: Option<&ArtifactManifest>,
+) -> Result<(), String> {
     let spec_started = Instant::now();
     eprintln!("e2e lane start: {}", run_label(spec));
-    let execution_mode = ExecutionMode::from_env()?;
-    let manifest = match execution_mode {
-        ExecutionMode::Cargo => None,
-        ExecutionMode::Prebuilt => Some(ArtifactManifest::from_env()?),
+    let owned_manifest;
+    let manifest = match (execution_mode, manifest) {
+        (ExecutionMode::Cargo, _) => None,
+        (ExecutionMode::Prebuilt, Some(manifest)) => Some(manifest),
+        (ExecutionMode::Prebuilt, None) => {
+            owned_manifest = ArtifactManifest::from_env()?;
+            Some(&owned_manifest)
+        }
     };
     if let Some(message) = prereq_failure(spec, execution_mode) {
         if strict_prereqs_enabled() {
@@ -839,19 +1072,14 @@ async fn run_spec(spec: &'static Spec) -> Result<(), String> {
 
     let cwd = workspace_root().join(spec.cwd);
     let scenario_target_dir = scenario_cargo_target_dir(spec)?;
-    let env_overrides = match scenario_env(
-        spec,
-        &scenario_target_dir,
-        execution_mode,
-        manifest.as_ref(),
-    ) {
+    let env_overrides = match scenario_env(spec, &scenario_target_dir, execution_mode, manifest) {
         Ok(env_overrides) => env_overrides,
         Err(error) => {
             clean_scenario_target_dir_if_requested(spec, &scenario_target_dir);
             return Err(error);
         }
     };
-    let commands = match build_commands_for_mode(spec, execution_mode, manifest.as_ref()) {
+    let commands = match build_commands_for_mode(spec, execution_mode, manifest) {
         Ok(commands) => commands,
         Err(error) => {
             clean_scenario_target_dir_if_requested(spec, &scenario_target_dir);
@@ -1325,6 +1553,8 @@ fn pre_command_replaced_by_manifest_artifact(command: &[&str]) -> bool {
     let text = command.join(" ");
     text.contains("{cargo_target_dir}/e2e-bins")
         || (command.first() == Some(&"cp") && text.contains("{cargo_target_dir}/debug/"))
+        || command_mentions_node_setup(command)
+        || command_mentions_python_setup(command)
 }
 
 fn is_raw_cargo_command(argv: &[&str]) -> bool {
@@ -1715,6 +1945,7 @@ async fn ensure_binary_signatures_fresh(spec: &Spec, env_overrides: &[(String, S
     if !cfg!(target_os = "macos") {
         return;
     }
+    let _guard = codesign_refresh_lock().lock().await;
     for (key, value) in env_overrides {
         // Cover every binary the scenario could spawn: cargo-advertised
         // binaries via CARGO_BIN_EXE_* and scenario-local staged copies
@@ -1767,6 +1998,11 @@ async fn ensure_binary_signatures_fresh(spec: &Spec, env_overrides: &[(String, S
             }
         }
     }
+}
+
+fn codesign_refresh_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
 fn workspace_root() -> PathBuf {
@@ -1866,7 +2102,8 @@ pub fn materialize_local_cargo_plan(
                 let path = materialize_rust_test(requirement)?;
                 manifest.rust_tests.insert(requirement.key(), path);
             }
-            ArtifactRequirement::NodeBuild { .. } | ArtifactRequirement::PythonEnv { .. } => {}
+            ArtifactRequirement::NodeBuild { cwd } => materialize_node_build(cwd)?,
+            ArtifactRequirement::PythonEnv { cwd } => materialize_python_env(cwd)?,
         }
     }
 
@@ -1966,6 +2203,87 @@ fn run_repo_cargo_json(args: &[String]) -> Result<Vec<serde_json::Value>, String
         messages.push(value);
     }
     Ok(messages)
+}
+
+fn materialize_node_build(cwd: &str) -> Result<(), String> {
+    match cwd {
+        "sdks/typescript" => {
+            run_materialize_command(cwd, &["npm", "install", "--no-audit", "--no-fund"])?;
+            run_materialize_command(cwd, &["npm", "run", "build"])?;
+        }
+        "tests/live_smoke/browser" => {
+            run_materialize_command(cwd, &["/bin/sh", "-c", "test -d node_modules || npm ci"])?;
+            run_materialize_command(
+                cwd,
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "test -d ../../../sdks/web/node_modules || npm --prefix ../../../sdks/web install",
+                ],
+            )?;
+            run_materialize_command_with_env(
+                cwd,
+                WEB_RUNTIME_BUILD_IF_MISSING,
+                &[
+                    ("CARGO_BUILD_JOBS", "1"),
+                    ("MEERKAT_WEB_WASM_PROFILE", "dev"),
+                ],
+            )?;
+            run_materialize_command(cwd, &["npx", "playwright", "install", "chromium"])?;
+        }
+        other => {
+            return Err(format!(
+                "no e2e materializer is defined for node build cwd '{other}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn materialize_python_env(cwd: &str) -> Result<(), String> {
+    let python = compatible_python_bin().ok_or_else(|| {
+        format!("cannot materialize python env for {cwd}: missing compatible python >=3.10")
+    })?;
+    let script = format!(
+        "{python} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || {python} -m pip install -e \".[dev]\""
+    );
+    run_materialize_command(cwd, &["/bin/sh", "-c", script.as_str()])
+}
+
+fn run_materialize_command(cwd: &str, command: &[&str]) -> Result<(), String> {
+    run_materialize_command_with_env(cwd, command, &[])
+}
+
+fn run_materialize_command_with_env(
+    cwd: &str,
+    command: &[&str],
+    env: &[(&str, &str)],
+) -> Result<(), String> {
+    let Some((program, args)) = command.split_first() else {
+        return Err(format!("empty e2e materialize command for {cwd}"));
+    };
+    eprintln!("e2e materialize setup ({cwd}): {}", command.join(" "));
+    let mut child = StdCommand::new(program);
+    child.args(args).current_dir(workspace_root().join(cwd));
+    for (key, value) in env {
+        child.env(key, value);
+    }
+    let output = child.output().map_err(|error| {
+        format!(
+            "failed to run e2e materialize setup in {cwd}: {}: {error}",
+            command.join(" ")
+        )
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "e2e materialize setup failed in {cwd} (exit {:?}): {}\n{}",
+            output.status.code(),
+            command.join(" "),
+            combine_output(&output.stdout, &output.stderr)
+        ))
+    }
 }
 
 fn executable_from_cargo_messages(
@@ -4829,12 +5147,16 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 mod tests {
     use super::{
         ArtifactManifest, ArtifactRequirement, CommandLockMode, E2eSelection, ExecutionMode, Lane,
-        SMOKE_ENTRIES, build_commands_for_mode, normalize_command_with_env, plan_for_selection,
+        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, build_commands_for_mode,
+        normalize_command_with_env, order_smoke_specs_for_runtime, plan_for_selection,
         pre_command_lock_mode, repo_cargo, sanitize_artifact_key, scenario_spec,
-        smoke_test_filter_for_selection, source_revision_key,
+        smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key, suite_spec,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+    use tokio::time::{Duration, timeout};
 
     #[test]
     fn artifact_keys_are_stable_for_scenario_targets() {
@@ -5004,6 +5326,78 @@ mod tests {
     }
 
     #[test]
+    fn smoke_scheduler_classifies_high_pressure_specs() {
+        assert_eq!(
+            smoke_runtime_class(suite_spec("mob-flow-runtime").unwrap()),
+            SmokeRuntimeClass::MobSuite
+        );
+        assert_eq!(
+            smoke_runtime_class(scenario_spec(62).unwrap()),
+            SmokeRuntimeClass::Realtime
+        );
+        assert_eq!(
+            smoke_runtime_class(scenario_spec(81).unwrap()),
+            SmokeRuntimeClass::Media
+        );
+        assert_eq!(
+            smoke_runtime_class(suite_spec("rpc-dynamic-tool-pickup").unwrap()),
+            SmokeRuntimeClass::Standard
+        );
+    }
+
+    #[test]
+    fn smoke_scheduler_prioritizes_long_runtime_specs() {
+        let mut selected = vec![
+            super::SelectedSpec {
+                spec: scenario_spec(16).unwrap(),
+                suite: None,
+            },
+            super::SelectedSpec {
+                spec: suite_spec("mob-pictionary").unwrap(),
+                suite: Some("mob-pictionary".to_string()),
+            },
+            super::SelectedSpec {
+                spec: scenario_spec(73).unwrap(),
+                suite: None,
+            },
+        ];
+        order_smoke_specs_for_runtime(&mut selected);
+        assert_eq!(selected[0].suite.as_deref(), Some("mob-pictionary"));
+        assert_eq!(selected[1].spec.id, Some(73));
+        assert_eq!(selected[2].spec.id, Some(16));
+    }
+
+    #[tokio::test]
+    async fn class_limited_specs_do_not_occupy_global_slots_while_waiting() {
+        let scheduler = Arc::new(SmokeScheduler {
+            jobs: 1,
+            realtime_jobs: 1,
+            media_jobs: 0,
+            mob_suite_jobs: 1,
+            global: Arc::new(Semaphore::new(1)),
+            realtime: Arc::new(Semaphore::new(1)),
+            media: Arc::new(Semaphore::new(0)),
+            mob_suite: Arc::new(Semaphore::new(1)),
+        });
+        let blocked_media = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move { scheduler.acquire(scenario_spec(73).unwrap()).await })
+        };
+
+        tokio::task::yield_now().await;
+
+        let standard = timeout(
+            Duration::from_millis(100),
+            scheduler.acquire(scenario_spec(16).unwrap()),
+        )
+        .await
+        .expect("standard spec should not wait behind a media class backlog")
+        .expect("standard spec should acquire scheduler permits");
+        drop(standard);
+        blocked_media.abort();
+    }
+
+    #[test]
     fn single_scenario_plan_avoids_unrelated_service_bins() {
         let plan = plan_for_selection(&E2eSelection::Scenario(62)).unwrap();
         let rust_bins = plan
@@ -5082,6 +5476,28 @@ mod tests {
                 .pre_commands
                 .iter()
                 .all(|command| command.first().map(String::as_str) != Some("cargo"))
+        );
+    }
+
+    #[test]
+    fn prebuilt_node_specs_do_not_repeat_setup_precommands() {
+        let spec = scenario_spec(44).unwrap();
+        let manifest = ArtifactManifest::from_json_str(
+            r#"{
+              "rust_bins": {
+                "rkat-rpc": "/tmp/rkat-rpc"
+              },
+              "rust_tests": {}
+            }"#,
+        )
+        .unwrap();
+
+        let prebuilt =
+            build_commands_for_mode(spec, ExecutionMode::Prebuilt, Some(&manifest)).unwrap();
+        assert!(
+            prebuilt.pre_commands.is_empty(),
+            "node setup should move to materialization in prebuilt mode: {:?}",
+            prebuilt.pre_commands
         );
     }
 }

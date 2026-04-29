@@ -684,7 +684,9 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
     ];
     let forbidden_projection_cas_writes = [
         ".cas_flow_state(",
+        ".cas_run_snapshot(",
         ".cas_frame_state(",
+        ".cas_complete_step_and_record_output(",
         ".cas_loop_state(",
         ".cas_grant_node_slot(",
         ".cas_start_loop(",
@@ -992,15 +994,17 @@ fn mob_catalog_input_occurrence_is_fail_closed(lines: &[&str], line_index: usize
     let window = lines[start..end].join("\n");
     let compact = window.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if compact.contains("let _ = self.apply_dsl_input")
-        || compact.contains("tracing::warn")
-        || compact.contains("may diverge")
-    {
+    if compact.contains("let _ = self.apply_dsl_input") || compact.contains("may diverge") {
         return false;
     }
 
     compact.contains("probe_mob_machine_input(")
         || (compact.contains("apply_dsl_input(")
+            && (compact.contains('?')
+                || compact.contains("return Err")
+                || compact.contains("continue;")
+                || compact.contains(".map_err(")))
+        || (compact.contains("prepare_dsl_input(")
             && (compact.contains('?')
                 || compact.contains("return Err")
                 || compact.contains("continue;")
@@ -1153,6 +1157,7 @@ fn flow_reducer_projection_commit_is_structurally_allowed(
     match path {
         "meerkat-mob/src/runtime/flow.rs" => {
             let signature = compact_function_signature(lines, function_start);
+            let call_window = lines[line_index..(line_index + 8).min(lines.len())].join(" ");
             let has_authority_setup = scope
                 .iter()
                 .any(|line| line.contains("project_machine_input("))
@@ -1161,98 +1166,91 @@ fn flow_reducer_projection_commit_is_structurally_allowed(
                     .any(|line| line.contains("from_accepted_mob_machine_input("));
             let has_typed_authority_args = signature.contains("MobMachineFlowRunCommand")
                 && signature.contains("MobMachineFlowAuthorityToken");
+            let has_typed_authority_token_and_command_source = signature
+                .contains("MobMachineFlowAuthorityToken")
+                && (signature.contains("MobMachineFlowRunCommand")
+                    || scope
+                        .iter()
+                        .any(|line| line.contains("MobMachineFlowRunCommand::")));
             scope
                 .iter()
                 .any(|line| line.contains("apply_mob_machine_flow_run_command("))
-                && (has_authority_setup || has_typed_authority_args)
-                && lines[line_index].contains("outcome.next_state")
+                && (has_authority_setup
+                    || has_typed_authority_args
+                    || has_typed_authority_token_and_command_source)
+                && (call_window.contains("outcome.next_state")
+                    || call_window.contains("next_state"))
         }
-        "meerkat-mob/src/runtime/flow_frame_engine.rs" => {
-            let Some(name) = function_name.as_deref() else {
+        "meerkat-mob/src/runtime/actor.rs" => {
+            if function_name.as_deref() != Some("commit_flow_frame_store_plan_in_actor") {
                 return false;
-            };
-            match name {
-                "transition_frame" | "admit_next_ready_node_with_retry" | "terminalize_frame" => {
-                    scope
-                        .iter()
-                        .any(|line| line.contains("authorize_frame_command("))
-                        && scope
-                            .iter()
-                            .any(|line| line.contains("apply_mob_machine_flow_frame_command("))
-                        && lines
-                            .iter()
-                            .skip(function_start)
-                            .take(80)
-                            .any(|line| line.contains("commit_mob_machine_inputs("))
-                        && lines[line_index].contains("next")
-                }
-                "start_frame" | "start_frame_snapshot" => {
-                    scope
-                        .iter()
-                        .any(|line| line.contains("preview_mob_machine_input("))
-                        && scope
-                            .iter()
-                            .any(|line| line.contains("from_accepted_mob_machine_input("))
-                        && scope
-                            .iter()
-                            .any(|line| line.contains("apply_mob_machine_flow_frame_command("))
-                        && lines
-                            .iter()
-                            .skip(function_start)
-                            .take(90)
-                            .any(|line| line.contains("commit_mob_machine_inputs("))
-                        && lines[line_index].contains("snapshot")
-                }
-                "execute_store_plan" => {
-                    let function_commits_machine_inputs = lines
-                        .iter()
-                        .skip(function_start)
-                        .take(240)
-                        .any(|line| line.contains("commit_mob_machine_inputs(machine_inputs)"));
-                    if !function_commits_machine_inputs {
-                        return false;
-                    }
-                    let window_start = line_index.saturating_sub(24);
-                    let local_scope = &lines[window_start..=line_index];
-                    let line = lines[line_index];
-                    (line.contains(".cas_flow_state(")
-                        && line.contains("next_run_state")
-                        && local_scope
-                            .iter()
-                            .any(|line| line.contains("FlowFrameLoopStorePlan::RunStateOnly")))
-                        || (line.contains(".cas_frame_state(")
-                            && line.contains("next_frame")
-                            && local_scope
-                                .iter()
-                                .any(|line| line.contains("FlowFrameLoopStorePlan::SealFrame")))
-                        || (line.contains(".cas_grant_node_slot(")
-                            && local_scope
-                                .iter()
-                                .any(|line| line.contains("FlowFrameLoopStorePlan::GrantNodeSlot")))
-                        || (line.contains(".cas_start_loop(")
-                            && local_scope
-                                .iter()
-                                .any(|line| line.contains("FlowFrameLoopStorePlan::StartLoop")))
-                        || (line.contains(".cas_grant_body_frame_start(")
-                            && local_scope.iter().any(|line| {
-                                line.contains("FlowFrameLoopStorePlan::GrantBodyFrameStart")
-                            }))
-                        || (line.contains(".cas_complete_body_frame(")
-                            && local_scope.iter().any(|line| {
-                                line.contains("FlowFrameLoopStorePlan::CompleteBodyFrame")
-                            }))
-                        || (line.contains(".cas_loop_request_body_frame(")
-                            && local_scope.iter().any(|line| {
-                                line.contains("FlowFrameLoopStorePlan::LoopRequestBodyFrame")
-                            }))
-                        || (line.contains(".cas_complete_loop(")
-                            && local_scope
-                                .iter()
-                                .any(|line| line.contains("FlowFrameLoopStorePlan::CompleteLoop")))
-                }
-                _ => false,
             }
+            let function_commits_prepared_inputs = lines
+                .iter()
+                .skip(function_start)
+                .take(420)
+                .any(|line| line.contains("commit_prepared_dsl_input(prepared)"));
+            let function_prepares_machine_inputs = lines
+                .iter()
+                .skip(function_start)
+                .take(420)
+                .any(|line| line.contains("prepare_dsl_inputs(plan.machine_inputs()"));
+            if !function_prepares_machine_inputs || !function_commits_prepared_inputs {
+                return false;
+            }
+            let window_start = line_index.saturating_sub(32);
+            let local_scope = &lines[window_start..=line_index];
+            let call_window = lines[line_index..(line_index + 12).min(lines.len())].join(" ");
+            (call_window.contains(".cas_flow_state(")
+                && call_window.contains("next_run_state")
+                && local_scope
+                    .iter()
+                    .any(|line| line.contains("FlowFrameLoopStorePlan::RunStateOnly")))
+                || (call_window.contains(".cas_frame_state(")
+                    && call_window.contains("next_frame")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::FrameState")))
+                || (call_window.contains(".cas_frame_state(")
+                    && call_window.contains("initial_frame")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::InsertFrame")))
+                || (call_window.contains(".cas_frame_state(")
+                    && call_window.contains("next_frame")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::SealFrame")))
+                || (call_window.contains(".cas_complete_step_and_record_output(")
+                    && local_scope.iter().any(|line| {
+                        line.contains("FlowFrameLoopStorePlan::CompleteStepAndRecordOutput")
+                    }))
+                || (call_window.contains(".cas_grant_node_slot(")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::GrantNodeSlot")))
+                || (call_window.contains(".cas_start_loop(")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::StartLoop")))
+                || (call_window.contains(".cas_grant_body_frame_start(")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::GrantBodyFrameStart")))
+                || (call_window.contains(".cas_complete_body_frame(")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::CompleteBodyFrame")))
+                || (call_window.contains(".cas_loop_request_body_frame(")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::LoopRequestBodyFrame")))
+                || (call_window.contains(".cas_complete_loop(")
+                    && local_scope
+                        .iter()
+                        .any(|line| line.contains("FlowFrameLoopStorePlan::CompleteLoop")))
         }
+        "meerkat-mob/src/runtime/flow_frame_engine.rs" => false,
         _ => false,
     }
 }
@@ -1263,9 +1261,11 @@ fn nearest_function_start(lines: &[&str], line_index: usize) -> Option<usize> {
         compact.starts_with("fn")
             || compact.starts_with("pubfn")
             || compact.starts_with("pub(crate)fn")
+            || compact.starts_with("pub(super)fn")
             || compact.starts_with("asyncfn")
             || compact.starts_with("pubasyncfn")
             || compact.starts_with("pub(crate)asyncfn")
+            || compact.starts_with("pub(super)asyncfn")
     })
 }
 

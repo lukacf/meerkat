@@ -734,11 +734,11 @@ class WireBackendProfile:
 @dataclass
 class WireAuthProfile:
     """Wire projection of [`meerkat_core::AuthProfile`]. Sensitive credential
-material is NOT wire-projected — callers that want to read secret
-material have to go through the server-side
-`auth.profile.get` / `/auth/profiles/:id` endpoints which return
-typed redacted shapes. `source_kind` is a discriminator for the
-credential-source variant."""
+material is NOT wire-projected; callers that inspect profile metadata use
+the server-side `auth.profile.get` RPC or the
+`GET /auth/bindings/{binding_id}` REST path; both return typed redacted
+shapes. `source_kind` is a
+discriminator for the credential-source variant."""
     auth_method: str
     id: str
     provider: str
@@ -794,7 +794,7 @@ class WireAuthProfileCreated:
 
 @dataclass
 class WireAuthProfileDetail:
-    """`GET /auth/profiles/:binding_id` success body."""
+    """`GET /auth/bindings/{binding_id}` success body."""
     auth_profile: dict[str, Any]
     binding_id: str
     connection_ref: dict[str, Any]
@@ -803,7 +803,8 @@ class WireAuthProfileDetail:
 
 @dataclass
 class WireAuthProfileCleared:
-    """`DELETE /auth/profiles/:binding_id` / `POST /auth/logout` success body."""
+    """`DELETE /auth/bindings/{binding_id}` /
+`POST /auth/bindings/{binding_id}/logout` success body."""
     binding_id: str
     cleared: bool
     connection_ref: dict[str, Any]
@@ -880,7 +881,7 @@ auth, and binding profiles."""
 @dataclass
 class WireAuthStatus:
     """Wire projection of the auth-profile status. Returned from
-`auth.status.get` / `GET /auth/status/:id`."""
+`auth.status.get` / `GET /auth/bindings/{binding_id}/status`."""
     auth_method: str
     profile_id: str
     provider: str
@@ -893,7 +894,7 @@ class WireAuthStatus:
 
 @dataclass
 class WireAuthStatusDetail:
-    """`GET /auth/status/:binding_id` success body. Richer than
+    """`GET /auth/bindings/{binding_id}/status` success body. Richer than
 [`WireAuthStatus`] — also carries `realm_id` / `binding_id` /
 `connection_ref` / `has_refresh_token` so the caller can key by
 binding directly."""

@@ -1,28 +1,16 @@
 use std::sync::Arc;
-#[cfg(feature = "mob")]
-use std::time::Duration;
 
 use async_trait::async_trait;
-#[cfg(feature = "mob")]
-use meerkat::DeliveryTerminal;
 #[cfg(not(feature = "mob"))]
-use meerkat::surface::immediate_delivery_failure;
+use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::prepare_surface_session;
 use meerkat::surface::{
     ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
     SurfaceScheduleSessionHost, schedule_host_supported, spawn_schedule_host,
 };
-#[cfg(feature = "mob")]
-use meerkat::surface::{
-    async_completion_dispatch, immediate_completed_dispatch, immediate_delivery_failure,
-};
 use meerkat::{
-    DeliveryDispatch, MobTargetBinding, Occurrence, OccurrenceFailureClass, ScheduleDomainError,
-    SessionMaterializationSpec, SessionService, SessionTargetBinding, TargetProbeOutcome,
-};
-#[cfg(feature = "mob")]
-use meerkat::{
-    ForkContextSpec, HelperOptionsSpec, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
+    DeliveryDispatch, Occurrence, ScheduleDomainError, SessionMaterializationSpec, SessionService,
+    SessionTargetBinding, TargetProbeOutcome,
 };
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::handles::ExternalToolSurfaceHandle;
@@ -33,17 +21,11 @@ use meerkat_core::types::HandlingMode;
 use meerkat_core::{ContentInput, Session, SessionId};
 use meerkat_mcp::{McpRouter, McpRouterAdapter};
 #[cfg(feature = "mob")]
-use meerkat_mob::{
-    AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobId, MobRunStatus, RunId,
-};
-#[cfg(feature = "mob")]
-use meerkat_mob_mcp::MobMcpState;
+use meerkat_mob_mcp::MobMcpScheduleHost;
 use meerkat_runtime::{
     CorrelationId, IdempotencyKey, Input, InputDurability, InputHeader, InputOrigin,
     InputVisibility, PromptInput,
 };
-#[cfg(feature = "mob")]
-use tokio::time::sleep;
 
 use crate::{
     MeerkatMcpState, canonical_skill_keys, compose_external_tool_dispatchers, runtime_ingress,
@@ -65,8 +47,6 @@ struct McpScheduleContext {
     backend: String,
     mcp_adapters: runtime_ingress::SharedMcpAdapters,
     runtime_sessions: runtime_ingress::SharedMcpRuntimeSessions,
-    #[cfg(feature = "mob")]
-    mob_state: Arc<MobMcpState>,
 }
 
 impl McpScheduleContext {
@@ -80,8 +60,6 @@ impl McpScheduleContext {
             backend: state.backend.clone(),
             mcp_adapters: Arc::clone(&state.mcp_adapters),
             runtime_sessions: Arc::clone(&state.runtime_sessions),
-            #[cfg(feature = "mob")]
-            mob_state: Arc::clone(&state.mob_state),
         }
     }
 
@@ -305,77 +283,6 @@ impl McpScheduleTargetAdapter {
     fn new(context: McpScheduleContext) -> Self {
         Self { context }
     }
-
-    #[cfg(feature = "mob")]
-    async fn probe_mob_binding(
-        &self,
-        binding: &MobTargetBinding,
-    ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
-        let mob_id = MobId::from(mob_binding_mob_id(binding));
-        let handle = match self.context.mob_state.handle_for(&mob_id).await {
-            Ok(handle) => handle,
-            Err(error) => {
-                return Ok(TargetProbeOutcome::Missing {
-                    detail: Some(error.to_string()),
-                });
-            }
-        };
-
-        match binding {
-            MobTargetBinding::Member { member_id, .. } => {
-                let identity = AgentIdentity::from(member_id.as_str());
-                Ok(if handle.get_member(&identity).await.is_some() {
-                    TargetProbeOutcome::Ready
-                } else {
-                    TargetProbeOutcome::Missing {
-                        detail: Some(format!("mob member not found: {member_id}")),
-                    }
-                })
-            }
-            MobTargetBinding::Flow { flow_id, .. } => {
-                let expected = FlowId::from(flow_id.as_str());
-                Ok(
-                    if handle.list_flows().into_iter().any(|flow| flow == expected) {
-                        TargetProbeOutcome::Ready
-                    } else {
-                        TargetProbeOutcome::Missing {
-                            detail: Some(format!("mob flow not found: {flow_id}")),
-                        }
-                    },
-                )
-            }
-            MobTargetBinding::SpawnHelper { member_id, .. } => {
-                let identity = AgentIdentity::from(member_id.as_str());
-                Ok(if handle.get_member(&identity).await.is_some() {
-                    TargetProbeOutcome::Busy {
-                        detail: Some(format!("mob member already exists: {member_id}")),
-                    }
-                } else {
-                    TargetProbeOutcome::Ready
-                })
-            }
-            MobTargetBinding::ForkHelper {
-                source_member_id,
-                member_id,
-                ..
-            } => {
-                let source = AgentIdentity::from(source_member_id.as_str());
-                if handle.get_member(&source).await.is_none() {
-                    return Ok(TargetProbeOutcome::Missing {
-                        detail: Some(format!("mob source member not found: {source_member_id}")),
-                    });
-                }
-                let target = AgentIdentity::from(member_id.as_str());
-                Ok(if handle.get_member(&target).await.is_some() {
-                    TargetProbeOutcome::Busy {
-                        detail: Some(format!("mob member already exists: {member_id}")),
-                    }
-                } else {
-                    TargetProbeOutcome::Ready
-                })
-            }
-        }
-    }
 }
 
 fn scheduled_materialization_preload_skills(
@@ -440,170 +347,6 @@ impl SurfaceScheduleSessionHost for McpScheduleTargetAdapter {
     }
 }
 
-#[async_trait]
-impl SurfaceScheduleMobHost for McpScheduleTargetAdapter {
-    async fn probe_mob_target(
-        &self,
-        binding: &MobTargetBinding,
-    ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
-        #[cfg(feature = "mob")]
-        {
-            self.probe_mob_binding(binding).await
-        }
-
-        #[cfg(not(feature = "mob"))]
-        {
-            let _ = binding;
-            Ok(TargetProbeOutcome::Missing {
-                detail: Some(
-                    "scheduled mob targets require the mob feature on the MCP host".into(),
-                ),
-            })
-        }
-    }
-
-    async fn deliver_mob_target(
-        &self,
-        occurrence: &Occurrence,
-        binding: &MobTargetBinding,
-    ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-        #[cfg(feature = "mob")]
-        {
-            let mob_state = Arc::clone(&self.context.mob_state);
-            let mob_id = MobId::from(mob_binding_mob_id(binding));
-
-            return match binding {
-                MobTargetBinding::Member {
-                    member_id,
-                    action:
-                        meerkat::ScheduledMobAction::Send {
-                            content,
-                            render_metadata,
-                        },
-                    ..
-                } => match mob_state
-                    .mob_member_send(
-                        &mob_id,
-                        AgentIdentity::from(member_id.as_str()),
-                        content.clone(),
-                        HandlingMode::Queue,
-                        render_metadata.clone(),
-                    )
-                    .await
-                {
-                    Ok(receipt) => Ok(immediate_completed_dispatch(
-                        occurrence,
-                        Some(receipt.identity.to_string()),
-                    )),
-                    Err(error) => Ok(immediate_delivery_failure(
-                        occurrence,
-                        error.to_string(),
-                        OccurrenceFailureClass::MobRejected,
-                        None,
-                        None,
-                    )),
-                },
-                MobTargetBinding::Flow {
-                    flow_id, params, ..
-                } => {
-                    let params: serde_json::Value =
-                        serde_json::from_str(params.get()).map_err(|error| {
-                            ScheduleDomainError::InvalidSchedule(format!(
-                                "invalid mob flow params: {error}"
-                            ))
-                        })?;
-                    match mob_state
-                        .mob_run_flow(&mob_id, FlowId::from(flow_id.as_str()), params)
-                        .await
-                    {
-                        Ok(run_id) => Ok(async_completion_dispatch(
-                            occurrence,
-                            Some(run_id.to_string()),
-                            mob_flow_completion_future(mob_state, mob_id, run_id),
-                        )),
-                        Err(error) => Ok(immediate_delivery_failure(
-                            occurrence,
-                            error.to_string(),
-                            OccurrenceFailureClass::MobRejected,
-                            None,
-                            None,
-                        )),
-                    }
-                }
-                MobTargetBinding::SpawnHelper {
-                    member_id,
-                    prompt,
-                    options,
-                    ..
-                } => {
-                    let identity = AgentIdentity::from(member_id.as_str());
-                    let helper_options = helper_options_from_spec(options)?;
-                    let prompt = prompt.clone();
-                    Ok(async_completion_dispatch(
-                        occurrence,
-                        Some(member_id.clone()),
-                        Box::pin(async move {
-                            match mob_state
-                                .mob_spawn_helper(&mob_id, identity, prompt, helper_options)
-                                .await
-                            {
-                                Ok(_) => Ok(DeliveryTerminal::completed(None)),
-                                Err(error) => Ok(mob_delivery_failed_terminal(error)),
-                            }
-                        }),
-                    ))
-                }
-                MobTargetBinding::ForkHelper {
-                    source_member_id,
-                    member_id,
-                    prompt,
-                    fork_context,
-                    options,
-                    ..
-                } => {
-                    let source_identity = AgentIdentity::from(source_member_id.as_str());
-                    let meerkat_id = AgentIdentity::from(member_id.as_str());
-                    let helper_options = helper_options_from_spec(options)?;
-                    let fork_context = fork_context_from_spec(fork_context);
-                    let prompt = prompt.clone();
-                    Ok(async_completion_dispatch(
-                        occurrence,
-                        Some(member_id.clone()),
-                        Box::pin(async move {
-                            match mob_state
-                                .mob_fork_helper(
-                                    &mob_id,
-                                    &source_identity,
-                                    meerkat_id,
-                                    prompt,
-                                    fork_context,
-                                    helper_options,
-                                )
-                                .await
-                            {
-                                Ok(_) => Ok(DeliveryTerminal::completed(None)),
-                                Err(error) => Ok(mob_delivery_failed_terminal(error)),
-                            }
-                        }),
-                    ))
-                }
-            };
-        }
-
-        #[cfg(not(feature = "mob"))]
-        {
-            let _ = binding;
-            Ok(immediate_delivery_failure(
-                occurrence,
-                "scheduled mob targets require the mob feature on the MCP host".to_string(),
-                OccurrenceFailureClass::MobRejected,
-                None,
-                None,
-            ))
-        }
-    }
-}
-
 impl MeerkatMcpState {
     pub(crate) fn start_schedule_host(&self) -> Result<(), ScheduleDomainError> {
         if !schedule_host_supported(self.schedule_service.store().kind()) {
@@ -618,11 +361,10 @@ impl MeerkatMcpState {
             return Ok(());
         }
 
-        let surface_adapter = Arc::new(McpScheduleTargetAdapter::new(
-            McpScheduleContext::from_state(self),
-        ));
-        let session_host: Arc<dyn SurfaceScheduleSessionHost> = surface_adapter.clone();
-        let mob_host: Arc<dyn SurfaceScheduleMobHost> = surface_adapter;
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(
+            McpScheduleTargetAdapter::new(McpScheduleContext::from_state(self)),
+        );
+        let mob_host = mcp_schedule_mob_host(self);
         let shared_adapter = Arc::new(SharedScheduleTargetAdapter::new(
             self.schedule_service.clone(),
             session_host,
@@ -639,6 +381,21 @@ impl MeerkatMcpState {
     fn schedule_owner_id(&self) -> String {
         let instance = self.instance_id.as_deref().unwrap_or("mcp");
         format!("mcp-scheduler:{}:{instance}", self.realm_id)
+    }
+}
+
+fn mcp_schedule_mob_host(state: &MeerkatMcpState) -> Arc<dyn SurfaceScheduleMobHost> {
+    #[cfg(feature = "mob")]
+    {
+        Arc::new(MobMcpScheduleHost::new(Arc::clone(&state.mob_state)))
+    }
+
+    #[cfg(not(feature = "mob"))]
+    {
+        let _ = state;
+        Arc::new(NoopScheduleMobHost::new(
+            "scheduled mob targets require the mob feature on the MCP host",
+        ))
     }
 }
 
@@ -704,72 +461,6 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .get("session_archived")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
-}
-
-#[cfg(feature = "mob")]
-fn mob_binding_mob_id(binding: &MobTargetBinding) -> &str {
-    match binding {
-        MobTargetBinding::Member { mob_id, .. }
-        | MobTargetBinding::Flow { mob_id, .. }
-        | MobTargetBinding::SpawnHelper { mob_id, .. }
-        | MobTargetBinding::ForkHelper { mob_id, .. } => mob_id,
-    }
-}
-
-#[cfg(feature = "mob")]
-fn helper_options_from_spec(
-    spec: &HelperOptionsSpec,
-) -> Result<HelperOptions, ScheduleDomainError> {
-    let mut options = HelperOptions::default();
-    options.role_name = spec.role_name.clone().map(Into::into);
-    options.runtime_mode = spec.runtime_mode.map(|mode| match mode {
-        ScheduledMobRuntimeMode::AutonomousHost => meerkat_mob::MobRuntimeMode::AutonomousHost,
-        ScheduledMobRuntimeMode::TurnDriven => meerkat_mob::MobRuntimeMode::TurnDriven,
-    });
-    options.backend = spec.backend.map(|backend| match backend {
-        ScheduledMobBackendKind::Session => MobBackendKind::Session,
-        ScheduledMobBackendKind::External => MobBackendKind::External,
-    });
-    options.tool_access_policy = spec.tool_access_policy.clone();
-    Ok(options)
-}
-
-#[cfg(feature = "mob")]
-fn fork_context_from_spec(spec: &ForkContextSpec) -> ForkContext {
-    match spec {
-        ForkContextSpec::FullHistory => ForkContext::FullHistory,
-        ForkContextSpec::LastMessages { count } => ForkContext::LastMessages { count: *count },
-    }
-}
-
-#[cfg(feature = "mob")]
-fn mob_delivery_failed_terminal(error: meerkat_mob::MobError) -> DeliveryTerminal {
-    DeliveryTerminal::delivery_failed(error.to_string(), OccurrenceFailureClass::MobRejected)
-}
-
-#[cfg(feature = "mob")]
-fn mob_flow_completion_future(
-    mob_state: Arc<MobMcpState>,
-    mob_id: MobId,
-    run_id: RunId,
-) -> meerkat::DeliveryCompletion {
-    Box::pin(async move {
-        loop {
-            match mob_state.mob_flow_status(&mob_id, run_id.clone()).await {
-                Ok(Some(run)) if run.status == MobRunStatus::Completed => {
-                    return Ok(DeliveryTerminal::completed(None));
-                }
-                Ok(Some(run)) if run.status.is_terminal() => {
-                    return Ok(DeliveryTerminal::delivery_failed(
-                        format!("mob flow terminated as {:?}", run.status),
-                        OccurrenceFailureClass::MobRejected,
-                    ));
-                }
-                Ok(Some(_) | None) => sleep(Duration::from_millis(100)).await,
-                Err(error) => return Ok(mob_delivery_failed_terminal(error)),
-            }
-        }
-    })
 }
 
 #[cfg(test)]

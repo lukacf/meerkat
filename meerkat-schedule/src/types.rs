@@ -304,6 +304,13 @@ impl TargetBinding {
             Self::Mob(_) => false,
         }
     }
+
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        match self {
+            Self::Session(_) => Ok(()),
+            Self::Mob(binding) => binding.validate_public_api(),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -632,6 +639,15 @@ impl MobTargetBinding {
             } => format!("mob:{mob_id}:fork_helper:{source_member_id}:{member_id}"),
         }
     }
+
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        match self {
+            Self::SpawnHelper { options, .. } | Self::ForkHelper { options, .. } => {
+                options.validate_public_api()
+            }
+            Self::Member { .. } | Self::Flow { .. } => Ok(()),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -733,12 +749,32 @@ impl HelperOptionsSpec {
     /// `InheritParent` and `Minimal` require an active parent agent context and
     /// are only valid when created through agent tools. Public APIs must reject them.
     pub fn validate_public_api(&self) -> Result<(), String> {
+        if self.resolved_spawn_snapshot.is_some() {
+            return Err(
+                "resolved spawn snapshots are trusted internal schedule state and cannot be \
+                 supplied through public schedule APIs"
+                    .to_string(),
+            );
+        }
         if let Some(tooling) = &self.tooling
             && tooling.requires_parent_context()
         {
             return Err("schedule spawn tooling mode requires parent agent context \
                  (inherit_parent/minimal are only valid through agent tools)"
                 .to_string());
+        }
+        if let Some(ScheduleSpawnTooling::Profile {
+            allow_overlay,
+            deny_overlay,
+            ..
+        }) = &self.tooling
+            && (allow_overlay.is_some() || deny_overlay.is_some())
+        {
+            return Err(
+                "schedule spawn profile overlays require trusted resolved spawn state and are \
+                 only valid through agent tools"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -1097,6 +1133,12 @@ pub struct CreateScheduleRequest {
     pub planning_horizon_occurrences: Option<u32>,
 }
 
+impl CreateScheduleRequest {
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        self.target.validate_public_api()
+    }
+}
+
 #[cfg(all(test, feature = "schema"))]
 #[allow(clippy::unwrap_used)]
 mod schema_tests {
@@ -1146,6 +1188,15 @@ pub struct UpdateScheduleRequest {
     pub planning_horizon_occurrences: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
+}
+
+impl UpdateScheduleRequest {
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        if let Some(target) = &self.target {
+            target.validate_public_api()?;
+        }
+        Ok(())
+    }
 }
 
 pub fn default_planning_horizon_days() -> u32 {
@@ -1369,6 +1420,42 @@ mod tests {
             ..Default::default()
         };
         assert!(spec.validate_public_api().is_err());
+    }
+
+    #[test]
+    fn validate_public_api_rejects_resolved_snapshot() {
+        let spec = HelperOptionsSpec {
+            resolved_spawn_snapshot: Some(ResolvedSpawnSnapshot {
+                tool_filter: meerkat_core::tool_scope::ToolFilter::Allow(ToolNameSet::from_iter([
+                    "shell".to_string(),
+                ])),
+                model: "claude-sonnet-4-6".into(),
+                provider_params: None,
+            }),
+            ..Default::default()
+        };
+        let result = spec.validate_public_api();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("trusted internal schedule state")
+        );
+    }
+
+    #[test]
+    fn validate_public_api_rejects_profile_overlay() {
+        let spec = HelperOptionsSpec {
+            tooling: Some(ScheduleSpawnTooling::Profile {
+                name: "worker".into(),
+                allow_overlay: Some(vec!["shell".into()]),
+                deny_overlay: None,
+            }),
+            ..Default::default()
+        };
+        let result = spec.validate_public_api();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("profile overlays"));
     }
 
     #[test]

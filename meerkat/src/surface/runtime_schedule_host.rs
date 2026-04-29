@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use super::configure_peer_ingress;
 use super::{
     NoopScheduleMobHost, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
-    SurfaceScheduleSessionHost, default_persistent_executor, materialize_session,
-    schedule_host_supported, spawn_schedule_host,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, default_persistent_executor,
+    materialize_session, schedule_host_supported, spawn_schedule_host,
 };
 use crate::{
     Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
@@ -21,9 +21,38 @@ use meerkat_runtime::MeerkatMachine;
 pub fn spawn_runtime_backed_schedule_host(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     runtime_adapter: Arc<MeerkatMachine>,
+    config: Config,
+    schedule_service: ScheduleService,
+    build_template: SessionBuildOptions,
+    owner_id: impl Into<String>,
+) -> Option<super::ScheduleHostHandle> {
+    let mob_host: Arc<dyn SurfaceScheduleMobHost> = Arc::new(NoopScheduleMobHost::new(
+        "scheduled mob targets are not supported by this runtime host",
+    ));
+    spawn_runtime_backed_schedule_host_with_mobs(
+        service,
+        runtime_adapter,
+        config,
+        schedule_service,
+        build_template,
+        mob_host,
+        owner_id,
+    )
+}
+
+/// Spawn a runtime-backed schedule host with an explicit mob delivery adapter.
+///
+/// Embedders that maintain mob state should pass a real
+/// [`SurfaceScheduleMobHost`] here, for example the `meerkat-mob-mcp`
+/// schedule host adapter. The default [`spawn_runtime_backed_schedule_host`]
+/// remains session-only and reports explicit mob target failures.
+pub fn spawn_runtime_backed_schedule_host_with_mobs(
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: Arc<MeerkatMachine>,
     _config: Config,
     schedule_service: ScheduleService,
     build_template: SessionBuildOptions,
+    mob_host: Arc<dyn SurfaceScheduleMobHost>,
     owner_id: impl Into<String>,
 ) -> Option<super::ScheduleHostHandle> {
     if !schedule_host_supported(schedule_service.store().kind()) {
@@ -33,9 +62,6 @@ pub fn spawn_runtime_backed_schedule_host(
     let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(
         RuntimeBackedScheduleSessionHost::new(service, runtime_adapter, build_template),
     );
-    let mob_host = Arc::new(NoopScheduleMobHost::new(
-        "scheduled mob targets are not supported by this runtime host",
-    ));
     let adapter = Arc::new(SharedScheduleTargetAdapter::new(
         schedule_service.clone(),
         session_host,

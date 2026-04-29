@@ -24,8 +24,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{EnvLookup, LeaseFreshnessObserver};
-use meerkat_core::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeaseHandle, LeaseKey};
+use super::{EnvLookup, LeaseFreshnessObserver, token_is_fresh_at};
+use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 const DEFAULT_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
@@ -214,37 +214,64 @@ impl GoogleAuthAuthorizer {
         self.cache.lock().as_ref().map(|token| token.expires_at)
     }
 
-    fn publish_expires_at(&self, expires_at: DateTime<Utc>) {
-        if let Some(observer) = &self.lease_observer {
-            observer.observe_expires_at(&self.label, expires_at);
-        }
-    }
-
     async fn get_token(&self) -> Result<String, AuthError> {
-        let cached = {
+        let now = Utc::now();
+        if let Some((access_token, expires_at)) = {
             let guard = self.cache.lock();
-            if let Some(t) = guard.as_ref()
-                && t.expires_at - Utc::now()
-                    > Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64)
-            {
-                Some((t.access_token.clone(), t.expires_at))
+            guard
+                .as_ref()
+                .map(|t| (t.access_token.clone(), t.expires_at))
+        } {
+            let fresh = if let Some(observer) = &self.lease_observer {
+                observer.cached_token_is_fresh(&self.label, expires_at, now)?
             } else {
-                None
+                token_is_fresh_at(expires_at, now)
+            };
+            if fresh {
+                return Ok(access_token);
             }
-        };
-        if let Some((access_token, expires_at)) = cached {
-            self.publish_expires_at(expires_at);
-            return Ok(access_token);
         }
+
+        let lifecycle = if let Some(observer) = &self.lease_observer {
+            Some(observer.begin_refresh(&self.label)?)
+        } else {
+            None
+        };
 
         let token = match self.chain {
-            GoogleAuthChain::ComputeOnly => self.fetch_from_metadata().await?,
-            GoogleAuthChain::Default => self.fetch_full_chain().await?,
+            GoogleAuthChain::ComputeOnly => match self.fetch_from_metadata().await {
+                Ok(token) => token,
+                Err(err) => {
+                    if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
+                        observer.refresh_failed(
+                            &self.label,
+                            lifecycle,
+                            google_refresh_failure_is_permanent(&err),
+                        )?;
+                    }
+                    return Err(err.into());
+                }
+            },
+            GoogleAuthChain::Default => match self.fetch_full_chain().await {
+                Ok(token) => token,
+                Err(err) => {
+                    if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
+                        observer.refresh_failed(
+                            &self.label,
+                            lifecycle,
+                            google_refresh_failure_is_permanent(&err),
+                        )?;
+                    }
+                    return Err(err.into());
+                }
+            },
         };
         let access = token.access_token.clone();
         let expires_at = token.expires_at;
+        if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
+            observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
+        }
         *self.cache.lock() = Some(token);
-        self.publish_expires_at(expires_at);
         Ok(access)
     }
 
@@ -403,6 +430,17 @@ impl GoogleAuthAuthorizer {
             expires_at: Utc::now() + Duration::seconds(body.expires_in as i64),
         })
     }
+}
+
+fn google_refresh_failure_is_permanent(err: &GoogleAuthError) -> bool {
+    matches!(
+        err,
+        GoogleAuthError::NoCredentialSource
+            | GoogleAuthError::Json(_)
+            | GoogleAuthError::JwtSign(_)
+            | GoogleAuthError::TokenEndpoint { .. }
+            | GoogleAuthError::MetadataEndpoint { .. }
+    )
 }
 
 #[async_trait]

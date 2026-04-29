@@ -327,6 +327,13 @@ impl SessionAgent for FactoryAgent {
         self.agent.session_with_system_context_state()
     }
 
+    fn durable_llm_identity(&self) -> Option<meerkat_core::SessionLlmIdentity> {
+        self.agent
+            .session()
+            .session_metadata()
+            .map(|metadata| metadata.llm_identity())
+    }
+
     fn has_pending_boundary(&self) -> bool {
         self.agent.session().has_pending_boundary()
     }
@@ -651,7 +658,7 @@ mod tests {
     use meerkat_core::Config;
     use meerkat_core::comms::InputSource;
     use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
-    use meerkat_core::service::SessionBuildOptions;
+    use meerkat_core::service::{SessionBuildOptions, SessionService};
     use meerkat_core::{
         Provider, ToolCallView, ToolDef, ToolDispatchOutcome, ToolError, ToolResult,
     };
@@ -777,6 +784,56 @@ mod tests {
             builder.model_supports_inline_video(&identity).await,
             Some(true)
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn session_service_live_identity_matches_factory_resolved_metadata() -> Result<(), String>
+    {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, self_hosted_inline_video_config(true));
+        builder.default_llm_client = Some(Arc::new(MockLlmClient::default()));
+        let service = EphemeralSessionService::new(builder, 10);
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "video-alias".to_string(),
+                prompt: "defer identity parity".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let live_identity = service
+            .live_session_llm_identity(&result.session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(live_identity.model, "video-alias");
+        assert_eq!(live_identity.provider, Provider::SelfHosted);
+        assert_eq!(
+            live_identity.self_hosted_server_id.as_deref(),
+            Some("local")
+        );
+
+        let exported = service
+            .export_session(&result.session_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        let metadata = exported
+            .session_metadata()
+            .ok_or_else(|| "missing session metadata".to_string())?;
+        assert_eq!(metadata.llm_identity(), live_identity);
+
+        Ok(())
     }
 
     #[async_trait]

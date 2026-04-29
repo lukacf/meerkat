@@ -464,6 +464,15 @@ pub trait SessionAgent: Send {
     /// after each turn.
     fn session_clone(&self) -> meerkat_core::Session;
 
+    /// Return the durable LLM identity authored by the concrete agent builder.
+    ///
+    /// Factory-backed agents resolve this through the same model registry path
+    /// that constructs the runtime client and persisted session metadata. Mock
+    /// or legacy agents without durable metadata may return `None`.
+    fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+        None
+    }
+
     /// Whether the session has a pending user/tool-results boundary.
     ///
     /// Lightweight check used by the ResumePending no-op guard to avoid
@@ -703,7 +712,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(())
     }
 
-    fn llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
+    fn fallback_llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
         let provider = req
             .build
             .as_ref()
@@ -1450,9 +1459,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let caller_event_tx = req.event_tx.clone();
         let defer_initial_turn =
             req.initial_turn == meerkat_core::service::InitialTurnPolicy::Defer;
-        let llm_identity = Self::llm_identity_from_create_request(&req);
-        self.validate_prompt_video_input(&prompt, &llm_identity)
-            .await?;
         let labels = req.labels.clone().unwrap_or_default();
         let resumed_session = req
             .build
@@ -1497,6 +1503,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let agent = self
             .builder
             .build_agent(&req, agent_event_tx.clone())
+            .await?;
+        let llm_identity = agent
+            .durable_llm_identity()
+            .unwrap_or_else(|| Self::fallback_llm_identity_from_create_request(&req));
+        self.validate_prompt_video_input(&prompt, &llm_identity)
             .await?;
         let session_id = agent.session_id();
         let created_at = SystemTime::now();
@@ -2883,8 +2894,14 @@ async fn session_task<A: SessionAgent>(
 #[cfg(test)]
 mod inline_video_admission_tests {
     use super::*;
+    use async_trait::async_trait;
     use meerkat_core::Provider;
-    use meerkat_core::types::{ContentBlock, VideoData};
+    use meerkat_core::service::{
+        DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
+        StartTurnRequest,
+    };
+    use meerkat_core::types::{ContentBlock, HandlingMode, VideoData};
+    use std::sync::{Arc, Mutex};
 
     fn identity(provider: Provider, model: &str) -> SessionLlmIdentity {
         SessionLlmIdentity {
@@ -2909,6 +2926,179 @@ mod inline_video_admission_tests {
                 },
             },
         ])
+    }
+
+    struct BuilderIdentityProbe {
+        identity: SessionLlmIdentity,
+        validated_identities: Arc<Mutex<Vec<SessionLlmIdentity>>>,
+    }
+
+    struct BuilderIdentityAgent {
+        session_id: SessionId,
+        identity: SessionLlmIdentity,
+        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    }
+
+    struct NoopAgentLlmClient {
+        model: String,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentLlmClient for NoopAgentLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[meerkat_core::Message],
+            _tools: &[Arc<meerkat_core::ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<
+                &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+            >,
+        ) -> Result<meerkat_core::LlmStreamResult, AgentError> {
+            Err(AgentError::ConfigError(
+                "noop test client should not be called".to_string(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "noop"
+        }
+
+        fn model(&self) -> &str {
+            &self.model
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for BuilderIdentityProbe {
+        type Agent = BuilderIdentityAgent;
+
+        async fn model_supports_inline_video(&self, identity: &SessionLlmIdentity) -> Option<bool> {
+            self.validated_identities
+                .lock()
+                .expect("validated identities lock poisoned")
+                .push(identity.clone());
+            Some(identity == &self.identity)
+        }
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(BuilderIdentityAgent {
+                session_id: SessionId::new(),
+                identity: self.identity.clone(),
+                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for BuilderIdentityAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            self.identity = identity;
+            Ok(())
+        }
+
+        fn cancel(&mut self) {}
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> meerkat_core::Session {
+            meerkat_core::Session::new()
+        }
+
+        fn durable_llm_identity(&self) -> Option<SessionLlmIdentity> {
+            Some(self.identity.clone())
+        }
+
+        fn apply_runtime_system_context(&mut self, _appends: &[PendingSystemContextAppend]) {}
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
+    fn create_request(
+        prompt: ContentInput,
+        initial_turn: InitialTurnPolicy,
+    ) -> CreateSessionRequest {
+        CreateSessionRequest {
+            model: "providerless-video-alias".to_string(),
+            prompt,
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        }
+    }
+
+    fn start_turn_request(prompt: ContentInput) -> StartTurnRequest {
+        StartTurnRequest {
+            prompt,
+            system_prompt: None,
+            render_metadata: None,
+            handling_mode: HandlingMode::Queue,
+            event_tx: None,
+            skill_references: None,
+            flow_tool_overlay: None,
+            turn_metadata: None,
+        }
     }
 
     #[test]
@@ -2940,6 +3130,122 @@ mod inline_video_admission_tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_session_validates_initial_video_against_builder_identity() {
+        let durable_identity = identity(Provider::Gemini, "providerless-video-alias");
+        let validated_identities = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: durable_identity.clone(),
+                validated_identities: Arc::clone(&validated_identities),
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(create_request(
+                inline_video_prompt(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("builder-owned Gemini identity should allow inline video");
+
+        let live_identity = service
+            .live_session_llm_identity(&result.session_id)
+            .await
+            .expect("live identity");
+        assert_eq!(live_identity, durable_identity);
+        assert_eq!(
+            *validated_identities
+                .lock()
+                .expect("validated identities lock poisoned"),
+            vec![durable_identity]
+        );
+    }
+
+    #[tokio::test]
+    async fn start_turn_validates_video_against_builder_seeded_live_identity() {
+        let durable_identity = identity(Provider::Gemini, "providerless-video-alias");
+        let validated_identities = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: durable_identity.clone(),
+                validated_identities: Arc::clone(&validated_identities),
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(create_request(
+                ContentInput::Text("defer".to_string()),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create session");
+        validated_identities
+            .lock()
+            .expect("validated identities lock poisoned")
+            .clear();
+
+        service
+            .start_turn(
+                &result.session_id,
+                start_turn_request(inline_video_prompt()),
+            )
+            .await
+            .expect("builder-seeded live identity should allow inline video turn");
+
+        assert_eq!(
+            *validated_identities
+                .lock()
+                .expect("validated identities lock poisoned"),
+            vec![durable_identity]
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_swap_replaces_builder_seeded_live_identity() {
+        let durable_identity = identity(Provider::Gemini, "providerless-video-alias");
+        let validated_identities = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            BuilderIdentityProbe {
+                identity: durable_identity,
+                validated_identities,
+            },
+            1,
+        );
+        let result = service
+            .create_session(create_request(
+                ContentInput::Text("defer".to_string()),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create session");
+
+        let target_identity = identity(Provider::OpenAI, "gpt-5.4");
+        service
+            .hot_swap_session_llm_identity(
+                &result.session_id,
+                Arc::new(NoopAgentLlmClient {
+                    model: target_identity.model.clone(),
+                }),
+                target_identity.clone(),
+                meerkat_core::SessionLlmRequestPolicy {
+                    model: target_identity.model.clone(),
+                    provider_params: None,
+                    provider_tool_defaults: None,
+                },
+            )
+            .await
+            .expect("hot-swap should update the live identity watch");
+
+        let live_identity = service
+            .live_session_llm_identity(&result.session_id)
+            .await
+            .expect("live identity");
+        assert_eq!(live_identity, target_identity);
     }
 }
 

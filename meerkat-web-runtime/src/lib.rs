@@ -1728,6 +1728,10 @@ struct SpawnSpecInput {
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default)]
     context: Option<serde_json::Value>,
+    /// Legacy 0.6 pre-release SDKs exposed `generation` even though the
+    /// runtime owns member generations. Accept and ignore it for raw JS callers.
+    #[serde(default, rename = "generation")]
+    _generation: Option<u64>,
     /// Additional instruction sections appended to the system prompt.
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
@@ -2798,6 +2802,21 @@ capabilities = [{capability_values}]
 
         let specs: Vec<super::SpawnSpecInput> =
             serde_json::from_value(payload).expect("legacy meerkat_id alias should deserialize");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].agent_identity, "worker-1");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn spawn_spec_input_ignores_legacy_generation() {
+        let payload = json!([{
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "generation": 99,
+        }]);
+
+        let specs: Vec<super::SpawnSpecInput> =
+            serde_json::from_value(payload).expect("legacy generation should be ignored");
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].agent_identity, "worker-1");
     }

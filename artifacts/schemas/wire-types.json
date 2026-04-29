@@ -3702,8 +3702,7 @@
             "type": "string"
           },
           "stage": {
-            "description": "One of `\"spawn\"` or `\"retire\"`.",
-            "type": "string"
+            "$ref": "#/$defs/WireMobReconcileStage"
           }
         },
         "required": [
@@ -3768,6 +3767,14 @@
       },
       "WireMemberRef": {
         "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      },
+      "WireMobReconcileStage": {
+        "description": "Closed wire stage for a per-identity `mob/reconcile` failure.",
+        "enum": [
+          "spawn",
+          "retire"
+        ],
         "type": "string"
       }
     },
@@ -10733,6 +10740,385 @@
     "title": "ScheduleOccurrencesResult",
     "type": "object"
   },
+  "SkillEntry": {
+    "$defs": {
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillSourceProvenance": {
+        "description": "Typed source provenance for a skill entry. `display_name` is presentation\nmetadata only; `source_uuid` is the stable identity.",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          },
+          "status": {
+            "$ref": "#/$defs/SourceIdentityStatus",
+            "default": "active"
+          },
+          "transport_kind": {
+            "$ref": "#/$defs/SourceTransportKind"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "display_name",
+          "transport_kind",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "SourceIdentityStatus": {
+        "description": "Source lifecycle status in the identity registry.",
+        "enum": [
+          "active",
+          "disabled",
+          "retired"
+        ],
+        "type": "string"
+      },
+      "SourceTransportKind": {
+        "description": "Source transport class used for identity governance.",
+        "enum": [
+          "embedded",
+          "filesystem",
+          "git",
+          "http",
+          "stdio"
+        ],
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire representation of a skill entry (for list responses).",
+    "properties": {
+      "description": {
+        "description": "Short description.",
+        "type": "string"
+      },
+      "is_active": {
+        "description": "Whether this skill is active (not shadowed by a higher-precedence source).",
+        "type": "boolean"
+      },
+      "key": {
+        "$ref": "#/$defs/SkillKey",
+        "description": "Canonical skill identity."
+      },
+      "name": {
+        "description": "Human-readable name.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Scope: \"builtin\", \"project\", or \"user\".",
+        "type": "string"
+      },
+      "shadowed_by": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SkillSourceProvenance"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "If shadowed, the higher-precedence source identity."
+      },
+      "source": {
+        "$ref": "#/$defs/SkillSourceProvenance",
+        "description": "Typed source provenance."
+      }
+    },
+    "required": [
+      "key",
+      "name",
+      "description",
+      "scope",
+      "source",
+      "is_active"
+    ],
+    "title": "SkillEntry",
+    "type": "object"
+  },
+  "SkillInspectResponse": {
+    "$defs": {
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillSourceProvenance": {
+        "description": "Typed source provenance for a skill entry. `display_name` is presentation\nmetadata only; `source_uuid` is the stable identity.",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          },
+          "status": {
+            "$ref": "#/$defs/SourceIdentityStatus",
+            "default": "active"
+          },
+          "transport_kind": {
+            "$ref": "#/$defs/SourceTransportKind"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "display_name",
+          "transport_kind",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "SourceIdentityStatus": {
+        "description": "Source lifecycle status in the identity registry.",
+        "enum": [
+          "active",
+          "disabled",
+          "retired"
+        ],
+        "type": "string"
+      },
+      "SourceTransportKind": {
+        "description": "Source transport class used for identity governance.",
+        "enum": [
+          "embedded",
+          "filesystem",
+          "git",
+          "http",
+          "stdio"
+        ],
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire response for inspecting a single skill.",
+    "properties": {
+      "body": {
+        "description": "Full skill body (markdown content).",
+        "type": "string"
+      },
+      "description": {
+        "description": "Short description.",
+        "type": "string"
+      },
+      "key": {
+        "$ref": "#/$defs/SkillKey",
+        "description": "Canonical skill identity."
+      },
+      "name": {
+        "description": "Human-readable name.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "Scope: \"builtin\", \"project\", or \"user\".",
+        "type": "string"
+      },
+      "source": {
+        "$ref": "#/$defs/SkillSourceProvenance",
+        "description": "Typed source provenance."
+      }
+    },
+    "required": [
+      "key",
+      "name",
+      "description",
+      "scope",
+      "source",
+      "body"
+    ],
+    "title": "SkillInspectResponse",
+    "type": "object"
+  },
+  "SkillListResponse": {
+    "$defs": {
+      "SkillEntry": {
+        "description": "Wire representation of a skill entry (for list responses).",
+        "properties": {
+          "description": {
+            "description": "Short description.",
+            "type": "string"
+          },
+          "is_active": {
+            "description": "Whether this skill is active (not shadowed by a higher-precedence source).",
+            "type": "boolean"
+          },
+          "key": {
+            "$ref": "#/$defs/SkillKey",
+            "description": "Canonical skill identity."
+          },
+          "name": {
+            "description": "Human-readable name.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Scope: \"builtin\", \"project\", or \"user\".",
+            "type": "string"
+          },
+          "shadowed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SkillSourceProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "If shadowed, the higher-precedence source identity."
+          },
+          "source": {
+            "$ref": "#/$defs/SkillSourceProvenance",
+            "description": "Typed source provenance."
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "description",
+          "scope",
+          "source",
+          "is_active"
+        ],
+        "type": "object"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillSourceProvenance": {
+        "description": "Typed source provenance for a skill entry. `display_name` is presentation\nmetadata only; `source_uuid` is the stable identity.",
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          },
+          "status": {
+            "$ref": "#/$defs/SourceIdentityStatus",
+            "default": "active"
+          },
+          "transport_kind": {
+            "$ref": "#/$defs/SourceTransportKind"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "display_name",
+          "transport_kind",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "SourceIdentityStatus": {
+        "description": "Source lifecycle status in the identity registry.",
+        "enum": [
+          "active",
+          "disabled",
+          "retired"
+        ],
+        "type": "string"
+      },
+      "SourceTransportKind": {
+        "description": "Source transport class used for identity governance.",
+        "enum": [
+          "embedded",
+          "filesystem",
+          "git",
+          "http",
+          "stdio"
+        ],
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire response for listing skills with introspection data.",
+    "properties": {
+      "skills": {
+        "items": {
+          "$ref": "#/$defs/SkillEntry"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "skills"
+    ],
+    "title": "SkillListResponse",
+    "type": "object"
+  },
   "WireAssistantBlock": {
     "$defs": {
       "AssistantImageId": {
@@ -15944,6 +16330,276 @@
     ],
     "title": "WireRenderSalience",
     "type": "string"
+  },
+  "WireRunResult": {
+    "$defs": {
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "SchemaWarning": {
+        "description": "Warnings emitted during schema lowering.",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "provider": {
+            "$ref": "#/$defs/Provider"
+          }
+        },
+        "required": [
+          "provider",
+          "path",
+          "message"
+        ],
+        "type": "object"
+      },
+      "SessionId": {
+        "description": "Unique identifier for a session (UUID v7 for time-ordering)",
+        "type": "string"
+      },
+      "SkillKey": {
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SkillQuarantineDiagnostic": {
+        "description": "Per-skill quarantine diagnostic.",
+        "properties": {
+          "error_class": {
+            "type": "string"
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "first_seen_unix_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "key": {
+            "$ref": "#/$defs/SkillKey"
+          },
+          "last_seen_unix_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "location": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "location",
+          "error_code",
+          "error_class",
+          "message",
+          "first_seen_unix_secs",
+          "last_seen_unix_secs"
+        ],
+        "type": "object"
+      },
+      "SkillRuntimeDiagnostics": {
+        "description": "Runtime-visible diagnostics for skill health and quarantined entries.",
+        "properties": {
+          "quarantined": {
+            "items": {
+              "$ref": "#/$defs/SkillQuarantineDiagnostic"
+            },
+            "type": "array"
+          },
+          "source_health": {
+            "$ref": "#/$defs/SourceHealthSnapshot"
+          }
+        },
+        "required": [
+          "source_health",
+          "quarantined"
+        ],
+        "type": "object"
+      },
+      "SourceHealthSnapshot": {
+        "description": "Source health snapshot reported by sources.",
+        "properties": {
+          "failure_streak": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "handshake_failed": {
+            "type": "boolean"
+          },
+          "invalid_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "invalid_ratio": {
+            "format": "float",
+            "type": "number"
+          },
+          "state": {
+            "$ref": "#/$defs/SourceHealthState"
+          },
+          "total_count": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "state",
+          "invalid_ratio",
+          "invalid_count",
+          "total_count",
+          "failure_streak",
+          "handshake_failed"
+        ],
+        "type": "object"
+      },
+      "SourceHealthState": {
+        "description": "Source health state.",
+        "enum": [
+          "healthy",
+          "degraded",
+          "unhealthy"
+        ],
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "WireUsage": {
+        "description": "Canonical token usage for wire protocol.",
+        "properties": {
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "total_tokens"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Canonical run result for wire protocol.",
+    "properties": {
+      "schema_warnings": {
+        "items": {
+          "$ref": "#/$defs/SchemaWarning"
+        },
+        "type": [
+          "array",
+          "null"
+        ]
+      },
+      "session_id": {
+        "$ref": "#/$defs/SessionId"
+      },
+      "session_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "skill_diagnostics": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SkillRuntimeDiagnostics"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "structured_output": true,
+      "text": {
+        "type": "string"
+      },
+      "tool_calls": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "turns": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "usage": {
+        "$ref": "#/$defs/WireUsage"
+      }
+    },
+    "required": [
+      "session_id",
+      "text",
+      "turns",
+      "tool_calls",
+      "usage"
+    ],
+    "title": "WireRunResult",
+    "type": "object"
   },
   "WireRuntimeState": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

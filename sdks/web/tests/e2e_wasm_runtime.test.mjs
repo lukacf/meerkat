@@ -447,7 +447,8 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     async mob_events() {
       return JSON.stringify([]);
     },
-    async mob_spawn() {
+    async mob_spawn(mobId, specsJson) {
+      calls.push(["spawn", mobId, JSON.parse(specsJson)]);
       return JSON.stringify([
         {
           mob_id: "mob-web-parity",
@@ -575,6 +576,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       {
         profile: "worker",
         agent_identity: "worker-1",
+        generation: 7,
       },
     ]);
     assert.equal(spawned[0].agent_identity, "worker-1");
@@ -584,6 +586,16 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       undefined,
       "binding-era agent_runtime_id must not leak to app-facing spawn result",
     );
+    assert.deepEqual(calls[0], [
+      "spawn",
+      "mob-web-parity",
+      [
+        {
+          profile: "worker",
+          agent_identity: "worker-1",
+        },
+      ],
+    ]);
 
     const listed = await mob.listMembers();
     assert.equal(listed[0].agent_identity, "worker-1");

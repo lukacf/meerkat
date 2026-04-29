@@ -73,6 +73,18 @@ function encodeMemberRef(mobId: string, agentIdentity: string): string {
   return encodeBase64UrlJson({ m: mobId, a: agentIdentity });
 }
 
+function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
+  return {
+    profile: spec.profile,
+    agent_identity: spec.agent_identity,
+    runtime_mode: spec.runtime_mode,
+    initial_message: spec.initial_message,
+    labels: spec.labels,
+    context: spec.context,
+    additional_instructions: spec.additional_instructions,
+  };
+}
+
 function normalizeEventEnvelope(raw: unknown, mobId: string): MemberEventItem {
   if (!raw || typeof raw !== 'object') {
     return raw as MemberEventItem;
@@ -189,7 +201,7 @@ export class Mob {
   async spawn(specs: SpawnSpec[]): Promise<SpawnResult[]> {
     const json = await this.bindings.mob_spawn(
       this.mobId,
-      JSON.stringify(specs),
+      JSON.stringify(specs.map(spawnSpecPayload)),
     );
     return (JSON.parse(json) as Array<Partial<SpawnResult> & Record<string, unknown>>).map((entry) => {
       if (typeof entry.agent_identity !== 'string' || entry.agent_identity.length === 0) {

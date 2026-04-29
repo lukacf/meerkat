@@ -166,6 +166,14 @@ const spawnSpec: SpawnSpec = {
   labels: { role: 'worker' },
 };
 
+const spawnSpecWithoutGeneration: SpawnSpec = {
+  profile: 'worker',
+  agent_identity: 'w2',
+};
+
+// @ts-expect-error generation is runtime-owned and not a public spawn knob.
+spawnSpecWithoutGeneration.generation = 1;
+
 // ─── Event narrowing (matches Rust AgentEvent serde) ────────────
 
 function handleEvent(event: AgentEvent): string {
@@ -223,7 +231,7 @@ function handleEvent(event: AgentEvent): string {
     case 'skills_resolved':
       return `${event.skills.length}`;
     case 'skill_resolution_failed':
-      return event.reference;
+      return event.reference ?? '';
     case 'interaction_complete':
       return event.result;
     case 'interaction_callback_pending':

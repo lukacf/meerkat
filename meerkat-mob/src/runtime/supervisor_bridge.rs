@@ -9,10 +9,10 @@ use meerkat_core::comms::{
 use meerkat_core::interaction::{
     InteractionContent, PeerInputCandidate, TerminalityClass, classify_response_terminality,
 };
+use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::HandlingMode;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
 pub(crate) struct MobSupervisorBridge {
@@ -165,7 +165,7 @@ impl MobSupervisorBridge {
             return Ok(result);
         }
 
-        let started = std::time::Instant::now();
+        let deadline = BridgeRequestDeadline::start(timeout);
         loop {
             let drained = runtime.drain_peer_input_candidates().await;
             if let Some(result) = self
@@ -175,7 +175,7 @@ impl MobSupervisorBridge {
                 return Ok(result);
             }
 
-            let remaining = timeout.saturating_sub(started.elapsed());
+            let remaining = deadline.remaining();
             if remaining.is_zero() {
                 return Err(MobError::Internal(format!(
                     "supervisor request '{request_envelope_id}' timed out after {}ms",
@@ -265,6 +265,29 @@ impl MobSupervisorBridge {
             TerminalityClass::Progress => Ok(None),
             _ => Ok(None),
         }
+    }
+}
+
+#[derive(Debug)]
+struct BridgeRequestDeadline {
+    started: Instant,
+    timeout: Duration,
+}
+
+impl BridgeRequestDeadline {
+    fn start(timeout: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    fn remaining(&self) -> Duration {
+        Self::remaining_after(self.timeout, self.started.elapsed())
+    }
+
+    fn remaining_after(timeout: Duration, elapsed: Duration) -> Duration {
+        timeout.saturating_sub(elapsed)
     }
 }
 
@@ -404,6 +427,24 @@ mod tests {
         assert!(
             value.is_none(),
             "response for a different envelope must not satisfy the current wait"
+        );
+    }
+
+    #[test]
+    fn bridge_request_deadline_saturates_elapsed_timeout() {
+        assert_eq!(
+            BridgeRequestDeadline::remaining_after(
+                Duration::from_millis(25),
+                Duration::from_millis(30)
+            ),
+            Duration::ZERO
+        );
+        assert_eq!(
+            BridgeRequestDeadline::remaining_after(
+                Duration::from_millis(25),
+                Duration::from_millis(10)
+            ),
+            Duration::from_millis(15)
         );
     }
 }

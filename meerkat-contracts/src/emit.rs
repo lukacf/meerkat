@@ -32,6 +32,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     let wire_types = serde_json::json!({
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
+        "WireRunResult": schema_for!(crate::wire::WireRunResult),
         "McpLiveOpStatus": schema_for!(crate::wire::McpLiveOpStatus),
         "McpLiveOperation": schema_for!(crate::wire::McpLiveOperation),
         "McpLiveOpResponse": schema_for!(crate::wire::McpLiveOpResponse),
@@ -143,6 +144,9 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireAuthStatus": schema_for!(crate::wire::WireAuthStatus),
         "WireAuthStatusDetail": schema_for!(crate::wire::WireAuthStatusDetail),
         "WireAuthError": schema_for!(crate::wire::WireAuthError),
+        "SkillEntry": schema_for!(crate::wire::SkillEntry),
+        "SkillListResponse": schema_for!(crate::wire::SkillListResponse),
+        "SkillInspectResponse": schema_for!(crate::wire::SkillInspectResponse),
         "CommsCommandRequest": schema_for!(crate::wire::CommsCommandRequest),
     });
     write_pretty_json(output_dir.join("wire-types.json"), &wire_types)?;
@@ -275,9 +279,694 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     });
     write_pretty_json(output_dir.join("rpc-methods.json"), &rpc_methods)?;
 
-    // REST OpenAPI — endpoint listing snapshot, not a full OpenAPI spec.
-    // Request/response body schemas are intentionally omitted, but the path
-    // inventory should stay aligned with the live router surface.
+    fn schema_ref(name: &str) -> Value {
+        serde_json::json!({ "$ref": format!("#/components/schemas/{name}") })
+    }
+
+    fn media_content(content_type: &str, schema_name: &str) -> Value {
+        serde_json::json!({
+            content_type: {
+                "schema": schema_ref(schema_name),
+            }
+        })
+    }
+
+    fn rewrite_component_refs(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                if let Some(Value::String(reference)) = object.get_mut("$ref")
+                    && let Some(name) = reference.strip_prefix("#/$defs/")
+                {
+                    *reference = format!("#/components/schemas/{name}");
+                }
+                for nested in object.values_mut() {
+                    rewrite_component_refs(nested);
+                }
+            }
+            Value::Array(values) => {
+                for nested in values {
+                    rewrite_component_refs(nested);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn add_component_schema(components: &mut Map<String, Value>, name: String, mut schema: Value) {
+        let defs = schema
+            .as_object_mut()
+            .and_then(|object| object.remove("$defs"));
+        if let Some(Value::Object(defs)) = defs {
+            for (def_name, def_schema) in defs {
+                add_component_schema(components, def_name, def_schema);
+            }
+        }
+        if let Some(object) = schema.as_object_mut() {
+            object.remove("$schema");
+        }
+        rewrite_component_refs(&mut schema);
+        components.entry(name).or_insert(schema);
+    }
+
+    fn add_component_section(components: &mut Map<String, Value>, section: &Value) {
+        if let Some(schemas) = section.as_object() {
+            for (name, schema) in schemas {
+                add_component_schema(components, name.clone(), schema.clone());
+            }
+        }
+    }
+
+    fn object_schema(properties: Vec<(&str, Value)>, required: Vec<&str>) -> Value {
+        let mut property_map = Map::new();
+        for (name, schema) in properties {
+            property_map.insert(name.to_string(), schema);
+        }
+        serde_json::json!({
+            "type": "object",
+            "properties": Value::Object(property_map),
+            "required": required,
+        })
+    }
+
+    fn string_schema() -> Value {
+        serde_json::json!({ "type": "string" })
+    }
+
+    fn bool_schema() -> Value {
+        serde_json::json!({ "type": "boolean" })
+    }
+
+    fn integer_schema() -> Value {
+        serde_json::json!({ "type": "integer", "minimum": 0 })
+    }
+
+    fn json_value_schema() -> Value {
+        serde_json::json!({
+            "description": "Arbitrary JSON value.",
+        })
+    }
+
+    fn nullable(schema: Value) -> Value {
+        serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
+    }
+
+    fn rest_manual_components() -> Map<String, Value> {
+        let mut components = Map::new();
+        let json_value = schema_ref("JsonValue");
+        let content_input = serde_json::json!({
+            "oneOf": [
+                { "type": "string" },
+                schema_ref("WireContentInput")
+            ]
+        });
+        let labels = serde_json::json!({
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+        });
+        let string_array = serde_json::json!({
+            "type": "array",
+            "items": { "type": "string" }
+        });
+
+        components.insert("JsonValue".to_string(), json_value_schema());
+        components.insert(
+            "PlainTextResponse".to_string(),
+            serde_json::json!({ "type": "string" }),
+        );
+        components.insert(
+            "SseEventStream".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": "Server-sent event stream."
+            }),
+        );
+        components.insert(
+            "StatusResponse".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": true
+            }),
+        );
+        components.insert(
+            "ListSessionsResponse".to_string(),
+            object_schema(
+                vec![(
+                    "sessions",
+                    serde_json::json!({
+                        "type": "array",
+                        "items": schema_ref("WireSessionSummary")
+                    }),
+                )],
+                vec!["sessions"],
+            ),
+        );
+        components.insert(
+            "SessionDetailsResponse".to_string(),
+            object_schema(
+                vec![
+                    ("session_id", string_schema()),
+                    ("session_ref", string_schema()),
+                    ("created_at", string_schema()),
+                    ("updated_at", string_schema()),
+                    ("message_count", integer_schema()),
+                    ("total_tokens", integer_schema()),
+                    ("labels", labels.clone()),
+                ],
+                vec![
+                    "session_id",
+                    "session_ref",
+                    "created_at",
+                    "updated_at",
+                    "message_count",
+                    "total_tokens",
+                ],
+            ),
+        );
+        components.insert(
+            "ConfigEnvelope".to_string(),
+            object_schema(
+                vec![
+                    ("config", json_value.clone()),
+                    ("generation", integer_schema()),
+                    ("realm_id", string_schema()),
+                    ("instance_id", string_schema()),
+                    ("backend", string_schema()),
+                    (
+                        "resolved_paths",
+                        serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": { "type": "string" }
+                        }),
+                    ),
+                ],
+                vec!["config", "generation"],
+            ),
+        );
+        components.insert(
+            "RestCreateSessionRequest".to_string(),
+            object_schema(
+                vec![
+                    ("prompt", content_input.clone()),
+                    ("system_prompt", string_schema()),
+                    ("model", string_schema()),
+                    ("provider", string_schema()),
+                    ("max_tokens", integer_schema()),
+                    ("output_schema", json_value.clone()),
+                    ("structured_output_retries", integer_schema()),
+                    ("verbose", bool_schema()),
+                    ("keep_alive", nullable(bool_schema())),
+                    ("comms_name", string_schema()),
+                    ("peer_meta", json_value.clone()),
+                    ("hooks_override", json_value.clone()),
+                    ("enable_builtins", bool_schema()),
+                    ("enable_shell", bool_schema()),
+                    ("enable_memory", bool_schema()),
+                    ("enable_mob", bool_schema()),
+                    ("budget_limits", json_value.clone()),
+                    ("provider_params", json_value.clone()),
+                    (
+                        "preload_skills",
+                        serde_json::json!({
+                            "type": "array",
+                            "items": json_value
+                        }),
+                    ),
+                    (
+                        "skill_refs",
+                        serde_json::json!({
+                            "type": "array",
+                            "items": json_value
+                        }),
+                    ),
+                    ("labels", labels),
+                    ("additional_instructions", string_array.clone()),
+                    ("app_context", json_value.clone()),
+                    (
+                        "shell_env",
+                        serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": { "type": "string" }
+                        }),
+                    ),
+                ],
+                vec!["prompt"],
+            ),
+        );
+        components.insert(
+            "RestContinueSessionRequest".to_string(),
+            object_schema(
+                vec![
+                    ("session_id", string_schema()),
+                    ("prompt", content_input),
+                    ("system_prompt", string_schema()),
+                    ("output_schema", json_value.clone()),
+                    ("structured_output_retries", integer_schema()),
+                    ("keep_alive", nullable(bool_schema())),
+                    ("comms_name", string_schema()),
+                    ("peer_meta", json_value.clone()),
+                    ("verbose", bool_schema()),
+                    ("model", string_schema()),
+                    ("provider", string_schema()),
+                    ("max_tokens", integer_schema()),
+                    ("hooks_override", json_value.clone()),
+                    (
+                        "skill_refs",
+                        serde_json::json!({
+                            "type": "array",
+                            "items": json_value
+                        }),
+                    ),
+                    ("flow_tool_overlay", json_value.clone()),
+                    ("additional_instructions", string_array),
+                ],
+                vec!["session_id", "prompt"],
+            ),
+        );
+        components.insert(
+            "RestAppendSystemContextRequest".to_string(),
+            object_schema(
+                vec![
+                    ("text", string_schema()),
+                    ("source", string_schema()),
+                    ("idempotency_key", string_schema()),
+                ],
+                vec!["text"],
+            ),
+        );
+        components.insert(
+            "RestPeerResponseTerminalRequest".to_string(),
+            object_schema(
+                vec![
+                    ("peer_name", string_schema()),
+                    ("request_id", string_schema()),
+                    (
+                        "status",
+                        serde_json::json!({
+                            "type": "string",
+                            "enum": ["completed", "failed"]
+                        }),
+                    ),
+                    ("result", json_value.clone()),
+                ],
+                vec!["peer_name", "request_id", "status", "result"],
+            ),
+        );
+        components.insert(
+            "RestSetConfigRequest".to_string(),
+            serde_json::json!({
+                "oneOf": [
+                    schema_ref("JsonValue"),
+                    object_schema(
+                        vec![
+                            ("config", schema_ref("JsonValue")),
+                            ("expected_generation", integer_schema()),
+                        ],
+                        vec!["config"],
+                    )
+                ]
+            }),
+        );
+        components.insert(
+            "RestPatchConfigRequest".to_string(),
+            serde_json::json!({
+                "oneOf": [
+                    schema_ref("JsonValue"),
+                    object_schema(
+                        vec![
+                            ("patch", schema_ref("JsonValue")),
+                            ("expected_generation", integer_schema()),
+                        ],
+                        vec!["patch"],
+                    )
+                ]
+            }),
+        );
+        components.insert(
+            "RestScheduleToolCallRequest".to_string(),
+            object_schema(
+                vec![("name", string_schema()), ("arguments", json_value.clone())],
+                vec!["name"],
+            ),
+        );
+        components.insert(
+            "RestCommsSendRequest".to_string(),
+            object_schema(
+                vec![
+                    ("session_id", string_schema()),
+                    ("command", schema_ref("CommsCommandRequest")),
+                ],
+                vec!["session_id", "command"],
+            ),
+        );
+        components.insert(
+            "RestAuthBindingRequest".to_string(),
+            object_schema(
+                vec![
+                    ("realm_id", string_schema()),
+                    ("binding_id", string_schema()),
+                    ("profile_id", string_schema()),
+                ],
+                vec!["realm_id", "binding_id"],
+            ),
+        );
+        components.insert(
+            "RestAuthProfileCreateRequest".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["realm_id", "binding_id", "auth_method"],
+            }),
+        );
+        components.insert(
+            "RestAuthLoginStartRequest".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["provider"],
+            }),
+        );
+        components.insert(
+            "RestMobHelperRequest".to_string(),
+            object_schema(
+                vec![
+                    ("prompt", string_schema()),
+                    ("agent_identity", string_schema()),
+                    ("role_name", string_schema()),
+                    ("runtime_mode", string_schema()),
+                    ("backend", string_schema()),
+                ],
+                vec!["prompt"],
+            ),
+        );
+        components.insert(
+            "RestMobForkHelperRequest".to_string(),
+            object_schema(
+                vec![
+                    ("source_member_id", string_schema()),
+                    ("prompt", string_schema()),
+                    ("agent_identity", string_schema()),
+                    ("role_name", string_schema()),
+                    ("fork_context", json_value),
+                    ("runtime_mode", string_schema()),
+                    ("backend", string_schema()),
+                ],
+                vec!["source_member_id", "prompt"],
+            ),
+        );
+        components.insert(
+            "RestMobWaitRequest".to_string(),
+            object_schema(
+                vec![
+                    (
+                        "member_ids",
+                        serde_json::json!({
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }),
+                    ),
+                    ("timeout_ms", integer_schema()),
+                ],
+                vec![],
+            ),
+        );
+        components
+    }
+
+    #[derive(Clone, Copy)]
+    struct RestOperationContract {
+        request_schema: Option<&'static str>,
+        request_required: bool,
+        response_schema: &'static str,
+        response_content_type: &'static str,
+    }
+
+    impl RestOperationContract {
+        const fn json(response_schema: &'static str) -> Self {
+            Self {
+                request_schema: None,
+                request_required: false,
+                response_schema,
+                response_content_type: "application/json",
+            }
+        }
+
+        const fn with_json_request(
+            request_schema: &'static str,
+            response_schema: &'static str,
+        ) -> Self {
+            Self {
+                request_schema: Some(request_schema),
+                request_required: true,
+                response_schema,
+                response_content_type: "application/json",
+            }
+        }
+
+        const fn with_optional_json_request(
+            request_schema: &'static str,
+            response_schema: &'static str,
+        ) -> Self {
+            Self {
+                request_schema: Some(request_schema),
+                request_required: false,
+                response_schema,
+                response_content_type: "application/json",
+            }
+        }
+
+        const fn text(response_schema: &'static str) -> Self {
+            Self {
+                request_schema: None,
+                request_required: false,
+                response_schema,
+                response_content_type: "text/plain",
+            }
+        }
+
+        const fn event_stream(response_schema: &'static str) -> Self {
+            Self {
+                request_schema: None,
+                request_required: false,
+                response_schema,
+                response_content_type: "text/event-stream",
+            }
+        }
+    }
+
+    fn rest_operation_contract(path: &str, method: &str) -> RestOperationContract {
+        match (path, method) {
+            ("/sessions", "get") => RestOperationContract::json("ListSessionsResponse"),
+            ("/sessions", "post") => RestOperationContract::with_json_request(
+                "RestCreateSessionRequest",
+                "WireRunResult",
+            ),
+            ("/sessions/{id}", "get") => RestOperationContract::json("SessionDetailsResponse"),
+            ("/sessions/{id}", "delete") => RestOperationContract::json("StatusResponse"),
+            ("/sessions/{id}/history", "get") => RestOperationContract::json("WireSessionHistory"),
+            ("/sessions/{id}/interrupt", "post") => RestOperationContract::json("StatusResponse"),
+            ("/sessions/{id}/system_context", "post") => RestOperationContract::with_json_request(
+                "RestAppendSystemContextRequest",
+                "StatusResponse",
+            ),
+            ("/sessions/{id}/messages", "post") => RestOperationContract::with_json_request(
+                "RestContinueSessionRequest",
+                "WireRunResult",
+            ),
+            ("/sessions/{id}/external-events", "post") => {
+                RestOperationContract::with_json_request("JsonValue", "StatusResponse")
+            }
+            ("/sessions/{id}/peer-response-terminal", "post") => {
+                RestOperationContract::with_json_request(
+                    "RestPeerResponseTerminalRequest",
+                    "StatusResponse",
+                )
+            }
+            ("/sessions/{id}/mcp/add", "post") => {
+                RestOperationContract::with_json_request("McpAddParams", "McpLiveOpResponse")
+            }
+            ("/sessions/{id}/mcp/remove", "post") => {
+                RestOperationContract::with_json_request("McpRemoveParams", "McpLiveOpResponse")
+            }
+            ("/sessions/{id}/mcp/reload", "post") => {
+                RestOperationContract::with_json_request("McpReloadParams", "McpLiveOpResponse")
+            }
+            ("/sessions/{id}/events" | "/mob/{id}/events", "get") => {
+                RestOperationContract::event_stream("SseEventStream")
+            }
+            ("/sessions/{id}/status", "get") => RestOperationContract::json("RuntimeStateResult"),
+            ("/sessions/{id}/realtime-attachment-status", "get") => {
+                RestOperationContract::json("RuntimeRealtimeAttachmentStatusResult")
+            }
+            ("/sessions/{id}/submit", "post") => RestOperationContract::with_json_request(
+                "RuntimeAcceptParams",
+                "RuntimeAcceptResult",
+            ),
+            ("/sessions/{id}/retire", "post") => RestOperationContract::json("RuntimeRetireResult"),
+            ("/sessions/{id}/reset", "post") => RestOperationContract::json("RuntimeResetResult"),
+            ("/sessions/{id}/submissions", "get") => RestOperationContract::json("InputListResult"),
+            ("/sessions/{session_id}/submissions/{submission_id}", "get") => {
+                RestOperationContract::json("InputStateResult")
+            }
+            ("/schedule/call", "post") => {
+                RestOperationContract::with_json_request("RestScheduleToolCallRequest", "JsonValue")
+            }
+            ("/schedules", "get") => RestOperationContract::json("ScheduleListResult"),
+            ("/schedules", "post") => {
+                RestOperationContract::with_json_request("JsonValue", "JsonValue")
+            }
+            ("/schedules/{id}", "get" | "delete")
+            | ("/schedules/{id}/pause" | "/schedules/{id}/resume", "post") => {
+                RestOperationContract::json("JsonValue")
+            }
+            ("/schedules/{id}", "patch") => {
+                RestOperationContract::with_json_request("JsonValue", "JsonValue")
+            }
+            ("/schedules/{id}/occurrences", "get") => {
+                RestOperationContract::json("ScheduleOccurrencesResult")
+            }
+            ("/comms/send", "post") => {
+                RestOperationContract::with_json_request("RestCommsSendRequest", "JsonValue")
+            }
+            ("/config", "get") => RestOperationContract::json("ConfigEnvelope"),
+            ("/config", "put") => {
+                RestOperationContract::with_json_request("RestSetConfigRequest", "ConfigEnvelope")
+            }
+            ("/config", "patch") => {
+                RestOperationContract::with_json_request("RestPatchConfigRequest", "ConfigEnvelope")
+            }
+            ("/skills", "get") => RestOperationContract::json("SkillListResponse"),
+            ("/capabilities", "get") => RestOperationContract::json("CapabilitiesResponse"),
+            ("/runtime/host_info", "get") => RestOperationContract::json("RuntimeHostInfo"),
+            ("/runtime/capabilities", "get") => {
+                RestOperationContract::json("RuntimeHostCapabilities")
+            }
+            ("/runtime/health", "get") => RestOperationContract::json("RuntimeHostHealth"),
+            ("/models/catalog", "get") => RestOperationContract::json("ModelsCatalogResponse"),
+            ("/realtime/open_info", "post") => {
+                RestOperationContract::with_json_request("RealtimeOpenRequest", "RealtimeOpenInfo")
+            }
+            ("/realtime/status", "post") => RestOperationContract::with_json_request(
+                "RealtimeStatusParams",
+                "RealtimeStatusResult",
+            ),
+            ("/realtime/capabilities", "post") => RestOperationContract::with_json_request(
+                "RealtimeCapabilitiesParams",
+                "RealtimeCapabilitiesResult",
+            ),
+            ("/mob/{id}/spawn-helper", "post") => {
+                RestOperationContract::with_json_request("RestMobHelperRequest", "JsonValue")
+            }
+            ("/mob/{id}/fork-helper", "post") => {
+                RestOperationContract::with_json_request("RestMobForkHelperRequest", "JsonValue")
+            }
+            ("/mob/{id}/wait-kickoff", "post") => {
+                RestOperationContract::with_optional_json_request("RestMobWaitRequest", "JsonValue")
+            }
+            ("/mob/{id}/members/{agent_identity}/status", "get")
+            | (
+                "/mob/{id}/members/{agent_identity}/cancel"
+                | "/mob/{id}/members/{agent_identity}/respawn",
+                "post",
+            ) => RestOperationContract::json("JsonValue"),
+            ("/health", "get") => RestOperationContract::text("PlainTextResponse"),
+            ("/auth/profiles", "get") => RestOperationContract::json("WireAuthProfilesList"),
+            ("/auth/profiles", "post") => RestOperationContract::with_json_request(
+                "RestAuthProfileCreateRequest",
+                "WireAuthProfileCreated",
+            ),
+            ("/auth/bindings/{binding_id}", "get") => {
+                RestOperationContract::json("WireAuthProfileDetail")
+            }
+            ("/auth/bindings/{binding_id}", "delete")
+            | ("/auth/bindings/{binding_id}/logout", "post") => {
+                RestOperationContract::json("WireAuthProfileCleared")
+            }
+            ("/auth/bindings/{binding_id}/test", "post")
+            | ("/auth/bindings/{binding_id}/status", "get") => {
+                RestOperationContract::json("WireAuthStatusDetail")
+            }
+            ("/auth/login/start", "post") => RestOperationContract::with_json_request(
+                "RestAuthLoginStartRequest",
+                "WireLoginStart",
+            ),
+            ("/auth/login/complete", "post") => {
+                RestOperationContract::with_json_request("JsonValue", "WireLoginReady")
+            }
+            ("/auth/login/device/start", "post") => {
+                RestOperationContract::with_json_request("JsonValue", "WireDeviceStart")
+            }
+            ("/auth/login/device/complete", "post") => {
+                RestOperationContract::with_json_request("JsonValue", "WireLoginReady")
+            }
+            ("/realms", "get") => RestOperationContract::json("WireRealmList"),
+            ("/realms/{id}", "get") => RestOperationContract::json("WireRealmConnectionSet"),
+            _ => RestOperationContract::json("JsonValue"),
+        }
+    }
+
+    fn rest_operation_id(method: &str, path: &str) -> String {
+        let mut operation_id = method.to_string();
+        for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+            operation_id.push('_');
+            operation_id.push_str(
+                &segment
+                    .trim_start_matches('{')
+                    .trim_end_matches('}')
+                    .replace('-', "_"),
+            );
+        }
+        operation_id
+    }
+
+    fn rest_path_parameters(path: &str) -> Vec<Value> {
+        let mut seen = Vec::new();
+        for segment in path.split('/') {
+            if let Some(name) = segment
+                .strip_prefix('{')
+                .and_then(|value| value.strip_suffix('}'))
+                && !seen.contains(&name)
+            {
+                seen.push(name);
+            }
+        }
+        seen.into_iter()
+            .map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" },
+                })
+            })
+            .collect()
+    }
+
+    fn rest_responses(contract: RestOperationContract) -> Value {
+        serde_json::json!({
+            "200": {
+                "description": "Successful response",
+                "content": media_content(contract.response_content_type, contract.response_schema),
+            },
+            "default": {
+                "description": "Error response",
+                "content": media_content("application/json", "WireError"),
+            }
+        })
+    }
+
+    let mut rest_components = rest_manual_components();
+    for section in [
+        &wire_types,
+        &params,
+        &errors,
+        &capabilities,
+        &runtime_host,
+        &models,
+    ] {
+        add_component_section(&mut rest_components, section);
+    }
+
+    // REST OpenAPI — generated wire contract for the documented route surface.
     let rest_paths: Map<String, Value> = crate::rest_path_catalog()
         .into_iter()
         .map(|path| {
@@ -285,7 +974,12 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 .operations
                 .into_iter()
                 .map(|operation| {
+                    let contract = rest_operation_contract(path.path, operation.method);
                     let mut operation_map = Map::new();
+                    operation_map.insert(
+                        "operationId".to_string(),
+                        Value::String(rest_operation_id(operation.method, path.path)),
+                    );
                     operation_map.insert(
                         "summary".to_string(),
                         Value::String(operation.summary.to_string()),
@@ -296,6 +990,20 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                             Value::String(description.to_string()),
                         );
                     }
+                    let parameters = rest_path_parameters(path.path);
+                    if !parameters.is_empty() {
+                        operation_map.insert("parameters".to_string(), Value::Array(parameters));
+                    }
+                    if let Some(request_schema) = contract.request_schema {
+                        operation_map.insert(
+                            "requestBody".to_string(),
+                            serde_json::json!({
+                                "required": contract.request_required,
+                                "content": media_content("application/json", request_schema),
+                            }),
+                        );
+                    }
+                    operation_map.insert("responses".to_string(), rest_responses(contract));
                     (operation.method.to_string(), Value::Object(operation_map))
                 })
                 .collect();
@@ -303,12 +1011,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         })
         .collect();
     let rest_openapi = serde_json::json!({
-        "openapi": "3.0.0",
+        "openapi": "3.1.0",
         "info": {
             "title": "Meerkat REST API",
             "version": crate::version::ContractVersion::CURRENT.to_string(),
         },
         "paths": Value::Object(rest_paths),
+        "components": {
+            "schemas": Value::Object(rest_components),
+        },
     });
     write_pretty_json(output_dir.join("rest-openapi.json"), &rest_openapi)?;
 
@@ -446,6 +1157,116 @@ mod tests {
         assert!(
             cancel_all_work.get("result_type").is_none(),
             "mob/cancel_all_work must not advertise a phantom result contract"
+        );
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_rest_openapi_contains_wire_contracts_not_only_paths() {
+        let output_dir = temp_output_dir("rest-openapi-contracts");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let rest_openapi: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rest-openapi.json")).unwrap())
+                .unwrap();
+        let components = rest_openapi
+            .pointer("/components/schemas")
+            .and_then(serde_json::Value::as_object)
+            .expect("rest OpenAPI should publish schema components");
+        for expected in [
+            "RestCreateSessionRequest",
+            "WireRunResult",
+            "WireError",
+            "ConfigEnvelope",
+        ] {
+            assert!(
+                components.contains_key(expected),
+                "rest OpenAPI components missing {expected}"
+            );
+        }
+
+        let create_session = &rest_openapi["paths"]["/sessions"]["post"];
+        assert_eq!(
+            create_session
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/RestCreateSessionRequest")
+        );
+        assert_eq!(
+            create_session
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/WireRunResult")
+        );
+        assert_eq!(
+            create_session
+                .pointer("/responses/default/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/WireError")
+        );
+
+        let get_session = &rest_openapi["paths"]["/sessions/{id}"]["get"];
+        assert_eq!(
+            get_session
+                .pointer("/parameters/0/name")
+                .and_then(serde_json::Value::as_str),
+            Some("id")
+        );
+        assert_eq!(
+            get_session
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/SessionDetailsResponse")
+        );
+
+        for (path, request_schema) in [
+            ("/sessions/{id}/mcp/add", "McpAddParams"),
+            ("/sessions/{id}/mcp/remove", "McpRemoveParams"),
+            ("/sessions/{id}/mcp/reload", "McpReloadParams"),
+        ] {
+            let operation = &rest_openapi["paths"][path]["post"];
+            let expected_request = format!("#/components/schemas/{request_schema}");
+            assert_eq!(
+                operation
+                    .pointer("/requestBody/content/application~1json/schema/$ref")
+                    .and_then(serde_json::Value::as_str),
+                Some(expected_request.as_str()),
+                "{path} request body contract drifted"
+            );
+            assert_eq!(
+                operation
+                    .pointer("/responses/200/content/application~1json/schema/$ref")
+                    .and_then(serde_json::Value::as_str),
+                Some("#/components/schemas/McpLiveOpResponse"),
+                "{path} response contract drifted"
+            );
+        }
+
+        let wait_kickoff = &rest_openapi["paths"]["/mob/{id}/wait-kickoff"]["post"];
+        assert_eq!(
+            wait_kickoff
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/RestMobWaitRequest")
+        );
+        assert_eq!(
+            wait_kickoff
+                .pointer("/requestBody/required")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            wait_kickoff
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/JsonValue")
+        );
+
+        let body = serde_json::to_string(&rest_openapi).unwrap();
+        assert!(
+            !body.contains("#/$defs/"),
+            "OpenAPI component refs must resolve through #/components/schemas"
         );
 
         fs::remove_dir_all(&output_dir).unwrap();

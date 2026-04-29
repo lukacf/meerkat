@@ -269,7 +269,6 @@ export interface SpawnSpec {
   readonly backend?: "session" | "external";
   readonly labels?: Record<string, string>;
   readonly context?: Record<string, unknown>;
-  readonly generation?: number;
   readonly additionalInstructions?: string[];
 }
 

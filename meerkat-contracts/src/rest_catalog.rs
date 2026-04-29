@@ -316,6 +316,13 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
+            "/mob/{id}/wait-kickoff",
+            vec![RestOperationDescriptor::new(
+                "post",
+                "Wait for autonomous kickoff completion",
+            )],
+        ),
+        RestPathDescriptor::new(
             "/mob/{id}/members/{agent_identity}/status",
             vec![RestOperationDescriptor::with_description(
                 "get",
@@ -444,6 +451,7 @@ mod tests {
             "/auth/login/device/complete",
             "/auth/bindings/{binding_id}/status",
             "/auth/bindings/{binding_id}/logout",
+            "/mob/{id}/wait-kickoff",
             "/mob/{id}/members/{agent_identity}/status",
             "/mob/{id}/members/{agent_identity}/cancel",
             "/mob/{id}/members/{agent_identity}/respawn",

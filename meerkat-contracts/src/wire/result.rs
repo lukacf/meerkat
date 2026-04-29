@@ -52,6 +52,7 @@ impl From<&meerkat_core::error::ToolError> for WireToolErrorClass {
 
 /// Canonical run result for wire protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireRunResult {
     pub session_id: SessionId,
     #[serde(skip_serializing_if = "Option::is_none")]

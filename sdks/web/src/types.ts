@@ -325,7 +325,6 @@ export interface SpawnSpec {
   initial_message?: string | ContentBlock[];
   labels?: Record<string, string>;
   context?: Record<string, unknown>;
-  generation?: number;
   additional_instructions?: string[];
 }
 

@@ -10,6 +10,23 @@ enum SessionBindingPreparation {
     LocalSessionResources,
 }
 
+fn visibility_authorities_for_names(
+    names: &std::collections::BTreeSet<String>,
+    witnesses: &std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<String, crate::meerkat_machine::dsl::ToolVisibilityWitness> {
+    names
+        .iter()
+        .filter_map(|name| {
+            witnesses.get(name).map(|witness| {
+                (
+                    name.clone(),
+                    crate::meerkat_machine::dsl::ToolVisibilityWitness::from(witness),
+                )
+            })
+        })
+        .collect()
+}
+
 impl MeerkatMachine {
     async fn prepare_session_runtime_bindings(
         &self,
@@ -668,6 +685,14 @@ impl MeerkatMachine {
                             staged_requested_deferred_names: visibility_state
                                 .staged_requested_deferred_names
                                 .clone(),
+                            active_deferred_authorities: visibility_authorities_for_names(
+                                &visibility_state.active_requested_deferred_names,
+                                &visibility_state.requested_witnesses,
+                            ),
+                            staged_deferred_authorities: visibility_authorities_for_names(
+                                &visibility_state.staged_requested_deferred_names,
+                                &visibility_state.requested_witnesses,
+                            ),
                             active_visibility_revision: visibility_state.active_revision,
                             staged_visibility_revision: visibility_state.staged_revision,
                         },

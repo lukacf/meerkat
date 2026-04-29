@@ -188,6 +188,8 @@ pub(crate) fn project_state(
         staged_visibility_revision: 0,
         active_deferred_names: std::collections::BTreeSet::new(),
         staged_deferred_names: std::collections::BTreeSet::new(),
+        active_deferred_authorities: std::collections::BTreeMap::new(),
+        staged_deferred_authorities: std::collections::BTreeMap::new(),
         input_phases: std::collections::BTreeMap::new(),
         input_terminal_kind: std::collections::BTreeMap::new(),
         input_superseded_by: std::collections::BTreeMap::new(),

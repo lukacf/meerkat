@@ -2192,6 +2192,8 @@ pub struct State {
     pub staged_visibility_revision: u64,
     pub active_deferred_names: std::collections::BTreeSet<String>,
     pub staged_deferred_names: std::collections::BTreeSet<String>,
+    pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     pub input_phases: std::collections::BTreeMap<String, InputPhase>,
     pub input_terminal_kind: std::collections::BTreeMap<String, InputTerminalKind>,
     pub input_superseded_by: std::collections::BTreeMap<String, String>,
@@ -2341,6 +2343,8 @@ pub mod inputs {
         pub staged_filter: ToolFilter,
         pub active_requested_deferred_names: std::collections::BTreeSet<String>,
         pub staged_requested_deferred_names: std::collections::BTreeSet<String>,
+        pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
         pub active_visibility_revision: u64,
         pub staged_visibility_revision: u64,
     }
@@ -2792,11 +2796,16 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CommitDeferredNames {
         pub names: std::collections::BTreeSet<String>,
+        pub witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SyncVisibilityRevisions {
         pub active_revision: u64,
         pub staged_revision: u64,
+        pub active_deferred_names: std::collections::BTreeSet<String>,
+        pub staged_deferred_names: std::collections::BTreeSet<String>,
+        pub active_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        pub staged_deferred_authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceRegister {
@@ -5104,6 +5113,8 @@ pub fn initial_state() -> State {
         staged_visibility_revision: 0,
         active_deferred_names: Default::default(),
         staged_deferred_names: Default::default(),
+        active_deferred_authorities: Default::default(),
+        staged_deferred_authorities: Default::default(),
         input_phases: Default::default(),
         input_terminal_kind: Default::default(),
         input_superseded_by: Default::default(),

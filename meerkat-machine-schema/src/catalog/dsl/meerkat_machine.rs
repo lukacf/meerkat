@@ -1231,6 +1231,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             staged_visibility_revision: u64,
             active_deferred_names: Set<String>,
             staged_deferred_names: Set<String>,
+            active_deferred_authorities: Map<String, ToolVisibilityWitness>,
+            staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
 
             // --- Input lifecycle substate ---
             input_phases: Map<String, InputPhase>,
@@ -1548,6 +1550,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             staged_visibility_revision = 0,
             active_deferred_names = EmptySet,
             staged_deferred_names = EmptySet,
+            active_deferred_authorities = EmptyMap,
+            staged_deferred_authorities = EmptyMap,
             // Input lifecycle substate
             input_phases = EmptyMap,
             input_terminal_kind = EmptyMap,
@@ -1673,6 +1677,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 staged_filter: ToolFilter,
                 active_requested_deferred_names: Set<String>,
                 staged_requested_deferred_names: Set<String>,
+                active_deferred_authorities: Map<String, ToolVisibilityWitness>,
+                staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
                 active_visibility_revision: u64,
                 staged_visibility_revision: u64,
             },
@@ -1847,7 +1853,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             StageVisibilityFilter { filter: ToolFilter },
             CommitVisibilityFilter { filter: ToolFilter, revision: u64 },
             StageDeferredNames { names: Set<String> },
-            CommitDeferredNames { names: Set<String> },
+            CommitDeferredNames { names: Set<String>, witnesses: Map<String, ToolVisibilityWitness> },
             // Sync the DSL monotonic staged-revision counter to at least the
             // max of externally-installed active/staged revisions. Fired
             // from the shell's `replace_visibility_state` path (recovery
@@ -1856,7 +1862,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             // from the already-durable high-water mark rather than 0 —
             // preserving `max(active, staged)`-advance across external
             // state installs.
-            SyncVisibilityRevisions { active_revision: u64, staged_revision: u64 },
+            SyncVisibilityRevisions {
+                active_revision: u64,
+                staged_revision: u64,
+                active_deferred_names: Set<String>,
+                staged_deferred_names: Set<String>,
+                active_deferred_authorities: Map<String, ToolVisibilityWitness>,
+                staged_deferred_authorities: Map<String, ToolVisibilityWitness>,
+            },
             SurfaceRegister { surface_id: String },
             SurfaceStageAdd { surface_id: String, now_ms: u64 },
             SurfaceStageRemove { surface_id: String, now_ms: u64 },
@@ -3002,9 +3015,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input RequestDeferredTools { names, witnesses }
             guard "session_registered" { self.session_id != None }
+            guard "deferred_authorities_cover_names" {
+                for_all(requested_name in names, witnesses.contains_key(requested_name))
+            }
+            guard "deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in witnesses.keys(), names.contains(witnessed_name))
+            }
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_deferred_names = names;
+                self.staged_deferred_authorities = witnesses;
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
@@ -3145,6 +3165,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input PublishCommittedVisibleSet {
                 active_filter, staged_filter,
                 active_requested_deferred_names, staged_requested_deferred_names,
+                active_deferred_authorities, staged_deferred_authorities,
                 active_visibility_revision, staged_visibility_revision
             }
             guard { self.lifecycle_phase == Phase::Idle }
@@ -3153,12 +3174,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "equal_revision_requires_equal_active_and_staged_input" {
                 active_visibility_revision != staged_visibility_revision
                 || (active_filter == staged_filter
-                    && active_requested_deferred_names == staged_requested_deferred_names)
+                    && active_requested_deferred_names == staged_requested_deferred_names
+                    && active_deferred_authorities == staged_deferred_authorities)
             }
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
+            guard "active_deferred_authorities_cover_names" {
+                for_all(requested_name in active_requested_deferred_names, active_deferred_authorities.contains_key(requested_name))
+            }
+            guard "staged_deferred_authorities_cover_names" {
+                for_all(requested_name in staged_requested_deferred_names, staged_deferred_authorities.contains_key(requested_name))
+            }
+            guard "active_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in active_deferred_authorities.keys(), active_requested_deferred_names.contains(witnessed_name))
+            }
+            guard "staged_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in staged_deferred_authorities.keys(), staged_requested_deferred_names.contains(witnessed_name))
+            }
             update {
+                self.active_filter = active_filter;
+                self.staged_filter = staged_filter;
+                self.active_deferred_names = active_requested_deferred_names;
+                self.staged_deferred_names = staged_requested_deferred_names;
+                self.active_deferred_authorities = active_deferred_authorities;
+                self.staged_deferred_authorities = staged_deferred_authorities;
+                self.active_visibility_revision = active_visibility_revision;
+                self.staged_visibility_revision = staged_visibility_revision;
                 // Sync the DSL monotonic counter to at least the published
                 // active revision — guard `active_not_behind_staged` already
                 // ensures active >= staged, so max == active here. Keeps the
@@ -3176,6 +3218,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input PublishCommittedVisibleSet {
                 active_filter, staged_filter,
                 active_requested_deferred_names, staged_requested_deferred_names,
+                active_deferred_authorities, staged_deferred_authorities,
                 active_visibility_revision, staged_visibility_revision
             }
             guard { self.lifecycle_phase == Phase::Attached }
@@ -3184,12 +3227,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "equal_revision_requires_equal_active_and_staged_input" {
                 active_visibility_revision != staged_visibility_revision
                 || (active_filter == staged_filter
-                    && active_requested_deferred_names == staged_requested_deferred_names)
+                    && active_requested_deferred_names == staged_requested_deferred_names
+                    && active_deferred_authorities == staged_deferred_authorities)
             }
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
+            guard "active_deferred_authorities_cover_names" {
+                for_all(requested_name in active_requested_deferred_names, active_deferred_authorities.contains_key(requested_name))
+            }
+            guard "staged_deferred_authorities_cover_names" {
+                for_all(requested_name in staged_requested_deferred_names, staged_deferred_authorities.contains_key(requested_name))
+            }
+            guard "active_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in active_deferred_authorities.keys(), active_requested_deferred_names.contains(witnessed_name))
+            }
+            guard "staged_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in staged_deferred_authorities.keys(), staged_requested_deferred_names.contains(witnessed_name))
+            }
             update {
+                self.active_filter = active_filter;
+                self.staged_filter = staged_filter;
+                self.active_deferred_names = active_requested_deferred_names;
+                self.staged_deferred_names = staged_requested_deferred_names;
+                self.active_deferred_authorities = active_deferred_authorities;
+                self.staged_deferred_authorities = staged_deferred_authorities;
+                self.active_visibility_revision = active_visibility_revision;
+                self.staged_visibility_revision = staged_visibility_revision;
                 if active_visibility_revision > self.next_staged_visibility_revision {
                     self.next_staged_visibility_revision = active_visibility_revision;
                 }
@@ -3201,6 +3265,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input PublishCommittedVisibleSet {
                 active_filter, staged_filter,
                 active_requested_deferred_names, staged_requested_deferred_names,
+                active_deferred_authorities, staged_deferred_authorities,
                 active_visibility_revision, staged_visibility_revision
             }
             guard { self.lifecycle_phase == Phase::Running }
@@ -3209,12 +3274,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "equal_revision_requires_equal_active_and_staged_input" {
                 active_visibility_revision != staged_visibility_revision
                 || (active_filter == staged_filter
-                    && active_requested_deferred_names == staged_requested_deferred_names)
+                    && active_requested_deferred_names == staged_requested_deferred_names
+                    && active_deferred_authorities == staged_deferred_authorities)
             }
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
+            guard "active_deferred_authorities_cover_names" {
+                for_all(requested_name in active_requested_deferred_names, active_deferred_authorities.contains_key(requested_name))
+            }
+            guard "staged_deferred_authorities_cover_names" {
+                for_all(requested_name in staged_requested_deferred_names, staged_deferred_authorities.contains_key(requested_name))
+            }
+            guard "active_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in active_deferred_authorities.keys(), active_requested_deferred_names.contains(witnessed_name))
+            }
+            guard "staged_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in staged_deferred_authorities.keys(), staged_requested_deferred_names.contains(witnessed_name))
+            }
             update {
+                self.active_filter = active_filter;
+                self.staged_filter = staged_filter;
+                self.active_deferred_names = active_requested_deferred_names;
+                self.staged_deferred_names = staged_requested_deferred_names;
+                self.active_deferred_authorities = active_deferred_authorities;
+                self.staged_deferred_authorities = staged_deferred_authorities;
+                self.active_visibility_revision = active_visibility_revision;
+                self.staged_visibility_revision = staged_visibility_revision;
                 if active_visibility_revision > self.next_staged_visibility_revision {
                     self.next_staged_visibility_revision = active_visibility_revision;
                 }
@@ -3226,6 +3312,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input PublishCommittedVisibleSet {
                 active_filter, staged_filter,
                 active_requested_deferred_names, staged_requested_deferred_names,
+                active_deferred_authorities, staged_deferred_authorities,
                 active_visibility_revision, staged_visibility_revision
             }
             guard { self.lifecycle_phase == Phase::Retired }
@@ -3234,12 +3321,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "equal_revision_requires_equal_active_and_staged_input" {
                 active_visibility_revision != staged_visibility_revision
                 || (active_filter == staged_filter
-                    && active_requested_deferred_names == staged_requested_deferred_names)
+                    && active_requested_deferred_names == staged_requested_deferred_names
+                    && active_deferred_authorities == staged_deferred_authorities)
             }
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
+            guard "active_deferred_authorities_cover_names" {
+                for_all(requested_name in active_requested_deferred_names, active_deferred_authorities.contains_key(requested_name))
+            }
+            guard "staged_deferred_authorities_cover_names" {
+                for_all(requested_name in staged_requested_deferred_names, staged_deferred_authorities.contains_key(requested_name))
+            }
+            guard "active_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in active_deferred_authorities.keys(), active_requested_deferred_names.contains(witnessed_name))
+            }
+            guard "staged_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in staged_deferred_authorities.keys(), staged_requested_deferred_names.contains(witnessed_name))
+            }
             update {
+                self.active_filter = active_filter;
+                self.staged_filter = staged_filter;
+                self.active_deferred_names = active_requested_deferred_names;
+                self.staged_deferred_names = staged_requested_deferred_names;
+                self.active_deferred_authorities = active_deferred_authorities;
+                self.staged_deferred_authorities = staged_deferred_authorities;
+                self.active_visibility_revision = active_visibility_revision;
+                self.staged_visibility_revision = staged_visibility_revision;
                 if active_visibility_revision > self.next_staged_visibility_revision {
                     self.next_staged_visibility_revision = active_visibility_revision;
                 }
@@ -3251,6 +3359,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input PublishCommittedVisibleSet {
                 active_filter, staged_filter,
                 active_requested_deferred_names, staged_requested_deferred_names,
+                active_deferred_authorities, staged_deferred_authorities,
                 active_visibility_revision, staged_visibility_revision
             }
             guard { self.lifecycle_phase == Phase::Stopped }
@@ -3259,12 +3368,33 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "equal_revision_requires_equal_active_and_staged_input" {
                 active_visibility_revision != staged_visibility_revision
                 || (active_filter == staged_filter
-                    && active_requested_deferred_names == staged_requested_deferred_names)
+                    && active_requested_deferred_names == staged_requested_deferred_names
+                    && active_deferred_authorities == staged_deferred_authorities)
             }
             guard "active_requested_subset_of_staged_requested" {
                 for_all(requested_name in active_requested_deferred_names, staged_requested_deferred_names.contains(requested_name))
             }
+            guard "active_deferred_authorities_cover_names" {
+                for_all(requested_name in active_requested_deferred_names, active_deferred_authorities.contains_key(requested_name))
+            }
+            guard "staged_deferred_authorities_cover_names" {
+                for_all(requested_name in staged_requested_deferred_names, staged_deferred_authorities.contains_key(requested_name))
+            }
+            guard "active_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in active_deferred_authorities.keys(), active_requested_deferred_names.contains(witnessed_name))
+            }
+            guard "staged_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in staged_deferred_authorities.keys(), staged_requested_deferred_names.contains(witnessed_name))
+            }
             update {
+                self.active_filter = active_filter;
+                self.staged_filter = staged_filter;
+                self.active_deferred_names = active_requested_deferred_names;
+                self.staged_deferred_names = staged_requested_deferred_names;
+                self.active_deferred_authorities = active_deferred_authorities;
+                self.staged_deferred_authorities = staged_deferred_authorities;
+                self.active_visibility_revision = active_visibility_revision;
+                self.staged_visibility_revision = staged_visibility_revision;
                 if active_visibility_revision > self.next_staged_visibility_revision {
                     self.next_staged_visibility_revision = active_visibility_revision;
                 }
@@ -6102,21 +6232,30 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition StageDeferredNames {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input StageDeferredNames { names }
+            guard "deferred_names_empty" { names == EmptySet }
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
                 self.staged_deferred_names = names;
+                self.staged_deferred_authorities = EmptyMap;
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
         }
 
-        // CommitDeferredNames: promote staged deferred names to active
+        // CommitDeferredNames: promote staged deferred authority to active
         transition CommitDeferredNames {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CommitDeferredNames { names }
+            on input CommitDeferredNames { names, witnesses }
+            guard "deferred_authorities_cover_names" {
+                for_all(requested_name in names, witnesses.contains_key(requested_name))
+            }
+            guard "deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in witnesses.keys(), names.contains(witnessed_name))
+            }
             update {
                 self.active_deferred_names = names;
+                self.active_deferred_authorities = witnesses;
             }
             to Idle
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
@@ -6139,12 +6278,32 @@ macro_rules! meerkat_catalog_machine_dsl {
         // input-value pre-check, no silent no-op update.
         transition SyncVisibilityRevisions {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input SyncVisibilityRevisions { active_revision, staged_revision }
+            on input SyncVisibilityRevisions {
+                active_revision, staged_revision,
+                active_deferred_names, staged_deferred_names,
+                active_deferred_authorities, staged_deferred_authorities
+            }
             guard "counter_advances" {
                 active_revision > self.next_staged_visibility_revision
                 || staged_revision > self.next_staged_visibility_revision
             }
+            guard "active_deferred_authorities_cover_names" {
+                for_all(requested_name in active_deferred_names, active_deferred_authorities.contains_key(requested_name))
+            }
+            guard "staged_deferred_authorities_cover_names" {
+                for_all(requested_name in staged_deferred_names, staged_deferred_authorities.contains_key(requested_name))
+            }
+            guard "active_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in active_deferred_authorities.keys(), active_deferred_names.contains(witnessed_name))
+            }
+            guard "staged_deferred_authorities_are_name_scoped" {
+                for_all(witnessed_name in staged_deferred_authorities.keys(), staged_deferred_names.contains(witnessed_name))
+            }
             update {
+                self.active_deferred_names = active_deferred_names;
+                self.staged_deferred_names = staged_deferred_names;
+                self.active_deferred_authorities = active_deferred_authorities;
+                self.staged_deferred_authorities = staged_deferred_authorities;
                 if active_revision > self.next_staged_visibility_revision {
                     self.next_staged_visibility_revision = active_revision;
                 }

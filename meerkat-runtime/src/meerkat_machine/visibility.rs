@@ -92,6 +92,37 @@ impl MachineToolVisibilityOwner {
         })?;
         Ok(ToolScopeRevision(guard.state.staged_visibility_revision))
     }
+
+    fn apply_visibility_dsl_input(
+        &self,
+        input: super::dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<(), ToolScopeApplyError> {
+        let slot = self
+            .dsl_authority
+            .read()
+            .map_err(|_| ToolScopeApplyError::Owner {
+                message: "machine visibility DSL authority slot lock poisoned".to_string(),
+            })?;
+        let authority = slot
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ToolScopeApplyError::Owner {
+                message:
+                    "machine visibility DSL authority not bound — apply call before session wiring"
+                        .to_string(),
+            })?;
+        drop(slot);
+        let mut guard = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::dsl::MeerkatMachineMutator::apply(&mut *guard, input).map_err(|err| {
+            ToolScopeApplyError::Owner {
+                message: super::dsl_authority::map_error(err, context),
+            }
+        })?;
+        Ok(())
+    }
 }
 
 pub fn formal_projection_value<T: serde::Serialize>(value: &T) -> String {
@@ -113,6 +144,34 @@ fn missing_visibility_witness_names(
         .collect()
 }
 
+fn authority_witnesses_for_names(
+    names: &std::collections::BTreeSet<String>,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    names
+        .iter()
+        .filter_map(|name| {
+            witnesses
+                .get(name)
+                .map(|witness| (name.clone(), witness.clone()))
+        })
+        .collect()
+}
+
+fn dsl_witnesses(
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> std::collections::BTreeMap<String, super::dsl::ToolVisibilityWitness> {
+    witnesses
+        .iter()
+        .map(|(name, witness)| {
+            (
+                name.clone(),
+                super::dsl::ToolVisibilityWitness::from(witness),
+            )
+        })
+        .collect()
+}
+
 impl ToolVisibilityOwner for MachineToolVisibilityOwner {
     fn visibility_state(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
         self.state
@@ -127,6 +186,14 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         &self,
         visibility_state: SessionToolVisibilityState,
     ) -> Result<(), ToolScopeApplyError> {
+        let active_deferred_authorities = dsl_witnesses(&authority_witnesses_for_names(
+            &visibility_state.active_requested_deferred_names,
+            &visibility_state.requested_witnesses,
+        ));
+        let staged_deferred_authorities = dsl_witnesses(&authority_witnesses_for_names(
+            &visibility_state.staged_requested_deferred_names,
+            &visibility_state.requested_witnesses,
+        ));
         // Sync the DSL monotonic counter up to the externally-installed
         // revisions before we overwrite the owner-held state. The DSL
         // owns `next_staged_visibility_revision`; without this sync,
@@ -160,14 +227,36 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
                 super::dsl::MeerkatMachineInput::SyncVisibilityRevisions {
                     active_revision: visibility_state.active_revision,
                     staged_revision: visibility_state.staged_revision,
+                    active_deferred_names: visibility_state.active_requested_deferred_names.clone(),
+                    staged_deferred_names: visibility_state.staged_requested_deferred_names.clone(),
+                    active_deferred_authorities: active_deferred_authorities.clone(),
+                    staged_deferred_authorities: staged_deferred_authorities.clone(),
                 },
             ) {
                 Ok(_) => {}
                 // Typed guard rejection is the idempotent no-op case:
-                // neither revision advances the counter. Treat as
-                // success — the installed state is already reflected in
-                // the DSL counter.
-                Err(super::dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => {}
+                // neither revision advances the counter and the installed
+                // deferred authority projection already matches the DSL.
+                Err(err @ super::dsl::MeerkatMachineTransitionError::GuardRejected { .. }) => {
+                    let counter_covers_install = visibility_state.active_revision
+                        <= guard.state.next_staged_visibility_revision
+                        && visibility_state.staged_revision
+                            <= guard.state.next_staged_visibility_revision;
+                    let deferred_authority_matches = guard.state.active_deferred_names
+                        == visibility_state.active_requested_deferred_names
+                        && guard.state.staged_deferred_names
+                            == visibility_state.staged_requested_deferred_names
+                        && guard.state.active_deferred_authorities == active_deferred_authorities
+                        && guard.state.staged_deferred_authorities == staged_deferred_authorities;
+                    if !(counter_covers_install && deferred_authority_matches) {
+                        return Err(ToolScopeApplyError::Owner {
+                            message: super::dsl_authority::map_error(
+                                err,
+                                "SyncVisibilityRevisions",
+                            ),
+                        });
+                    }
+                }
                 Err(err) => {
                     return Err(ToolScopeApplyError::Owner {
                         message: super::dsl_authority::map_error(err, "SyncVisibilityRevisions"),
@@ -259,15 +348,8 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         if !missing.is_empty() {
             return Err(ToolScopeStageError::MissingWitnesses { names: missing });
         }
-        let dsl_witnesses = combined_witnesses
-            .iter()
-            .map(|(name, witness)| {
-                (
-                    name.clone(),
-                    super::dsl::ToolVisibilityWitness::from(witness),
-                )
-            })
-            .collect();
+        let staged_authorities = authority_witnesses_for_names(&extended, &combined_witnesses);
+        let dsl_witnesses = dsl_witnesses(&staged_authorities);
         let revision = self.mint_revision_via_dsl(
             super::dsl::MeerkatMachineInput::RequestDeferredTools {
                 names: extended.clone(),
@@ -285,11 +367,26 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
     }
 
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
+        let (names, witnesses) = {
+            let state = self.state.read().map_err(|_| ToolScopeApplyError::Owner {
+                message: "machine visibility state lock poisoned".to_string(),
+            })?;
+            let names = state.staged_requested_deferred_names.clone();
+            let witnesses = authority_witnesses_for_names(&names, &state.requested_witnesses);
+            (names, witnesses)
+        };
+        self.apply_visibility_dsl_input(
+            super::dsl::MeerkatMachineInput::CommitDeferredNames {
+                names: names.clone(),
+                witnesses: dsl_witnesses(&witnesses),
+            },
+            "CommitDeferredNames",
+        )?;
         let mut state = self.state.write().map_err(|_| ToolScopeApplyError::Owner {
             message: "machine visibility state lock poisoned".to_string(),
         })?;
         state.active_filter = state.staged_filter.clone();
-        state.active_requested_deferred_names = state.staged_requested_deferred_names.clone();
+        state.active_requested_deferred_names = names;
         state.active_revision = state.staged_revision;
         Ok(state.clone())
     }

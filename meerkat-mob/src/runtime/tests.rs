@@ -5420,6 +5420,47 @@ async fn test_stopped_submit_work_auto_spawn_rejects_before_policy_provisioning(
 }
 
 #[tokio::test]
+async fn test_running_submit_work_auto_spawn_non_addressable_rejects_before_policy_provisioning() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticWorkerSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+
+    let target = AgentIdentity::from("auto-running");
+    let result = handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "queued for non-addressable policy profile".to_string(),
+                WorkOrigin::External,
+            ),
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(MobError::NotExternallyAddressable(_))),
+        "running external auto-spawn SubmitWork must surface MobMachine addressability admission: {result:?}"
+    );
+    assert!(
+        handle.get_member(&target).await.is_none(),
+        "non-addressable auto-spawn SubmitWork must not insert the rejected target"
+    );
+    assert_eq!(
+        service.recorded_create_requests().await.len(),
+        0,
+        "non-addressable auto-spawn SubmitWork must reject before policy provisioning side effects"
+    );
+    assert_eq!(
+        service.active_session_count().await,
+        0,
+        "non-addressable auto-spawn SubmitWork must not leak a provisioned session"
+    );
+}
+
+#[tokio::test]
 async fn test_register_tool_bundle_is_wired_into_spawn() {
     let definition = sample_definition_with_tool_bundle("bundle-a");
     let service = Arc::new(MockSessionService::new());

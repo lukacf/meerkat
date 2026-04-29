@@ -1998,6 +1998,91 @@ impl MobActor {
         .map_err(|_| self.invalid_transition_to(MobState::Running))
     }
 
+    fn submit_work_rejection_for_machine_state(
+        &self,
+        machine_state: &mob_dsl::MobMachineState,
+        dsl_runtime_id: &mob_dsl::AgentRuntimeId,
+        origin: WorkOrigin,
+        agent_identity: &MeerkatId,
+    ) -> MobError {
+        if project_dsl_phase(machine_state.lifecycle_phase) != MobState::Running {
+            return MobError::InvalidTransition {
+                from: self.state(),
+                to: MobState::Running,
+            };
+        }
+        if !machine_state.live_runtime_ids.contains(dsl_runtime_id) {
+            return MobError::MemberNotFound(agent_identity.clone());
+        }
+        if matches!(origin, WorkOrigin::External)
+            && !machine_state
+                .externally_addressable_runtime_ids
+                .contains(dsl_runtime_id)
+        {
+            return MobError::NotExternallyAddressable(agent_identity.clone());
+        }
+        match origin {
+            WorkOrigin::External => MobError::NotExternallyAddressable(agent_identity.clone()),
+            WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
+        }
+    }
+
+    fn preview_policy_spawn_submit_work_admission(
+        &self,
+        agent_identity: &MeerkatId,
+        external_addressable: bool,
+        work_ref: &WorkRef,
+        origin: WorkOrigin,
+    ) -> Result<(), MobError> {
+        let domain_identity = AgentIdentity::from(agent_identity.as_str());
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(&domain_identity);
+        let domain_runtime_id =
+            crate::ids::AgentRuntimeId::new(domain_identity, crate::ids::Generation::INITIAL);
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&domain_runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(self.next_fence_token_preview());
+        let replacing = self
+            .dsl_authority
+            .state
+            .member_session_bindings
+            .get(&dsl_identity)
+            .cloned();
+        let mut authority =
+            mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
+        let spawn = mob_dsl::MobMachineInput::Spawn {
+            agent_identity: dsl_identity,
+            agent_runtime_id: dsl_runtime_id.clone(),
+            fence_token: dsl_fence_token,
+            generation: mob_dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
+            external_addressable,
+            bridge_session_id: mob_dsl::SessionId::default(),
+            replacing,
+        };
+        let transition = mob_dsl::MobMachineMutator::apply(&mut authority, spawn)
+            .map_err(|_| self.invalid_transition_to(MobState::Running))?;
+        if transition.from_phase != transition.to_phase {
+            authority.state.lifecycle_phase = transition.to_phase;
+        }
+
+        mob_dsl::MobMachineMutator::apply(
+            &mut authority,
+            mob_dsl::MobMachineInput::SubmitWork {
+                agent_runtime_id: dsl_runtime_id.clone(),
+                fence_token: dsl_fence_token,
+                work_id: mob_dsl::WorkId::from_work_ref(work_ref),
+                origin: mob_dsl::WorkOrigin::from(origin),
+            },
+        )
+        .map(|_| ())
+        .map_err(|_| {
+            self.submit_work_rejection_for_machine_state(
+                &authority.state,
+                &dsl_runtime_id,
+                origin,
+                agent_identity,
+            )
+        })
+    }
+
     fn complete_orchestrator_spawn(
         &mut self,
         spawn_ticket: Option<u64>,
@@ -8538,6 +8623,16 @@ impl MobActor {
                 }
                 let identity = AgentIdentity::from(agent_identity.as_str());
                 if let Some(spec) = self.spawn_policy.resolve(&identity).await {
+                    let profile = self
+                        .definition
+                        .resolve_profile(&spec.profile, self.realm_profile_store.as_ref())
+                        .await?;
+                    self.preview_policy_spawn_submit_work_admission(
+                        &identity,
+                        profile.external_addressable,
+                        &work_ref,
+                        origin,
+                    )?;
                     Box::pin(self.spawn_from_policy_inline(&identity, spec))
                         .await
                         .map_err(|error| {
@@ -8586,35 +8681,13 @@ impl MobActor {
             },
         ) {
             Ok(transition) => transition,
-            Err(_) if self.state() != MobState::Running => {
-                return Err(self.invalid_transition_to(MobState::Running));
-            }
-            Err(_)
-                if !self
-                    .dsl_authority
-                    .state
-                    .live_runtime_ids
-                    .contains(&dsl_runtime_id) =>
-            {
-                return Err(MobError::MemberNotFound(agent_identity.clone()));
-            }
-            Err(_)
-                if matches!(origin, WorkOrigin::External)
-                    && !self
-                        .dsl_authority
-                        .state
-                        .externally_addressable_runtime_ids
-                        .contains(&dsl_runtime_id) =>
-            {
-                return Err(MobError::NotExternallyAddressable(agent_identity.clone()));
-            }
             Err(_) => {
-                return Err(match origin {
-                    WorkOrigin::External => {
-                        MobError::NotExternallyAddressable(agent_identity.clone())
-                    }
-                    WorkOrigin::Internal => MobError::MemberNotFound(agent_identity.clone()),
-                });
+                return Err(self.submit_work_rejection_for_machine_state(
+                    &self.dsl_authority.state,
+                    &dsl_runtime_id,
+                    origin,
+                    &agent_identity,
+                ));
             }
         };
         if transition.from_phase != transition.to_phase {

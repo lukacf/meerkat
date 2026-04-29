@@ -10,7 +10,7 @@
 //! 5. Config-level tool instructions (`config.agent.tool_instructions`).
 //! 6. Dispatcher-provided tool usage instructions (appended last).
 
-use meerkat_core::{Config, SystemPromptConfig};
+use meerkat_core::{Config, SystemPromptConfig, prompt::normalize_agents_md_content};
 use std::path::Path;
 
 /// Assemble the final system prompt. Single canonical path.
@@ -30,12 +30,8 @@ pub async fn assemble_system_prompt(
         return append_sections(prompt, extra_sections, &[], tool_usage_instructions);
     }
 
-    // 2-4. Use SystemPromptConfig to compose the base prompt.
-    //
-    // Wire config overrides INTO SystemPromptConfig rather than bypassing it.
-    // This preserves AGENTS.md loading when config-level overrides are set —
-    // a user setting `agent.system_prompt` in config wants to override the
-    // DEFAULT prompt, not lose AGENTS.md content.
+    // 2-4. This crate owns filesystem reads and prompt precedence, then passes
+    // already-loaded content into core's pure renderer.
     let mut spc = SystemPromptConfig::new();
 
     // 2. Config-level file override → feeds into SystemPromptConfig.
@@ -54,16 +50,10 @@ pub async fn assemble_system_prompt(
     }
 
     // AGENTS.md is resolved only from explicit context roots.
-    if let Some(context) = context_root {
-        if let Some(project_agents) = meerkat_core::prompt::find_project_agents_md_in(context) {
-            spc = spc.with_project_agents_md(project_agents);
-        } else {
-            spc = spc.with_project_agents_md(context.join("AGENTS.md"));
-        }
-        // Disable global AGENTS.md lookup.
-        spc = spc.with_global_agents_md(context.join(".rkat/__disabled_global_agents__.md"));
-    } else {
-        spc = spc.without_agents_md();
+    if let Some(context) = context_root
+        && let Some(content) = load_project_agents_md_in(context).await
+    {
+        spc = spc.with_project_agents_md_content(content);
     }
 
     // 4. compose() uses the override if set, otherwise DEFAULT_SYSTEM_PROMPT.
@@ -84,6 +74,24 @@ pub async fn assemble_system_prompt(
         &config_tool_sections,
         tool_usage_instructions,
     )
+}
+
+async fn load_project_agents_md_in(dir: &Path) -> Option<String> {
+    for candidate in [dir.join("AGENTS.md"), dir.join(".rkat/AGENTS.md")] {
+        if let Some(content) = load_agents_md_file(&candidate).await {
+            return Some(content);
+        }
+    }
+    None
+}
+
+async fn load_agents_md_file(path: &Path) -> Option<String> {
+    if !tokio::fs::try_exists(path).await.ok()? {
+        return None;
+    }
+
+    let content = tokio::fs::read_to_string(path).await.ok()?;
+    normalize_agents_md_content(&content)
 }
 
 /// Append extra sections and tool instructions to a base prompt.
@@ -117,7 +125,7 @@ fn append_sections(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT;
+    use meerkat_core::prompt::{AGENTS_MD_MAX_BYTES, DEFAULT_SYSTEM_PROMPT};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -220,6 +228,57 @@ mod tests {
         let result = assemble_system_prompt(&config, None, None, &[], "").await;
         assert!(result.contains("Inline prompt"));
         assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_appended_to_config_inline() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join("AGENTS.md");
+        tokio::fs::write(&agents_path, "Context root instructions")
+            .await
+            .unwrap();
+
+        let mut config = default_config();
+        config.agent.system_prompt = Some("Inline prompt".to_string());
+
+        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "").await;
+        assert!(result.contains("Inline prompt"));
+        assert!(result.contains("Context root instructions"));
+        assert!(!result.contains(DEFAULT_SYSTEM_PROMPT));
+        let inline_pos = result.find("Inline prompt").unwrap();
+        let agents_pos = result.find("Context root instructions").unwrap();
+        assert!(inline_pos < agents_pos);
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_size_limit_owned_by_prompt_assembly() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join("AGENTS.md");
+        tokio::fs::write(&agents_path, "x".repeat(AGENTS_MD_MAX_BYTES + 1000))
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "").await;
+        let agents_section_start = result.find("# Project Instructions").unwrap();
+        let agents_content = &result[agents_section_start..];
+        assert!(agents_content.len() <= AGENTS_MD_MAX_BYTES + 100);
+    }
+
+    #[tokio::test]
+    async fn test_context_root_agents_md_falls_back_when_root_file_is_unusable() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = temp.path().join("AGENTS.md");
+        tokio::fs::write(&agents_path, [0xff, 0xfe]).await.unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        tokio::fs::create_dir_all(&rkat_dir).await.unwrap();
+        tokio::fs::write(rkat_dir.join("AGENTS.md"), "Fallback instructions")
+            .await
+            .unwrap();
+
+        let config = default_config();
+        let result = assemble_system_prompt(&config, None, Some(temp.path()), &[], "").await;
+        assert!(result.contains("Fallback instructions"));
     }
 
     // --- Precedence level 4: default prompt ---

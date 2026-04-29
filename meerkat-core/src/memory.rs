@@ -147,6 +147,54 @@ impl MemoryIndexRequest {
     }
 }
 
+/// Atomic scoped semantic-memory indexing batch.
+#[derive(Debug, Clone)]
+pub struct MemoryIndexBatch {
+    scope: MemoryIndexScope,
+    requests: Vec<MemoryIndexRequest>,
+}
+
+impl MemoryIndexBatch {
+    pub fn new(
+        scope: MemoryIndexScope,
+        requests: Vec<MemoryIndexRequest>,
+    ) -> Result<Self, MemoryStoreError> {
+        for request in &requests {
+            if request.scope() != &scope {
+                return Err(MemoryStoreError::Scope(format!(
+                    "memory index request scope {} is outside batch scope {}",
+                    request.scope().session_id(),
+                    scope.session_id()
+                )));
+            }
+        }
+        Ok(Self { scope, requests })
+    }
+
+    pub fn single(request: MemoryIndexRequest) -> Self {
+        Self {
+            scope: request.scope.clone(),
+            requests: vec![request],
+        }
+    }
+
+    pub fn scope(&self) -> &MemoryIndexScope {
+        &self.scope
+    }
+
+    pub fn len(&self) -> usize {
+        self.requests.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    pub fn into_parts(self) -> (MemoryIndexScope, Vec<MemoryIndexRequest>) {
+        (self.scope, self.requests)
+    }
+}
+
 /// Successful delivery receipt for a scoped memory index request.
 #[derive(Debug, Clone)]
 pub struct MemoryIndexReceipt {
@@ -176,6 +224,18 @@ pub trait MemoryStore: Send + Sync {
     async fn index_scoped(
         &self,
         request: MemoryIndexRequest,
+    ) -> Result<MemoryIndexReceipt, MemoryStoreError> {
+        self.index_scoped_batch(MemoryIndexBatch::single(request))
+            .await
+    }
+
+    /// Atomically index a typed, owner-scoped memory batch.
+    ///
+    /// Implementations must either make every request in the batch visible or
+    /// make none of them visible.
+    async fn index_scoped_batch(
+        &self,
+        batch: MemoryIndexBatch,
     ) -> Result<MemoryIndexReceipt, MemoryStoreError>;
 
     /// Semantic search: return up to `limit` results ordered by relevance.

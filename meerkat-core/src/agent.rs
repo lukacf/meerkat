@@ -985,12 +985,8 @@ where
     /// Explicit call-timeout override from the build/config composition seam.
     /// Takes precedence over profile-derived defaults.
     pub(crate) call_timeout_override: crate::config::CallTimeoutOverride,
-    /// Populated on successful extraction validation — carried into RunResult.
-    pub(crate) extraction_result: Option<serde_json::Value>,
-    /// Schema warnings from compilation — carried into RunResult.
-    pub(crate) extraction_schema_warnings: Option<Vec<crate::schema::SchemaWarning>>,
-    /// Last validation error (for retry prompt).
-    pub(crate) extraction_last_error: Option<String>,
+    /// Structured-output extraction state carried into RunResult.
+    pub(crate) extraction_state: extraction::ExtractionState,
     /// Last published hidden deferred-catalog names.
     pub(crate) last_hidden_deferred_catalog_names: BTreeSet<String>,
     /// Last published pending catalog sources.

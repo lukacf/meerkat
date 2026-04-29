@@ -15279,6 +15279,55 @@ fn test_flow_frame_store_plan_commits_authority_with_store_in_actor() {
 }
 
 #[test]
+fn test_flow_frame_kernel_mutations_route_store_and_authority_through_actor() {
+    let source = include_str!("flow_frame_engine.rs");
+    let start = source
+        .find("impl FlowFrameMutator for FlowFrameKernel")
+        .expect("FlowFrameKernel mutator impl exists");
+    let end = source[start..]
+        .find("// ─── FlowFrameEngine")
+        .expect("FlowFrameEngine section follows kernel mutator impl");
+    let body = &source[start..start + end];
+    for disallowed in [
+        ".cas_frame_state(",
+        ".cas_complete_step_and_record_output(",
+        ".cas_run_snapshot(",
+        "commit_mob_machine_inputs(",
+    ] {
+        assert!(
+            !body.contains(disallowed),
+            "FlowFrameKernel store mutation '{disallowed}' must be committed through the actor authority/store seam"
+        );
+    }
+    assert!(
+        body.contains("commit_flow_frame_store_plan"),
+        "FlowFrameKernel frame store mutations must route through actor-owned prepared authority commits"
+    );
+}
+
+#[test]
+fn test_flow_frame_scheduler_start_run_routes_through_actor_authority() {
+    let source = include_str!("flow_frame_engine.rs");
+    let start = source
+        .find("async fn ensure_scheduler_state_initialized")
+        .expect("ensure_scheduler_state_initialized exists");
+    let end = source[start..]
+        .find("async fn heal_orphaned_running_nodes")
+        .expect("heal helper follows scheduler initialization");
+    let body = &source[start..start + end];
+    assert!(
+        body.contains("commit_flow_run_command"),
+        "scheduler initialization must use the actor-owned flow run command seam"
+    );
+    for disallowed in [".cas_run_snapshot(", "commit_mob_machine_inputs("] {
+        assert!(
+            !body.contains(disallowed),
+            "scheduler initialization must not persist run state before a separate MobMachine authority commit"
+        );
+    }
+}
+
+#[test]
 fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
     let source = include_str!("actor.rs");
     let start = source
@@ -15741,6 +15790,20 @@ async fn test_flow_failed_append_failure_records_coherence_failure_ledger_entry(
         }),
         "failed terminal event append should be recorded in failure ledger"
     );
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after failed append failure");
+    let run_key = crate::machines::mob_machine::RunId::from(run_id.to_string());
+    assert_eq!(
+        machine_state.run_status.get(&run_key),
+        Some(&crate::machines::mob_machine::FlowRunStatus::Failed),
+        "MobMachine run_status must still be Failed when durable run status CAS wins before terminal event append fails"
+    );
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "failed terminal append failure must not leave MobMachine active_run_count running"
+    );
 }
 
 #[tokio::test]
@@ -15766,6 +15829,20 @@ async fn test_flow_completed_append_failure_records_coherence_failure_ledger_ent
                 && entry.reason.contains("FlowCompleted append failed")
         }),
         "failed terminal event append should be recorded in failure ledger"
+    );
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after terminal append failure");
+    let run_key = crate::machines::mob_machine::RunId::from(run_id.to_string());
+    assert_eq!(
+        machine_state.run_status.get(&run_key),
+        Some(&crate::machines::mob_machine::FlowRunStatus::Completed),
+        "MobMachine run_status must still be terminal when durable run status CAS wins before terminal event append fails"
+    );
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "terminal append failure must not leave MobMachine active_run_count running"
     );
 }
 
@@ -15800,6 +15877,20 @@ async fn test_flow_canceled_append_failure_records_coherence_failure_ledger_entr
                 && entry.reason.contains("FlowCanceled append failed")
         }),
         "failed terminal event append should be recorded in failure ledger"
+    );
+    let machine_state = handle
+        .query_machine_state()
+        .await
+        .expect("query MobMachine state after canceled append failure");
+    let run_key = crate::machines::mob_machine::RunId::from(run_id.to_string());
+    assert_eq!(
+        machine_state.run_status.get(&run_key),
+        Some(&crate::machines::mob_machine::FlowRunStatus::Canceled),
+        "MobMachine run_status must still be Canceled when durable run status CAS wins before terminal event append fails"
+    );
+    assert_eq!(
+        machine_state.active_run_count, 0,
+        "canceled terminal append failure must not leave MobMachine active_run_count running"
     );
 }
 

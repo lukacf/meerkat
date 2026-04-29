@@ -9373,6 +9373,48 @@ impl MobActor {
         let prepared =
             self.prepare_dsl_inputs(plan.machine_inputs(), "flow_frame_loop_store_plan")?;
         let won = match &plan {
+            FlowFrameLoopStorePlan::InsertFrame {
+                frame_id,
+                initial_frame,
+                ..
+            } => self
+                .run_store
+                .cas_frame_state(run_id, frame_id, None, initial_frame.clone())
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::FrameState {
+                frame_id,
+                expected_frame,
+                next_frame,
+                ..
+            } => self
+                .run_store
+                .cas_frame_state(run_id, frame_id, Some(expected_frame), next_frame.clone())
+                .await
+                .map_err(MobError::from)?,
+            FlowFrameLoopStorePlan::CompleteStepAndRecordOutput {
+                frame_id,
+                expected_frame,
+                next_frame,
+                step_output_key,
+                step_output,
+                loop_context,
+                ..
+            } => self
+                .run_store
+                .cas_complete_step_and_record_output(
+                    run_id,
+                    frame_id,
+                    expected_frame,
+                    next_frame.clone(),
+                    step_output_key.clone(),
+                    step_output.clone(),
+                    loop_context
+                        .as_ref()
+                        .map(|(loop_id, iteration)| (loop_id, *iteration)),
+                )
+                .await
+                .map_err(MobError::from)?,
             FlowFrameLoopStorePlan::GrantNodeSlot {
                 expected_run_state,
                 next_run_state,
@@ -9565,18 +9607,42 @@ impl MobActor {
         let outcome = self
             .flow_engine
             .terminalize_with_machine_state(
-                run_id,
+                run_id.clone(),
                 flow_id,
-                target,
+                target.clone(),
                 command,
                 machine_state,
                 authority,
             )
-            .await?;
-        if outcome == TerminalizationOutcome::Transitioned {
-            self.commit_prepared_dsl_input(prepared);
+            .await;
+        match outcome {
+            Ok(TerminalizationOutcome::Transitioned) => {
+                self.commit_prepared_dsl_input(prepared);
+                Ok(TerminalizationOutcome::Transitioned)
+            }
+            Ok(TerminalizationOutcome::Noop) => Ok(TerminalizationOutcome::Noop),
+            Err(error) => {
+                if self
+                    .persisted_terminal_status_matches_target(&run_id, &target)
+                    .await?
+                {
+                    self.commit_prepared_dsl_input(prepared);
+                }
+                Err(error)
+            }
         }
-        Ok(outcome)
+    }
+
+    async fn persisted_terminal_status_matches_target(
+        &self,
+        run_id: &RunId,
+        target: &TerminalizationTarget,
+    ) -> Result<bool, MobError> {
+        Ok(self
+            .run_store
+            .get_run(run_id)
+            .await?
+            .is_some_and(|run| run.status == target.status()))
     }
 
     async fn cancel_unfinished_steps_in_actor(&mut self, run_id: &RunId) -> Result<(), MobError> {

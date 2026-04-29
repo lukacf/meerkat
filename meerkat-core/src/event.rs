@@ -10,6 +10,7 @@ use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::types::{ContentInput, SessionId, StopReason, Usage};
 use serde::de::{self, DeserializeOwned};
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -646,21 +647,158 @@ pub fn compare_event_envelopes<T>(a: &EventEnvelope<T>, b: &EventEnvelope<T>) ->
 }
 
 /// Payload for tool configuration change notifications.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolConfigChangedPayload {
     pub operation: ToolConfigChangeOperation,
     pub target: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_info: Option<ToolConfigChangeStatus>,
+    status_info: ToolConfigChangeStatus,
     pub persisted: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub applied_at_turn: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<ToolConfigChangeDomain>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_catalog_delta: Option<DeferredCatalogDelta>,
+}
+
+impl ToolConfigChangedPayload {
+    #[must_use]
+    pub fn new(
+        operation: ToolConfigChangeOperation,
+        target: impl Into<String>,
+        status_info: ToolConfigChangeStatus,
+        persisted: bool,
+    ) -> Self {
+        Self {
+            operation,
+            target: target.into(),
+            status_info,
+            persisted,
+            applied_at_turn: None,
+            domain: None,
+            deferred_catalog_delta: None,
+        }
+    }
+
+    #[must_use]
+    pub fn status_info(&self) -> &ToolConfigChangeStatus {
+        &self.status_info
+    }
+
+    #[must_use]
+    pub fn status_text(&self) -> String {
+        self.status_info.status_text()
+    }
+
+    #[must_use]
+    pub fn with_applied_at_turn(mut self, applied_at_turn: Option<u32>) -> Self {
+        self.applied_at_turn = applied_at_turn;
+        self
+    }
+
+    #[must_use]
+    pub fn with_domain(mut self, domain: Option<ToolConfigChangeDomain>) -> Self {
+        self.domain = domain;
+        self
+    }
+
+    #[must_use]
+    pub fn with_deferred_catalog_delta(
+        mut self,
+        deferred_catalog_delta: Option<DeferredCatalogDelta>,
+    ) -> Self {
+        self.deferred_catalog_delta = deferred_catalog_delta;
+        self
+    }
+}
+
+impl Serialize for ToolConfigChangedPayload {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("ToolConfigChangedPayload", 8)?;
+        state.serialize_field("operation", &self.operation)?;
+        state.serialize_field("target", &self.target)?;
+        state.serialize_field("status", &self.status_text())?;
+        state.serialize_field("status_info", &self.status_info)?;
+        state.serialize_field("persisted", &self.persisted)?;
+        if let Some(applied_at_turn) = self.applied_at_turn {
+            state.serialize_field("applied_at_turn", &applied_at_turn)?;
+        }
+        if let Some(domain) = &self.domain {
+            state.serialize_field("domain", domain)?;
+        }
+        if let Some(delta) = &self.deferred_catalog_delta {
+            state.serialize_field("deferred_catalog_delta", delta)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolConfigChangedPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WirePayload {
+            operation: ToolConfigChangeOperation,
+            target: String,
+            #[serde(default)]
+            status: Option<String>,
+            #[serde(default)]
+            status_info: Option<ToolConfigChangeStatus>,
+            persisted: bool,
+            #[serde(default)]
+            applied_at_turn: Option<u32>,
+            #[serde(default)]
+            domain: Option<ToolConfigChangeDomain>,
+            #[serde(default)]
+            deferred_catalog_delta: Option<DeferredCatalogDelta>,
+        }
+
+        let wire = WirePayload::deserialize(deserializer)?;
+        let status_info = wire
+            .status_info
+            .or_else(|| wire.status.map(ToolConfigChangeStatus::legacy_status))
+            .ok_or_else(|| de::Error::missing_field("status_info"))?;
+
+        Ok(Self {
+            operation: wire.operation,
+            target: wire.target,
+            status_info,
+            persisted: wire.persisted,
+            applied_at_turn: wire.applied_at_turn,
+            domain: wire.domain,
+            deferred_catalog_delta: wire.deferred_catalog_delta,
+        })
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for ToolConfigChangedPayload {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ToolConfigChangedPayload".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        /// Payload for tool configuration change notifications.
+        #[allow(dead_code)]
+        #[derive(schemars::JsonSchema)]
+        struct ToolConfigChangedPayloadSchema {
+            operation: ToolConfigChangeOperation,
+            target: String,
+            status: String,
+            status_info: ToolConfigChangeStatus,
+            persisted: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            applied_at_turn: Option<u32>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            domain: Option<ToolConfigChangeDomain>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            deferred_catalog_delta: Option<DeferredCatalogDelta>,
+        }
+
+        ToolConfigChangedPayloadSchema::json_schema(generator)
+    }
 }
 
 /// Optional typed domain for tool-configuration change payloads.
@@ -742,6 +880,9 @@ pub enum ToolConfigChangeStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    LegacyStatus {
+        status: String,
+    },
 }
 
 impl ToolConfigChangeStatus {
@@ -780,6 +921,13 @@ impl ToolConfigChangeStatus {
     }
 
     #[must_use]
+    pub fn legacy_status(status: impl Into<String>) -> Self {
+        Self::LegacyStatus {
+            status: status.into(),
+        }
+    }
+
+    #[must_use]
     pub fn status_text(&self) -> String {
         match self {
             Self::BoundaryApplied {
@@ -808,6 +956,7 @@ impl ToolConfigChangeStatus {
                 }
                 status
             }
+            Self::LegacyStatus { status } => status.clone(),
         }
     }
 }
@@ -869,16 +1018,13 @@ impl ExternalToolDelta {
     pub fn to_tool_config_changed_payload(&self) -> ToolConfigChangedPayload {
         let status_info =
             ToolConfigChangeStatus::external_tool_delta(self.phase, self.detail.clone());
-        ToolConfigChangedPayload {
-            operation: self.operation.clone(),
-            target: self.target.clone(),
-            status: status_info.status_text(),
-            status_info: Some(status_info),
-            persisted: self.persisted,
-            applied_at_turn: self.applied_at_turn,
-            domain: None,
-            deferred_catalog_delta: None,
-        }
+        ToolConfigChangedPayload::new(
+            self.operation.clone(),
+            self.target.clone(),
+            status_info,
+            self.persisted,
+        )
+        .with_applied_at_turn(self.applied_at_turn)
     }
 }
 
@@ -1405,16 +1551,14 @@ mod tests {
     fn tool_config_changed_payload_carries_structured_status_with_legacy_mirror() {
         let status_info = ToolConfigChangeStatus::boundary_applied(true, true, 42);
         let event = AgentEvent::ToolConfigChanged {
-            payload: ToolConfigChangedPayload {
-                operation: ToolConfigChangeOperation::Reload,
-                target: "tool_scope".to_string(),
-                status: status_info.status_text(),
-                status_info: Some(status_info),
-                persisted: false,
-                applied_at_turn: Some(3),
-                domain: Some(ToolConfigChangeDomain::ToolScope),
-                deferred_catalog_delta: None,
-            },
+            payload: ToolConfigChangedPayload::new(
+                ToolConfigChangeOperation::Reload,
+                "tool_scope",
+                status_info,
+                false,
+            )
+            .with_applied_at_turn(Some(3))
+            .with_domain(Some(ToolConfigChangeDomain::ToolScope)),
         };
 
         let json = serde_json::to_value(event).unwrap();
@@ -1426,6 +1570,39 @@ mod tests {
         assert_eq!(json["payload"]["status_info"]["base_changed"], true);
         assert_eq!(json["payload"]["status_info"]["visible_changed"], true);
         assert_eq!(json["payload"]["status_info"]["revision"], 42);
+    }
+
+    #[test]
+    fn tool_config_changed_payload_derives_legacy_status_from_typed_status() {
+        let status = ToolConfigChangeStatus::boundary_applied(true, false, 9);
+        let event = AgentEvent::ToolConfigChanged {
+            payload: ToolConfigChangedPayload::new(
+                ToolConfigChangeOperation::Reload,
+                "tool_scope",
+                status.clone(),
+                false,
+            )
+            .with_applied_at_turn(Some(4))
+            .with_domain(Some(ToolConfigChangeDomain::ToolScope)),
+        };
+
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(
+            json["payload"]["status"],
+            "boundary_applied(base_changed=true,visible_changed=false,revision=9)"
+        );
+        assert_eq!(json["payload"]["status_info"]["kind"], "boundary_applied");
+
+        let event: AgentEvent = serde_json::from_value(json).unwrap();
+        if let AgentEvent::ToolConfigChanged { payload } = event {
+            assert_eq!(payload.status_info(), &status);
+            assert_eq!(
+                payload.status_text(),
+                "boundary_applied(base_changed=true,visible_changed=false,revision=9)"
+            );
+        } else {
+            panic!("expected tool_config_changed event");
+        }
     }
 
     #[test]
@@ -1449,10 +1626,15 @@ mod tests {
         );
         if let AgentEvent::ToolConfigChanged { payload } = event {
             assert_eq!(
-                payload.status,
+                payload.status_text(),
                 "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
             );
-            assert_eq!(payload.status_info, None);
+            assert_eq!(
+                payload.status_info(),
+                &ToolConfigChangeStatus::legacy_status(
+                    "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
+                )
+            );
         }
     }
 
@@ -1545,16 +1727,13 @@ mod tests {
                 reason: "channel full".to_string(),
             },
             AgentEvent::ToolConfigChanged {
-                payload: ToolConfigChangedPayload {
-                    operation: ToolConfigChangeOperation::Remove,
-                    target: "filesystem".to_string(),
-                    status: "staged".to_string(),
-                    status_info: None,
-                    persisted: false,
-                    applied_at_turn: Some(12),
-                    domain: None,
-                    deferred_catalog_delta: None,
-                },
+                payload: ToolConfigChangedPayload::new(
+                    ToolConfigChangeOperation::Remove,
+                    "filesystem",
+                    ToolConfigChangeStatus::legacy_status("staged"),
+                    false,
+                )
+                .with_applied_at_turn(Some(12)),
             },
             AgentEvent::BackgroundJobCompleted {
                 job_id: "j_123".to_string(),
@@ -2038,19 +2217,16 @@ mod tests {
                 reason: "lag".to_string(),
             },
             AgentEvent::ToolConfigChanged {
-                payload: ToolConfigChangedPayload {
-                    operation: ToolConfigChangeOperation::Reload,
-                    target: "external".to_string(),
-                    status: "applied".to_string(),
-                    status_info: Some(ToolConfigChangeStatus::external_tool_delta(
+                payload: ToolConfigChangedPayload::new(
+                    ToolConfigChangeOperation::Reload,
+                    "external",
+                    ToolConfigChangeStatus::external_tool_delta(
                         ExternalToolDeltaPhase::Applied,
                         None,
-                    )),
-                    persisted: true,
-                    applied_at_turn: Some(1),
-                    domain: None,
-                    deferred_catalog_delta: None,
-                },
+                    ),
+                    true,
+                )
+                .with_applied_at_turn(Some(1)),
             },
             AgentEvent::BackgroundJobCompleted {
                 job_id: "j_123".to_string(),

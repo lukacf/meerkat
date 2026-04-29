@@ -243,6 +243,7 @@ pub use wire::{
     WireMobBackendKind,
     WireMobLifecycleAction,
     WireMobMemberStatus,
+    WireMobReconcileStage,
     WireMobRuntimeMode,
     WireModelBetaHeader,
     WireModelProfile,

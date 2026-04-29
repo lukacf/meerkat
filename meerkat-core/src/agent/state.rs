@@ -1299,16 +1299,14 @@ where
                                     );
                                     let status = status_info.status_text();
                                     emit_event!(AgentEvent::ToolConfigChanged {
-                                        payload: ToolConfigChangedPayload {
-                                            operation: ToolConfigChangeOperation::Reload,
-                                            target: "tool_scope".to_string(),
-                                            status: status.clone(),
-                                            status_info: Some(status_info),
-                                            persisted: false,
-                                            applied_at_turn: Some(turn_count),
-                                            domain: Some(ToolConfigChangeDomain::ToolScope),
-                                            deferred_catalog_delta: None,
-                                        },
+                                        payload: ToolConfigChangedPayload::new(
+                                            ToolConfigChangeOperation::Reload,
+                                            "tool_scope",
+                                            status_info,
+                                            false,
+                                        )
+                                        .with_applied_at_turn(Some(turn_count))
+                                        .with_domain(Some(ToolConfigChangeDomain::ToolScope)),
                                     });
                                     // Represent runtime notices as user-scoped synthetic context
                                     // (same pattern as peer lifecycle updates) so this does not
@@ -1371,22 +1369,20 @@ where
                                             removed_hidden_names.len(),
                                             pending_sources.len(),
                                         );
-                                    let status = status_info.status_text();
                                     emit_event!(AgentEvent::ToolConfigChanged {
-                                        payload: ToolConfigChangedPayload {
-                                            operation: ToolConfigChangeOperation::Reload,
-                                            target: "deferred_catalog".to_string(),
-                                            status: status.clone(),
-                                            status_info: Some(status_info),
-                                            persisted: false,
-                                            applied_at_turn: Some(turn_count),
-                                            domain: Some(ToolConfigChangeDomain::DeferredCatalog,),
-                                            deferred_catalog_delta: Some(DeferredCatalogDelta {
-                                                added_hidden_names: added_hidden_names.clone(),
-                                                removed_hidden_names: removed_hidden_names.clone(),
-                                                pending_sources: pending_sources.clone(),
-                                            },),
-                                        },
+                                        payload: ToolConfigChangedPayload::new(
+                                            ToolConfigChangeOperation::Reload,
+                                            "deferred_catalog",
+                                            status_info,
+                                            false,
+                                        )
+                                        .with_applied_at_turn(Some(turn_count))
+                                        .with_domain(Some(ToolConfigChangeDomain::DeferredCatalog))
+                                        .with_deferred_catalog_delta(Some(DeferredCatalogDelta {
+                                            added_hidden_names: added_hidden_names.clone(),
+                                            removed_hidden_names: removed_hidden_names.clone(),
+                                            pending_sources: pending_sources.clone(),
+                                        },)),
                                     });
                                     let mut notice_parts = Vec::new();
                                     if !added_hidden_names.is_empty() {
@@ -1424,22 +1420,19 @@ where
                             Err(err) => {
                                 let status_info =
                                     ToolConfigChangeStatus::warning_failed_closed(err.to_string());
-                                let status = status_info.status_text();
                                 tracing::warn!(
                                     error = %err,
                                     "tool scope boundary apply failed; closing visible tool set for this boundary"
                                 );
                                 emit_event!(AgentEvent::ToolConfigChanged {
-                                    payload: ToolConfigChangedPayload {
-                                        operation: ToolConfigChangeOperation::Reload,
-                                        target: "tool_scope".to_string(),
-                                        status: status.clone(),
-                                        status_info: Some(status_info),
-                                        persisted: false,
-                                        applied_at_turn: Some(turn_count),
-                                        domain: Some(ToolConfigChangeDomain::ToolScope),
-                                        deferred_catalog_delta: None,
-                                    },
+                                    payload: ToolConfigChangedPayload::new(
+                                        ToolConfigChangeOperation::Reload,
+                                        "tool_scope",
+                                        status_info,
+                                        false,
+                                    )
+                                    .with_applied_at_turn(Some(turn_count))
+                                    .with_domain(Some(ToolConfigChangeDomain::ToolScope)),
                                 });
                                 self.session.push(synthetic_notice_message(
                                     SystemNoticeKind::ToolScopeWarning,
@@ -4755,20 +4748,20 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
                 && payload.domain == Some(crate::event::ToolConfigChangeDomain::DeferredCatalog)
-                && let Some(delta) = payload.deferred_catalog_delta
+                && let Some(delta) = payload.deferred_catalog_delta.as_ref()
             {
-                added_hidden_batches.push(delta.added_hidden_names);
-                removed_hidden_batches.push(delta.removed_hidden_names);
-                if let Some(crate::event::ToolConfigChangeStatus::DeferredCatalogDelta {
+                added_hidden_batches.push(delta.added_hidden_names.clone());
+                removed_hidden_batches.push(delta.removed_hidden_names.clone());
+                if let crate::event::ToolConfigChangeStatus::DeferredCatalogDelta {
                     added_hidden_count,
                     removed_hidden_count,
                     pending_source_count,
-                }) = payload.status_info
+                } = payload.status_info()
                 {
                     deferred_status_counts.push((
-                        added_hidden_count,
-                        removed_hidden_count,
-                        pending_source_count,
+                        *added_hidden_count,
+                        *removed_hidden_count,
+                        *pending_source_count,
                     ));
                 }
             }
@@ -4897,9 +4890,9 @@ mod tests {
         let mut saw_warning_event = false;
         while let Ok(event) = rx.try_recv() {
             if let crate::event::AgentEvent::ToolConfigChanged { payload } = event
-                && payload.status.contains("warning_failed_closed")
-                && let Some(crate::event::ToolConfigChangeStatus::WarningFailedClosed { error }) =
-                    payload.status_info
+                && payload.status_text().contains("warning_failed_closed")
+                && let crate::event::ToolConfigChangeStatus::WarningFailedClosed { error } =
+                    payload.status_info()
             {
                 assert!(
                     error.contains("Injected"),

@@ -86,8 +86,9 @@ pub use mob::{
     MobTopologyRuleInput, MobTopologySpecInput, MobUnwireParams, MobUnwireResult, MobWireParams,
     MobWireResult, MobWiringRulesInput, WireAgentRuntimeId, WireHandlingMode, WireMemberRef,
     WireMemberRefError, WireMemberState, WireMobBackendKind, WireMobLifecycleAction,
-    WireMobMemberStatus, WireMobRuntimeMode, WireRenderClass, WireRenderMetadata,
-    WireRenderSalience, WireRuntimeBinding, WireTrustedPeerSpec, WireWorkOrigin,
+    WireMobMemberStatus, WireMobReconcileStage, WireMobRuntimeMode, WireRenderClass,
+    WireRenderMetadata, WireRenderSalience, WireRuntimeBinding, WireTrustedPeerSpec,
+    WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,

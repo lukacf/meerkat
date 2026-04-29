@@ -236,16 +236,13 @@ mod tests {
             session_id: SessionId::new(),
             sequence: 42,
             event: AgentEvent::ToolConfigChanged {
-                payload: ToolConfigChangedPayload {
-                    operation: ToolConfigChangeOperation::Remove,
-                    target: "filesystem".to_string(),
-                    status: "staged".to_string(),
-                    status_info: None,
-                    persisted: false,
-                    applied_at_turn: Some(3),
-                    domain: None,
-                    deferred_catalog_delta: None,
-                },
+                payload: ToolConfigChangedPayload::new(
+                    ToolConfigChangeOperation::Remove,
+                    "filesystem",
+                    meerkat_core::ToolConfigChangeStatus::legacy_status("staged"),
+                    false,
+                )
+                .with_applied_at_turn(Some(3)),
             },
             contract_version: ContractVersion::CURRENT,
         };
@@ -256,7 +253,7 @@ mod tests {
             AgentEvent::ToolConfigChanged { payload } => {
                 assert_eq!(payload.operation, ToolConfigChangeOperation::Remove);
                 assert_eq!(payload.target, "filesystem");
-                assert_eq!(payload.status, "staged");
+                assert_eq!(payload.status_text(), "staged");
                 assert!(!payload.persisted);
                 assert_eq!(payload.applied_at_turn, Some(3));
             }

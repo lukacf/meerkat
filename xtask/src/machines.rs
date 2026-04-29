@@ -1010,6 +1010,16 @@ fn mob_catalog_input_occurrence_is_fail_closed(lines: &[&str], line_index: usize
                 || compact.contains("return Err")
                 || compact.contains("continue;")
                 || compact.contains(".map_err(")))
+        || (compact.contains("apply_command_admission(")
+            && (compact.contains('?')
+                || compact.contains("return Err")
+                || compact.contains("continue;")
+                || compact.contains(".map_err(")))
+        || (compact.contains("prepare_command_admission(")
+            && (compact.contains('?')
+                || compact.contains("return Err")
+                || compact.contains("continue;")
+                || compact.contains(".map_err(")))
 }
 
 fn function_scope_bounds(lines: &[&str], function_name: &str) -> Option<(usize, usize)> {

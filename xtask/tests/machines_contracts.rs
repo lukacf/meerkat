@@ -788,15 +788,19 @@ async fn handle_run_flow(&mut self) -> Result<RunId, MobError> {
 }
 
 async fn handle_cancel_flow(&mut self) -> Result<(), MobError> {
-    self.apply_dsl_input(MobMachineInput::CancelFlow, "cancel_flow_input")?;
+    self.apply_command_admission(MobMachineInput::CancelFlow, MobState::Running, "cancel_flow_input")?;
     Ok(())
 }
 
 async fn handle_task_create(&mut self) -> Result<TaskId, MobError> {
     let task_id = TaskId::new();
-    self.apply_dsl_input(MobMachineInput::TaskCreate { task_id }, "handle_task_create")
-        .map_err(|error| MobError::Internal(format!("task create rejected by MobMachine guards: {error}")))?;
+    let prepared = self.prepare_command_admission(
+        MobMachineInput::TaskCreate { task_id },
+        MobState::Running,
+        "handle_task_create",
+    )?;
     self.task_board_service.create_task().await?;
+    self.commit_prepared_dsl_input(prepared);
     Ok(task_id)
 }
 

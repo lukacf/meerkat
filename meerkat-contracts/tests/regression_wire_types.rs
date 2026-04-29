@@ -16,9 +16,9 @@ use meerkat_contracts::{
     WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::{
-    AgentErrorClass, AgentEvent, BudgetType, ContentInput, HookPatch, HookPoint, HookReasonCode,
-    RunResult, SessionId, SkillResolutionFailureReason, StopReason, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
+    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookPatch, HookPoint,
+    HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
+    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
 };
 
 // ---------------------------------------------------------------------------
@@ -410,6 +410,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolResultReceived {
             id: "tc1".to_string(),
             name: "read_file".to_string(),
+            content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
         },
         AgentEvent::TurnCompleted {
@@ -424,9 +425,9 @@ fn agent_event_all_variants_roundtrip() {
             id: "tc2".to_string(),
             name: "shell".to_string(),
             result: "ok".to_string(),
+            content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 100,
-            has_images: false,
         },
         AgentEvent::ToolExecutionTimedOut {
             id: "tc3".to_string(),
@@ -661,6 +662,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolResultReceived {
             id: "tool-1".to_string(),
             name: "search".to_string(),
+            content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
         },
         AgentEvent::TurnCompleted {
@@ -675,9 +677,9 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             id: "tool-1".to_string(),
             name: "search".to_string(),
             result: "ok".to_string(),
+            content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 1,
-            has_images: false,
         },
         AgentEvent::ToolExecutionTimedOut {
             id: "tool-1".to_string(),

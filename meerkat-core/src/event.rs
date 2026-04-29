@@ -8,7 +8,7 @@ use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
 use crate::retry::LlmRetrySchedule;
 use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
-use crate::types::{ContentInput, SessionId, StopReason, Usage};
+use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, Usage};
 use serde::de::{self, DeserializeOwned};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -1130,6 +1130,8 @@ pub enum AgentEvent {
     ToolResultReceived {
         id: String,
         name: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content: Vec<ContentBlock>,
         is_error: bool,
     },
 
@@ -1147,12 +1149,13 @@ pub enum AgentEvent {
     ToolExecutionCompleted {
         id: String,
         name: String,
+        /// Legacy text projection retained for existing event consumers.
         result: String,
+        /// Canonical typed tool-result content.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content: Vec<ContentBlock>,
         is_error: bool,
         duration_ms: u64,
-        /// Whether the tool result contains image content blocks.
-        #[serde(default)]
-        has_images: bool,
     },
 
     /// Tool execution timed out
@@ -1523,6 +1526,20 @@ mod tests {
     use super::*;
     use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
     use crate::skills::SkillName;
+    use crate::types::ContentBlock;
+
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_string(),
+        }
+    }
+
+    fn image_block(media_type: &str, data: &str) -> ContentBlock {
+        ContentBlock::Image {
+            media_type: media_type.to_string(),
+            data: data.into(),
+        }
+    }
 
     #[test]
     fn tool_config_change_status_mirrors_legacy_status_text() {
@@ -1546,6 +1563,178 @@ mod tests {
             .status_text(),
             "failed: exit 1"
         );
+    }
+
+    #[test]
+    fn tool_result_events_carry_text_only_content_blocks() {
+        let content = vec![text_block("plain output")];
+        let completed = AgentEvent::ToolExecutionCompleted {
+            id: "tc_text".to_string(),
+            name: "text_tool".to_string(),
+            result: "plain output".to_string(),
+            content: content.clone(),
+            is_error: false,
+            duration_ms: 12,
+        };
+        let received = AgentEvent::ToolResultReceived {
+            id: "tc_text".to_string(),
+            name: "text_tool".to_string(),
+            content: content.clone(),
+            is_error: false,
+        };
+
+        let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
+        assert_eq!(
+            completed_json["content"],
+            serde_json::json!([{"type": "text", "text": "plain output"}])
+        );
+        assert!(
+            completed_json.get("has_images").is_none(),
+            "typed content blocks should replace image side flags on event surfaces"
+        );
+
+        let received_json = serde_json::to_value(&received).expect("serialize received event");
+        assert_eq!(
+            received_json["content"],
+            serde_json::json!([{"type": "text", "text": "plain output"}])
+        );
+    }
+
+    #[test]
+    fn tool_result_events_carry_image_only_content_blocks() {
+        let content = vec![image_block("image/png", "AAAA")];
+        let completed = AgentEvent::ToolExecutionCompleted {
+            id: "tc_image".to_string(),
+            name: "view_image".to_string(),
+            result: "[image: image/png]".to_string(),
+            content: content.clone(),
+            is_error: false,
+            duration_ms: 12,
+        };
+        let received = AgentEvent::ToolResultReceived {
+            id: "tc_image".to_string(),
+            name: "view_image".to_string(),
+            content: content.clone(),
+            is_error: false,
+        };
+
+        let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
+        assert_eq!(
+            completed_json["content"],
+            serde_json::json!([{
+                "type": "image",
+                "media_type": "image/png",
+                "source": "inline",
+                "data": "AAAA"
+            }])
+        );
+        assert!(
+            completed_json.get("has_images").is_none(),
+            "typed content blocks should replace image side flags on event surfaces"
+        );
+
+        let received_json = serde_json::to_value(&received).expect("serialize received event");
+        assert_eq!(received_json["content"], completed_json["content"]);
+    }
+
+    #[test]
+    fn tool_result_events_carry_mixed_content_blocks_in_order() {
+        let content = vec![
+            text_block("before"),
+            image_block("image/png", "AAAA"),
+            text_block("after"),
+        ];
+        let completed = AgentEvent::ToolExecutionCompleted {
+            id: "tc_mixed".to_string(),
+            name: "mixed_tool".to_string(),
+            result: "before\n[image: image/png]\nafter".to_string(),
+            content: content.clone(),
+            is_error: false,
+            duration_ms: 12,
+        };
+        let received = AgentEvent::ToolResultReceived {
+            id: "tc_mixed".to_string(),
+            name: "mixed_tool".to_string(),
+            content: content.clone(),
+            is_error: false,
+        };
+
+        let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
+        assert_eq!(
+            completed_json["content"],
+            serde_json::json!([
+                {"type": "text", "text": "before"},
+                {
+                    "type": "image",
+                    "media_type": "image/png",
+                    "source": "inline",
+                    "data": "AAAA"
+                },
+                {"type": "text", "text": "after"}
+            ])
+        );
+        assert!(
+            completed_json.get("has_images").is_none(),
+            "typed content blocks should replace image side flags on event surfaces"
+        );
+
+        let roundtrip: AgentEvent = serde_json::from_value(completed_json).unwrap();
+        match roundtrip {
+            AgentEvent::ToolExecutionCompleted {
+                content: roundtrip_content,
+                ..
+            } => assert_eq!(roundtrip_content, content),
+            other => unreachable!("unexpected event: {other:?}"),
+        }
+
+        let received_json = serde_json::to_value(&received).expect("serialize received event");
+        assert_eq!(received_json["content"][0]["text"], "before");
+        assert_eq!(received_json["content"][1]["media_type"], "image/png");
+        assert_eq!(received_json["content"][2]["text"], "after");
+    }
+
+    #[test]
+    fn legacy_tool_result_event_payloads_deserialize_without_typed_content() {
+        let completed: AgentEvent = serde_json::from_value(serde_json::json!({
+            "type": "tool_execution_completed",
+            "id": "tc_legacy",
+            "name": "legacy_tool",
+            "result": "legacy output",
+            "is_error": false,
+            "duration_ms": 3,
+            "has_images": true
+        }))
+        .expect("legacy tool_execution_completed payload should deserialize");
+        match completed {
+            AgentEvent::ToolExecutionCompleted {
+                result,
+                content,
+                is_error,
+                ..
+            } => {
+                assert_eq!(result, "legacy output");
+                assert!(content.is_empty());
+                assert!(!is_error);
+            }
+            other => unreachable!("unexpected event: {other:?}"),
+        }
+
+        let received: AgentEvent = serde_json::from_value(serde_json::json!({
+            "type": "tool_result_received",
+            "id": "tc_legacy",
+            "name": "legacy_tool",
+            "is_error": false
+        }))
+        .expect("legacy tool_result_received payload should deserialize");
+        match received {
+            AgentEvent::ToolResultReceived {
+                content, is_error, ..
+            } => {
+                assert!(content.is_empty());
+                assert!(!is_error);
+            }
+            other => unreachable!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
@@ -1717,6 +1906,7 @@ mod tests {
             AgentEvent::ToolResultReceived {
                 id: "tc_1".to_string(),
                 name: "read_file".to_string(),
+                content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
             },
             AgentEvent::BudgetWarning {
@@ -2194,6 +2384,7 @@ mod tests {
             AgentEvent::ToolResultReceived {
                 id: "tool-1".to_string(),
                 name: "search".to_string(),
+                content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
             },
             AgentEvent::TurnCompleted {
@@ -2208,9 +2399,9 @@ mod tests {
                 id: "tool-1".to_string(),
                 name: "search".to_string(),
                 result: "ok".to_string(),
+                content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
                 duration_ms: 1,
-                has_images: false,
             },
             AgentEvent::ToolExecutionTimedOut {
                 id: "tool-1".to_string(),

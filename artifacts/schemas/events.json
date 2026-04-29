@@ -1683,6 +1683,12 @@
       {
         "description": "Tool result received (injected into conversation)",
         "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          },
           "id": {
             "type": "string"
           },
@@ -1750,15 +1756,17 @@
       {
         "description": "Tool execution completed",
         "properties": {
+          "content": {
+            "description": "Canonical typed tool-result content.",
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": "array"
+          },
           "duration_ms": {
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
-          },
-          "has_images": {
-            "default": false,
-            "description": "Whether the tool result contains image content blocks.",
-            "type": "boolean"
           },
           "id": {
             "type": "string"
@@ -1770,6 +1778,7 @@
             "type": "string"
           },
           "result": {
+            "description": "Legacy text projection retained for existing event consumers.",
             "type": "string"
           },
           "type": {
@@ -2874,6 +2883,12 @@
           {
             "description": "Tool result received (injected into conversation)",
             "properties": {
+              "content": {
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
               "id": {
                 "type": "string"
               },
@@ -2941,15 +2956,17 @@
           {
             "description": "Tool execution completed",
             "properties": {
+              "content": {
+                "description": "Canonical typed tool-result content.",
+                "items": {
+                  "$ref": "#/$defs/ContentBlock"
+                },
+                "type": "array"
+              },
               "duration_ms": {
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
-              },
-              "has_images": {
-                "default": false,
-                "description": "Whether the tool result contains image content blocks.",
-                "type": "boolean"
               },
               "id": {
                 "type": "string"
@@ -2961,6 +2978,7 @@
                 "type": "string"
               },
               "result": {
+                "description": "Legacy text projection retained for existing event consumers.",
                 "type": "string"
               },
               "type": {

@@ -325,12 +325,12 @@ match event {
     AgentEvent::TextDelta { delta } => {}
     AgentEvent::TextComplete { content } => {}
     AgentEvent::ToolCallRequested { id, name, args } => {}
-    AgentEvent::ToolResultReceived { id, name, is_error } => {}
+    AgentEvent::ToolResultReceived { id, name, content, is_error } => {}
     AgentEvent::TurnCompleted { stop_reason, usage } => {}
 
     // Tool execution
     AgentEvent::ToolExecutionStarted { id, name } => {}
-    AgentEvent::ToolExecutionCompleted { id, name, result, is_error, duration_ms } => {}
+    AgentEvent::ToolExecutionCompleted { id, name, result, content, is_error, duration_ms } => {}
     AgentEvent::ToolExecutionTimedOut { id, name, timeout_ms } => {}
 
     // Compaction

@@ -169,12 +169,6 @@ impl PersistentRuntimeDriver {
         self.inner.sync_control_projection_from_dsl_authority();
     }
 
-    pub(crate) fn apply_runtime_executor_exited_authority(
-        &mut self,
-    ) -> Result<(), RuntimeDriverError> {
-        self.inner.apply_runtime_executor_exited_authority()
-    }
-
     /// Get pending events (delegates to inner).
     pub fn drain_events(&mut self) -> Vec<RuntimeEventEnvelope> {
         self.inner.drain_events()
@@ -517,6 +511,20 @@ impl PersistentRuntimeDriver {
         .await
     }
 
+    pub(crate) async fn finalize_runtime_executor_exit(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        if let Err(err) = self.inner.apply_runtime_executor_exited_authority() {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(err);
+        }
+        self.inner.sync_control_projection_from_dsl_authority();
+        self.inner.stop_runtime_cleanup();
+        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Stopped, "stop")
+            .await
+    }
+
     pub(crate) async fn realize_stop_lifecycle(&mut self) -> Result<(), RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
         self.inner.apply_stop_runtime_executor_authority()?;
@@ -539,6 +547,14 @@ impl PersistentRuntimeDriver {
     #[doc(hidden)]
     pub async fn contract_finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
         self.finalize_stop_runtime().await
+    }
+
+    /// Low-level async executor-exit realization shim for external contract tests.
+    #[doc(hidden)]
+    pub async fn contract_finalize_runtime_executor_exit(
+        &mut self,
+    ) -> Result<(), RuntimeDriverError> {
+        self.finalize_runtime_executor_exit().await
     }
 
     pub async fn boundary_applied(

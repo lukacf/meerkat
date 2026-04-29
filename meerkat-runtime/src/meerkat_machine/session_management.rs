@@ -222,9 +222,8 @@ impl MeerkatMachine {
     }
 
     /// Register a runtime driver for a session WITH a RuntimeLoop backed by a
-    /// `CoreExecutor`. Takes `self: &Arc<Self>` so the spawned runtime loop
-    /// can hold a `Weak<Self>` to fire `RuntimeExecutorExited` on async stop
-    /// realisation.
+    /// `CoreExecutor`. Takes `self: &Arc<Self>` because executor attachment is
+    /// routed through the Arc-backed command path that owns runtime-loop spawn.
     pub async fn register_session_with_executor(
         self: &Arc<Self>,
         session_id: SessionId,

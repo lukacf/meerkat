@@ -686,10 +686,8 @@ impl MeerkatMachine {
         }
     }
 
-    /// Arc-requiring session dispatch: handles commands that spawn background
-    /// tasks holding `Weak<Self>` for async DSL transitions (currently
-    /// `EnsureSessionWithExecutor` for runtime-loop `RuntimeExecutorExited`
-    /// wiring).
+    /// Arc-requiring session dispatch: handles commands that spawn runtime-owned
+    /// background tasks.
     pub(super) async fn execute_meerkat_machine_ensure_session_command(
         self: &Arc<Self>,
         command: MeerkatMachineCommand,
@@ -707,9 +705,7 @@ impl MeerkatMachine {
                 }
                 // `inner` creates the session entry (if new), stages the DSL
                 // EnsureSessionWithExecutor transition BEFORE mutating the
-                // driver, attaches the executor, and spawns the runtime loop
-                // with `Weak<Self>` so the loop can fire
-                // `RuntimeExecutorExited` on async stop completion.
+                // driver, attaches the executor, and spawns the runtime loop.
                 self.ensure_session_with_executor_inner(session_id, executor)
                     .await;
                 Ok(MeerkatMachineCommandResult::Unit)

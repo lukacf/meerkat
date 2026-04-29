@@ -749,6 +749,53 @@ async fn stop_lifecycle_commit_failure_restores_running_projection() {
 }
 
 #[tokio::test]
+async fn runtime_executor_exit_commit_failure_restores_running_projection() {
+    let inner = Arc::new(InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        FailPersistInputStore::fail_atomic_lifecycle_commit_once(inner.clone()),
+    );
+    let rid = LogicalRuntimeId::new("test");
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store, memory_blob_store());
+
+    let input = make_prompt("executor exit rollback");
+    let input_id = input.id().clone();
+    driver.accept_input(input).await.unwrap();
+    let run_id = RunId::new();
+    bind_running(&mut driver, run_id.clone(), RuntimeState::Idle);
+    driver.stage_input(&input_id, &run_id).unwrap();
+
+    let err = driver
+        .contract_finalize_runtime_executor_exit()
+        .await
+        .expect_err("executor-exit lifecycle commit should fail");
+    assert!(
+        err.to_string()
+            .contains("synthetic atomic_lifecycle_commit failure"),
+        "unexpected error: {err}",
+    );
+    assert_eq!(
+        driver.runtime_state(),
+        RuntimeState::Running,
+        "failed executor-exit terminalization must restore running truth",
+    );
+    assert_eq!(
+        driver.inner_ref().input_phase(&input_id),
+        Some(meerkat_runtime::input_state::InputLifecycleState::Staged),
+        "failed executor-exit terminalization must restore staged work",
+    );
+    assert_eq!(
+        driver.inner_ref().current_run_id(),
+        Some(run_id),
+        "failed executor-exit terminalization must restore active run identity",
+    );
+    assert_eq!(
+        inner.load_runtime_state(&rid).await.unwrap(),
+        None,
+        "failed executor-exit terminalization must not persist stopped truth",
+    );
+}
+
+#[tokio::test]
 async fn destroy_lifecycle_commit_failure_restores_cleanup_projection() {
     let inner = Arc::new(InMemoryRuntimeStore::new());
     let store: Arc<dyn RuntimeStore> = Arc::new(

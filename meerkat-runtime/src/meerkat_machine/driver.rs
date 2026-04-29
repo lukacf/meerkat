@@ -464,16 +464,6 @@ impl DriverEntry {
             DriverEntry::Persistent(d) => d.destroy().await,
         }
     }
-
-    pub(crate) async fn finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
-        match self {
-            DriverEntry::Ephemeral(d) => {
-                d.finalize_stop_runtime();
-                Ok(())
-            }
-            DriverEntry::Persistent(d) => d.finalize_stop_runtime().await,
-        }
-    }
 }
 
 /// Shared completion registry (accessed by adapter for registration and loop for resolution).
@@ -1387,15 +1377,12 @@ pub(crate) async fn machine_stop_runtime(
 
     match driver {
         DriverEntry::Ephemeral(d) => {
-            let _ = d.apply_runtime_executor_exited_authority();
+            d.apply_runtime_executor_exited_authority()?;
             d.sync_control_projection_from_dsl_authority();
             d.finalize_stop_runtime();
             Ok(())
         }
-        DriverEntry::Persistent(d) => {
-            let _ = d.apply_runtime_executor_exited_authority();
-            d.finalize_stop_runtime().await
-        }
+        DriverEntry::Persistent(d) => d.finalize_runtime_executor_exit().await,
     }
 }
 

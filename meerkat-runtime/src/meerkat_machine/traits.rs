@@ -482,9 +482,9 @@ impl MeerkatMachine {
     ) -> Option<RuntimeState> {
         let sessions = self.sessions.read().await;
         let entry = sessions.get(session_id)?;
-        // DSL is the single source of truth. The async runtime-loop stop
-        // path fires `RuntimeExecutorExited` through `Weak<MeerkatMachine>`
-        // so `lifecycle_phase` is Stopped by the time any observer reads it.
+        // DSL is the single source of truth. The async runtime-loop stop path
+        // terminalizes through the shared driver authority, so
+        // `lifecycle_phase` is Stopped by the time any observer reads it.
         let authority = entry
             .dsl_authority
             .lock()

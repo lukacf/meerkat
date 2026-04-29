@@ -5,42 +5,44 @@
 //! the per-session driver. These helpers keep the concrete stop/preemption
 //! behavior in one place.
 
-use std::sync::Weak;
-
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::types::SessionId;
 
-use crate::meerkat_machine::{MeerkatMachine, SharedCompletionRegistry, SharedDriver};
+use crate::meerkat_machine::{SharedCompletionRegistry, SharedDriver, machine_stop_runtime};
 use crate::tokio::sync::mpsc;
 use crate::traits::RuntimeDriverError;
 
-async fn finalize_runtime_stopped(driver: &SharedDriver) -> Result<(), RuntimeDriverError> {
-    let mut driver = driver.lock().await;
-    if matches!(
-        driver.as_driver().runtime_state(),
-        crate::RuntimeState::Destroyed
-    ) {
-        return Ok(());
+/// Canonical terminalization for an async stop after the executor has accepted
+/// the stop control command.
+pub(crate) async fn terminalize_async_stop(
+    driver: &SharedDriver,
+    completions: Option<&SharedCompletionRegistry>,
+) -> Result<(), RuntimeDriverError> {
+    {
+        let mut driver = driver.lock().await;
+        if !matches!(driver.runtime_state(), crate::RuntimeState::Destroyed) {
+            machine_stop_runtime(&mut driver).await?;
+        }
     }
 
-    driver.finalize_stop_runtime().await?;
-    driver.sync_control_projection_from_dsl_authority();
+    if let Some(completions) = completions {
+        let mut reg = completions.lock().await;
+        reg.resolve_all_terminated("runtime stopped");
+    }
+
     Ok(())
 }
 
 /// Deliver one executor control command and report whether the runtime loop
 /// should stop after applying it.
 ///
-/// When a stop completes, fires the DSL `RuntimeExecutorExited` transition on
-/// the session's machine so the machine phase reflects the async realisation
-/// of the stop (driver → Stopped). No shell→DSL read-through bridge.
+/// When a stop completes, routes all semantic stop terminalization through
+/// [`terminalize_async_stop`] so DSL executor-exit, driver finalization, durable
+/// stopped truth, and waiter resolution cannot split.
 pub(crate) async fn apply_executor_control(
     driver: &SharedDriver,
     completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     command: RunControlCommand,
-    machine: &Weak<MeerkatMachine>,
-    session_id: &SessionId,
 ) -> bool {
     let should_stop = matches!(command, RunControlCommand::StopRuntimeExecutor { .. });
 
@@ -48,20 +50,11 @@ pub(crate) async fn apply_executor_control(
         tracing::warn!(error = %err, "failed to deliver out-of-band executor control");
     }
 
-    if should_stop && let Some(machine) = machine.upgrade() {
-        machine.notify_runtime_executor_exited(session_id).await;
-    }
-
-    if should_stop && let Err(err) = finalize_runtime_stopped(driver).await {
+    if should_stop && let Err(err) = terminalize_async_stop(driver, completions).await {
         tracing::warn!(
             error = %err,
-            "failed to mark runtime stopped after stop-runtime-executor command"
+            "failed to terminalize runtime stop after stop-runtime-executor command"
         );
-    }
-
-    if should_stop && let Some(completions) = completions {
-        let mut reg = completions.lock().await;
-        reg.resolve_all_terminated("runtime stopped");
     }
 
     should_stop
@@ -74,22 +67,11 @@ pub(crate) async fn drain_ready_executor_controls(
     completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     control_rx: &mut mpsc::Receiver<RunControlCommand>,
-    machine: &Weak<MeerkatMachine>,
-    session_id: &SessionId,
 ) -> bool {
     loop {
         match control_rx.try_recv() {
             Ok(command) => {
-                if apply_executor_control(
-                    driver,
-                    completions,
-                    executor,
-                    command,
-                    machine,
-                    session_id,
-                )
-                .await
-                {
+                if apply_executor_control(driver, completions, executor, command).await {
                     return true;
                 }
             }

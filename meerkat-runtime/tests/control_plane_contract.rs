@@ -8,6 +8,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use std::{fs, path::Path};
 
 use chrono::Utc;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
@@ -22,8 +23,8 @@ use meerkat_runtime::input::{
     ResponseProgressPhase,
 };
 use meerkat_runtime::{
-    InputAbandonReason, InputLifecycleState, InputTerminalOutcome, MeerkatMachine, RuntimeState,
-    SessionServiceRuntimeExt,
+    InMemoryRuntimeStore, InputAbandonReason, InputLifecycleState, InputTerminalOutcome,
+    LogicalRuntimeId, MeerkatMachine, RuntimeState, RuntimeStore, SessionServiceRuntimeExt,
 };
 
 fn make_progress_input(label: &str) -> Input {
@@ -63,6 +64,41 @@ fn make_run_result(text: &str) -> RunResult {
         schema_warnings: None,
         skill_diagnostics: None,
     }
+}
+
+#[test]
+fn control_plane_contract_async_stop_terminalization_has_one_call_site() {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(crate_root.join("src/control_plane.rs"))
+        .expect("control_plane.rs should be readable");
+    let start = source
+        .find("pub(crate) async fn apply_executor_control")
+        .expect("apply_executor_control should exist");
+    let end = source[start..]
+        .find("/// Drain any ready executor control commands")
+        .expect("drain_ready_executor_controls should follow apply_executor_control");
+    let apply_body = &source[start..start + end];
+
+    let split_terminalizers = [
+        "notify_runtime_executor_exited",
+        "finalize_runtime_stopped",
+        "resolve_all_terminated",
+    ];
+    let offenders = split_terminalizers
+        .iter()
+        .copied()
+        .filter(|needle| apply_body.contains(needle))
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "async stop terminalization must be a single canonical call from \
+         apply_executor_control; found split terminalizers: {offenders:?}"
+    );
+    assert_eq!(
+        apply_body.matches("terminalize_async_stop(").count(),
+        1,
+        "apply_executor_control should call terminalize_async_stop exactly once"
+    );
 }
 
 struct RecordingExecutor {
@@ -232,6 +268,64 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
     assert!(
         runtime.list_active_inputs(&sid).await.unwrap().is_empty(),
         "stopping the runtime should drain active inputs from the ledger"
+    );
+
+    let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();
+    assert_eq!(stored.seed.phase, InputLifecycleState::Abandoned);
+    assert!(matches!(
+        stored.state.terminal_outcome(),
+        Some(InputTerminalOutcome::Abandoned {
+            reason: InputAbandonReason::Stopped,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_without_loop() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>
+    ));
+    let runtime: &dyn SessionServiceRuntimeExt = &*adapter;
+    let sid = SessionId::new();
+
+    adapter.register_session(sid.clone()).await;
+
+    let input = make_progress_input("persistent-stop");
+    let input_id = input.id().clone();
+    let (outcome, handle) = runtime
+        .accept_input_with_completion(&sid, input)
+        .await
+        .unwrap();
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("accepted input should expose a wait handle");
+
+    adapter
+        .stop_runtime_executor(
+            &sid,
+            RunControlCommand::StopRuntimeExecutor {
+                reason: "persistent stopped state".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    match handle.wait().await {
+        CompletionOutcome::RuntimeTerminated(reason) => {
+            assert_eq!(reason, "runtime stopped");
+        }
+        other => panic!("expected runtime stopped termination, got {other:?}"),
+    }
+    assert_eq!(
+        runtime.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Stopped
+    );
+
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    assert_eq!(
+        store.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Stopped),
+        "persistent stop terminalization should commit Stopped as durable runtime truth"
     );
 
     let stored = runtime.input_state(&sid, &input_id).await.unwrap().unwrap();

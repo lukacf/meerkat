@@ -470,36 +470,6 @@ impl MeerkatMachine {
             *authority = dsl::MeerkatMachineAuthority::from_state(*state);
         }
     }
-
-    /// Fire `RuntimeExecutorExited` on the session's DSL authority after the
-    /// runtime loop has realised an async stop into the driver's control
-    /// projection. Called via `Weak<Self>` from `control_plane`.
-    pub(crate) async fn notify_runtime_executor_exited(&self, session_id: &SessionId) {
-        let driver = {
-            let mut sessions = self.sessions.write().await;
-            let Some(entry) = sessions.get_mut(session_id) else {
-                return;
-            };
-            let mut authority = entry
-                .dsl_authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Err(err) = dsl::MeerkatMachineMutator::apply(
-                &mut *authority,
-                dsl::MeerkatMachineInput::RuntimeExecutorExited,
-            ) {
-                tracing::debug!(
-                    %session_id,
-                    error = %dsl_authority::map_error(err, "RuntimeExecutorExited"),
-                    "DSL rejected RuntimeExecutorExited (terminal or phase-not-covered)"
-                );
-            }
-            Arc::clone(&entry.driver)
-        };
-
-        let mut driver = driver.lock().await;
-        driver.sync_control_projection_from_dsl_authority();
-    }
 }
 
 /// Per-session comms drain slot, driven by direct in-kernel state.

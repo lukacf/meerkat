@@ -133,13 +133,7 @@ impl MeerkatMachine {
         }
 
         if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-            let mut driver = driver.lock().await;
-            machine_stop_runtime(&mut driver).await?;
-            drop(driver);
-            self.notify_runtime_executor_exited(session_id).await;
-            let mut completions = completions.lock().await;
-            completions.resolve_all_terminated("runtime stopped");
-            drop(completions);
+            crate::control_plane::terminalize_async_stop(&driver, Some(&completions)).await?;
 
             // No live control sender was available for this stop path. Scrub any
             // dead attachment capabilities that may still be published.

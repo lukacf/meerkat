@@ -38,13 +38,14 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use meerkat_core::types::SessionId;
 use meerkat_machine_schema::identity::{
-    CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
+    EffectVariantId, FieldId, InputVariantId, MachineInstanceId,
 };
 
 use crate::composition::{
     CompositionSignalDispatcher, FieldValue, ProducerInstance, ProducerSignal, SignalPayload,
 };
 use crate::composition::{ConsumerSurface, OwnedFieldValue, SignalDispatchOutcome};
+use crate::generated::meerkat_mob_seam as seam_facts;
 use crate::meerkat_machine::{MeerkatMachine, dsl as mm_dsl};
 
 /// Consumer-side surface for the `meerkat_mob_seam` composition.
@@ -92,15 +93,18 @@ pub enum MeerkatSeamSignal {
 
 impl MeerkatSeamSignal {
     pub fn variant_id(&self) -> EffectVariantId {
-        let slug = match self {
-            Self::RuntimeBound { .. } => "RuntimeBound",
-            Self::RuntimeRetired { .. } => "RuntimeRetired",
-            Self::RuntimeDestroyed { .. } => "RuntimeDestroyed",
-        };
-        match EffectVariantId::parse(slug) {
-            Ok(id) => id,
-            Err(err) => unreachable!("meerkat seam signal slug rejected: {err}"),
+        match self {
+            Self::RuntimeBound { .. } => seam_facts::effects::meerkat::runtime_bound(),
+            Self::RuntimeRetired { .. } => seam_facts::effects::meerkat::runtime_retired(),
+            Self::RuntimeDestroyed { .. } => seam_facts::effects::meerkat::runtime_destroyed(),
         }
+    }
+
+    pub fn generated_signal_route(&self) -> Option<seam_facts::TypedRoutedSignal> {
+        seam_facts::route_to_signal(
+            &seam_facts::producers::meerkat_instance_id(),
+            &self.variant_id(),
+        )
     }
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
@@ -118,10 +122,12 @@ impl MeerkatSeamSignal {
                 fence_token,
             } => (agent_runtime_id, fence_token),
         };
-        match id.as_str() {
-            "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id.0.as_str())),
-            "fence_token" => Some(FieldValue::U64(fence_token.0)),
-            _ => None,
+        if id == &seam_facts::fields::agent_runtime_id() {
+            Some(FieldValue::Str(agent_runtime_id.0.as_str()))
+        } else if id == &seam_facts::fields::fence_token() {
+            Some(FieldValue::U64(fence_token.0))
+        } else {
+            None
         }
     }
 }
@@ -140,18 +146,11 @@ pub type MeerkatCompositionSignalDispatcher =
     Arc<dyn CompositionSignalDispatcher<Signal = MeerkatSeamSignal>>;
 
 pub fn meerkat_producer_instance() -> ProducerInstance {
-    let composition = match CompositionId::parse("meerkat_mob_seam") {
-        Ok(id) => id,
-        Err(err) => unreachable!("canonical composition slug rejected: {err}"),
-    };
-    let machine = match MachineId::parse("MeerkatMachine") {
-        Ok(id) => id,
-        Err(err) => unreachable!("canonical machine id rejected: {err}"),
-    };
+    let producer = seam_facts::producers::meerkat();
     ProducerInstance {
-        composition,
-        instance_id: meerkat_instance_id().clone(),
-        machine,
+        composition: seam_facts::composition_id(),
+        instance_id: producer.instance_id,
+        machine: producer.machine,
     }
 }
 
@@ -230,7 +229,7 @@ impl MeerkatConsumerSurface {
 
     async fn resolve_session(
         &self,
-        variant: &str,
+        variant: &InputVariantId,
         projected: &[(FieldId, OwnedFieldValue)],
     ) -> Result<SessionId, String> {
         // Typed session_id is the canonical source (Shape 4 — producer DSL
@@ -239,7 +238,7 @@ impl MeerkatConsumerSurface {
         // `meerkat-machine-schema/src/catalog/dsl/mob_machine.rs:168`).
         let projected_session_id = projected
             .iter()
-            .find(|(id, _)| id.as_str() == "session_id")
+            .find(|(id, _)| id == &seam_facts::fields::session_id())
             .and_then(|(_, v)| match v {
                 OwnedFieldValue::Str(s) => Some(s.clone()),
                 _ => None,
@@ -252,8 +251,8 @@ impl MeerkatConsumerSurface {
             (Some(pinned), _) => Ok(pinned.clone()),
             (None, Some(sid)) => SessionId::parse(&sid)
                 .map_err(|e| format!("routed session_id `{sid}` is not a valid UUID: {e}")),
-            (None, None) if variant == "Ingest" => {
-                let runtime_id = project_str(projected, "runtime_id")?;
+            (None, None) if variant == &seam_facts::inputs::ingest() => {
+                let runtime_id = project_str(projected, &seam_facts::fields::runtime_id())?;
                 self.machine
                     .resolve_registered_session_for_runtime_id(&mm_dsl::AgentRuntimeId::from(
                         runtime_id.to_string(),
@@ -304,52 +303,56 @@ impl MeerkatMachine {
 #[allow(clippy::panic)]
 fn meerkat_instance_id() -> &'static MachineInstanceId {
     static ID: OnceLock<MachineInstanceId> = OnceLock::new();
-    ID.get_or_init(|| match MachineInstanceId::parse("meerkat") {
-        Ok(id) => id,
-        Err(err) => unreachable!("canonical consumer instance slug rejected: {err}"),
-    })
+    ID.get_or_init(seam_facts::producers::meerkat_instance_id)
 }
 
-fn project_u64(fields: &[(FieldId, OwnedFieldValue)], name: &str) -> Result<u64, String> {
+fn project_u64(fields: &[(FieldId, OwnedFieldValue)], field: &FieldId) -> Result<u64, String> {
     fields
         .iter()
-        .find(|(id, _)| id.as_str() == name)
-        .ok_or_else(|| format!("missing projected field `{name}`"))
+        .find(|(id, _)| id == field)
+        .ok_or_else(|| format!("missing projected field `{}`", field.as_str()))
         .and_then(|(_, v)| match v {
             OwnedFieldValue::U64(n) => Ok(*n),
-            other => Err(format!("projected field `{name}` is not U64: {other:?}")),
+            other => Err(format!(
+                "projected field `{}` is not U64: {other:?}",
+                field.as_str()
+            )),
         })
 }
 
 fn project_str<'a>(
     fields: &'a [(FieldId, OwnedFieldValue)],
-    name: &str,
+    field: &FieldId,
 ) -> Result<&'a str, String> {
     fields
         .iter()
-        .find(|(id, _)| id.as_str() == name)
-        .ok_or_else(|| format!("missing projected field `{name}`"))
+        .find(|(id, _)| id == field)
+        .ok_or_else(|| format!("missing projected field `{}`", field.as_str()))
         .and_then(|(_, v)| match v {
             OwnedFieldValue::Str(s) => Ok(s.as_str()),
-            other => Err(format!("projected field `{name}` is not Str: {other:?}")),
+            other => Err(format!(
+                "projected field `{}` is not Str: {other:?}",
+                field.as_str()
+            )),
         })
 }
 
 fn project_work_origin(
     fields: &[(FieldId, OwnedFieldValue)],
-    name: &str,
+    field: &FieldId,
 ) -> Result<mm_dsl::WorkOrigin, String> {
     fields
         .iter()
-        .find(|(id, _)| id.as_str() == name)
-        .ok_or_else(|| format!("missing projected field `{name}`"))
+        .find(|(id, _)| id == field)
+        .ok_or_else(|| format!("missing projected field `{}`", field.as_str()))
         .and_then(|(_, v)| match v {
             OwnedFieldValue::Opaque(value) => value
                 .downcast_ref::<mm_dsl::WorkOrigin>()
                 .copied()
-                .ok_or_else(|| format!("projected field `{name}` is not WorkOrigin")),
+                .ok_or_else(|| format!("projected field `{}` is not WorkOrigin", field.as_str())),
             other => Err(format!(
-                "projected field `{name}` is not WorkOrigin: {other:?}"
+                "projected field `{}` is not WorkOrigin: {other:?}",
+                field.as_str()
             )),
         })
 }
@@ -365,54 +368,48 @@ impl ConsumerSurface for MeerkatConsumerSurface {
         variant: InputVariantId,
         projected: Vec<(FieldId, OwnedFieldValue)>,
     ) -> Result<(), String> {
-        let variant_slug = variant.as_str();
-        let session_id = self.resolve_session(variant_slug, &projected).await?;
-        let input = match variant_slug {
-            "PrepareBindings" => {
-                let rt = project_str(&projected, "agent_runtime_id")?;
-                let fence = project_u64(&projected, "fence_token")?;
-                let gen_ = project_u64(&projected, "generation")?;
-                let sid = project_str(&projected, "session_id")?;
-                mm_dsl::MeerkatMachineInput::PrepareBindings {
-                    agent_runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
-                    fence_token: mm_dsl::FenceToken(fence),
-                    generation: mm_dsl::Generation(gen_),
-                    session_id: mm_dsl::SessionId::from(sid.to_string()),
-                }
+        let session_id = self.resolve_session(&variant, &projected).await?;
+        let input = if variant == seam_facts::inputs::prepare_bindings() {
+            let rt = project_str(&projected, &seam_facts::fields::agent_runtime_id())?;
+            let fence = project_u64(&projected, &seam_facts::fields::fence_token())?;
+            let gen_ = project_u64(&projected, &seam_facts::fields::generation())?;
+            let sid = project_str(&projected, &seam_facts::fields::session_id())?;
+            mm_dsl::MeerkatMachineInput::PrepareBindings {
+                agent_runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
+                fence_token: mm_dsl::FenceToken(fence),
+                generation: mm_dsl::Generation(gen_),
+                session_id: mm_dsl::SessionId::from(sid.to_string()),
             }
-            "Ingest" => {
-                // Route binding `work_request_reaches_meerkat` delivers
-                // producer `agent_runtime_id` into the consumer's canonical
-                // `runtime_id` field; producer `work_id` → consumer
-                // `work_id`; producer `origin` → consumer `origin`.
-                let rt = project_str(&projected, "runtime_id")?;
-                let work_id = project_str(&projected, "work_id")?;
-                let origin = project_work_origin(&projected, "origin")?;
-                mm_dsl::MeerkatMachineInput::Ingest {
-                    runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
-                    work_id: mm_dsl::WorkId::from(work_id.to_string()),
-                    origin,
-                }
+        } else if variant == seam_facts::inputs::ingest() {
+            // Route binding `work_request_reaches_meerkat` delivers
+            // producer `agent_runtime_id` into the consumer's canonical
+            // `runtime_id` field; producer `work_id` → consumer
+            // `work_id`; producer `origin` → consumer `origin`.
+            let rt = project_str(&projected, &seam_facts::fields::runtime_id())?;
+            let work_id = project_str(&projected, &seam_facts::fields::work_id())?;
+            let origin = project_work_origin(&projected, &seam_facts::fields::origin())?;
+            mm_dsl::MeerkatMachineInput::Ingest {
+                runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
+                work_id: mm_dsl::WorkId::from(work_id.to_string()),
+                origin,
             }
-            "Retire" => {
-                let sid = project_str(&projected, "session_id")?;
-                mm_dsl::MeerkatMachineInput::Retire {
-                    session_id: mm_dsl::SessionId::from(sid.to_string()),
-                }
+        } else if variant == seam_facts::inputs::retire() {
+            let sid = project_str(&projected, &seam_facts::fields::session_id())?;
+            mm_dsl::MeerkatMachineInput::Retire {
+                session_id: mm_dsl::SessionId::from(sid.to_string()),
             }
-            "Destroy" => {
-                let sid = project_str(&projected, "session_id")?;
-                mm_dsl::MeerkatMachineInput::Destroy {
-                    session_id: mm_dsl::SessionId::from(sid.to_string()),
-                }
+        } else if variant == seam_facts::inputs::destroy() {
+            let sid = project_str(&projected, &seam_facts::fields::session_id())?;
+            mm_dsl::MeerkatMachineInput::Destroy {
+                session_id: mm_dsl::SessionId::from(sid.to_string()),
             }
-            other => {
-                return Err(format!(
-                    "meerkat consumer surface does not accept routed input `{other}`; \
+        } else {
+            return Err(format!(
+                "meerkat consumer surface does not accept routed input `{}`; \
                      only PrepareBindings/Ingest/Retire/Destroy are declared in the \
                      `meerkat_mob_seam` schema",
-                ));
-            }
+                variant.as_str()
+            ));
         };
 
         self.machine
@@ -708,6 +705,48 @@ mod tests {
         assert!(matches!(&log[0].1[0].1, OwnedFieldValue::Str(value) if value == "rt-1"));
         assert_eq!(log[0].1[1].0.as_str(), "fence_token");
         assert!(matches!(log[0].1[1].1, OwnedFieldValue::U64(11)));
+    }
+
+    #[test]
+    fn routed_meerkat_signal_projection_tracks_generated_route_facts() {
+        use crate::generated::meerkat_mob_seam as seam_facts;
+
+        let cases = vec![
+            (
+                MeerkatSeamSignal::RuntimeBound {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-bound".into()),
+                    fence_token: mm_dsl::FenceToken(11),
+                },
+                seam_facts::route_runtime_bound_reaches_mob(),
+            ),
+            (
+                MeerkatSeamSignal::RuntimeRetired {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-retired".into()),
+                    fence_token: mm_dsl::FenceToken(12),
+                },
+                seam_facts::route_runtime_retired_reaches_mob(),
+            ),
+            (
+                MeerkatSeamSignal::RuntimeDestroyed {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-destroyed".into()),
+                    fence_token: mm_dsl::FenceToken(13),
+                },
+                seam_facts::route_runtime_destroyed_reaches_mob(),
+            ),
+        ];
+
+        for (signal, expected_route) in cases {
+            let route = signal.generated_signal_route().expect("generated route");
+            assert_eq!(route, expected_route);
+            for (producer_field, _) in &route.bindings {
+                assert!(
+                    signal.field(producer_field).is_some(),
+                    "generated route `{}` requires producer field `{}`",
+                    route.route_id.as_str(),
+                    producer_field.as_str()
+                );
+            }
+        }
     }
 
     #[tokio::test]

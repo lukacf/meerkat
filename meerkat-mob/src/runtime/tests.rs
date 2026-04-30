@@ -5988,6 +5988,34 @@ fn mob_command_arm_source<'a>(source: &'a str, command: &str) -> &'a str {
 }
 
 #[test]
+fn test_lifecycle_command_admission_arms_do_not_shadow_mob_machine_guards() {
+    let source = include_str!("actor.rs");
+    for (command, input) in [
+        ("Stop", "Stop"),
+        ("ResumeLifecycle", "Resume"),
+        ("Complete", "Complete"),
+        ("Reset", "Reset"),
+    ] {
+        let arm = mob_command_arm_source(source, command);
+        for disallowed in [
+            "require_state(",
+            "require_live_lifecycle_phase(",
+            "require_live_reset_admission(",
+            "require_live_stop_admission(",
+        ] {
+            assert!(
+                !arm.contains(disallowed),
+                "MobCommand::{command} admission must be delegated to MobMachineInput::{input}, not shell `{disallowed}`"
+            );
+        }
+        assert!(
+            arm.contains(&format!("MobMachineInput::{input}")),
+            "MobCommand::{command} must submit MobMachineInput::{input} for command admission before shell mechanics"
+        );
+    }
+}
+
+#[test]
 fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
     let source = include_str!("actor.rs");
     for command in [
@@ -6013,6 +6041,30 @@ fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn test_stopped_missing_member_wire_is_rejected_by_machine_admission() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.stop().await.expect("stop mob");
+
+    let result = handle
+        .wire(
+            AgentIdentity::from("missing-a"),
+            AgentIdentity::from("missing-b"),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "WireMembers must surface the MobMachine stopped-phase admission before shell member lookup: {result:?}"
+    );
 }
 
 #[tokio::test]

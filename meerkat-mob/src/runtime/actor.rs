@@ -1163,48 +1163,6 @@ impl MobActor {
         Ok(effects)
     }
 
-    fn require_live_lifecycle_phase(
-        &self,
-        required: mob_dsl::MobPhase,
-        target: MobState,
-    ) -> Result<(), MobError> {
-        if self.dsl_authority.state.lifecycle_phase == required {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: target,
-            })
-        }
-    }
-
-    fn require_live_reset_admission(&self) -> Result<(), MobError> {
-        if matches!(
-            self.dsl_authority.state.lifecycle_phase,
-            mob_dsl::MobPhase::Running | mob_dsl::MobPhase::Stopped | mob_dsl::MobPhase::Completed
-        ) {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Running,
-            })
-        }
-    }
-
-    fn require_live_stop_admission(&self) -> Result<(), MobError> {
-        if self.dsl_authority.state.lifecycle_phase == mob_dsl::MobPhase::Running
-            && self.dsl_authority.state.active_run_count == 0
-        {
-            Ok(())
-        } else {
-            Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: MobState::Stopped,
-            })
-        }
-    }
-
     fn prepare_dsl_input(
         &self,
         input: mob_dsl::MobMachineInput,
@@ -1268,6 +1226,30 @@ impl MobActor {
             );
             self.invalid_transition_to(target)
         })
+    }
+
+    fn probe_command_admission(
+        &self,
+        input: mob_dsl::MobMachineInput,
+        target: MobState,
+        context: &str,
+    ) -> Result<(), MobError> {
+        self.prepare_command_admission(input, target, context)
+            .map(|_| ())
+    }
+
+    fn probe_idempotent_command_admission(
+        &self,
+        input: mob_dsl::MobMachineInput,
+        target: MobState,
+        context: &str,
+        already_applied: bool,
+    ) -> Result<(), MobError> {
+        match self.probe_command_admission(input, target, context) {
+            Ok(()) => Ok(()),
+            Err(error) if already_applied && self.state() == target => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn apply_command_admission(
@@ -1890,30 +1872,6 @@ impl MobActor {
             topology_revision: 0,
             supervisor_active: coordinator_bound,
         })
-    }
-
-    /// Probe a DSL input against a clone of current state — returns
-    /// `InvalidTransition` if the DSL rejects the input, without
-    /// mutating the live authority. This remains only for non-lifecycle
-    /// policy lookahead paths where the shell must avoid staging unrelated
-    /// side effects before a later live admission seam.
-    ///
-    /// `target` is used purely for the `InvalidTransition` error hint
-    /// (the phase the caller is trying to reach). The DSL rejects on the
-    /// guard level, not a phase comparison.
-    fn probe_mob_machine_input(
-        &self,
-        input: mob_dsl::MobMachineInput,
-        target: MobState,
-    ) -> Result<(), MobError> {
-        let mut probe = mob_dsl::MobMachineAuthority::from_state(self.dsl_authority.state.clone());
-        if mob_dsl::MobMachineMutator::apply(&mut probe, input).is_err() {
-            return Err(MobError::InvalidTransition {
-                from: self.state(),
-                to: target,
-            });
-        }
-        Ok(())
     }
 
     /// Guard that the mob is in one of the `allowed` phases.
@@ -3352,7 +3310,11 @@ impl MobActor {
                     let _ = reply_tx.send(binding);
                 }
                 MobCommand::Stop { reply_tx } => {
-                    let result = match self.require_live_stop_admission() {
+                    let result = match self.probe_command_admission(
+                        mob_dsl::MobMachineInput::Stop,
+                        MobState::Stopped,
+                        "stop_command_admission",
+                    ) {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is stopping").await;
                             self.notify_orchestrator_lifecycle(format!(
@@ -3399,14 +3361,13 @@ impl MobActor {
                                     )));
                                 }
                                 if stop_result.is_ok()
-                                    && let Err(error) = self.apply_dsl_input(
+                                    && let Err(error) = self.apply_command_admission(
                                         mob_dsl::MobMachineInput::Stop,
+                                        MobState::Stopped,
                                         "stop_input",
                                     )
                                 {
-                                    stop_result = Err(MobError::Internal(format!(
-                                        "lifecycle Stop transition failed during stop: {error}"
-                                    )));
+                                    stop_result = Err(error);
                                 }
                             }
                             if stop_result.is_err() {
@@ -3419,9 +3380,11 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::ResumeLifecycle { reply_tx } => {
-                    let result = match self
-                        .require_live_lifecycle_phase(mob_dsl::MobPhase::Stopped, MobState::Running)
-                    {
+                    let result = match self.probe_command_admission(
+                        mob_dsl::MobMachineInput::Resume,
+                        MobState::Running,
+                        "resume_command_admission",
+                    ) {
                         Ok(()) => {
                             // Re-enable checkpointers cancelled during stop.
                             self.provisioner.rearm_all_checkpointers().await;
@@ -3467,14 +3430,13 @@ impl MobActor {
                                     )));
                                 }
                                 if resume_result.is_ok()
-                                    && let Err(error) = self.apply_dsl_input(
+                                    && let Err(error) = self.apply_command_admission(
                                         mob_dsl::MobMachineInput::Resume,
+                                        MobState::Running,
                                         "resume_input",
                                     )
                                 {
-                                    resume_result = Err(MobError::Internal(format!(
-                                        "lifecycle Resume transition failed during resume: {error}"
-                                    )));
+                                    resume_result = Err(error);
                                 }
                                 if let Err(error) = resume_result {
                                     if let Err(stop_error) =
@@ -3505,9 +3467,10 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Complete { reply_tx } => {
-                    let result = match self.require_live_lifecycle_phase(
-                        mob_dsl::MobPhase::Running,
+                    let result = match self.probe_command_admission(
+                        mob_dsl::MobMachineInput::Complete,
                         MobState::Completed,
+                        "complete_command_admission",
                     ) {
                         Ok(()) => {
                             self.fail_all_pending_spawns("mob is completing").await;
@@ -3532,7 +3495,11 @@ impl MobActor {
                 }
                 MobCommand::Reset { reply_tx } => {
                     let prior_state = self.state();
-                    if let Err(error) = self.require_live_reset_admission() {
+                    if let Err(error) = self.probe_command_admission(
+                        mob_dsl::MobMachineInput::Reset,
+                        MobState::Running,
+                        "reset_command_admission",
+                    ) {
                         let _ = reply_tx.send(Err(error));
                         continue;
                     }
@@ -3749,9 +3716,10 @@ impl MobActor {
                     let _ = reply_tx.send(self.state());
                 }
                 MobCommand::Shutdown { reply_tx } => {
-                    if let Err(error) = self.probe_mob_machine_input(
+                    if let Err(error) = self.probe_command_admission(
                         mob_dsl::MobMachineInput::Shutdown,
                         MobState::Stopped,
+                        "shutdown_command_admission",
                     ) {
                         let _ = reply_tx.send(Err(error));
                         continue;
@@ -3782,23 +3750,15 @@ impl MobActor {
                     // abort_all is non-blocking; join_next drains the abort results.
                     self.lifecycle_tasks.abort_all();
                     while self.lifecycle_tasks.join_next().await.is_some() {}
-                    // Wave-c WAR-2: submit `Stop` unconditionally and let the
-                    // authority be the single decider of whether the
-                    // transition is valid for the current phase. A pre-state
-                    // check here would be a shell-side second source of truth
-                    // about when `Stop` is accepted, which the `NoGuardedApply`
-                    // rule forbids. During `Shutdown`, an authority rejection
-                    // of `Stop` is the benign "already past Running" shape and
-                    // is logged at debug level without contaminating the
-                    // shutdown result.
-                    if let Err(error) =
-                        self.apply_dsl_input(mob_dsl::MobMachineInput::Stop, "shutdown_stop")
-                    {
-                        tracing::debug!(
-                            error = %error,
-                            "authority rejected Stop during shutdown (expected when mob is \
-                             already past Running); continuing shutdown",
-                        );
+                    if let Err(error) = self.apply_command_admission(
+                        mob_dsl::MobMachineInput::Shutdown,
+                        MobState::Stopped,
+                        "shutdown_input",
+                    ) {
+                        tracing::warn!(error = %error, "shutdown admission apply failed");
+                        if result.is_ok() {
+                            result = Err(error);
+                        }
                     }
                     let _ = reply_tx.send(result);
                     break;
@@ -5582,6 +5542,23 @@ impl MobActor {
         };
 
         let local_identity = AgentIdentity::from(local.as_str());
+        let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
+        let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
+        let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
+        let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
+        let dsl_has_edge = self
+            .dsl_authority
+            .state
+            .wiring_edges
+            .iter()
+            .any(|existing| existing == &edge);
+        self.probe_idempotent_command_admission(
+            mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
+            MobState::Running,
+            "wire_members_command_admission",
+            dsl_has_edge,
+        )?;
+
         if local_identity == peer_identity {
             return Err(MobError::WiringError(format!(
                 "wire requires distinct members (got '{local}')"
@@ -5589,13 +5566,7 @@ impl MobActor {
         }
         self.ensure_member_not_broken(&local).await?;
 
-        let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
         self.ensure_member_not_broken(&peer_meerkat_id).await?;
-
-        // Project domain identities into the DSL bridging type.
-        let dsl_a = mob_dsl::AgentIdentity::from_domain(&local_identity);
-        let dsl_b = mob_dsl::AgentIdentity::from_domain(&peer_identity);
-        let edge = mob_dsl::WiringEdge::new(dsl_a, dsl_b);
 
         // Pre-flight: roster lookups. Missing members fail fast before
         // any authority mutation.
@@ -5615,12 +5586,6 @@ impl MobActor {
 
         // Idempotent short-circuit when DSL AND roster both already
         // reflect the edge — no trust/notification fan-out needed.
-        let dsl_has_edge = self
-            .dsl_authority
-            .state
-            .wiring_edges
-            .iter()
-            .any(|existing| existing == &edge);
         let roster_has_edge = local_entry.wired_to.contains(&peer_entry.agent_identity)
             && peer_entry.wired_to.contains(&local_entry.agent_identity);
 
@@ -6839,6 +6804,18 @@ impl MobActor {
             )));
         }
         let edge = Self::external_peer_edge(&local_identity, &spec);
+        let dsl_has_edge = self
+            .dsl_authority
+            .state
+            .external_peer_edges
+            .iter()
+            .any(|existing| existing == &edge);
+        self.probe_idempotent_command_admission(
+            mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
+            MobState::Running,
+            "wire_external_peer_command_admission",
+            dsl_has_edge,
+        )?;
 
         // Look up the local member's roster entry and session binding.
         let (member_ref, already_wired_with_same_spec) = {
@@ -7965,12 +7942,11 @@ impl MobActor {
             })
             .await?;
         // Apply Complete input to set active_run_count = 0 and transition to Completed phase
-        self.apply_dsl_input(mob_dsl::MobMachineInput::Complete, "complete_input")
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "lifecycle Complete transition failed during complete: {error}"
-                ))
-            })?;
+        self.apply_command_admission(
+            mob_dsl::MobMachineInput::Complete,
+            MobState::Completed,
+            "complete_input",
+        )?;
         self.ensure_pending_spawn_alignment("handle_complete completion")?;
         self.ensure_flow_tracker_alignment("handle_complete completion")
             .await?;
@@ -8751,12 +8727,11 @@ impl MobActor {
         // transition on the live authority. ResetToRunning owns active/pending
         // run counters and coordinator binding, so reset does not need shell
         // Stop/Resume or orchestrator stop/resume choreography.
-        self.apply_dsl_input(mob_dsl::MobMachineInput::Reset, "reset_to_running")
-            .map_err(|error| {
-                MobError::Internal(format!(
-                    "lifecycle Reset transition failed during reset: {error}"
-                ))
-            })?;
+        self.apply_command_admission(
+            mob_dsl::MobMachineInput::Reset,
+            MobState::Running,
+            "reset_to_running",
+        )?;
         self.ensure_pending_spawn_alignment("handle_reset completion")?;
         self.ensure_flow_tracker_alignment("handle_reset completion")
             .await?;
@@ -8917,7 +8892,7 @@ impl MobActor {
         // need to auto-spawn an absent external target. Probe the declared
         // command before policy resolution so stopped/completed mobs reject
         // without staging spawn side effects.
-        if let Err(error) = self.probe_mob_machine_input(
+        if let Err(error) = self.probe_command_admission(
             mob_dsl::MobMachineInput::SubmitWork {
                 agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(&runtime_id),
                 fence_token: mob_dsl::FenceToken::from_domain(fence_token),
@@ -8925,6 +8900,7 @@ impl MobActor {
                 origin: mob_dsl::WorkOrigin::from(origin),
             },
             MobState::Running,
+            "submit_work_command_admission",
         ) {
             if self.state() != MobState::Running {
                 return Err(error);

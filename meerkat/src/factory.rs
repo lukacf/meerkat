@@ -4202,7 +4202,7 @@ mod tests {
                 env: &ResolverEnvironment,
             ) -> Result<ResolvedConnection, ProviderAuthError> {
                 assert_eq!(binding.connection_ref.realm.as_str(), "env_default");
-                self.auth_lease_handle_seen.store(
+                self.auth_lease_handle_seen.fetch_or(
                     env.auth_lease_handle.is_some(),
                     std::sync::atomic::Ordering::SeqCst,
                 );

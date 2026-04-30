@@ -1060,17 +1060,25 @@ where
         D: serde::Deserializer<'de>,
     {
         let raw = serde_json::Value::deserialize(deserializer)?;
-        if let Some(action) = raw
-            .as_object()
-            .and_then(|object| object.get("action"))
-            .and_then(serde_json::Value::as_str)
-        {
+        if let Some(object) = raw.as_object() {
+            let Some(action_value) = object.get("action") else {
+                return serde_json::from_value(raw)
+                    .map(Self::Set)
+                    .map_err(de::Error::custom);
+            };
+            let action = action_value.as_str().ok_or_else(|| {
+                de::Error::custom("turn metadata override action must be a string")
+            })?;
             return match action {
-                "clear" => Ok(Self::Clear),
+                "clear" => {
+                    if object.contains_key("value") {
+                        return Err(de::Error::custom("clear override cannot include value"));
+                    }
+                    Ok(Self::Clear)
+                }
                 "set" => {
-                    let value = raw
-                        .as_object()
-                        .and_then(|object| object.get("value"))
+                    let value = object
+                        .get("value")
                         .ok_or_else(|| de::Error::custom("set override is missing value"))?;
                     serde_json::from_value(value.clone())
                         .map(Self::Set)

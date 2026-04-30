@@ -193,6 +193,26 @@ fn set_overrides_round_trip_with_explicit_action() {
 }
 
 #[test]
+fn legacy_clear_only_payloads_deserialize_as_clear_overrides() {
+    let parsed: RuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+        "clear_provider_params": true,
+        "clear_connection_ref": true,
+    }))
+    .expect("legacy clear-only payloads remain accepted");
+
+    assert_eq!(
+        parsed.provider_params,
+        Some(TurnMetadataOverride::Clear),
+        "legacy provider clear must become a clear override"
+    );
+    assert_eq!(
+        parsed.connection_ref,
+        Some(TurnMetadataOverride::Clear),
+        "legacy connection clear must become a clear override"
+    );
+}
+
+#[test]
 fn legacy_set_and_clear_payloads_fail_at_boundary() {
     let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
         "provider_params": { "temperature": 0.2 },
@@ -216,6 +236,33 @@ fn legacy_set_and_clear_payloads_fail_at_boundary() {
         err.to_string().contains("clear_connection_ref"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn malformed_tagged_override_payloads_fail_at_boundary() {
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+        "provider_params": {
+            "action": 1,
+            "value": { "temperature": 0.2 },
+        },
+    }))
+    .expect_err("non-string override action must fail");
+    assert!(
+        err.to_string().contains("action"),
+        "unexpected error: {err}"
+    );
+
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+        "connection_ref": {
+            "action": "clear",
+            "value": {
+                "realm": "dev",
+                "binding": "default",
+            },
+        },
+    }))
+    .expect_err("clear override with value must fail");
+    assert!(err.to_string().contains("clear"), "unexpected error: {err}");
 }
 
 #[test]

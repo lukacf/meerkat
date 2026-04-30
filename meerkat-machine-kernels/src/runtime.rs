@@ -598,7 +598,9 @@ impl GeneratedMachineKernel {
             bindings.insert(param.name.as_str().to_owned(), value.clone());
         }
 
-        self.eval_helper(state, &bindings, helper, &helper_transition)
+        let value = self.eval_helper_body(state, &bindings, helper, &helper_transition)?;
+        self.validate_helper_return_value(helper, &value, &helper_transition)?;
+        Ok(value)
     }
 
     fn render_effect(
@@ -1197,9 +1199,29 @@ impl GeneratedMachineKernel {
         helper: &HelperSchema,
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
-        let value = self.eval_expr(state, bindings, &helper.body, transition_name)?;
+        let value = self.eval_helper_body(state, bindings, helper, transition_name)?;
+        self.validate_helper_return_value(helper, &value, transition_name)?;
+        Ok(value)
+    }
+
+    fn eval_helper_body(
+        &self,
+        state: &KernelState,
+        bindings: &BTreeMap<String, KernelValue>,
+        helper: &HelperSchema,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
+        self.eval_expr(state, bindings, &helper.body, transition_name)
+    }
+
+    fn validate_helper_return_value(
+        &self,
+        helper: &HelperSchema,
+        value: &KernelValue,
+        transition_name: &TransitionId,
+    ) -> Result<(), TransitionRefusal> {
         if self.type_contains_constrained_string_enum(&helper.returns)
-            && !self.value_matches_type(&value, &helper.returns)
+            && !self.value_matches_type(value, &helper.returns)
         {
             return Err(self.eval_error(
                 transition_name,
@@ -1209,7 +1231,7 @@ impl GeneratedMachineKernel {
                 ),
             ));
         }
-        Ok(value)
+        Ok(())
     }
 
     fn compare_values(
@@ -1752,6 +1774,25 @@ mod tests {
         });
     }
 
+    fn add_state_backed_operation_status_helper(
+        schema: &mut meerkat_machine_schema::MachineSchema,
+    ) {
+        schema.helpers.push(meerkat_machine_schema::HelperSchema {
+            name: "state_backed_operation_status".to_string(),
+            params: vec![meerkat_machine_schema::FieldSchema {
+                name: field_id("operation_id"),
+                ty: meerkat_machine_schema::TypeRef::String,
+            }],
+            returns: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            body: meerkat_machine_schema::Expr::MapGet {
+                map: Box::new(meerkat_machine_schema::Expr::Field(field_id("op_statuses"))),
+                key: Box::new(meerkat_machine_schema::Expr::Binding(
+                    "operation_id".to_string(),
+                )),
+            },
+        });
+    }
+
     fn add_wrong_domain_operation_kind_helper(schema: &mut meerkat_machine_schema::MachineSchema) {
         schema.helpers.push(meerkat_machine_schema::HelperSchema {
             name: "wrong_domain_operation_kind".to_string(),
@@ -2024,6 +2065,47 @@ mod tests {
             TransitionRefusal::EvaluationError { reason, .. } => {
                 assert!(
                     reason.contains("invalid_operation_status") && reason.contains("return value"),
+                    "helper return refusal should identify the bad helper, got: {reason}"
+                );
+            }
+            other => panic!("expected helper return evaluation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_state_backed_helper_return_value() {
+        let mut schema = meerkat_machine();
+        add_state_backed_operation_status_helper(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let mut state = kernel.initial_state().expect("initial state");
+        state.fields.insert(
+            field_id("op_statuses"),
+            KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("op-bad".to_string()),
+                KernelValue::NamedVariant {
+                    enum_name: enum_type_id("OperationStatus"),
+                    variant: enum_variant_id("Launched"),
+                },
+            )])),
+        );
+
+        let refusal = kernel
+            .evaluate_helper(
+                &state,
+                "state_backed_operation_status",
+                &BTreeMap::from([(
+                    field_id("operation_id"),
+                    KernelValue::String("op-bad".to_string()),
+                )]),
+            )
+            .expect_err("state-backed invalid OperationStatus helper return must not be exposed");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("state_backed_operation_status")
+                        && reason.contains("return value"),
                     "helper return refusal should identify the bad helper, got: {reason}"
                 );
             }

@@ -39,7 +39,8 @@ use crate::peer_correlation::{
 use crate::retry::LlmRetrySchedule;
 use crate::tool_scope::{
     ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
+    ExternalToolSurfaceFailureCause, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
+    ExternalToolSurfaceStagedOp,
 };
 use crate::turn_execution_authority::{
     TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
@@ -764,7 +765,7 @@ pub enum ExternalToolSurfaceInput {
         surface_id: String,
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     },
     CallStarted {
         surface_id: String,
@@ -800,13 +801,14 @@ pub enum ExternalToolSurfaceEffect {
         surface_id: String,
         operation: ExternalToolSurfaceDeltaOperation,
         phase: ExternalToolSurfaceDeltaPhase,
+        cause: Option<ExternalToolSurfaceFailureCause>,
     },
     CloseSurfaceConnection {
         surface_id: String,
     },
     RejectSurfaceCall {
         surface_id: String,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     },
 }
 
@@ -851,7 +853,7 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
         surface_id: String,
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     ) -> Result<(), DslTransitionError>;
 
     fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError>;
@@ -1798,6 +1800,7 @@ pub trait RealtimeProductTurnHandle: Send + Sync {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
+        ExternalToolSurfaceEffect, ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput,
         PeerConversationProjection, PeerResponseProgressProjectionPhase,
         PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
         PeerResponseTerminalFact, PeerResponseTerminalProjectionStatus,
@@ -1805,6 +1808,41 @@ mod tests {
         PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
         peer_response_terminal_context_key,
     };
+    use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
+
+    #[test]
+    fn external_tool_surface_pending_failure_cause_projects_external_code() {
+        let input = ExternalToolSurfaceInput::MarkPendingFailed {
+            surface_id: "alpha".to_owned(),
+            pending_task_sequence: 7,
+            staged_intent_sequence: 11,
+            cause: ExternalToolSurfaceFailureCause::PendingFailed,
+        };
+
+        let ExternalToolSurfaceInput::MarkPendingFailed { cause, .. } = input else {
+            panic!("constructed MarkPendingFailed input");
+        };
+        assert_eq!(cause, ExternalToolSurfaceFailureCause::PendingFailed);
+        assert_eq!(cause.as_str(), "pending_failed");
+        assert_eq!(
+            serde_json::to_value(cause).expect("serialize failure cause"),
+            serde_json::json!("pending_failed")
+        );
+
+        let effect = ExternalToolSurfaceEffect::EmitExternalToolDelta {
+            surface_id: "alpha".to_owned(),
+            operation: ExternalToolSurfaceDeltaOperation::Add,
+            phase: ExternalToolSurfaceDeltaPhase::Failed,
+            cause: Some(cause),
+        };
+        assert!(matches!(
+            effect,
+            ExternalToolSurfaceEffect::EmitExternalToolDelta {
+                cause: Some(ExternalToolSurfaceFailureCause::PendingFailed),
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn peer_terminal_projection_owns_prompt_and_context_key() {

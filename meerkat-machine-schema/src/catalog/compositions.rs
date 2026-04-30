@@ -925,8 +925,8 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                                 source: FeedbackFieldSource::ObligationField(fld_id("staged_intent_sequence")),
                             },
                             FeedbackFieldBinding {
-                                input_field: fld_id("reason"),
-                                source: FeedbackFieldSource::OwnerContext("reason".into()),
+                                input_field: fld_id("cause"),
+                                source: FeedbackFieldSource::OwnerContext("cause".into()),
                             },
                         ],
                     },
@@ -940,7 +940,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
                         "use meerkat_core::handles::{DslTransitionError, ExternalToolSurfaceEffect, ExternalToolSurfaceHandle};".into(),
-                        "use meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation;".into(),
+                        "use meerkat_core::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceFailureCause};".into(),
                     ],
                     // No authority submitters; feedback flows through the
                     // handle only. EffectExtractor emits `extract_obligations`
@@ -978,7 +978,7 @@ fn external_tool_bundle_composition() -> CompositionSchema {
                                 fld_id("surface_id"),
                                 fld_id("pending_task_sequence"),
                                 fld_id("staged_intent_sequence"),
-                                fld_id("reason"),
+                                fld_id("cause"),
                             ]),
                         },
                     ],

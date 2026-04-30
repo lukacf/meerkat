@@ -5,6 +5,7 @@ use crate::tool_catalog::stable_owner_key_for_tool;
 use crate::types::{ToolDef, ToolNameSet};
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -110,6 +111,35 @@ pub enum ExternalToolSurfaceDeltaPhase {
     Draining,
     Failed,
     Forced,
+}
+
+/// Closed cause set for external tool surface failures and call rejections.
+///
+/// These codes are the stable external projection for MCP/router callers. Keep
+/// `as_str` and serde in snake_case because older consumers already observe
+/// these string codes at the surface boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalToolSurfaceFailureCause {
+    PendingFailed,
+    SurfaceDraining,
+    SurfaceUnavailable,
+}
+
+impl ExternalToolSurfaceFailureCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PendingFailed => "pending_failed",
+            Self::SurfaceDraining => "surface_draining",
+            Self::SurfaceUnavailable => "surface_unavailable",
+        }
+    }
+}
+
+impl fmt::Display for ExternalToolSurfaceFailureCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Diagnostic snapshot of one external tool surface entry.

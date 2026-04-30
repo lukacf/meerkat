@@ -1660,6 +1660,47 @@ impl From<ExternalToolSurfaceDeltaPhase>
     }
 }
 
+/// Typed failure cause for an external tool surface. Closed mirror of
+/// [`meerkat_core::tool_scope::ExternalToolSurfaceFailureCause`] so pending
+/// failure and call-rejection causes cross the DSL as data, not string codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ExternalToolSurfaceFailureCause {
+    #[default]
+    PendingFailed,
+    SurfaceDraining,
+    SurfaceUnavailable,
+}
+
+impl From<meerkat_core::tool_scope::ExternalToolSurfaceFailureCause>
+    for ExternalToolSurfaceFailureCause
+{
+    fn from(cause: meerkat_core::tool_scope::ExternalToolSurfaceFailureCause) -> Self {
+        match cause {
+            meerkat_core::tool_scope::ExternalToolSurfaceFailureCause::PendingFailed => {
+                Self::PendingFailed
+            }
+            meerkat_core::tool_scope::ExternalToolSurfaceFailureCause::SurfaceDraining => {
+                Self::SurfaceDraining
+            }
+            meerkat_core::tool_scope::ExternalToolSurfaceFailureCause::SurfaceUnavailable => {
+                Self::SurfaceUnavailable
+            }
+        }
+    }
+}
+
+impl From<ExternalToolSurfaceFailureCause>
+    for meerkat_core::tool_scope::ExternalToolSurfaceFailureCause
+{
+    fn from(cause: ExternalToolSurfaceFailureCause) -> Self {
+        match cause {
+            ExternalToolSurfaceFailureCause::PendingFailed => Self::PendingFailed,
+            ExternalToolSurfaceFailureCause::SurfaceDraining => Self::SurfaceDraining,
+            ExternalToolSurfaceFailureCause::SurfaceUnavailable => Self::SurfaceUnavailable,
+        }
+    }
+}
+
 /// Typed drain-exit reason. Closed mirror of
 /// [`meerkat_core::handles::DrainExitReason`] — replaces the former
 /// literal-string `reason` field on `NotifyDrainExited`.

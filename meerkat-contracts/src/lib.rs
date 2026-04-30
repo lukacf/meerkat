@@ -38,14 +38,16 @@ pub use session_locator::{SessionLocator, SessionLocatorError, format_session_re
 pub use version::ContractVersion;
 pub use wire::supervisor_bridge::{
     BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeCapabilities, BridgeCommand,
-    BridgeDeliveryOutcome, BridgeDeliveryPayload, BridgeDeliveryRejectionCause,
-    BridgeDeliveryResponse, BridgeDestroyResponse, BridgeMemberRuntimeState,
-    BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec, BridgePeerWiringPayload,
-    BridgeReply, BridgeRetireResponse, BridgeSupervisorPayload,
-    SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION,
-    SUPERVISOR_BRIDGE_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS,
-    supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
-    supervisor_bridge_protocol_version_supported, supervisor_bridge_supported_protocol_versions,
+    BridgeCommandDecodeError, BridgeDeliveryOutcome, BridgeDeliveryPayload,
+    BridgeDeliveryRejectionCause, BridgeDeliveryResponse, BridgeDestroyResponse,
+    BridgeMemberRuntimeState, BridgeObservationResponse, BridgePeerConnectivity, BridgePeerSpec,
+    BridgePeerWiringPayload, BridgeProtocolVersion, BridgeReply, BridgeRetireResponse,
+    BridgeSupervisorPayload, SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION,
+    SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+    SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS, UnsupportedBridgeProtocolVersion,
+    decode_bridge_command, supervisor_bridge_current_protocol_version,
+    supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
+    supervisor_bridge_supported_protocol_versions,
 };
 pub use wire::{
     ApprovalActionKind,

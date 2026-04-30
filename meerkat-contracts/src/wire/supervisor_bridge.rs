@@ -6,7 +6,8 @@
 //! crate depends on the other — the contracts crate owns the vocabulary.
 
 use meerkat_core::comms::{PeerAddress, PeerId, PeerName, TrustedPeerDescriptor};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use std::fmt;
 
 /// Comms intent used for all supervisor bridge commands.
 ///
@@ -15,6 +16,107 @@ use serde::{Deserialize, Serialize};
 pub use meerkat_core::comms::SUPERVISOR_BRIDGE_INTENT;
 /// Address query parameter carrying the one-time bind bootstrap token.
 pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootstrap_token";
+/// A supported supervisor bridge wire protocol version.
+///
+/// The JSON representation remains the historic integer so persisted records
+/// and wire payloads do not change shape. Construction is intentionally routed
+/// through this type so unsupported values fail at serde/TryFrom boundaries
+/// instead of being carried deeper as raw integers.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BridgeProtocolVersion(u32);
+
+/// Unsupported supervisor bridge wire protocol version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsupportedBridgeProtocolVersion {
+    raw: u32,
+}
+
+impl fmt::Display for UnsupportedBridgeProtocolVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unsupported supervisor bridge protocol version {} (supported {:?}; default {})",
+            self.raw,
+            BridgeProtocolVersion::SUPPORTED,
+            BridgeProtocolVersion::DEFAULT
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedBridgeProtocolVersion {}
+
+impl BridgeProtocolVersion {
+    /// Protocol with typed rejection causes.
+    pub const V2: Self = Self(2);
+    /// Current protocol version implemented by this bridge contract.
+    pub const CURRENT: Self = Self::V2;
+    /// Default protocol version for new supervisor authority records.
+    pub const DEFAULT: Self = Self::V2;
+    /// Protocol versions accepted by this bridge contract.
+    pub const SUPPORTED: &'static [Self] = &[Self::V2];
+
+    pub const fn is_supported(self) -> bool {
+        matches!(self.0, 2)
+    }
+
+    pub fn supported() -> &'static [Self] {
+        Self::SUPPORTED
+    }
+
+    fn from_supported_u32(raw: u32) -> Result<Self, UnsupportedBridgeProtocolVersion> {
+        match raw {
+            2 => Ok(Self::V2),
+            _ => Err(UnsupportedBridgeProtocolVersion { raw }),
+        }
+    }
+}
+
+impl Default for BridgeProtocolVersion {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl fmt::Debug for BridgeProtocolVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl fmt::Display for BridgeProtocolVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<u32> for BridgeProtocolVersion {
+    type Error = UnsupportedBridgeProtocolVersion;
+
+    fn try_from(raw: u32) -> Result<Self, Self::Error> {
+        Self::from_supported_u32(raw)
+    }
+}
+
+impl Serialize for BridgeProtocolVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for BridgeProtocolVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = u32::deserialize(deserializer)?;
+        Self::from_supported_u32(raw).map_err(de::Error::custom)
+    }
+}
+
 /// Current supervisor bridge wire protocol version.
 ///
 /// Version history:
@@ -24,36 +126,41 @@ pub const SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM: &str = "mob_supervisor_bootst
 ///   `BridgeReply` values through to the transport. Delivery rejections
 ///   carry typed `BridgeDeliveryRejectionCause` data; the string `reason`
 ///   remains diagnostic presentation only.
-pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: u32 = 2;
+pub const SUPERVISOR_BRIDGE_PROTOCOL_VERSION: BridgeProtocolVersion =
+    BridgeProtocolVersion::CURRENT;
 /// Canonical current supervisor bridge protocol version.
-pub const SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION: u32 = SUPERVISOR_BRIDGE_PROTOCOL_VERSION;
+pub const SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION: BridgeProtocolVersion =
+    BridgeProtocolVersion::CURRENT;
 /// Canonical default supervisor bridge protocol version for new authorities.
-pub const SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION: u32 = SUPERVISOR_BRIDGE_PROTOCOL_VERSION;
+pub const SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION: BridgeProtocolVersion =
+    BridgeProtocolVersion::DEFAULT;
 /// Canonical set of protocol versions this runtime/wire contract accepts.
-pub const SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS: &[u32] =
-    &[SUPERVISOR_BRIDGE_PROTOCOL_VERSION];
+pub const SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS: &[BridgeProtocolVersion] =
+    BridgeProtocolVersion::SUPPORTED;
 
 /// Return the canonical current supervisor bridge protocol version.
-pub const fn supervisor_bridge_current_protocol_version() -> u32 {
+pub const fn supervisor_bridge_current_protocol_version() -> BridgeProtocolVersion {
     SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION
 }
 
 /// Return the canonical default supervisor bridge protocol version.
-pub const fn supervisor_bridge_default_protocol_version() -> u32 {
+pub const fn supervisor_bridge_default_protocol_version() -> BridgeProtocolVersion {
     SUPERVISOR_BRIDGE_DEFAULT_PROTOCOL_VERSION
 }
 
 /// Return the canonical list of supported supervisor bridge protocol versions.
-pub fn supervisor_bridge_supported_protocol_versions() -> &'static [u32] {
+pub fn supervisor_bridge_supported_protocol_versions() -> &'static [BridgeProtocolVersion] {
     SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS
 }
 
 /// Return `true` when `protocol_version` is accepted by this bridge contract.
-pub fn supervisor_bridge_protocol_version_supported(protocol_version: u32) -> bool {
-    supervisor_bridge_supported_protocol_versions().contains(&protocol_version)
+pub fn supervisor_bridge_protocol_version_supported(
+    protocol_version: BridgeProtocolVersion,
+) -> bool {
+    protocol_version.is_supported()
 }
 
-fn default_supported_protocol_versions() -> Vec<u32> {
+fn default_supported_protocol_versions() -> Vec<BridgeProtocolVersion> {
     supervisor_bridge_supported_protocol_versions().to_vec()
 }
 
@@ -101,7 +208,7 @@ pub enum BridgeCommand {
 
 impl BridgeCommand {
     /// Protocol version carried by this command's payload.
-    pub fn protocol_version(&self) -> u32 {
+    pub fn protocol_version(&self) -> BridgeProtocolVersion {
         match self {
             Self::BindMember(payload) => payload.protocol_version,
             Self::AuthorizeSupervisor(payload)
@@ -114,6 +221,46 @@ impl BridgeCommand {
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
         }
     }
+}
+
+/// Decode failure for a supervisor bridge command.
+#[derive(Debug)]
+pub enum BridgeCommandDecodeError {
+    UnsupportedProtocolVersion(UnsupportedBridgeProtocolVersion),
+    Invalid(serde_json::Error),
+}
+
+impl fmt::Display for BridgeCommandDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedProtocolVersion(error) => error.fmt(f),
+            Self::Invalid(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for BridgeCommandDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::UnsupportedProtocolVersion(error) => Some(error),
+            Self::Invalid(error) => Some(error),
+        }
+    }
+}
+
+/// Decode a bridge command while preserving typed protocol-version failures.
+pub fn decode_bridge_command(
+    value: serde_json::Value,
+) -> Result<BridgeCommand, BridgeCommandDecodeError> {
+    if let Some(raw) = value
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|raw| u32::try_from(raw).ok())
+    {
+        BridgeProtocolVersion::from_supported_u32(raw)
+            .map_err(BridgeCommandDecodeError::UnsupportedProtocolVersion)?;
+    }
+    serde_json::from_value(value).map_err(BridgeCommandDecodeError::Invalid)
 }
 
 // ---------------------------------------------------------------------------
@@ -200,23 +347,17 @@ pub fn decode_legacy_v1_raw_string_rejection(
         })
 }
 
-/// Decode a bridge rejection according to the command protocol version.
+/// Decode a bridge rejection according to a supported command protocol version.
 ///
-/// Typed replies are accepted for every version so upgraded runtimes can reply
-/// precisely even while a persisted supervisor record still carries v1.
-/// Bare strings are accepted only for the explicit protocol-v1 compatibility
-/// path and never synthesize a typed cause.
+/// Supported supervisors expect typed rejection replies. The legacy v1 bare
+/// string shape remains isolated in [`decode_legacy_v1_raw_string_rejection`]
+/// and is never promoted through this supported-version path.
 pub fn decode_bridge_rejection_reply(
-    protocol_version: u32,
+    protocol_version: BridgeProtocolVersion,
     value: &serde_json::Value,
 ) -> Option<BridgeRejectionReply> {
-    decode_protocol_v2_bridge_rejection(value).or_else(|| {
-        if protocol_version == 1 {
-            decode_legacy_v1_raw_string_rejection(value)
-        } else {
-            None
-        }
-    })
+    let _ = protocol_version;
+    decode_protocol_v2_bridge_rejection(value)
 }
 
 /// Typed vocabulary for why a bridge command was rejected.
@@ -487,7 +628,7 @@ fn parse_peer_address(raw: &str) -> Result<PeerAddress, String> {
 pub struct BridgeSupervisorPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
-    pub protocol_version: u32,
+    pub protocol_version: BridgeProtocolVersion,
 }
 
 /// One-time bootstrap proof exchanged between a mob supervisor and a
@@ -556,7 +697,7 @@ impl std::fmt::Debug for BridgeBootstrapToken {
 pub struct BridgeBindPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
-    pub protocol_version: u32,
+    pub protocol_version: BridgeProtocolVersion,
     /// Expected canonical member `PeerId`; not an Ed25519 public-key string.
     pub expected_peer_id: String,
     pub expected_address: String,
@@ -568,13 +709,13 @@ pub struct BridgeBindPayload {
 pub struct BridgeCapabilities {
     /// Protocol version implemented by the responding member runtime.
     #[serde(default = "supervisor_bridge_current_protocol_version")]
-    pub current_protocol_version: u32,
+    pub current_protocol_version: BridgeProtocolVersion,
     /// Protocol version new supervisors should use for fresh authority records.
     #[serde(default = "supervisor_bridge_default_protocol_version")]
-    pub default_protocol_version: u32,
+    pub default_protocol_version: BridgeProtocolVersion,
     /// Protocol versions accepted by the responding member runtime.
     #[serde(default = "default_supported_protocol_versions")]
-    pub supported_protocol_versions: Vec<u32>,
+    pub supported_protocol_versions: Vec<BridgeProtocolVersion>,
     #[serde(default)]
     pub deliver_member_input: bool,
     #[serde(default)]
@@ -632,7 +773,7 @@ pub struct BridgeAck {
 pub struct BridgeDeliveryPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
-    pub protocol_version: u32,
+    pub protocol_version: BridgeProtocolVersion,
     pub input_id: String,
     pub content: meerkat_core::types::ContentInput,
     pub handling_mode: meerkat_core::types::HandlingMode,
@@ -700,7 +841,7 @@ pub struct BridgeDeliveryResponse {
 pub struct BridgePeerWiringPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
-    pub protocol_version: u32,
+    pub protocol_version: BridgeProtocolVersion,
     pub peer_spec: BridgePeerSpec,
 }
 
@@ -1013,8 +1154,8 @@ mod tests {
     fn bridge_rejection_decoder_isolates_raw_string_to_legacy_v1() {
         let value = json!("legacy rejection");
 
-        let decoded =
-            decode_bridge_rejection_reply(1, &value).expect("legacy raw string should decode");
+        let decoded = decode_legacy_v1_raw_string_rejection(&value)
+            .expect("legacy raw string should decode only through the explicit v1 helper");
 
         assert_eq!(decoded.typed_cause(), None);
         assert_eq!(decoded.reason(), "legacy rejection");
@@ -1023,11 +1164,12 @@ mod tests {
 
     #[test]
     fn bridge_command_reports_payload_protocol_version() {
-        let mut payload = sample_supervisor_payload();
-        payload.protocol_version = 7;
-        let command = BridgeCommand::AuthorizeSupervisor(payload);
+        let command = BridgeCommand::AuthorizeSupervisor(sample_supervisor_payload());
 
-        assert_eq!(command.protocol_version(), 7);
+        assert_eq!(
+            command.protocol_version(),
+            SUPERVISOR_BRIDGE_PROTOCOL_VERSION
+        );
     }
 
     #[test]
@@ -1047,10 +1189,8 @@ mod tests {
         assert!(supervisor_bridge_protocol_version_supported(
             SUPERVISOR_BRIDGE_PROTOCOL_VERSION
         ));
-        assert!(!supervisor_bridge_protocol_version_supported(1));
-        assert!(!supervisor_bridge_protocol_version_supported(
-            SUPERVISOR_BRIDGE_PROTOCOL_VERSION + 1
-        ));
+        assert!(BridgeProtocolVersion::from_supported_u32(1).is_err());
+        assert!(BridgeProtocolVersion::from_supported_u32(999).is_err());
     }
 
     #[test]
@@ -1102,6 +1242,52 @@ mod tests {
         assert!(capabilities.destroy_member);
         assert!(capabilities.wire_member);
         assert!(capabilities.unwire_member);
+    }
+
+    #[test]
+    fn bridge_bind_payload_rejects_unsupported_protocol_version_at_wire_boundary() {
+        let raw = json!({
+            "supervisor": {
+                "name": "mob/__mob_supervisor__",
+                "peer_id": "00000000-0000-0000-0000-00000000bbbb",
+                "address": "inproc://mob/__mob_supervisor__",
+            },
+            "epoch": 7,
+            "protocol_version": 999,
+            "expected_peer_id": "00000000-0000-0000-0000-00000000aaaa",
+            "expected_address": "inproc://member",
+            "bootstrap_token": "tok-raw-string",
+        });
+
+        let error = serde_json::from_value::<BridgeBindPayload>(raw)
+            .expect_err("unsupported protocol versions must fail closed at decode");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported supervisor bridge protocol version"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn bridge_capabilities_reject_unsupported_protocol_versions_at_wire_boundary() {
+        let raw = json!({
+            "current_protocol_version": SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            "default_protocol_version": 999,
+            "supported_protocol_versions": [SUPERVISOR_BRIDGE_PROTOCOL_VERSION],
+            "deliver_member_input": true,
+        });
+
+        let error = serde_json::from_value::<BridgeCapabilities>(raw)
+            .expect_err("unsupported advertised defaults must fail closed at decode");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported supervisor bridge protocol version"),
+            "unexpected error: {error}",
+        );
     }
 
     // -----------------------------------------------------------------------

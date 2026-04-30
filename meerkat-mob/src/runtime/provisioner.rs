@@ -1473,7 +1473,7 @@ impl MultiBackendProvisioner {
     }
 
     fn bridge_rejection_reply(
-        protocol_version: u32,
+        protocol_version: super::bridge_protocol::BridgeProtocolVersion,
         value: &serde_json::Value,
     ) -> Option<super::bridge_protocol::BridgeRejectionReply> {
         super::bridge_protocol::decode_bridge_rejection_reply(protocol_version, value)
@@ -2081,6 +2081,7 @@ mod bridge_rejection_tests {
     use crate::MobError;
     use crate::runtime::bridge_protocol::{
         BridgeRejectionCause, SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        decode_legacy_v1_raw_string_rejection,
     };
     use serde_json::json;
 
@@ -2141,8 +2142,8 @@ mod bridge_rejection_tests {
             )
             .is_none()
         );
-        let legacy = MultiBackendProvisioner::bridge_rejection_reply(1, &value)
-            .expect("legacy raw string should decode only on protocol v1");
+        let legacy = decode_legacy_v1_raw_string_rejection(&value)
+            .expect("legacy raw string should decode only through the explicit v1 helper");
         assert_eq!(legacy.typed_cause(), None);
         assert!(legacy.is_legacy_v1_raw_string());
     }
@@ -2180,8 +2181,8 @@ mod bridge_rejection_tests {
     #[test]
     fn provisioner_legacy_bridge_rejection_error_stays_untyped() {
         let value = json!("legacy rejection");
-        let legacy = MultiBackendProvisioner::bridge_rejection_reply(1, &value)
-            .expect("legacy raw string should decode only on protocol v1");
+        let legacy = decode_legacy_v1_raw_string_rejection(&value)
+            .expect("legacy raw string should decode only through the explicit v1 helper");
 
         let error = MultiBackendProvisioner::bridge_rejection_error(legacy);
 

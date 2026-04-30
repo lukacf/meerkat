@@ -127,10 +127,12 @@ const externalAuthFailure: ExternalAuthFailure = {
   kind: 'refresh_failed',
   detail: 'browser refresh token revoked',
 };
-const legacyExternalAuthResolver: ExternalAuthResolver = (connectionRef) =>
-  `bearer-${connectionRef.realm}-${connectionRef.binding}`;
 const typedExternalAuthResolver: ExternalAuthResolver = async () => externalAuthLease;
 const externalAuthResult: ExternalAuthResolverResult = externalAuthLease;
+// @ts-expect-error bare bearer strings are not structured auth envelopes.
+const rejectedStringExternalAuthResolver: ExternalAuthResolver = () => 'bearer-default-openai';
+// @ts-expect-error resolver results must preserve lease metadata structurally.
+const rejectedStringExternalAuthResult: ExternalAuthResolverResult = 'bearer-default-openai';
 
 const appendSystemContextOptions: AppendSystemContextOptions = {
   text: 'Coordinate with the orchestrator.',
@@ -337,9 +339,10 @@ void authLogoutWithProfile;
 void authBinding;
 void externalAuthLease;
 void externalAuthFailure;
-void legacyExternalAuthResolver;
 void typedExternalAuthResolver;
 void externalAuthResult;
+void rejectedStringExternalAuthResolver;
+void rejectedStringExternalAuthResult;
 void sessionState;
 void appendSystemContextOptions;
 void appendSystemContextResult;

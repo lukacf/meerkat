@@ -78,7 +78,6 @@ pub mod service_ext;
 pub mod silent_intent;
 pub mod store;
 pub mod traits;
-pub(crate) mod user_interrupt;
 
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata as RuntimeStampedTurnMetadata;
 

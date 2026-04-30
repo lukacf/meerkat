@@ -145,6 +145,8 @@ mod llm_reconfigure;
 mod runtime_control;
 mod session_management;
 mod traits;
+#[path = "../user_interrupt.rs"]
+pub(crate) mod user_interrupt;
 mod visibility;
 
 pub use composition::{MeerkatCompositionSignalDispatcher, MeerkatConsumerSurface};
@@ -374,31 +376,6 @@ impl RuntimeSessionEntry {
 }
 
 impl MeerkatMachine {
-    pub(crate) async fn interrupt_handle_for(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>, RuntimeDriverError>
-    {
-        let handle = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            entry.interrupt_handle()
-        };
-
-        let Some(handle) = handle else {
-            let state = self
-                .existing_session_runtime_state(session_id)
-                .await
-                .unwrap_or(RuntimeState::Destroyed);
-            return Err(RuntimeDriverError::NotReady { state });
-        };
-        Ok(handle)
-    }
-
     /// Acquire the per-session mutation gate.
     ///
     /// Returns an `Arc<Mutex<()>>` that the caller must `.lock().await` and

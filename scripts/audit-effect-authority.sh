@@ -61,6 +61,30 @@ EOF
     exit 1
   fi
 
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/user_interrupt.rs" <<'EOF'
+impl Machine {
+    pub async fn hard_cancel_current_run(&self) {
+        let handle = self.interrupt_handle_for(&session_id).await.unwrap();
+        handle.hard_cancel_current_run("bad".to_string()).await.unwrap();
+    }
+
+    pub(crate) async fn hard_cancel_current_run_authorized(&self) {
+        let handle = self.interrupt_handle_for(&session_id).await.unwrap();
+        handle.hard_cancel_current_run("allowed".to_string()).await.unwrap();
+    }
+
+    async fn interrupt_handle_for(&self) {}
+}
+EOF
+  if "$0" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: public hard-cancel live-handle fixture passed" >&2
+    exit 1
+  fi
+
   echo "audit-effect-authority self-test passed"
   exit 0
 fi
@@ -115,8 +139,38 @@ done < <(cd "$root" && rg --files 2>/dev/null | rg '(^|/)peer_admission[^/]*\.rs
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
 if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
-  public_interrupt_bypass="$(rg -n 'self\.hard_cancel_current_run_authorized\(|UserInterruptAuthority::new\(\)' \
-    "$root/meerkat-runtime/src/user_interrupt.rs" 2>/dev/null || true)"
+  strip_authorized_interrupt_body() {
+    awk '
+      function brace_delta(line, opened, closed, copy) {
+        copy = line
+        opened = gsub(/\{/, "{", copy)
+        copy = line
+        closed = gsub(/\}/, "}", copy)
+        return opened - closed
+      }
+      /pub\(crate\)[[:space:]]+async[[:space:]]+fn[[:space:]]+hard_cancel_current_run_authorized[[:space:]]*\(/ {
+        in_authorized = 1
+        depth = 0
+        saw_open = 0
+      }
+      in_authorized {
+        if (index($0, "{") > 0) {
+          saw_open = 1
+        }
+        depth += brace_delta($0)
+        if (saw_open && depth <= 0) {
+          in_authorized = 0
+          depth = 0
+          saw_open = 0
+        }
+        next
+      }
+      { print }
+    ' "$1"
+  }
+  public_interrupt_bypass="$(strip_authorized_interrupt_body "$root/meerkat-runtime/src/user_interrupt.rs" \
+    | rg -n 'self\.hard_cancel_current_run_authorized\(|UserInterruptAuthority::new\(\)|\.hard_cancel_current_run\(|\binterrupt_handle_for\(' \
+    | rg -v 'fn[[:space:]]+interrupt_handle_for[[:space:]]*\(' 2>/dev/null || true)"
   report_matches "public user-interrupt API must route through the command/DSL path" "$public_interrupt_bypass"
 fi
 

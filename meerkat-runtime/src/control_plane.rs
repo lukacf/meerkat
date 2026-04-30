@@ -54,7 +54,7 @@ pub(crate) async fn apply_executor_effect(
 
     if let Err(err) = result {
         tracing::warn!(error = %err, "failed to apply runtime executor effect");
-    };
+    }
 
     if should_stop && let Err(err) = terminalize_async_stop(driver, completions).await {
         tracing::warn!(

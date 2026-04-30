@@ -3403,8 +3403,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission currently routes one control command through the executor seam while requesting immediate processing"
+        0,
+        "attached steered admission should not route a queued executor control command while requesting immediate processing"
     );
 
     allow_finish.notify_waiters();
@@ -3603,8 +3603,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission should still route one control command through the executor seam"
+        0,
+        "attached steered admission should not route a queued executor control command"
     );
 
     allow_finish.notify_waiters();
@@ -3856,7 +3856,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
         "wait_all should track the live operation while attached steered work is active"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(control_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control_calls.load(Ordering::SeqCst), 0);
 
     registry
         .complete_operation(
@@ -3962,7 +3962,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
+        0,
         "isolated attached steered completion should not emit extra executor control commands"
     );
 }
@@ -4122,7 +4122,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
         "wait_all should track the live operation while attached steered work is active"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(control_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control_calls.load(Ordering::SeqCst), 0);
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -5213,8 +5213,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission should still route one control command through the executor seam"
+        0,
+        "attached steered admission should not route a queued executor control command"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5267,8 +5267,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "the explicit stop command should still be queued instead of reaching the executor mid-apply"
+        0,
+        "the explicit stop command should stay queued instead of reaching the executor mid-apply"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5383,8 +5383,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        2,
-        "one admission control plus one deferred stop command should reach the attached executor"
+        1,
+        "only the deferred stop command should reach the attached executor"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),

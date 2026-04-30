@@ -1039,19 +1039,6 @@ mod tests {
             .expect("executor apply should start");
 
         release_event.notify_waiters();
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(
-            cancel_calls.load(Ordering::SeqCst),
-            0,
-            "runtime interrupt should stay deferred while apply is still running"
-        );
-
-        allow_finish.notify_waiters();
-        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
-            .await
-            .expect("executor apply should finish once released");
-        let _ = completion_handle.wait().await;
-
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if cancel_calls.load(Ordering::SeqCst) == 1 {
@@ -1061,7 +1048,19 @@ mod tests {
             }
         })
         .await
-        .expect("speech started should route through runtime interrupt");
+        .expect("speech started should hard-cancel the live run while apply is still running");
+
+        allow_finish.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(1), apply_finished.notified())
+            .await
+            .expect("executor apply should finish once released");
+        let _ = completion_handle.wait().await;
+
+        assert_eq!(
+            cancel_calls.load(Ordering::SeqCst),
+            1,
+            "speech started should route exactly one hard cancel through runtime interrupt"
+        );
 
         let status = <MeerkatMachine as SessionServiceRuntimeExt>::realtime_attachment_status(
             &runtime,

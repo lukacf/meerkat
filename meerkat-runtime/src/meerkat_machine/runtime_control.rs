@@ -6,7 +6,7 @@ impl MeerkatMachine {
         session_id: &SessionId,
         reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        let authority = crate::user_interrupt::UserInterruptAuthority::new();
+        let authority = super::user_interrupt::UserInterruptAuthority::new();
         self.hard_cancel_current_run_authorized(session_id, reason, authority)
             .await
     }
@@ -15,7 +15,7 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let staged = self
+        let staged = match self
             .stage_session_dsl_transition(
                 session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::CancelAfterBoundary {
@@ -24,7 +24,17 @@ impl MeerkatMachine {
                 "CancelAfterBoundary",
             )
             .await
-            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        {
+            Ok(staged) => staged,
+            Err(_) => {
+                return Err(RuntimeDriverError::NotReady {
+                    state: self
+                        .existing_session_runtime_state(session_id)
+                        .await
+                        .unwrap_or(RuntimeState::Destroyed),
+                });
+            }
+        };
         let fact = crate::effect::runtime_effect_fact_from_effects(&staged.effects)
             .map_err(RuntimeDriverError::Internal)?;
 

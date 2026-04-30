@@ -469,7 +469,7 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read();
-    let sendable_kinds = PeerSendability::directory_defaults();
+    let sendable_kinds = peer_sendability_authorized_by_tools(ctx);
     peers
         .peers
         .iter()
@@ -514,6 +514,23 @@ fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
             })
         })
         .collect()
+}
+
+fn peer_sendability_authorized_by_tools(ctx: &ToolContext) -> Vec<PeerSendability> {
+    PeerSendability::directory_defaults()
+        .into_iter()
+        .filter(|kind| {
+            comms_tool_unavailable_reason(ctx, peer_sendability_tool_name(*kind)).is_none()
+        })
+        .collect()
+}
+
+fn peer_sendability_tool_name(kind: PeerSendability) -> &'static str {
+    match kind {
+        PeerSendability::PeerMessage => "send_message",
+        PeerSendability::PeerRequest => "send_request",
+        PeerSendability::PeerResponse => "send_response",
+    }
 }
 
 #[cfg(test)]
@@ -944,7 +961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_peers_runtime_less_payload_uses_typed_directory_defaults() {
+    async fn test_handle_peers_runtime_less_payload_uses_authorized_sendability() {
         let peer_keypair = Keypair::generate();
         let (ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
 
@@ -955,10 +972,7 @@ mod tests {
 
         assert_eq!(peer["peer_id"], peer_id.to_string());
         assert_eq!(peer["source"], "trusted");
-        assert_eq!(
-            peer["sendable_kinds"],
-            json!(["peer_message", "peer_request", "peer_response"])
-        );
+        assert_eq!(peer["sendable_kinds"], json!(["peer_message"]));
         assert_eq!(peer["capabilities"]["version"], 1);
         assert_eq!(peer["capabilities"]["extensions"], json!({}));
         assert_eq!(peer["reachability"], "unknown");

@@ -69,6 +69,8 @@ pub struct AgentBuilder {
 /// required before crossing into core agent construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentBuildPolicyError {
+    #[error("factory policy build requires canonical factory authority")]
+    InvalidBuildAuthority,
     #[error("factory policy build requires an explicit session")]
     MissingSession,
     #[error("factory policy build requires session metadata")]
@@ -87,7 +89,7 @@ pub enum AgentBuildPolicyError {
 #[cfg(feature = "internal-agent-factory-build")]
 #[doc(hidden)]
 pub async fn build_agent_after_factory_policy<C, T, S>(
-    _authority: meerkat_agent_build_authority::AgentFactoryBuildAuthority,
+    authority: meerkat_agent_build_authority::AgentFactoryBuildAuthority,
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
@@ -98,6 +100,9 @@ where
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
+    if !authority.is_canonical_factory_authority() {
+        return Err(AgentBuildPolicyError::InvalidBuildAuthority);
+    }
     builder.validate_factory_policy()?;
     Ok(builder.build_inner(client, tools, store).await)
 }

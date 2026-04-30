@@ -18,15 +18,18 @@ use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
-const AGENT_FACTORY_BUILD_AUTHORITY: meerkat_agent_build_authority::AgentFactoryBuildAuthority =
-    agent_factory_build_authority();
-
 #[allow(unsafe_code)]
-const fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority
-{
-    // SAFETY: this constant is private to the facade factory module and is only
-    // passed after `AgentFactory::build_agent` has composed factory policy.
-    unsafe { meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory() }
+fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    unsafe extern "Rust" {
+        #[link_name = "__meerkat_agent_factory_build_authority_new"]
+        fn mint_agent_factory_build_authority()
+        -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
+    }
+
+    // SAFETY: the bridge symbol is intentionally outside the public Rust API.
+    // This helper is private to the facade factory module and is only called
+    // after `AgentFactory::build_agent` has composed factory policy metadata.
+    unsafe { mint_agent_factory_build_authority() }
 }
 
 /// Default system prompt for wasm32 builds.
@@ -3886,7 +3889,7 @@ impl AgentFactory {
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            AGENT_FACTORY_BUILD_AUTHORITY,
+            agent_factory_build_authority(),
             builder,
             llm_adapter,
             tools,
@@ -4030,7 +4033,7 @@ mod tests {
             .max_tokens_per_turn(64)
             .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
         let result = meerkat_core::agent::build_agent_after_factory_policy(
-            AGENT_FACTORY_BUILD_AUTHORITY,
+            agent_factory_build_authority(),
             builder,
             llm_adapter,
             tools,

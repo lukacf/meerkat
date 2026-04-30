@@ -153,10 +153,16 @@ fn public_factory_policy_finalizer_requires_typed_authority(source: &str) -> boo
     signature_window.contains("meerkat_agent_build_authority::AgentFactoryBuildAuthority")
 }
 
-fn factory_authority_constructor_requires_unsafe(source: &str) -> bool {
-    source.contains("pub const unsafe fn new_for_agent_factory() -> Self")
-        && !source.contains("pub const fn new_for_agent_factory() -> Self")
-        && !source.contains("pub fn new_for_agent_factory() -> Self")
+fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
+    !source.contains("new_for_agent_factory")
+        && !source.contains("pub const fn")
+        && !source.contains("pub unsafe fn")
+        && !source.contains("pub const unsafe fn")
+        && !source.contains("pub fn new")
+        && !source.contains("pub fn mint")
+        && source.matches("pub fn ").count() == 1
+        && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
+        && source.contains("seal: &'static private::Seal")
 }
 
 fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
@@ -306,14 +312,13 @@ meerkat-core = {{ path = "{}" }}
 }
 
 #[test]
-fn downstream_direct_authority_dep_cannot_safely_forge_factory_policy_finalizer()
--> std::io::Result<()> {
+fn downstream_direct_authority_dep_cannot_forge_factory_policy_finalizer() -> std::io::Result<()> {
     if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
         return Ok(());
     }
 
     if run_in_configured_bazel_child(
-        "downstream_direct_authority_dep_cannot_safely_forge_factory_policy_finalizer",
+        "downstream_direct_authority_dep_cannot_forge_factory_policy_finalizer",
         bazel_cargo_check_env(),
     )? {
         return Ok(());
@@ -363,9 +368,10 @@ meerkat-core = {{ path = "{}" }}
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unsafe function")
-            && (stderr.contains("new_for_agent_factory")
-                || stderr.contains("build_agent_after_factory_policy")),
+        stderr.contains("new_for_agent_factory")
+            && (stderr.contains("no function")
+                || stderr.contains("no associated item")
+                || stderr.contains("not found")),
         "downstream direct-authority fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -409,6 +415,8 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("validate_factory_policy()?")
+            && builder.contains("is_canonical_factory_authority()")
+            && builder.contains("AgentBuildPolicyError::InvalidBuildAuthority")
             && !builder.contains("pub fn from_registered_source<A: 'static>")
             && !builder.contains("pub const fn canonical_factory")
             && !builder.contains("pub const fn test_harness")
@@ -486,9 +494,10 @@ fn core_factory_authority_token_is_not_reexported() {
          standalone construction shortcut"
     );
     assert!(
-        factory_authority_constructor_requires_unsafe(&authority),
-        "direct dependency on the authority crate must not provide a safe \
-         constructor that downstream code can use to call the core finalizer"
+        factory_authority_crate_exposes_no_minting_api(&authority),
+        "direct dependency on the authority crate must not provide any public \
+         constructor or minting helper that downstream code can use to call the \
+         core finalizer, including public unsafe helpers"
     );
 }
 

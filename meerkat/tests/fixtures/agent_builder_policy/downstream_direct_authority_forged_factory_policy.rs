@@ -45,8 +45,9 @@ async fn forged_factory_policy_entrypoint() {
     let client: Arc<dyn AgentLlmClient> = fabricated();
     let tools: Arc<dyn AgentToolDispatcher> = fabricated();
     let store: Arc<dyn AgentSessionStore> = fabricated();
-    let authority =
-        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory();
+    let authority = unsafe {
+        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
+    };
 
     let _ = meerkat_core::agent::build_agent_after_factory_policy(
         authority, builder, client, tools, store,

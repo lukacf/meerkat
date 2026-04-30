@@ -310,13 +310,18 @@ async fn build_agent(
     .expect("factory policy test builder")
 }
 
+#[allow(unsafe_code)]
 fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    // SAFETY: this helper is confined to core integration tests that construct
-    // factory-equivalent session policy state before finalizing.
-    #[allow(unsafe_code)]
-    unsafe {
-        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
+    unsafe extern "Rust" {
+        #[link_name = "__meerkat_agent_factory_build_authority_new"]
+        fn mint_agent_factory_build_authority()
+        -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
     }
+
+    // SAFETY: the bridge symbol is intentionally outside the public Rust API.
+    // This helper is confined to core integration tests that construct
+    // factory-equivalent session policy state before finalizing.
+    unsafe { mint_agent_factory_build_authority() }
 }
 
 fn test_hooks() -> TestHookEngine {

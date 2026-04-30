@@ -816,13 +816,18 @@ impl SessionAgentBuilder for RealAgentBuilder {
     }
 }
 
+#[allow(unsafe_code)]
 fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    // SAFETY: session integration tests construct factory-equivalent session
-    // metadata, build state, and runtime turn-state handles before finalizing.
-    #[allow(unsafe_code)]
-    unsafe {
-        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
+    unsafe extern "Rust" {
+        #[link_name = "__meerkat_agent_factory_build_authority_new"]
+        fn mint_agent_factory_build_authority()
+        -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
     }
+
+    // SAFETY: the bridge symbol is intentionally outside the public Rust API.
+    // Session integration tests construct factory-equivalent session metadata,
+    // build state, and runtime turn-state handles before finalizing.
+    unsafe { mint_agent_factory_build_authority() }
 }
 
 fn make_service(builder: MockAgentBuilder) -> Arc<EphemeralSessionService<MockAgentBuilder>> {

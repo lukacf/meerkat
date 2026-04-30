@@ -4718,13 +4718,18 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
     }
 }
 
+#[allow(unsafe_code)]
 fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    // SAFETY: runtime integration tests compose factory-equivalent policy state
-    // before crossing the core factory-policy finalizer.
-    #[allow(unsafe_code)]
-    unsafe {
-        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
+    unsafe extern "Rust" {
+        #[link_name = "__meerkat_agent_factory_build_authority_new"]
+        fn mint_agent_factory_build_authority()
+        -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
     }
+
+    // SAFETY: the bridge symbol is intentionally outside the public Rust API.
+    // Runtime integration tests compose factory-equivalent policy state before
+    // crossing the core factory-policy finalizer.
+    unsafe { mint_agent_factory_build_authority() }
 }
 
 async fn create_test_mob_with_overlay_probe_service(

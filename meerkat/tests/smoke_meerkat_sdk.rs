@@ -1359,11 +1359,18 @@ mod scenario_10_memory {
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
         let authority = {
-            // SAFETY: this smoke test composes factory-equivalent persisted
+            unsafe extern "Rust" {
+                #[link_name = "__meerkat_agent_factory_build_authority_new"]
+                fn mint_agent_factory_build_authority()
+                -> meerkat_agent_build_authority::AgentFactoryBuildAuthority;
+            }
+
+            // SAFETY: the bridge symbol is intentionally outside the public
+            // Rust API. This smoke test composes factory-equivalent persisted
             // session/build metadata and runtime turn-state handle above.
             #[allow(unsafe_code)]
             unsafe {
-                meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
+                mint_agent_factory_build_authority()
             }
         };
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(

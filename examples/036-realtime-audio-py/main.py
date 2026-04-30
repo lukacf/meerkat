@@ -77,6 +77,13 @@ class SharedState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+@dataclass
+class TextProbeSignals:
+    tool_completed: asyncio.Event = field(default_factory=asyncio.Event)
+    turn_completed: asyncio.Event = field(default_factory=asyncio.Event)
+    channel_closed: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 class TranscriptPrinter:
     def __init__(self) -> None:
         self._partial_user = ""
@@ -417,7 +424,7 @@ async def microphone_sender(
 
 
 async def speaker_player(
-    audio_format: AudioFormat,
+    audio_format: AudioFormat | None,
     output_queue: "asyncio.Queue[bytes | None]",
     args: argparse.Namespace,
     printer: TranscriptPrinter,
@@ -433,6 +440,9 @@ async def speaker_player(
         raise RuntimeError(
             "Missing audio dependency. Install it with: python3 -m pip install -r requirements.txt"
         ) from exc
+
+    if audio_format is None:
+        raise RuntimeError("speaker playback requires realtime audio output capabilities")
 
     printer.status(f"speaker open: {audio_format.sample_rate_hz} Hz, {audio_format.channels} channel(s)")
     with sd.RawOutputStream(
@@ -453,16 +463,21 @@ async def realtime_receiver(
     output_queue: "asyncio.Queue[bytes | None]",
     printer: TranscriptPrinter,
     stop_event: asyncio.Event,
+    text_probe_signals: TextProbeSignals | None = None,
 ) -> None:
     while not stop_event.is_set():
         frame = await connection.recv()
         if frame is None:
             printer.status("realtime websocket closed")
+            if text_probe_signals is not None:
+                text_probe_signals.channel_closed.set()
             stop_event.set()
             break
         frame_type = frame.get("type")
         if frame_type == "channel.closed":
             printer.status(f"channel closed: {frame.get('reason', 'done')}")
+            if text_probe_signals is not None:
+                text_probe_signals.channel_closed.set()
             stop_event.set()
             break
         if frame_type == "channel.error":
@@ -491,12 +506,16 @@ async def realtime_receiver(
         elif event_type == "turn_completed":
             printer.turn_completed()
             printer.status("turn completed")
+            if text_probe_signals is not None:
+                text_probe_signals.turn_completed.set()
         elif event_type == "interrupted":
             printer.status("interrupted")
         elif event_type == "tool_call_requested":
             printer.tool(f"requested {event.get('tool_name')} ({event.get('call_id')})")
         elif event_type == "tool_call_completed":
             printer.tool(f"completed {event.get('call_id')}")
+            if text_probe_signals is not None:
+                text_probe_signals.tool_completed.set()
         elif event_type == "tool_call_failed":
             printer.tool(f"failed {event.get('call_id')}: {event.get('error')}")
         elif event_type == "tool_call_timed_out":
@@ -510,7 +529,40 @@ async def realtime_receiver(
     await output_queue.put(None)
 
 
-async def run_text_probe(connection: Any, printer: TranscriptPrinter, stop_event: asyncio.Event) -> None:
+async def wait_for_first_event(
+    waits: dict[str, asyncio.Event],
+    *,
+    timeout_s: float,
+) -> str:
+    tasks = {
+        asyncio.create_task(event.wait(), name=f"wait-{name}"): name
+        for name, event in waits.items()
+    }
+    try:
+        done, _pending = await asyncio.wait(
+            set(tasks),
+            timeout=timeout_s,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            raise TimeoutError(f"timed out after {timeout_s:.0f}s")
+        for task in done:
+            if task.result():
+                return tasks[task]
+        raise RuntimeError("wait completed without a matching event")
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def run_text_probe(
+    connection: Any,
+    printer: TranscriptPrinter,
+    stop_event: asyncio.Event,
+    signals: TextProbeSignals,
+    timeout_s: float = 45.0,
+) -> None:
     await connection.send_input(
         {
             "kind": "text_chunk",
@@ -520,13 +572,61 @@ async def run_text_probe(connection: Any, printer: TranscriptPrinter, stop_event
             ),
         }
     )
-    await asyncio.sleep(8.0)
+    await connection.commit_turn()
+    printer.status("text probe sent; waiting for a tool or turn completion event")
+    completed = await wait_for_first_event(
+        {
+            "tool completion": signals.tool_completed,
+            "turn completion": signals.turn_completed,
+            "channel close": signals.channel_closed,
+        },
+        timeout_s=timeout_s,
+    )
+    if completed == "channel close":
+        if signals.tool_completed.is_set():
+            completed = "tool completion"
+        elif signals.turn_completed.is_set():
+            completed = "turn completion"
+    if completed == "channel close":
+        raise RuntimeError("text probe channel closed before a tool or turn completion event")
+    printer.status(f"text probe observed {completed}")
     stop_event.set()
 
 
 async def wait_for_enter(stop_event: asyncio.Event) -> None:
-    await asyncio.to_thread(sys.stdin.readline)
-    stop_event.set()
+    loop = asyncio.get_running_loop()
+    try:
+        stdin_fd = sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        await stop_event.wait()
+        return
+
+    entered = loop.create_future()
+    stop_waiter = asyncio.create_task(stop_event.wait(), name="wait-stop-for-stdin")
+
+    def on_stdin_ready() -> None:
+        with contextlib.suppress(Exception):
+            sys.stdin.readline()
+        if not entered.done():
+            entered.set_result(None)
+
+    try:
+        loop.add_reader(stdin_fd, on_stdin_ready)
+    except (NotImplementedError, OSError, RuntimeError):
+        await stop_event.wait()
+        return
+
+    try:
+        done, _pending = await asyncio.wait(
+            {entered, stop_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if entered in done:
+            stop_event.set()
+    finally:
+        loop.remove_reader(stdin_fd)
+        stop_waiter.cancel()
+        await asyncio.gather(stop_waiter, return_exceptions=True)
 
 
 def require_audio_capabilities(open_info: Any) -> tuple[AudioFormat, AudioFormat]:
@@ -542,6 +642,44 @@ def require_audio_capabilities(open_info: Any) -> tuple[AudioFormat, AudioFormat
     input_audio = AudioFormat.from_wire(input_format)
     output_audio = AudioFormat.from_wire(output_format, fallback=input_audio)
     return input_audio, output_audio
+
+
+def require_text_capabilities(open_info: Any) -> None:
+    capabilities = read_field(open_info, "capabilities", {})
+    input_kinds = set(read_field(capabilities, "input_kinds", []) or [])
+    if "text" not in input_kinds:
+        raise RuntimeError(
+            "Realtime text input is unavailable for this channel. Check the realtime "
+            "capabilities exposed by rkat-rpc before using --text-probe."
+        )
+
+
+async def wait_for_stop_or_task_failure(
+    stop_event: asyncio.Event,
+    tasks: list[asyncio.Task[Any]],
+) -> None:
+    stop_waiter = asyncio.create_task(stop_event.wait(), name="wait-stop")
+    pending: set[asyncio.Task[Any]] = {stop_waiter, *tasks}
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            if stop_waiter in done:
+                return
+            for task in done:
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    stop_event.set()
+                    raise RuntimeError(f"{task.get_name()} failed: {exc}") from exc
+                if not stop_event.is_set():
+                    stop_event.set()
+                    raise RuntimeError(f"{task.get_name()} stopped unexpectedly")
+            if stop_event.is_set():
+                return
+    finally:
+        stop_waiter.cancel()
+        await asyncio.gather(stop_waiter, return_exceptions=True)
 
 
 async def async_main(argv: list[str] | None = None) -> int:
@@ -564,33 +702,66 @@ async def async_main(argv: list[str] | None = None) -> int:
         "realm_id": args.realm,
         "isolated": args.realm is None,
     }
-    await client.connect(**connect_kwargs)
-
     output_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
     connection = None
     tasks: list[asyncio.Task[Any]] = []
+    text_probe_signals = TextProbeSignals() if args.text_probe else None
 
     try:
+        await client.connect(**connect_kwargs)
         client.require_capability("mob")
         state.mob = await create_voice_mob(client, args, printer)
 
         channel = RealtimeChannel.mob_member(client, state.mob.id, HOST_IDENTITY)
         open_info = await channel.open_info()
-        input_audio, output_audio = require_audio_capabilities(open_info)
-        connection = await channel.connect_with_open_info(open_info)
-        printer.status("audio channel ready; start talking. Press Enter or Ctrl-C to stop.")
-
-        tasks.append(asyncio.create_task(realtime_receiver(connection, output_queue, printer, stop_event)))
-        tasks.append(asyncio.create_task(speaker_player(output_audio, output_queue, args, printer)))
-        tasks.append(asyncio.create_task(poll_helpers(state, printer, stop_event)))
-        tasks.append(asyncio.create_task(delegation_worker(state, printer, stop_event)))
-        tasks.append(asyncio.create_task(wait_for_enter(stop_event)))
+        input_audio: AudioFormat | None = None
+        output_audio: AudioFormat | None = None
         if args.text_probe:
-            tasks.append(asyncio.create_task(run_text_probe(connection, printer, stop_event)))
+            require_text_capabilities(open_info)
         else:
-            tasks.append(asyncio.create_task(microphone_sender(connection, input_audio, args, printer, stop_event)))
+            input_audio, output_audio = require_audio_capabilities(open_info)
+        connection = await channel.connect_with_open_info(open_info)
+        if args.text_probe:
+            printer.status("realtime channel ready; running text probe")
+        else:
+            printer.status("audio channel ready; start talking. Press Enter or Ctrl-C to stop.")
 
-        await stop_event.wait()
+        tasks.append(
+            asyncio.create_task(
+                realtime_receiver(connection, output_queue, printer, stop_event, text_probe_signals),
+                name="realtime receiver",
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                speaker_player(output_audio, output_queue, args, printer),
+                name="speaker",
+            )
+        )
+        tasks.append(asyncio.create_task(poll_helpers(state, printer, stop_event), name="helper poller"))
+        tasks.append(asyncio.create_task(delegation_worker(state, printer, stop_event), name="delegation worker"))
+        if not args.text_probe:
+            tasks.append(asyncio.create_task(wait_for_enter(stop_event), name="stdin waiter"))
+        if args.text_probe:
+            if text_probe_signals is None:
+                raise RuntimeError("text probe signals were not initialized")
+            tasks.append(
+                asyncio.create_task(
+                    run_text_probe(connection, printer, stop_event, text_probe_signals),
+                    name="text probe",
+                )
+            )
+        else:
+            if input_audio is None:
+                raise RuntimeError("microphone streaming requires realtime audio input capabilities")
+            tasks.append(
+                asyncio.create_task(
+                    microphone_sender(connection, input_audio, args, printer, stop_event),
+                    name="microphone",
+                )
+            )
+
+        await wait_for_stop_or_task_failure(stop_event, tasks)
     finally:
         stop_event.set()
         if connection is not None:

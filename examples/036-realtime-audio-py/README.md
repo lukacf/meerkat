@@ -61,8 +61,9 @@ python3 main.py --realm realtime-demo
 ```
 
 `--text-probe` keeps the realtime WebSocket path but sends one text chunk
-instead of opening local audio devices. It is useful for checking runtime
-plumbing on machines without a microphone.
+instead of opening local audio devices. It waits for a realtime tool completion
+or turn completion event, so it is useful for checking runtime plumbing on
+machines without a microphone.
 
 ## Troubleshooting
 

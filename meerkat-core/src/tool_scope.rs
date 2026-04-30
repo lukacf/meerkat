@@ -1034,12 +1034,12 @@ impl ToolScope {
                     message: err.to_string(),
                 })?;
         let names = authorities.keys().cloned().collect::<BTreeSet<_>>();
-        let extended = visibility_state
-            .staged_requested_deferred_names
+        let staged_requested_deferred_names = visibility_state.staged_requested_deferred_names;
+        let mut combined_witnesses = visibility_state.requested_witnesses;
+        let extended = staged_requested_deferred_names
             .union(&names)
             .cloned()
             .collect::<BTreeSet<_>>();
-        let mut combined_witnesses = visibility_state.requested_witnesses.clone();
         combined_witnesses.extend(authorities.clone());
         let catalog = deferred_authority_catalog_for_base_tools(
             &state.base_tools,

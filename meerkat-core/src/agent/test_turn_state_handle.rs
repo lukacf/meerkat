@@ -173,7 +173,7 @@ impl LocalState {
                 if !self.guard_run_matches(run_id) {
                     return Err(invalid(phase, &input));
                 }
-                fields.admitted_content_shape = Some(admitted_content_shape.clone());
+                fields.admitted_content_shape = Some(*admitted_content_shape);
                 fields.vision_enabled = *vision_enabled;
                 fields.image_tool_results_enabled = *image_tool_results_enabled;
                 match fields.primitive_kind {
@@ -557,7 +557,7 @@ fn ensure_active_conversation_run(state: &mut LocalState) -> Result<(), DslTrans
         state
             .apply(TurnExecutionInput::PrimitiveApplied {
                 run_id,
-                admitted_content_shape: ContentShape("conversation".to_string()),
+                admitted_content_shape: ContentShape::Conversation,
                 vision_enabled: false,
                 image_tool_results_enabled: false,
             })
@@ -627,7 +627,7 @@ impl TurnStateHandle for TestTurnStateHandle {
         &self,
         run_id: RunId,
         primitive_kind: crate::turn_execution_authority::TurnPrimitiveKind,
-        _admitted_content_shape: String,
+        _admitted_content_shape: ContentShape,
         _vision_enabled: bool,
         _image_tool_results_enabled: bool,
         _max_extraction_retries: u64,
@@ -653,7 +653,7 @@ impl TurnStateHandle for TestTurnStateHandle {
     fn start_immediate_append(
         &self,
         run_id: RunId,
-        _admitted_content_shape: String,
+        _admitted_content_shape: ContentShape,
     ) -> Result<(), DslTransitionError> {
         self.lock_state()?
             .apply(TurnExecutionInput::StartImmediateAppend { run_id })
@@ -662,7 +662,7 @@ impl TurnStateHandle for TestTurnStateHandle {
     fn start_immediate_context(
         &self,
         run_id: RunId,
-        _admitted_content_shape: String,
+        _admitted_content_shape: ContentShape,
     ) -> Result<(), DslTransitionError> {
         self.lock_state()?
             .apply(TurnExecutionInput::StartImmediateContext { run_id })
@@ -705,7 +705,7 @@ impl TurnStateHandle for TestTurnStateHandle {
         let run_id = active_run_or_err(&guard, "primitive_applied")?;
         guard.apply(TurnExecutionInput::PrimitiveApplied {
             run_id,
-            admitted_content_shape: ContentShape("conversation".to_string()),
+            admitted_content_shape: ContentShape::Conversation,
             vision_enabled: false,
             image_tool_results_enabled: false,
         })
@@ -910,10 +910,7 @@ impl TurnStateHandle for TestTurnStateHandle {
                 TurnPrimitiveKind::None => None,
                 other => Some(other),
             },
-            admitted_content_shape: fields
-                .admitted_content_shape
-                .as_ref()
-                .map(|cs| cs.0.clone()),
+            admitted_content_shape: fields.admitted_content_shape,
             vision_enabled: fields.vision_enabled,
             image_tool_results_enabled: fields.image_tool_results_enabled,
             tool_calls_pending: u64::from(fields.tool_calls_pending),
@@ -977,7 +974,7 @@ mod tests {
             .start_conversation_run(
                 run_id,
                 TurnPrimitiveKind::ConversationTurn,
-                "conversation".to_string(),
+                ContentShape::Conversation,
                 false,
                 false,
                 2,

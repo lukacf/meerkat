@@ -1404,6 +1404,73 @@ impl From<TurnPrimitiveKind> for meerkat_core::turn_execution_authority::TurnPri
     }
 }
 
+/// Typed turn primitive content shape. Closed mirror of
+/// [`meerkat_core::turn_execution_authority::ContentShape`] so the runtime DSL
+/// carries the same contract instead of local string labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ContentShape {
+    #[default]
+    Conversation,
+    ConversationAndContext,
+    Context,
+    Empty,
+    ImmediateAppend,
+    ImmediateContext,
+}
+
+impl ContentShape {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::ConversationAndContext => "conversation+context",
+            Self::Context => "context",
+            Self::Empty => "empty",
+            Self::ImmediateAppend => "immediate_append",
+            Self::ImmediateContext => "immediate_context",
+        }
+    }
+}
+
+impl std::fmt::Display for ContentShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<meerkat_core::turn_execution_authority::ContentShape> for ContentShape {
+    fn from(shape: meerkat_core::turn_execution_authority::ContentShape) -> Self {
+        match shape {
+            meerkat_core::turn_execution_authority::ContentShape::Conversation => {
+                Self::Conversation
+            }
+            meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext => {
+                Self::ConversationAndContext
+            }
+            meerkat_core::turn_execution_authority::ContentShape::Context => Self::Context,
+            meerkat_core::turn_execution_authority::ContentShape::Empty => Self::Empty,
+            meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend => {
+                Self::ImmediateAppend
+            }
+            meerkat_core::turn_execution_authority::ContentShape::ImmediateContext => {
+                Self::ImmediateContext
+            }
+        }
+    }
+}
+
+impl From<ContentShape> for meerkat_core::turn_execution_authority::ContentShape {
+    fn from(shape: ContentShape) -> Self {
+        match shape {
+            ContentShape::Conversation => Self::Conversation,
+            ContentShape::ConversationAndContext => Self::ConversationAndContext,
+            ContentShape::Context => Self::Context,
+            ContentShape::Empty => Self::Empty,
+            ContentShape::ImmediateAppend => Self::ImmediateAppend,
+            ContentShape::ImmediateContext => Self::ImmediateContext,
+        }
+    }
+}
+
 /// Typed turn terminal outcome. Closed mirror of
 /// [`meerkat_core::turn_execution_authority::TurnTerminalOutcome`] — replaces
 /// the former literal-string `terminal_outcome` field.

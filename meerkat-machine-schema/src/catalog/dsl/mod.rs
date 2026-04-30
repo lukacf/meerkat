@@ -188,6 +188,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("AgentRuntimeId"),
             NamedTypeBinding::string("CommsRuntimeId"),
             NamedTypeBinding::string("ConnectionRef"),
+            NamedTypeBinding::string("ContentShape"),
             NamedTypeBinding::string_enum(
                 "DrainExitReason",
                 &[

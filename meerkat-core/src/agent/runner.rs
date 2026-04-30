@@ -17,7 +17,7 @@ use crate::tool_scope::{
     ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceSnapshot, ToolFilter, ToolScopeRevision,
     ToolScopeStageError,
 };
-use crate::turn_execution_authority::{ContentShape, TurnPrimitiveKind, TurnTerminalOutcome};
+use crate::turn_execution_authority::{TurnPrimitiveKind, TurnTerminalOutcome};
 use crate::types::{ContentInput, Message, RunResult, ToolCallView, ToolNameSet};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
@@ -91,7 +91,7 @@ fn runtime_execution_snapshot(
         turn_phase,
         active_run_id: snapshot.active_run_id,
         primitive_kind,
-        admitted_content_shape: snapshot.admitted_content_shape.map(ContentShape),
+        admitted_content_shape: snapshot.admitted_content_shape,
         vision_enabled: snapshot.vision_enabled,
         image_tool_results_enabled: snapshot.image_tool_results_enabled,
         tool_calls_pending: u32::try_from(snapshot.tool_calls_pending).ok()?,

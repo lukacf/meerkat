@@ -787,6 +787,20 @@ pub enum TurnPrimitiveKind {
     ImmediateContextAppend,
 }
 
+/// Typed turn primitive content shape. Closed mirror of
+/// [`meerkat_core::turn_execution_authority::ContentShape`] — replaces the
+/// former literal-string `admitted_content_shape` state and input fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ContentShape {
+    #[default]
+    Conversation,
+    ConversationAndContext,
+    Context,
+    Empty,
+    ImmediateAppend,
+    ImmediateContext,
+}
+
 /// Typed turn terminal outcome. Closed mirror of
 /// [`meerkat_core::turn_execution_authority::TurnTerminalOutcome`] — replaces
 /// the former literal-string `terminal_outcome` field.
@@ -1303,7 +1317,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             pre_run_phase: Option<Enum<PreRunPhase>>,
             turn_phase: TurnPhase,
             primitive_kind: Option<Enum<TurnPrimitiveKind>>,
-            admitted_content_shape: Option<String>,
+            admitted_content_shape: Option<Enum<ContentShape>>,
             vision_enabled: bool,
             image_tool_results_enabled: bool,
             tool_calls_pending: u64,
@@ -1898,13 +1912,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             StartConversationRun {
                 run_id: RunId,
                 primitive_kind: Enum<TurnPrimitiveKind>,
-                admitted_content_shape: String,
+                admitted_content_shape: Enum<ContentShape>,
                 vision_enabled: bool,
                 image_tool_results_enabled: bool,
                 max_extraction_retries: u64,
             },
-            StartImmediateAppend { run_id: RunId, admitted_content_shape: String },
-            StartImmediateContext { run_id: RunId, admitted_content_shape: String },
+            StartImmediateAppend { run_id: RunId, admitted_content_shape: Enum<ContentShape> },
+            StartImmediateContext { run_id: RunId, admitted_content_shape: Enum<ContentShape> },
             PrimitiveApplied,
             LlmReturnedToolCalls { tool_count: u64 },
             LlmReturnedTerminal,

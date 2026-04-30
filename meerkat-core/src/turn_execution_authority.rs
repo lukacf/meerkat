@@ -146,9 +146,44 @@ impl TurnFailureReason {
     }
 }
 
-/// Content shape admitted by the primitive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentShape(pub String);
+/// Content shape admitted by the turn primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ContentShape {
+    Conversation,
+    ConversationAndContext,
+    Context,
+    Empty,
+    ImmediateAppend,
+    ImmediateContext,
+}
+
+impl ContentShape {
+    pub const fn from_staged_presence(has_conversation: bool, has_context: bool) -> Self {
+        match (has_conversation, has_context) {
+            (true, true) => Self::ConversationAndContext,
+            (true, false) => Self::Conversation,
+            (false, true) => Self::Context,
+            (false, false) => Self::Empty,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::ConversationAndContext => "conversation+context",
+            Self::Context => "context",
+            Self::Empty => "empty",
+            Self::ImmediateAppend => "immediate_append",
+            Self::ImmediateContext => "immediate_context",
+        }
+    }
+}
+
+impl std::fmt::Display for ContentShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Typed inputs describing turn-execution events.
 #[derive(Debug, Clone)]
@@ -314,5 +349,22 @@ mod tests {
             terminal_outcome_for_budget_exceeded(exceeded(BudgetDimension::Time)),
             TurnTerminalOutcome::TimeBudgetExceeded
         );
+    }
+
+    #[test]
+    fn content_shape_is_closed_contract_with_stable_wire_labels() {
+        let shapes = [
+            (ContentShape::Conversation, "conversation"),
+            (ContentShape::ConversationAndContext, "conversation+context"),
+            (ContentShape::Context, "context"),
+            (ContentShape::Empty, "empty"),
+            (ContentShape::ImmediateAppend, "immediate_append"),
+            (ContentShape::ImmediateContext, "immediate_context"),
+        ];
+
+        for (shape, label) in shapes {
+            assert_eq!(shape.as_str(), label);
+            assert_eq!(shape.to_string(), label);
+        }
     }
 }

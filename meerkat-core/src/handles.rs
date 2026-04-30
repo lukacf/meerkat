@@ -15,8 +15,7 @@
 //! `meerkat-core` — each maps 1-to-1 with the typed DSL state that
 //! [`meerkat-runtime::meerkat_machine`] owns. Free-form `String` values are
 //! reserved for opaque identifiers (surface ids, binding keys, error
-//! messages) and for DSL fields that are still literal-string today; those
-//! will retype in lockstep with their DSL slot.
+//! messages).
 //!
 //! Return type is `Result<(), DslTransitionError>`. The DSL decides legality;
 //! phase/field reads happen elsewhere (direct DSL state accessors, not via
@@ -43,7 +42,7 @@ use crate::tool_scope::{
     ExternalToolSurfaceStagedOp,
 };
 use crate::turn_execution_authority::{
-    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    ContentShape, TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
 };
 use crate::types::SessionId;
 
@@ -562,7 +561,7 @@ pub struct TurnStateSnapshot {
     /// Typed primitive kind recorded by the DSL (dogma #5, #19 — no stringly
     /// discriminants). `None` means no primitive is currently in flight.
     pub primitive_kind: Option<TurnPrimitiveKind>,
-    pub admitted_content_shape: Option<String>,
+    pub admitted_content_shape: Option<ContentShape>,
     pub vision_enabled: bool,
     pub image_tool_results_enabled: bool,
     pub tool_calls_pending: u64,
@@ -588,7 +587,7 @@ pub trait TurnStateHandle: Send + Sync {
         &self,
         run_id: RunId,
         primitive_kind: TurnPrimitiveKind,
-        admitted_content_shape: String,
+        admitted_content_shape: ContentShape,
         vision_enabled: bool,
         image_tool_results_enabled: bool,
         max_extraction_retries: u64,
@@ -597,13 +596,13 @@ pub trait TurnStateHandle: Send + Sync {
     fn start_immediate_append(
         &self,
         run_id: RunId,
-        admitted_content_shape: String,
+        admitted_content_shape: ContentShape,
     ) -> Result<(), DslTransitionError>;
 
     fn start_immediate_context(
         &self,
         run_id: RunId,
-        admitted_content_shape: String,
+        admitted_content_shape: ContentShape,
     ) -> Result<(), DslTransitionError>;
 
     fn primitive_applied(&self) -> Result<(), DslTransitionError>;

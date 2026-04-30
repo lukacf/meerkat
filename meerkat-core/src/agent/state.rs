@@ -587,7 +587,7 @@ where
             TurnExecutionInput::StartConversationRun { run_id } => handle.start_conversation_run(
                 run_id.clone(),
                 TurnPrimitiveKind::ConversationTurn,
-                "conversation".to_string(),
+                ContentShape::Conversation,
                 false,
                 false,
                 0,
@@ -598,7 +598,7 @@ where
                 Ok(())
             }
             TurnExecutionInput::StartImmediateAppend { run_id } => {
-                handle.start_immediate_append(run_id.clone(), "immediate_append".to_string())
+                handle.start_immediate_append(run_id.clone(), ContentShape::ImmediateAppend)
             }
             TurnExecutionInput::StartImmediateContext { run_id }
                 if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
@@ -606,7 +606,7 @@ where
                 Ok(())
             }
             TurnExecutionInput::StartImmediateContext { run_id } => {
-                handle.start_immediate_context(run_id.clone(), "immediate_context".to_string())
+                handle.start_immediate_context(run_id.clone(), ContentShape::ImmediateContext)
             }
             TurnExecutionInput::PrimitiveApplied {
                 run_id: _,
@@ -1025,7 +1025,7 @@ where
         // PrimitiveApplied transitions ApplyingPrimitive -> CallingLlm
         let t = self.apply_turn_input(TurnExecutionInput::PrimitiveApplied {
             run_id: run_id.clone(),
-            admitted_content_shape: ContentShape("conversation".to_string()),
+            admitted_content_shape: ContentShape::Conversation,
             vision_enabled: false,
             image_tool_results_enabled: false,
         })?;

@@ -1711,6 +1711,14 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
                 "ImmediateAppend",
                 "ImmediateContextAppend",
             ],
+            "ContentShape" => vec![
+                "Conversation",
+                "ConversationAndContext",
+                "Context",
+                "Empty",
+                "ImmediateAppend",
+                "ImmediateContext",
+            ],
             "TurnTerminalOutcome" => vec![
                 "None",
                 "Completed",

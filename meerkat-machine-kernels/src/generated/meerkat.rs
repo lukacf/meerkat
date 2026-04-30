@@ -3312,6 +3312,46 @@ impl std::fmt::Display for WorkOrigin {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ContentShape {
+    #[default]
+    Conversation,
+    ConversationAndContext,
+    Context,
+    Empty,
+    ImmediateAppend,
+    ImmediateContext,
+}
+impl ContentShape {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Conversation => "Conversation",
+            Self::ConversationAndContext => "ConversationAndContext",
+            Self::Context => "Context",
+            Self::Empty => "Empty",
+            Self::ImmediateAppend => "ImmediateAppend",
+            Self::ImmediateContext => "ImmediateContext",
+        }
+    }
+}
+impl std::fmt::Display for ContentShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ExternalToolSurfaceFailureCause {
     #[default]
     PendingFailed,
@@ -3659,7 +3699,7 @@ pub struct State {
     pub pre_run_phase: Option<PreRunPhase>,
     pub turn_phase: TurnPhase,
     pub primitive_kind: Option<TurnPrimitiveKind>,
-    pub admitted_content_shape: Option<String>,
+    pub admitted_content_shape: Option<ContentShape>,
     pub vision_enabled: bool,
     pub image_tool_results_enabled: bool,
     pub tool_calls_pending: u64,
@@ -4052,7 +4092,7 @@ pub mod inputs {
     pub struct StartConversationRun {
         pub run_id: RunId,
         pub primitive_kind: TurnPrimitiveKind,
-        pub admitted_content_shape: String,
+        pub admitted_content_shape: ContentShape,
         pub vision_enabled: bool,
         pub image_tool_results_enabled: bool,
         pub max_extraction_retries: u64,
@@ -4060,12 +4100,12 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartImmediateAppend {
         pub run_id: RunId,
-        pub admitted_content_shape: String,
+        pub admitted_content_shape: ContentShape,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartImmediateContext {
         pub run_id: RunId,
-        pub admitted_content_shape: String,
+        pub admitted_content_shape: ContentShape,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PrimitiveApplied {}

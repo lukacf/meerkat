@@ -14,7 +14,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `pre_run_phase`: `Option<PreRunPhase>`
 - `turn_phase`: `TurnPhase`
 - `primitive_kind`: `Option<TurnPrimitiveKind>`
-- `admitted_content_shape`: `Option<String>`
+- `admitted_content_shape`: `Option<ContentShape>`
 - `vision_enabled`: `Bool`
 - `image_tool_results_enabled`: `Bool`
 - `tool_calls_pending`: `u64`
@@ -204,9 +204,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
 - `Recycle`
-- `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: String, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
-- `StartImmediateAppend`(run_id: RunId, admitted_content_shape: String)
-- `StartImmediateContext`(run_id: RunId, admitted_content_shape: String)
+- `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
+- `StartImmediateAppend`(run_id: RunId, admitted_content_shape: ContentShape)
+- `StartImmediateContext`(run_id: RunId, admitted_content_shape: ContentShape)
 - `PrimitiveApplied`
 - `LlmReturnedToolCalls`(tool_count: u64)
 - `LlmReturnedTerminal`

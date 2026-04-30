@@ -8,8 +8,8 @@ use crate::service::{
     SessionBuildOptions,
 };
 use crate::{
-    AgentToolDispatcher, BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, PeerMeta,
-    Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef,
+    AgentToolDispatcher, BudgetLimits, ConnectionRef, ContentInput, HookRunOverrides, OutputSchema,
+    PeerMeta, Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef,
     checkpoint::SessionCheckpointer, skills::SkillKey,
 };
 
@@ -20,6 +20,9 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub model: Option<String>,
     pub provider: Option<Provider>,
     pub provider_params: Option<serde_json::Value>,
+    pub clear_provider_params: bool,
+    pub connection_ref: Option<ConnectionRef>,
+    pub clear_connection_ref: bool,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
     pub output_schema: Option<OutputSchema>,
@@ -108,6 +111,9 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
     overrides.model.is_some()
         || overrides.provider.is_some()
         || overrides.provider_params.is_some()
+        || overrides.clear_provider_params
+        || overrides.connection_ref.is_some()
+        || overrides.clear_connection_ref
         || has_build_only_turn_overrides(overrides)
         || overrides.hooks_override.is_some()
         || overrides.comms_name.is_some()
@@ -169,6 +175,16 @@ pub fn build_recovered_session(
             "provider override requires model on a session turn".to_string(),
         ));
     }
+    if overrides.clear_provider_params && overrides.provider_params.is_some() {
+        return Err(SurfaceSessionRecoveryError::InvalidOverride(
+            "clear_provider_params cannot be combined with provider_params".to_string(),
+        ));
+    }
+    if overrides.clear_connection_ref && overrides.connection_ref.is_some() {
+        return Err(SurfaceSessionRecoveryError::InvalidOverride(
+            "clear_connection_ref cannot be combined with connection_ref".to_string(),
+        ));
+    }
     if has_build_only_turn_overrides(overrides)
         && !session_allows_first_turn_build_overrides(&session)
     {
@@ -194,7 +210,8 @@ pub fn build_recovered_session(
         provider: llm_binding.provider_overridden,
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
-        provider_params: overrides.provider_params.is_some(),
+        provider_params: overrides.provider_params.is_some() || overrides.clear_provider_params,
+        connection_ref: overrides.connection_ref.is_some() || overrides.clear_connection_ref,
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
         override_memory: overrides.override_memory.is_some(),
@@ -251,10 +268,14 @@ pub fn build_recovered_session(
             .budget_limits
             .clone()
             .or_else(|| build_state.budget_limits.clone()),
-        provider_params: overrides
-            .provider_params
-            .clone()
-            .or_else(|| metadata.provider_params.clone()),
+        provider_params: if overrides.clear_provider_params {
+            None
+        } else {
+            overrides
+                .provider_params
+                .clone()
+                .or_else(|| metadata.provider_params.clone())
+        },
         external_tools: context.external_tools,
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
         blob_store_override: None,
@@ -286,8 +307,16 @@ pub fn build_recovered_session(
         backend: metadata.backend.clone().or(context.backend),
         config_generation: metadata.config_generation.or(context.config_generation),
         // Phase 3: persisted connection_ref re-entered at resume time so
-        // the binding re-resolves through the same realm entry.
-        connection_ref: metadata.connection_ref.clone(),
+        // the binding re-resolves through the same realm entry unless this
+        // recovery request explicitly sets or clears it.
+        connection_ref: if overrides.clear_connection_ref {
+            None
+        } else {
+            overrides
+                .connection_ref
+                .clone()
+                .or_else(|| metadata.connection_ref.clone())
+        },
         keep_alive,
         checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
@@ -346,6 +375,14 @@ mod tests {
                 .expect("valid source uuid fixture"),
             SkillName::parse(name).expect("valid skill name fixture"),
         )
+    }
+
+    fn connection_ref(realm: &str, binding: &str) -> ConnectionRef {
+        ConnectionRef {
+            realm: crate::connection::RealmId::parse(realm).expect("valid realm fixture"),
+            binding: crate::connection::BindingId::parse(binding).expect("valid binding fixture"),
+            profile: None,
+        }
     }
 
     fn sample_session() -> Session {
@@ -530,6 +567,103 @@ mod tests {
         let override_schema_json =
             serde_json::to_value(override_schema).expect("serialize override schema");
         assert_eq!(recovered_schema, override_schema_json);
+    }
+
+    #[test]
+    fn build_recovered_session_clear_provider_params_stays_explicit_through_resume_mask() {
+        let recovered = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides {
+                clear_provider_params: true,
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session");
+
+        assert_eq!(recovered.build.provider_params, None);
+        assert!(
+            recovered.build.resume_override_mask.provider_params,
+            "clear provider params must prevent factory metadata rehydration"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_connection_ref_override_and_clear_stay_explicit() {
+        let mut session = sample_session();
+        let mut metadata = session.session_metadata().expect("session metadata");
+        metadata.connection_ref = Some(connection_ref("persisted", "default"));
+        session
+            .set_session_metadata(metadata)
+            .expect("updated session metadata");
+
+        let override_ref = connection_ref("override", "default");
+        let recovered = build_recovered_session(
+            session.clone(),
+            &SurfaceSessionRecoveryOverrides {
+                connection_ref: Some(override_ref.clone()),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session with connection_ref override");
+
+        assert_eq!(recovered.build.connection_ref, Some(override_ref));
+        assert!(
+            recovered.build.resume_override_mask.connection_ref,
+            "set connection_ref must prevent persisted metadata overwrite"
+        );
+
+        let recovered = build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides {
+                clear_connection_ref: true,
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session with connection_ref clear");
+
+        assert_eq!(recovered.build.connection_ref, None);
+        assert!(
+            recovered.build.resume_override_mask.connection_ref,
+            "clear connection_ref must prevent factory metadata rehydration"
+        );
+    }
+
+    #[test]
+    fn build_recovered_session_rejects_invalid_set_and_clear_recovery_overrides() {
+        let provider_error = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides {
+                provider_params: Some(json!({ "temperature": 0.2 })),
+                clear_provider_params: true,
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect_err("set plus clear provider params must be rejected");
+        assert!(
+            provider_error.to_string().contains("clear_provider_params"),
+            "unexpected error: {provider_error}"
+        );
+
+        let connection_error = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides {
+                connection_ref: Some(connection_ref("override", "default")),
+                clear_connection_ref: true,
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect_err("set plus clear connection_ref must be rejected");
+        assert!(
+            connection_error
+                .to_string()
+                .contains("clear_connection_ref"),
+            "unexpected error: {connection_error}"
+        );
     }
 
     #[test]

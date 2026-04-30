@@ -581,8 +581,13 @@ fn generate_handle_bridge_helpers(
                 }
                 FeedbackFieldSource::OwnerContext(name) => {
                     let snake = to_snake_case(name);
-                    owner_params.push(format!("{snake}: impl Into<String>"));
-                    call_args.push(format!("{snake}.into()"));
+                    if snake == "cause" {
+                        owner_params.push(format!("{snake}: ExternalToolSurfaceFailureCause"));
+                        call_args.push(snake);
+                    } else {
+                        owner_params.push(format!("{snake}: impl Into<String>"));
+                        call_args.push(format!("{snake}.into()"));
+                    }
                 }
             }
         }

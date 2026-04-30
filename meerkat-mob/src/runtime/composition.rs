@@ -41,6 +41,7 @@ use meerkat_runtime::composition::{
     DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect, ProducerInstance,
     RouteTable, SignalConsumerSurface,
 };
+use meerkat_runtime::generated::meerkat_mob_seam as seam_facts;
 use meerkat_runtime::meerkat_machine::dsl as meerkat_dsl;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -63,17 +64,17 @@ pub type MobCompositionBinding = CompositionBinding<MobSeamEffect>;
 
 /// Composition slug — `meerkat_mob_seam`.
 pub(crate) fn mob_seam_composition_id() -> CompositionId {
-    CompositionId::parse("meerkat_mob_seam").expect("canonical composition slug")
+    seam_facts::composition_id()
 }
 
 /// Producer instance slug for the mob participant — `mob`.
 pub(crate) fn mob_producer_instance_id() -> MachineInstanceId {
-    MachineInstanceId::parse("mob").expect("canonical instance slug")
+    seam_facts::producers::mob_instance_id()
 }
 
 /// Machine id for the `mob` participant — `MobMachine`.
 pub(crate) fn mob_machine_id() -> MachineId {
-    MachineId::parse("MobMachine").expect("canonical machine id")
+    seam_facts::producers::mob_machine_id()
 }
 
 /// Construct the typed [`ProducerInstance`] handle for the mob side of
@@ -106,22 +107,25 @@ impl MobSeamEffect {
     /// effect-variant slugs declared on `MobMachine`'s schema and the
     /// `meerkat_mob_seam` route declarations.
     pub fn variant_id(&self) -> EffectVariantId {
-        let slug = match self {
+        match self {
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding { .. }) => {
-                "RequestRuntimeBinding"
+                seam_facts::effects::mob::request_runtime_binding()
             }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }) => {
-                "RequestRuntimeIngress"
+                seam_facts::effects::mob::request_runtime_ingress()
             }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { .. }) => {
-                "RequestRuntimeRetire"
+                seam_facts::effects::mob::request_runtime_retire()
             }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { .. }) => {
-                "RequestRuntimeDestroy"
+                seam_facts::effects::mob::request_runtime_destroy()
             }
             Self::Mob(other) => unreachable!("non-routed mob effect reached seam: {other:?}"),
-        };
-        EffectVariantId::parse(slug).expect("producer effect slug is hand-authored constant")
+        }
+    }
+
+    pub fn generated_input_route(&self) -> Option<seam_facts::TypedRoutedInput> {
+        seam_facts::route_to_input(&mob_producer_instance_id(), &self.variant_id())
     }
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
@@ -132,35 +136,49 @@ impl MobSeamEffect {
                 fence_token,
                 generation,
                 session_id,
-            }) => match id.as_str() {
-                "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id.as_str())),
-                "fence_token" => Some(FieldValue::U64(fence_token.0)),
-                "generation" => Some(FieldValue::U64(generation.0)),
-                "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
-                _ => None,
-            },
+            }) => {
+                if id == &seam_facts::fields::agent_runtime_id() {
+                    Some(FieldValue::Str(agent_runtime_id.as_str()))
+                } else if id == &seam_facts::fields::fence_token() {
+                    Some(FieldValue::U64(fence_token.0))
+                } else if id == &seam_facts::fields::generation() {
+                    Some(FieldValue::U64(generation.0))
+                } else if id == &seam_facts::fields::session_id() {
+                    Some(FieldValue::Str(session_id.0.as_str()))
+                } else {
+                    None
+                }
+            }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                 agent_runtime_id,
                 fence_token,
                 work_id,
                 origin,
-            }) => match id.as_str() {
-                "agent_runtime_id" => Some(FieldValue::Str(agent_runtime_id.as_str())),
-                "fence_token" => Some(FieldValue::U64(fence_token.0)),
-                "work_id" => Some(FieldValue::Str(work_id.0.as_str())),
-                "origin" => Some(FieldValue::Opaque(Arc::new(meerkat_work_origin(origin)))),
-                _ => None,
-            },
+            }) => {
+                if id == &seam_facts::fields::agent_runtime_id() {
+                    Some(FieldValue::Str(agent_runtime_id.as_str()))
+                } else if id == &seam_facts::fields::fence_token() {
+                    Some(FieldValue::U64(fence_token.0))
+                } else if id == &seam_facts::fields::work_id() {
+                    Some(FieldValue::Str(work_id.0.as_str()))
+                } else if id == &seam_facts::fields::origin() {
+                    Some(FieldValue::Opaque(Arc::new(meerkat_work_origin(origin))))
+                } else {
+                    None
+                }
+            }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }) => {
-                match id.as_str() {
-                    "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
-                    _ => None,
+                if id == &seam_facts::fields::session_id() {
+                    Some(FieldValue::Str(session_id.0.as_str()))
+                } else {
+                    None
                 }
             }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id }) => {
-                match id.as_str() {
-                    "session_id" => Some(FieldValue::Str(session_id.0.as_str())),
-                    _ => None,
+                if id == &seam_facts::fields::session_id() {
+                    Some(FieldValue::Str(session_id.0.as_str()))
+                } else {
+                    None
                 }
             }
             Self::Mob(_) => None,
@@ -278,30 +296,35 @@ impl MobSignalConsumerSurface {
 #[cfg(feature = "runtime-adapter")]
 fn signal_project_str<'a>(
     fields: &'a [(FieldId, OwnedFieldValue)],
-    name: &str,
+    field: &FieldId,
 ) -> Result<&'a str, String> {
     fields
         .iter()
-        .find(|(id, _)| id.as_str() == name)
-        .ok_or_else(|| format!("missing projected signal field `{name}`"))
+        .find(|(id, _)| id == field)
+        .ok_or_else(|| format!("missing projected signal field `{}`", field.as_str()))
         .and_then(|(_, value)| match value {
             OwnedFieldValue::Str(value) => Ok(value.as_str()),
             other => Err(format!(
-                "projected signal field `{name}` is not Str: {other:?}"
+                "projected signal field `{}` is not Str: {other:?}",
+                field.as_str()
             )),
         })
 }
 
 #[cfg(feature = "runtime-adapter")]
-fn signal_project_u64(fields: &[(FieldId, OwnedFieldValue)], name: &str) -> Result<u64, String> {
+fn signal_project_u64(
+    fields: &[(FieldId, OwnedFieldValue)],
+    field: &FieldId,
+) -> Result<u64, String> {
     fields
         .iter()
-        .find(|(id, _)| id.as_str() == name)
-        .ok_or_else(|| format!("missing projected signal field `{name}`"))
+        .find(|(id, _)| id == field)
+        .ok_or_else(|| format!("missing projected signal field `{}`", field.as_str()))
         .and_then(|(_, value)| match value {
             OwnedFieldValue::U64(value) => Ok(*value),
             other => Err(format!(
-                "projected signal field `{name}` is not U64: {other:?}"
+                "projected signal field `{}` is not U64: {other:?}",
+                field.as_str()
             )),
         })
 }
@@ -312,26 +335,33 @@ fn build_mob_signal(
     projected: &[(FieldId, OwnedFieldValue)],
 ) -> Result<mob_dsl::MobMachineSignal, String> {
     let runtime_id = mob_dsl::AgentRuntimeId::from(
-        signal_project_str(projected, "agent_runtime_id")?.to_string(),
+        signal_project_str(projected, &seam_facts::fields::agent_runtime_id())?.to_string(),
     );
-    let fence_token = mob_dsl::FenceToken(signal_project_u64(projected, "fence_token")?);
-    match variant.as_str() {
-        "ObserveRuntimeReady" => Ok(mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+    let fence_token = mob_dsl::FenceToken(signal_project_u64(
+        projected,
+        &seam_facts::fields::fence_token(),
+    )?);
+    if variant == &seam_facts::signals::observe_runtime_ready() {
+        Ok(mob_dsl::MobMachineSignal::ObserveRuntimeReady {
             agent_runtime_id: runtime_id,
             fence_token,
-        }),
-        "ObserveRuntimeRetired" => Ok(mob_dsl::MobMachineSignal::ObserveRuntimeRetired {
+        })
+    } else if variant == &seam_facts::signals::observe_runtime_retired() {
+        Ok(mob_dsl::MobMachineSignal::ObserveRuntimeRetired {
             agent_runtime_id: runtime_id,
             fence_token,
-        }),
-        "ObserveRuntimeDestroyed" => Ok(mob_dsl::MobMachineSignal::ObserveRuntimeDestroyed {
+        })
+    } else if variant == &seam_facts::signals::observe_runtime_destroyed() {
+        Ok(mob_dsl::MobMachineSignal::ObserveRuntimeDestroyed {
             agent_runtime_id: runtime_id,
             fence_token,
-        }),
-        other => Err(format!(
+        })
+    } else {
+        Err(format!(
             "mob signal consumer surface does not accept routed signal `{other}`; \
-             only ObserveRuntimeReady/ObserveRuntimeRetired/ObserveRuntimeDestroyed are declared"
-        )),
+             only ObserveRuntimeReady/ObserveRuntimeRetired/ObserveRuntimeDestroyed are declared",
+            other = variant.as_str()
+        ))
     }
 }
 
@@ -483,6 +513,58 @@ mod tests {
             FieldValue::U64(3),
         ));
         assert!(effect.field(&fid("unknown_field")).is_none());
+    }
+
+    #[test]
+    fn routed_mob_effect_projection_tracks_generated_route_facts() {
+        use meerkat_runtime::generated::meerkat_mob_seam as seam_facts;
+
+        let cases = vec![
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                    agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                    fence_token: mob_dsl::FenceToken(7),
+                    generation: mob_dsl::Generation(3),
+                    session_id: mob_dsl::SessionId::from("session-1"),
+                }),
+                seam_facts::route_binding_request_reaches_meerkat(),
+            ),
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                    fence_token: mob_dsl::FenceToken(7),
+                    work_id: mob_dsl::WorkId::from("work-1"),
+                    origin: mob_dsl::WorkOrigin::External,
+                }),
+                seam_facts::route_work_request_reaches_meerkat(),
+            ),
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                    session_id: mob_dsl::SessionId::from("session-1"),
+                }),
+                seam_facts::route_retire_request_reaches_meerkat(),
+            ),
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+                    session_id: mob_dsl::SessionId::from("session-1"),
+                }),
+                seam_facts::route_destroy_request_reaches_meerkat(),
+            ),
+        ];
+
+        for (effect, expected_route) in cases {
+            let route = effect.generated_input_route().expect("generated route");
+            assert_eq!(route, expected_route);
+            for (producer_field, _) in &route.bindings {
+                assert!(
+                    effect.field(producer_field).is_some(),
+                    "generated route `{}` requires producer field `{}`",
+                    route.route_id.as_str(),
+                    producer_field.as_str()
+                );
+            }
+        }
     }
 
     #[test]

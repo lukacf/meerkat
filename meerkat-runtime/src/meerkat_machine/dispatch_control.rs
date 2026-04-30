@@ -7,15 +7,16 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
         match command {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
-                let (session_id, driver, _completions, wake_tx, control_tx) = {
+                let (session_id, driver, _completions, wake_tx, control_tx, control_handle) = {
                     let (sid, d, c, w) = self.lookup_entry(&runtime_id).await?;
-                    let ctrl = {
+                    let (ctrl, ctrl_handle) = {
                         let sessions = self.sessions.read().await;
-                        sessions
-                            .get(&sid)
-                            .and_then(RuntimeSessionEntry::control_sender)
+                        match sessions.get(&sid) {
+                            Some(entry) => (entry.control_sender(), entry.control_handle()),
+                            None => (None, None),
+                        }
                     };
-                    (sid, d, c, w, ctrl)
+                    (sid, d, c, w, ctrl, ctrl_handle)
                 };
 
                 // DSL-first: stage Ingest input before driver mutation.
@@ -125,6 +126,21 @@ impl MeerkatMachine {
                     let _ = tx.try_send(
                         meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
                     );
+                }
+                if signal.should_interrupt_yielding()
+                    && let Some(control_handle) = control_handle
+                {
+                    let result = control_handle
+                        .control(
+                            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+                        )
+                        .await;
+                    if let Err(err) = result {
+                        tracing::trace!(
+                            error = %err,
+                            "out-of-band Ingest InterruptYielding control was not applied"
+                        );
+                    }
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptOutcome(outcome))
@@ -450,16 +466,38 @@ impl MeerkatMachine {
                     .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
-                let report = match machine_destroy(&mut drv).await {
-                    Ok(report) => report,
+                let prepared_destroy = match machine_prepare_destroy(&mut drv) {
+                    Ok(prepared) => prepared,
                     Err(err) => return Err(RuntimeControlPlaneError::Internal(err.to_string())),
                 };
+                let staged_dsl = Self::stage_dsl_transition_on_authority(
+                    &drv.shared_dsl_authority(),
+                    destroy_input,
+                    "Destroy",
+                );
+                let staged_dsl = match staged_dsl {
+                    Ok(staged) => staged,
+                    Err(reason) => {
+                        drv.rollback_prepared_destroy_lifecycle(prepared_destroy.lifecycle);
+                        drv.sync_control_projection_from_dsl_authority();
+                        return Err(RuntimeControlPlaneError::Internal(reason));
+                    }
+                };
+                drv.sync_control_projection_from_dsl_authority();
+                let report = prepared_destroy.report;
+                match machine_commit_prepared_destroy(&mut drv, prepared_destroy.lifecycle).await {
+                    Ok(()) => {}
+                    Err(err) => {
+                        drv.sync_control_projection_from_dsl_authority();
+                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
+                    }
+                }
                 drop(drv);
 
                 let apply_result = self
-                    .apply_session_dsl_input_preserving_committed_state(
+                    .commit_session_dsl_transition_preserving_committed_state(
                         &session_id,
-                        destroy_input,
+                        staged_dsl,
                         "Destroy",
                     )
                     .await;

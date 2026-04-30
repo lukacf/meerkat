@@ -116,6 +116,20 @@ impl RuntimeStore for InMemoryRuntimeStore {
         Ok(receipt)
     }
 
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError> {
+        let _: meerkat_core::Session = serde_json::from_slice(&session_delta.session_snapshot)
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let mut inner = self.inner.lock().await;
+        inner
+            .sessions
+            .insert(runtime_id.0.clone(), session_delta.session_snapshot);
+        Ok(())
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,

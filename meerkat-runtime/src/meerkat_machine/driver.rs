@@ -5,7 +5,7 @@ use std::sync::Arc;
 use meerkat_core::lifecycle::{InputId, RunId};
 
 use crate::accept::{AcceptOutcome, ResolvedAdmission};
-use crate::driver::ephemeral::EphemeralRuntimeDriver;
+use crate::driver::ephemeral::{EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver};
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::ingress_types::ContentShape;
@@ -98,6 +98,16 @@ impl IngressView<'_> {
 pub(crate) enum DriverEntry {
     Ephemeral(EphemeralRuntimeDriver),
     Persistent(PersistentRuntimeDriver),
+}
+
+pub(crate) enum PreparedDestroyLifecycle {
+    Ephemeral(EphemeralDriverRollbackSnapshot),
+    Persistent(EphemeralDriverRollbackSnapshot),
+}
+
+pub(crate) struct PreparedDestroy {
+    pub(crate) report: DestroyReport,
+    pub(crate) lifecycle: PreparedDestroyLifecycle,
 }
 
 impl DriverEntry {
@@ -453,15 +463,55 @@ impl DriverEntry {
         }
     }
 
-    pub(crate) async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+    pub(crate) fn prepare_destroy_lifecycle(&mut self) -> PreparedDestroy {
         match self {
             DriverEntry::Ephemeral(d) => {
+                let checkpoint = d.rollback_snapshot();
                 let abandoned = d.destroy_cleanup();
-                Ok(DestroyReport {
-                    inputs_abandoned: abandoned,
-                })
+                PreparedDestroy {
+                    report: DestroyReport {
+                        inputs_abandoned: abandoned,
+                    },
+                    lifecycle: PreparedDestroyLifecycle::Ephemeral(checkpoint),
+                }
             }
-            DriverEntry::Persistent(d) => d.destroy().await,
+            DriverEntry::Persistent(d) => {
+                let (checkpoint, report) = d.prepare_destroy_lifecycle();
+                PreparedDestroy {
+                    report,
+                    lifecycle: PreparedDestroyLifecycle::Persistent(checkpoint),
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn commit_prepared_destroy_lifecycle(
+        &mut self,
+        lifecycle: PreparedDestroyLifecycle,
+    ) -> Result<(), RuntimeDriverError> {
+        match (self, lifecycle) {
+            (DriverEntry::Ephemeral(_), PreparedDestroyLifecycle::Ephemeral(_)) => Ok(()),
+            (DriverEntry::Persistent(d), PreparedDestroyLifecycle::Persistent(checkpoint)) => {
+                d.commit_prepared_destroy_lifecycle(checkpoint).await
+            }
+            _ => Err(RuntimeDriverError::Internal(
+                "destroy lifecycle prepared for a different driver kind".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn rollback_prepared_destroy_lifecycle(
+        &mut self,
+        lifecycle: PreparedDestroyLifecycle,
+    ) {
+        match (self, lifecycle) {
+            (DriverEntry::Ephemeral(d), PreparedDestroyLifecycle::Ephemeral(checkpoint)) => {
+                d.restore_rollback_snapshot(checkpoint);
+            }
+            (DriverEntry::Persistent(d), PreparedDestroyLifecycle::Persistent(checkpoint)) => {
+                d.rollback_prepared_destroy_lifecycle(checkpoint);
+            }
+            _ => {}
         }
     }
 }
@@ -831,12 +881,25 @@ pub(crate) fn machine_batch_peer_response_terminal_apply_intent(
 
 pub(crate) fn machine_batch_primitive_projections(
     driver: &DriverEntry,
-    work_ids: &[InputId],
+    inputs: &[(InputId, Input)],
 ) -> Vec<crate::ingress_types::RuntimeInputProjection> {
     let ingress = driver.driver_ingress();
-    work_ids
+    inputs
         .iter()
-        .map(|id| ingress.primitive_projection(id).unwrap_or_default())
+        .map(|(id, input)| {
+            let projection = ingress.primitive_projection(id).unwrap_or_default();
+            if matches!(
+                input,
+                Input::Peer(crate::input::PeerInput {
+                    convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
+                    ..
+                })
+            ) {
+                crate::input::runtime_input_projection_for_machine_batch(input)
+            } else {
+                projection
+            }
+        })
         .collect()
 }
 
@@ -1508,9 +1571,9 @@ pub(crate) async fn machine_stop_runtime(
     }
 }
 
-pub(crate) async fn machine_destroy(
+pub(crate) fn machine_prepare_destroy(
     driver: &mut DriverEntry,
-) -> Result<DestroyReport, RuntimeDriverError> {
+) -> Result<PreparedDestroy, RuntimeDriverError> {
     match driver.runtime_state() {
         RuntimeState::Initializing => {
             return Err(RuntimeDriverError::Internal(
@@ -1529,9 +1592,16 @@ pub(crate) async fn machine_destroy(
         | RuntimeState::Destroyed => {}
     }
 
-    let report = driver.destroy().await?;
+    Ok(driver.prepare_destroy_lifecycle())
+}
+
+pub(crate) async fn machine_commit_prepared_destroy(
+    driver: &mut DriverEntry,
+    lifecycle: PreparedDestroyLifecycle,
+) -> Result<(), RuntimeDriverError> {
+    driver.commit_prepared_destroy_lifecycle(lifecycle).await?;
     driver.sync_control_projection_from_dsl_authority();
-    Ok(report)
+    Ok(())
 }
 
 pub(crate) async fn machine_retire(

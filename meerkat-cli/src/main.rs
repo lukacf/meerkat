@@ -7170,12 +7170,10 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     model: None,
                     provider: None,
                     provider_params: None,
-                    clear_provider_params: false,
                     render_metadata: dispatch.render_metadata.clone(),
                     execution_kind: None,
                     peer_response_terminal_apply_intent: None,
                     connection_ref: None,
-                    clear_connection_ref: false,
                 },
             ),
         );

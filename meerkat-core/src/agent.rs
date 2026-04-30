@@ -823,6 +823,20 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
+    /// Access peer request/response authority only when the runtime has the
+    /// complete machine-owned lifecycle pair.
+    ///
+    /// Semantic peer request/response ingress requires both the peer
+    /// interaction handle and the paired interaction-stream handle. The stream
+    /// handle itself stays hidden behind runtime ownership; this witness lets
+    /// authority boundaries fail closed instead of treating a lone peer handle
+    /// as sufficient.
+    fn peer_request_response_authority_handle(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::handles::PeerInteractionHandle>> {
+        None
+    }
+
     /// Drain classified inbox interactions.
     ///
     /// Returns interactions with pre-computed classification from ingress.

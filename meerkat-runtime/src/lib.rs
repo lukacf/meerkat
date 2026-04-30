@@ -50,6 +50,8 @@ pub mod composition;
 pub(crate) mod control_plane;
 pub mod driver;
 pub mod durability;
+#[doc(hidden)]
+pub mod generated;
 pub mod handles;
 pub mod identifiers;
 pub mod ingress_types;

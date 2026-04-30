@@ -187,6 +187,16 @@ impl RuntimeStore for HarnessRuntimeStore {
             .await
     }
 
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -406,6 +416,57 @@ async fn lifecycle_commit_failure_restores_staged_session_dsl_state() {
         adapter.list_active_inputs(&sid).await.unwrap(),
         vec![input_id],
         "failed retire must restore active input projection",
+    );
+}
+
+#[tokio::test]
+async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
+    let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+
+    let input = make_prompt("destroy rollback");
+    let input_id = input.id().clone();
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, input)
+        .await
+        .expect("input admission should succeed before lifecycle failure");
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("accepted input should produce a completion handle");
+
+    let err = meerkat_runtime::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect_err("destroy should surface lifecycle commit failure");
+    assert!(
+        err.to_string()
+            .contains("synthetic atomic_lifecycle_commit failure"),
+        "unexpected error: {err}",
+    );
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle,
+        "failed destroy must restore the session DSL phase",
+    );
+    assert_eq!(
+        adapter.list_active_inputs(&sid).await.unwrap(),
+        vec![input_id],
+        "failed destroy must restore active input projection",
+    );
+    assert_ne!(
+        store.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "failed destroy must not persist destroyed runtime truth",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), handle.wait())
+            .await
+            .is_err(),
+        "failed destroy must not terminate completion waiters",
     );
 }
 
@@ -840,7 +901,9 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-    use meerkat_core::{HandlingMode, InteractionContent, InteractionId, ResponseStatus};
+    use meerkat_core::{
+        HandlingMode, InteractionContent, InteractionId, PeerCorrelationId, ResponseStatus,
+    };
     use meerkat_runtime::PeerConvention;
     use tokio::sync::Notify;
     use uuid::Uuid;
@@ -936,7 +999,24 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .await
         .expect("prepare runtime bindings");
     requester_comms.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
-    requester_comms.install_peer_interaction_handle(Arc::clone(&bindings.peer_interaction));
+    requester_comms.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::clone(&bindings.peer_interaction),
+            Arc::clone(&bindings.interaction_stream),
+        ),
+    );
+    let responder_adapter = Arc::new(MeerkatMachine::ephemeral());
+    let responder_sid = SessionId::new();
+    let responder_bindings = responder_adapter
+        .prepare_bindings(responder_sid)
+        .await
+        .expect("prepare responder runtime bindings");
+    responder_comms.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::clone(&responder_bindings.peer_interaction),
+            Arc::clone(&responder_bindings.interaction_stream),
+        ),
+    );
 
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(Notify::new());
@@ -997,6 +1077,10 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         request_at_responder[0].interaction.content,
         InteractionContent::Request { .. }
     ));
+    responder_bindings
+        .peer_interaction
+        .request_received(PeerCorrelationId::from_uuid(request_id))
+        .expect("seed responder inbound request state");
 
     CoreCommsRuntime::send(
         responder_comms.as_ref(),

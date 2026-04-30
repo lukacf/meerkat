@@ -30,6 +30,7 @@ use meerkat_core::ops_lifecycle::OperationLifecycleSnapshot;
 use meerkat_core::types::HandlingMode;
 use meerkat_core::types::SessionId;
 use meerkat_machine_derive::CommandManifest;
+use meerkat_machine_schema::catalog::dsl::meerkat_machine::MeerkatMachineInputVariant;
 use serde::{Deserialize, Serialize};
 
 use crate::AcceptOutcome;
@@ -585,7 +586,8 @@ pub(crate) enum MeerkatMachineCommandResult {
 pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
     canonical_meerkat_machine_command_classifications()
         .into_iter()
-        .flat_map(|record| record.classification.catalog_input_names())
+        .flat_map(|record| record.classification.catalog_inputs())
+        .map(MeerkatMachineCatalogInput::as_str)
         .collect()
 }
 
@@ -607,10 +609,10 @@ impl MeerkatMachineCommandClassification {
     }
 
     #[must_use]
-    pub fn catalog_input_names(self) -> Vec<&'static str> {
+    pub fn catalog_input_variants(self) -> Vec<MeerkatMachineInputVariant> {
         self.catalog_inputs()
             .into_iter()
-            .map(MeerkatMachineCatalogInput::as_str)
+            .map(MeerkatMachineCatalogInput::input_variant)
             .collect()
     }
 }
@@ -667,6 +669,75 @@ pub enum MeerkatMachineCatalogInput {
 }
 
 impl MeerkatMachineCatalogInput {
+    #[must_use]
+    pub const fn input_variant(self) -> MeerkatMachineInputVariant {
+        match self {
+            Self::RegisterSession => MeerkatMachineInputVariant::RegisterSession,
+            Self::UnregisterSession => MeerkatMachineInputVariant::UnregisterSession,
+            Self::EnsureSessionWithExecutor => {
+                MeerkatMachineInputVariant::EnsureSessionWithExecutor
+            }
+            Self::SetSilentIntents => MeerkatMachineInputVariant::SetSilentIntents,
+            Self::InterruptCurrentRun => MeerkatMachineInputVariant::InterruptCurrentRun,
+            Self::CancelAfterBoundary => MeerkatMachineInputVariant::CancelAfterBoundary,
+            Self::StopRuntimeExecutor => MeerkatMachineInputVariant::StopRuntimeExecutor,
+            Self::ContainsSession => MeerkatMachineInputVariant::ContainsSession,
+            Self::SessionHasExecutor => MeerkatMachineInputVariant::SessionHasExecutor,
+            Self::SessionHasComms => MeerkatMachineInputVariant::SessionHasComms,
+            Self::OpsLifecycleRegistry => MeerkatMachineInputVariant::OpsLifecycleRegistry,
+            Self::PrepareBindings => MeerkatMachineInputVariant::PrepareBindings,
+            Self::InputState => MeerkatMachineInputVariant::InputState,
+            Self::ListActiveInputs => MeerkatMachineInputVariant::ListActiveInputs,
+            Self::ReconfigureSessionLlmIdentity => {
+                MeerkatMachineInputVariant::ReconfigureSessionLlmIdentity
+            }
+            Self::StagePersistentFilter => MeerkatMachineInputVariant::StagePersistentFilter,
+            Self::RequestDeferredTools => MeerkatMachineInputVariant::RequestDeferredTools,
+            Self::PublishCommittedVisibleSet => {
+                MeerkatMachineInputVariant::PublishCommittedVisibleSet
+            }
+            Self::SetPeerIngressContext => MeerkatMachineInputVariant::SetPeerIngressContext,
+            Self::NotifyDrainExited => MeerkatMachineInputVariant::NotifyDrainExited,
+            Self::AbortAll => MeerkatMachineInputVariant::AbortAll,
+            Self::Abort => MeerkatMachineInputVariant::Abort,
+            Self::Wait => MeerkatMachineInputVariant::Wait,
+            Self::Ingest => MeerkatMachineInputVariant::Ingest,
+            Self::PublishEvent => MeerkatMachineInputVariant::PublishEvent,
+            Self::Retire => MeerkatMachineInputVariant::Retire,
+            Self::Recycle => MeerkatMachineInputVariant::Recycle,
+            Self::Reset => MeerkatMachineInputVariant::Reset,
+            Self::Recover => MeerkatMachineInputVariant::Recover,
+            Self::Destroy => MeerkatMachineInputVariant::Destroy,
+            Self::RuntimeState => MeerkatMachineInputVariant::RuntimeState,
+            Self::RuntimeRealtimeAttachmentStatus => {
+                MeerkatMachineInputVariant::RuntimeRealtimeAttachmentStatus
+            }
+            Self::ModelRoutingStatus => MeerkatMachineInputVariant::ModelRoutingStatus,
+            Self::SetModelRoutingBaseline => MeerkatMachineInputVariant::SetModelRoutingBaseline,
+            Self::RequestFiniteSwitchTurn => MeerkatMachineInputVariant::RequestFiniteSwitchTurn,
+            Self::RequestUntilChangedSwitchTurn => {
+                MeerkatMachineInputVariant::RequestUntilChangedSwitchTurn
+            }
+            Self::AdmitModelRoutingAssistantTurn => {
+                MeerkatMachineInputVariant::AdmitModelRoutingAssistantTurn
+            }
+            Self::BeginImageOperation => MeerkatMachineInputVariant::BeginImageOperation,
+            Self::ActivateImageOperationOverride => {
+                MeerkatMachineInputVariant::ActivateImageOperationOverride
+            }
+            Self::CompleteImageOperation => MeerkatMachineInputVariant::CompleteImageOperation,
+            Self::RestoreImageOperationOverride => {
+                MeerkatMachineInputVariant::RestoreImageOperationOverride
+            }
+            Self::LoadBoundaryReceipt => MeerkatMachineInputVariant::LoadBoundaryReceipt,
+            Self::AcceptWithCompletion => MeerkatMachineInputVariant::AcceptWithCompletion,
+            Self::AcceptWithoutWake => MeerkatMachineInputVariant::AcceptWithoutWake,
+            Self::Prepare => MeerkatMachineInputVariant::Prepare,
+            Self::Commit => MeerkatMachineInputVariant::Commit,
+            Self::Fail => MeerkatMachineInputVariant::Fail,
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

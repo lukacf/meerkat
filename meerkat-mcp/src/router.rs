@@ -36,8 +36,9 @@ use meerkat_core::types::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolCallView, ToolResult};
 use meerkat_core::{
     ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
-    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceFailureCause,
+    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
+    ExternalToolSurfaceStagedOp,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -248,7 +249,7 @@ impl ExternalToolSurfaceHandle for CompatExternalToolSurfaceHandle {
                 surface_id,
                 pending_task_sequence,
                 staged_intent_sequence,
-                ..
+                cause,
             } => {
                 let mut authority = self
                     .authority
@@ -263,6 +264,7 @@ impl ExternalToolSurfaceHandle for CompatExternalToolSurfaceHandle {
                         pending_task_sequence,
                         staged_intent_sequence,
                         applied_at_turn: TurnNumber(staged_intent_sequence),
+                        cause,
                     })
                     .map_err(|error| {
                         compat_surface_error(
@@ -368,13 +370,13 @@ impl ExternalToolSurfaceHandle for CompatExternalToolSurfaceHandle {
         surface_id: String,
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     ) -> Result<(), DslTransitionError> {
         self.apply_surface_input(CoreSurfaceInput::MarkPendingFailed {
             surface_id,
             pending_task_sequence,
             staged_intent_sequence,
-            reason,
+            cause,
         })
         .map(|_| ())
     }
@@ -642,13 +644,14 @@ impl SurfaceOwner {
                 pending_task_sequence,
                 staged_intent_sequence,
                 applied_at_turn,
+                cause,
             } => (
                 "PendingFailed",
                 CoreSurfaceInput::MarkPendingFailed {
                     surface_id: surface_id.0,
                     pending_task_sequence,
                     staged_intent_sequence,
-                    reason: "pending_failed".to_string(),
+                    cause,
                 },
                 Some(applied_at_turn),
             ),
@@ -855,10 +858,12 @@ fn runtime_effect_from_core(
             surface_id,
             operation,
             phase,
+            cause,
         } => ExternalToolSurfaceEffect::EmitExternalToolDelta {
             surface_id: SurfaceId::from(surface_id),
             operation: surface_delta_operation_from_core(operation),
             phase: surface_delta_phase_from_core(phase),
+            cause,
             persisted: matches!(
                 phase,
                 ExternalToolSurfaceDeltaPhase::Applied
@@ -872,10 +877,10 @@ fn runtime_effect_from_core(
                 surface_id: SurfaceId::from(surface_id),
             }
         }
-        CoreSurfaceEffect::RejectSurfaceCall { surface_id, reason } => {
+        CoreSurfaceEffect::RejectSurfaceCall { surface_id, cause } => {
             ExternalToolSurfaceEffect::RejectSurfaceCall {
                 surface_id: SurfaceId::from(surface_id),
-                reason,
+                cause,
             }
         }
     }
@@ -1158,6 +1163,7 @@ fn core_surface_effects(effects: &[ExternalToolSurfaceEffect]) -> Vec<CoreSurfac
                 surface_id,
                 operation,
                 phase,
+                cause,
                 ..
             } => CoreSurfaceEffect::EmitExternalToolDelta {
                 surface_id: surface_id.0.clone(),
@@ -1170,16 +1176,17 @@ fn core_surface_effects(effects: &[ExternalToolSurfaceEffect]) -> Vec<CoreSurfac
                     SurfaceDeltaPhase::Failed => ExternalToolSurfaceDeltaPhase::Failed,
                     SurfaceDeltaPhase::Forced => ExternalToolSurfaceDeltaPhase::Forced,
                 },
+                cause: *cause,
             },
             ExternalToolSurfaceEffect::CloseSurfaceConnection { surface_id } => {
                 CoreSurfaceEffect::CloseSurfaceConnection {
                     surface_id: surface_id.0.clone(),
                 }
             }
-            ExternalToolSurfaceEffect::RejectSurfaceCall { surface_id, reason } => {
+            ExternalToolSurfaceEffect::RejectSurfaceCall { surface_id, cause } => {
                 CoreSurfaceEffect::RejectSurfaceCall {
                     surface_id: surface_id.0.clone(),
-                    reason: reason.clone(),
+                    cause: *cause,
                 }
             }
         })
@@ -1890,6 +1897,7 @@ impl McpRouter {
                         pending_task_sequence: obligation.pending_task_sequence,
                         staged_intent_sequence: obligation.staged_intent_sequence,
                         applied_at_turn: TurnNumber(obligation.applied_at_turn),
+                        cause: ExternalToolSurfaceFailureCause::PendingFailed,
                     },
                 ) {
                     Ok(transition) => {
@@ -2401,10 +2409,10 @@ impl McpRouter {
             }) {
             Ok(transition) => {
                 for effect in &transition.effects {
-                    if let ExternalToolSurfaceEffect::RejectSurfaceCall { reason, .. } = effect {
+                    if let ExternalToolSurfaceEffect::RejectSurfaceCall { cause, .. } = effect {
                         return Err(McpError::ServerUnavailable {
                             server: server_name.clone(),
-                            state: reason.clone(),
+                            state: cause.as_str().to_owned(),
                         });
                     }
                 }
@@ -2566,6 +2574,7 @@ impl Default for McpRouter {
 mod tests {
     use super::*;
     use crate::connection::McpConnection;
+    use meerkat_core::ExternalToolSurfaceFailureCause;
     use meerkat_core::event::ToolConfigChangeOperation;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -2615,6 +2624,220 @@ mod tests {
         McpRouter::new_with_surface_handle(Arc::new(CompatExternalToolSurfaceHandle::new(
             DEFAULT_REMOVAL_TIMEOUT,
         )))
+    }
+
+    #[derive(Default)]
+    struct RecordingSurfaceHandle {
+        inputs: Mutex<Vec<CoreSurfaceInput>>,
+    }
+
+    impl RecordingSurfaceHandle {
+        fn recorded_inputs(&self) -> Vec<CoreSurfaceInput> {
+            self.inputs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl ExternalToolSurfaceHandle for RecordingSurfaceHandle {
+        fn apply_surface_input(
+            &self,
+            input: CoreSurfaceInput,
+        ) -> Result<CoreSurfaceTransition, DslTransitionError> {
+            let effects = match &input {
+                CoreSurfaceInput::MarkPendingFailed {
+                    surface_id, cause, ..
+                } => {
+                    vec![CoreSurfaceEffect::EmitExternalToolDelta {
+                        surface_id: surface_id.clone(),
+                        operation: ExternalToolSurfaceDeltaOperation::Add,
+                        phase: ExternalToolSurfaceDeltaPhase::Failed,
+                        cause: Some(*cause),
+                    }]
+                }
+                _ => Vec::new(),
+            };
+            self.inputs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(input);
+            Ok(CoreSurfaceTransition {
+                phase: ExternalToolSurfaceGlobalPhase::Operating,
+                effects,
+            })
+        }
+
+        fn register(&self, _surface_id: String) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::StageAdd { surface_id, now_ms })
+                .map(|_| ())
+        }
+
+        fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::StageRemove { surface_id, now_ms })
+                .map(|_| ())
+        }
+
+        fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::StageReload { surface_id, now_ms })
+                .map(|_| ())
+        }
+
+        fn apply_boundary(
+            &self,
+            surface_id: String,
+            now_ms: u64,
+            staged_intent_sequence: u64,
+            applied_at_turn: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::ApplyBoundary {
+                surface_id,
+                now_ms,
+                staged_intent_sequence,
+                applied_at_turn,
+            })
+            .map(|_| ())
+        }
+
+        fn mark_pending_succeeded(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+        ) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::MarkPendingSucceeded {
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+            })
+            .map(|_| ())
+        }
+
+        fn mark_pending_failed(
+            &self,
+            surface_id: String,
+            pending_task_sequence: u64,
+            staged_intent_sequence: u64,
+            cause: ExternalToolSurfaceFailureCause,
+        ) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::MarkPendingFailed {
+                surface_id,
+                pending_task_sequence,
+                staged_intent_sequence,
+                cause,
+            })
+            .map(|_| ())
+        }
+
+        fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::CallStarted { surface_id })
+                .map(|_| ())
+        }
+
+        fn call_finished(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::CallFinished { surface_id })
+                .map(|_| ())
+        }
+
+        fn finalize_removal_clean(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalClean { surface_id })
+                .map(|_| ())
+        }
+
+        fn finalize_removal_forced(&self, surface_id: String) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::FinalizeRemovalForced { surface_id })
+                .map(|_| ())
+        }
+
+        fn snapshot_aligned(&self, epoch: u64) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::SnapshotAligned { epoch })
+                .map(|_| ())
+        }
+
+        fn shutdown_surface(&self) -> Result<(), DslTransitionError> {
+            self.apply_surface_input(CoreSurfaceInput::Shutdown)
+                .map(|_| ())
+        }
+
+        fn surface_snapshot(&self, _surface_id: &str) -> Option<SurfaceSnapshot> {
+            None
+        }
+
+        fn diagnostic_snapshot(&self) -> SurfaceDiagnosticSnapshot {
+            SurfaceDiagnosticSnapshot {
+                surface_phase: ExternalToolSurfaceGlobalPhase::Operating,
+                known_surfaces: BTreeSet::new(),
+                visible_surfaces: BTreeSet::new(),
+                snapshot_epoch: 0,
+                snapshot_aligned_epoch: 0,
+                has_pending_or_staged: false,
+                entries: Vec::new(),
+            }
+        }
+
+        fn visible_surfaces(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+
+        fn removing_surfaces(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+
+        fn pending_surfaces(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+
+        fn has_pending_or_staged(&self) -> bool {
+            false
+        }
+
+        fn snapshot_epoch(&self) -> u64 {
+            0
+        }
+
+        fn snapshot_aligned_epoch(&self) -> u64 {
+            0
+        }
+    }
+
+    #[test]
+    fn runtime_owner_pending_failed_preserves_typed_failure_cause() {
+        let handle = Arc::new(RecordingSurfaceHandle::default());
+        let owner = SurfaceOwner::runtime(handle.clone(), DEFAULT_REMOVAL_TIMEOUT);
+
+        let transition = owner
+            .apply(ExternalToolSurfaceInput::PendingFailed {
+                surface_id: SurfaceId::from("typed-failure"),
+                operation: SurfaceDeltaOperation::Add,
+                pending_task_sequence: 7,
+                staged_intent_sequence: 11,
+                applied_at_turn: TurnNumber(13),
+                cause: ExternalToolSurfaceFailureCause::PendingFailed,
+            })
+            .expect("runtime pending failure");
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            ExternalToolSurfaceEffect::EmitExternalToolDelta {
+                phase: SurfaceDeltaPhase::Failed,
+                cause: Some(ExternalToolSurfaceFailureCause::PendingFailed),
+                ..
+            }
+        )));
+
+        let recorded = handle.recorded_inputs();
+        assert_eq!(recorded.len(), 1);
+        let CoreSurfaceInput::MarkPendingFailed { cause, .. } = recorded[0] else {
+            panic!(
+                "expected MarkPendingFailed core input, got {:?}",
+                recorded[0]
+            );
+        };
+        assert_eq!(cause, ExternalToolSurfaceFailureCause::PendingFailed);
+        assert_eq!(cause.as_str(), "pending_failed");
     }
 
     fn complete_add(router: &mut McpRouter, server_name: &str) {
@@ -2753,8 +2976,8 @@ mod tests {
             .expect("call while removing is modeled rejection");
         assert!(rejected.effects.iter().any(|effect| matches!(
             effect,
-            ExternalToolSurfaceEffect::RejectSurfaceCall { reason, .. }
-                if reason == "surface_draining"
+            ExternalToolSurfaceEffect::RejectSurfaceCall { cause, .. }
+                if *cause == ExternalToolSurfaceFailureCause::SurfaceDraining
         )));
         assert_eq!(router.surface_owner.inflight_call_count(&sid), 1);
 

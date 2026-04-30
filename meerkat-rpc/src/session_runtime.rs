@@ -792,7 +792,35 @@ impl SessionRuntime {
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        provider_hint: Option<&str>,
     ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        use meerkat_core::lifecycle::run_primitive::{
+            ProviderParamsOverride, TurnMetadataOverride,
+        };
+
+        let provider_params = overrides.and_then(|ov| {
+            if ov.clear_provider_params {
+                Some(TurnMetadataOverride::Clear)
+            } else {
+                let provider = ov
+                    .provider
+                    .as_deref()
+                    .or(provider_hint)
+                    .unwrap_or("unknown");
+                ov.provider_params.clone().map(|params| {
+                    TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
+                        provider, &params,
+                    ))
+                })
+            }
+        });
+        let connection_ref = overrides.and_then(|ov| {
+            if ov.clear_connection_ref {
+                Some(TurnMetadataOverride::Clear)
+            } else {
+                ov.connection_ref.clone().map(TurnMetadataOverride::Set)
+            }
+        });
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
@@ -805,11 +833,9 @@ impl SessionRuntime {
             provider: overrides
                 .and_then(|ov| ov.provider.as_ref())
                 .map(|provider| meerkat_core::Provider::from_name(provider)),
-            provider_params: None,
-            clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
+            provider_params,
             render_metadata: None,
-            connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
-            clear_connection_ref: overrides.is_some_and(|ov| ov.clear_connection_ref),
+            connection_ref,
             execution_kind: None,
             peer_response_terminal_apply_intent: None,
         };
@@ -819,17 +845,33 @@ impl SessionRuntime {
     pub(crate) fn turn_overrides_from_metadata(
         metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     ) -> Option<crate::handlers::turn::TurnOverrides> {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+
         let metadata = metadata?;
+        let (provider_params, clear_provider_params) = match &metadata.provider_params {
+            Some(TurnMetadataOverride::Set(params)) => {
+                (Some(params.to_legacy_provider_value()), false)
+            }
+            Some(TurnMetadataOverride::Clear) => (None, true),
+            None => (None, false),
+        };
+        let (connection_ref, clear_connection_ref) = match &metadata.connection_ref {
+            Some(TurnMetadataOverride::Set(connection_ref)) => {
+                (Some(connection_ref.clone()), false)
+            }
+            Some(TurnMetadataOverride::Clear) => (None, true),
+            None => (None, false),
+        };
         let overrides = crate::handlers::turn::TurnOverrides {
             keep_alive: metadata.keep_alive.as_ref().map(|_| true),
             model: metadata.model.as_ref().map(ToString::to_string),
             provider: metadata
                 .provider
                 .map(|provider| provider.as_str().to_string()),
-            provider_params: None,
-            clear_provider_params: metadata.clear_provider_params,
-            connection_ref: metadata.connection_ref.clone(),
-            clear_connection_ref: metadata.clear_connection_ref,
+            provider_params,
+            clear_provider_params,
+            connection_ref,
+            clear_connection_ref,
             ..Default::default()
         };
         (!overrides.is_empty()).then_some(overrides)
@@ -847,7 +889,9 @@ impl SessionRuntime {
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
         let live = match self.service.export_live_session(session_id).await {
             Ok(session) => session,
-            Err(SessionError::NotFound { .. }) => return Ok(false),
+            Err(SessionError::NotFound { .. }) => {
+                return Ok(self.load_persisted_session(session_id).await?.is_some());
+            }
             Err(err) => return Err(session_error_to_rpc(err)),
         };
         let Some(stored) = self.load_persisted_session(session_id).await? else {
@@ -1153,6 +1197,9 @@ impl SessionRuntime {
                     .map(|provider| meerkat_core::Provider::from_name(provider))
             }),
             provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
+            clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
+            connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
+            clear_connection_ref: overrides.is_some_and(|ov| ov.clear_connection_ref),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
             system_prompt: overrides.and_then(|ov| ov.system_prompt.clone()),
             output_schema,
@@ -2146,6 +2193,7 @@ impl SessionRuntime {
             flow_tool_overlay,
             additional_instructions,
             overrides.as_ref(),
+            Some(effective_identity.provider.as_str()),
         );
 
         let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
@@ -3190,6 +3238,7 @@ impl SessionRuntime {
                 skill_references,
                 flow_tool_overlay,
                 additional_instructions,
+                overrides.as_ref(),
             ))
             .await;
         }
@@ -3251,6 +3300,7 @@ impl SessionRuntime {
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
+                    overrides.as_ref(),
                 ))
                 .await
             }
@@ -3305,6 +3355,7 @@ impl SessionRuntime {
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         let loaded_session = self.load_persisted_session(session_id).await?;
 
@@ -3323,7 +3374,7 @@ impl SessionRuntime {
             });
         }
 
-        let recovery_overrides = self.recovery_overrides_from_turn(None, keep_alive)?;
+        let recovery_overrides = self.recovery_overrides_from_turn(overrides, keep_alive)?;
         let create_request = self
             .recovered_create_request(session_id, session, recovery_overrides)
             .await?;
@@ -4751,6 +4802,15 @@ mod tests {
         }
     }
 
+    fn test_connection_ref(realm: &str, binding: &str) -> meerkat_core::ConnectionRef {
+        meerkat_core::ConnectionRef {
+            realm: meerkat_core::connection::RealmId::parse(realm).expect("valid realm fixture"),
+            binding: meerkat_core::connection::BindingId::parse(binding)
+                .expect("valid binding fixture"),
+            profile: None,
+        }
+    }
+
     fn slow_build_config(delay_ms: u64) -> AgentBuildConfig {
         AgentBuildConfig {
             llm_client_override: Some(Arc::new(SlowMockLlmClient::new(delay_ms))),
@@ -4946,6 +5006,7 @@ mod tests {
                 "Recover".into(),
                 event_tx,
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -5225,6 +5286,7 @@ mod tests {
                 "Recover".into(),
                 event_tx,
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -7949,6 +8011,117 @@ mod tests {
         assert!(params.clear_connection_ref);
     }
 
+    #[test]
+    fn runtime_turn_metadata_from_overrides_preserves_provider_params_set() {
+        use crate::handlers::turn::TurnOverrides;
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+
+        let provider_params = serde_json::json!({
+            "temperature": 0.2,
+            "thinking": { "budget_tokens": 10_000 }
+        });
+        let overrides = TurnOverrides {
+            provider_params: Some(provider_params),
+            ..Default::default()
+        };
+
+        let metadata = SessionRuntime::turn_metadata_from_overrides(
+            None,
+            None,
+            None,
+            Some(&overrides),
+            Some("anthropic"),
+        )
+        .expect("provider params set should produce turn metadata");
+
+        let Some(TurnMetadataOverride::Set(params)) = metadata.provider_params else {
+            panic!("provider_params set override should be preserved");
+        };
+        assert_eq!(params.temperature, Some(0.2));
+        assert!(
+            params.provider_tag.is_some(),
+            "provider-native keys must stay represented on the typed override"
+        );
+    }
+
+    #[test]
+    fn runtime_turn_metadata_round_trips_provider_native_params_as_legacy_json() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let overrides = TurnOverrides {
+            provider_params: Some(serde_json::json!({
+                "thinking": { "budget_tokens": 10_000 },
+                "effort": "xhigh",
+                "web_search": null,
+            })),
+            ..Default::default()
+        };
+        let metadata = SessionRuntime::turn_metadata_from_overrides(
+            None,
+            None,
+            None,
+            Some(&overrides),
+            Some("anthropic"),
+        )
+        .expect("provider params set should produce turn metadata");
+
+        let round_tripped = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
+            .expect("metadata should reconstruct turn overrides");
+        let provider_params = round_tripped
+            .provider_params
+            .expect("provider params should survive metadata round trip");
+
+        assert!(
+            provider_params.get("provider_tag").is_none(),
+            "runtime adapter must not feed typed provider_tag envelopes back as legacy params"
+        );
+        assert_eq!(
+            provider_params["thinking"]["budget_tokens"],
+            serde_json::json!(10_000)
+        );
+        assert_eq!(provider_params["effort"], serde_json::json!("xhigh"));
+        assert!(
+            provider_params
+                .as_object()
+                .is_some_and(|obj| obj.contains_key("web_search")),
+            "explicit provider-native null must not be dropped"
+        );
+        assert!(provider_params["web_search"].is_null());
+    }
+
+    #[test]
+    fn recovery_overrides_from_turn_preserve_clear_and_connection_intent() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let connection_ref = test_connection_ref("dev", "default");
+        let overrides = TurnOverrides {
+            clear_provider_params: true,
+            connection_ref: Some(connection_ref.clone()),
+            ..Default::default()
+        };
+
+        let recovered = runtime
+            .recovery_overrides_from_turn(Some(&overrides), false)
+            .expect("valid recovery overrides");
+
+        assert!(recovered.clear_provider_params);
+        assert_eq!(recovered.provider_params, None);
+        assert_eq!(recovered.connection_ref, Some(connection_ref));
+        assert!(!recovered.clear_connection_ref);
+
+        let clear_connection = TurnOverrides {
+            clear_connection_ref: true,
+            ..Default::default()
+        };
+        let recovered = runtime
+            .recovery_overrides_from_turn(Some(&clear_connection), false)
+            .expect("valid clear connection recovery override");
+        assert!(recovered.clear_connection_ref);
+        assert_eq!(recovered.connection_ref, None);
+    }
+
     // -----------------------------------------------------------------------
     // Phase 4: Persisted session recovery
     // -----------------------------------------------------------------------
@@ -8587,6 +8760,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
         assert!(
@@ -8607,6 +8781,94 @@ mod tests {
             info.provider, "openai",
             "recovered provider must match hot-swap"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_live_recovery_applies_turn_clear_and_connection_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.provider_params = Some(serde_json::json!({
+            "thinking": { "budget_tokens": 10_000 }
+        }));
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("initial materialization");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session before recovery");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        let connection_ref = test_connection_ref("dev", "default");
+        let overrides = crate::handlers::turn::TurnOverrides {
+            clear_provider_params: true,
+            connection_ref: Some(connection_ref.clone()),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "Recover with overrides".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .expect("recovery turn should apply overrides");
+
+        let live = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live session after recovery");
+        let live_meta = live
+            .session_metadata()
+            .expect("live metadata after recovery");
+        assert_eq!(
+            live_meta.provider_params, None,
+            "clear_provider_params must survive missing-live recovery"
+        );
+        assert_eq!(
+            live_meta.connection_ref,
+            Some(connection_ref.clone()),
+            "connection_ref set must survive missing-live recovery"
+        );
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session after recovery")
+            .expect("stored session should exist");
+        let stored_meta = stored
+            .session_metadata()
+            .expect("stored metadata after recovery");
+        assert_eq!(stored_meta.provider_params, None);
+        assert_eq!(stored_meta.connection_ref, Some(connection_ref));
     }
 
     /// Regression: start_turn_via_runtime must reject build-only overrides

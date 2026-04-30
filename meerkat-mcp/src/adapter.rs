@@ -9,9 +9,10 @@ use meerkat_core::handles::{
 };
 use meerkat_core::{
     ExternalToolDelta, ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation,
-    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
-    ExternalToolSurfaceStagedOp, ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities,
-    ToolCatalogEntry, ToolDef, ToolResult, agent::AgentToolDispatcher,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceFailureCause,
+    ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp,
+    ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry, ToolDef,
+    ToolResult, agent::AgentToolDispatcher,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -160,7 +161,7 @@ impl ExternalToolSurfaceHandle for PoisonedExternalToolSurfaceHandle {
         _surface_id: String,
         _pending_task_sequence: u64,
         _staged_intent_sequence: u64,
-        _reason: String,
+        _cause: ExternalToolSurfaceFailureCause,
     ) -> Result<(), DslTransitionError> {
         Err(self.reject("PoisonedExternalToolSurfaceHandle::mark_pending_failed"))
     }
@@ -988,7 +989,7 @@ mod tests {
             _surface_id: String,
             _pending_task_sequence: u64,
             _staged_intent_sequence: u64,
-            _reason: String,
+            _cause: ExternalToolSurfaceFailureCause,
         ) -> Result<(), DslTransitionError> {
             Err(Self::reject(
                 "RejectingExternalToolSurfaceHandle::mark_pending_failed",

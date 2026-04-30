@@ -446,6 +446,7 @@ impl MeerkatMachine {
         // Get the completion feed from the registry for feed-based idle wake.
         let completion_feed = ops_lifecycle.completion_feed_handle();
 
+        let control_handle = executor.control_handle();
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let entry_cursor_state = {
@@ -486,7 +487,12 @@ impl MeerkatMachine {
                     } else {
                         match pending_loop_handle.take() {
                             Some(loop_handle) => {
-                                entry.attach_runtime_loop(wake_tx.clone(), control_tx, loop_handle);
+                                entry.attach_runtime_loop(
+                                    wake_tx.clone(),
+                                    control_tx,
+                                    control_handle,
+                                    loop_handle,
+                                );
                                 (true, false)
                             }
                             None => {

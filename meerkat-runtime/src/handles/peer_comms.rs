@@ -75,6 +75,13 @@ fn response_status_to_dsl(
     }
 }
 
+fn lifecycle_peer_param(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("peer")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn terminality_from_dsl(
     terminality: mm_dsl::PeerIngressResponseTerminality,
 ) -> meerkat_core::TerminalityClass {
@@ -100,7 +107,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
         envelope_kind,
         request_intent,
         lifecycle_kind,
-        lifecycle_peer,
+        lifecycle_peer_param,
         response_status,
         in_reply_to,
     ) = match &facts.kind {
@@ -108,7 +115,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressEnvelopeClass::Message,
             String::new(),
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
-            String::new(),
+            None,
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
         ),
@@ -116,7 +123,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressEnvelopeClass::Request,
             intent.clone(),
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
-            meerkat_core::peer_lifecycle_subject(params, facts.from_peer.as_str()),
+            lifecycle_peer_param(params),
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
         ),
@@ -124,7 +131,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressEnvelopeClass::Lifecycle,
             String::new(),
             lifecycle_to_dsl(*kind),
-            meerkat_core::peer_lifecycle_subject(params, facts.from_peer.as_str()),
+            lifecycle_peer_param(params),
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
         ),
@@ -136,7 +143,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressEnvelopeClass::Response,
             String::new(),
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
-            String::new(),
+            None,
             response_status_to_dsl(*status),
             reply_to.clone(),
         ),
@@ -146,7 +153,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressEnvelopeClass::Ack,
             String::new(),
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
-            String::new(),
+            None,
             mm_dsl::PeerIngressResponseStatus::Accepted,
             reply_to.clone(),
         ),
@@ -158,7 +165,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
         envelope_kind,
         request_intent,
         lifecycle_kind,
-        lifecycle_peer,
+        lifecycle_peer_param,
         response_status,
         in_reply_to,
     }
@@ -354,5 +361,91 @@ mod tests {
             meerkat_core::PeerIngressAuthDecision::Required
         );
         assert_eq!(admission.request_id.as_deref(), Some("request-1"));
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_lifecycle_subject_is_selected_by_machine() {
+        let state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Attached,
+            session_id: Some(mm_dsl::SessionId("session-1".to_string())),
+            ..Default::default()
+        };
+        let authority = Arc::new(Mutex::new(mm_dsl::MeerkatMachineAuthority::from_state(
+            state,
+        )));
+        let handle =
+            RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
+
+        let with_param = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "request-param".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "mob.peer_added".to_string(),
+                    params: serde_json::json!({ "peer": "worker-1" }),
+                },
+            })
+            .expect("machine should classify lifecycle request");
+        assert_eq!(with_param.lifecycle_peer.as_deref(), Some("worker-1"));
+
+        let without_param = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "request-fallback".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "mob.peer_retired".to_string(),
+                    params: serde_json::json!({}),
+                },
+            })
+            .expect("machine should classify lifecycle request fallback");
+        assert_eq!(
+            without_param.lifecycle_peer.as_deref(),
+            Some("orchestrator")
+        );
+
+        let empty_param = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "lifecycle-empty".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
+                    kind: meerkat_core::comms::PeerLifecycleKind::PeerUnwired,
+                    params: serde_json::json!({ "peer": "" }),
+                },
+            })
+            .expect("machine should classify lifecycle event fallback");
+        assert_eq!(empty_param.lifecycle_peer.as_deref(), Some("orchestrator"));
+    }
+
+    #[test]
+    fn runtime_signal_builder_does_not_preselect_lifecycle_subject() {
+        let source = include_str!("peer_comms.rs");
+        let signal_builder = source
+            .split("fn external_envelope_signal")
+            .nth(1)
+            .expect("signal builder should exist")
+            .split("struct PeerIngressClassifiedEffect")
+            .next()
+            .expect("classified effect should follow signal builder");
+        let forbidden_helper = ["peer", "lifecycle", "subject"].join("_");
+
+        assert!(
+            signal_builder.contains("lifecycle_peer_param"),
+            "runtime should pass the parsed lifecycle peer candidate"
+        );
+        assert!(
+            !signal_builder.contains(&forbidden_helper),
+            "runtime must not call the lifecycle subject selector before the machine"
+        );
+        assert!(
+            !signal_builder.contains("facts.from_peer.as_str()"),
+            "fallback peer must remain a machine input fact, not a preselected subject"
+        );
+        assert!(
+            !signal_builder.contains("unwrap_or"),
+            "runtime must not choose a lifecycle subject fallback before the machine"
+        );
     }
 }

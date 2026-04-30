@@ -3935,7 +3935,7 @@ pub mod signals {
         pub envelope_kind: PeerIngressEnvelopeClass,
         pub request_intent: String,
         pub lifecycle_kind: PeerIngressLifecycleClass,
-        pub lifecycle_peer: String,
+        pub lifecycle_peer_param: Option<String>,
         pub response_status: PeerIngressResponseStatus,
         pub in_reply_to: String,
     }

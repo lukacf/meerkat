@@ -360,7 +360,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Initialize`
 - `BoundaryApplied`(revision: u64)
 - `DrainQueuedRun`(run_id: RunId)
-- `ClassifyExternalEnvelope`(item_id: String, from_peer: String, envelope_kind: PeerIngressEnvelopeClass, request_intent: String, lifecycle_kind: PeerIngressLifecycleClass, lifecycle_peer: String, response_status: PeerIngressResponseStatus, in_reply_to: String)
+- `ClassifyExternalEnvelope`(item_id: String, from_peer: String, envelope_kind: PeerIngressEnvelopeClass, request_intent: String, lifecycle_kind: PeerIngressLifecycleClass, lifecycle_peer_param: Option<String>, response_status: PeerIngressResponseStatus, in_reply_to: String)
 - `ClassifyPlainEvent`(source_name: String)
 - `EnsureDrainRunning`
 
@@ -1895,7 +1895,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeMessageAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_message`
@@ -1904,7 +1904,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeMessageRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_message`
@@ -1913,7 +1913,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
@@ -1922,7 +1922,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestPeerAddedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_added`
@@ -1931,7 +1931,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
@@ -1940,7 +1940,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestPeerRetiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_retired`
@@ -1949,7 +1949,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
@@ -1958,7 +1958,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestPeerUnwiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_request_peer_unwired`
@@ -1967,7 +1967,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
@@ -1976,7 +1976,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestSupervisorSilentRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_silent_request`
@@ -1985,7 +1985,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestSilentAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_silent_request`
@@ -1994,7 +1994,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestSilentRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_silent_request`
@@ -2003,7 +2003,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestSupervisorAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
@@ -2012,7 +2012,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestSupervisorRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_supervisor_request`
@@ -2021,7 +2021,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestActionableAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_actionable_request`
@@ -2030,7 +2030,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeRequestActionableRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_actionable_request`
@@ -2039,7 +2039,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeLifecycleAddedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
@@ -2048,7 +2048,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeLifecycleAddedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_added`
@@ -2057,7 +2057,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
@@ -2066,7 +2066,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeLifecycleRetiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_retired`
@@ -2075,7 +2075,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
@@ -2084,7 +2084,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeLifecycleUnwiredRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_lifecycle_unwired`
@@ -2093,7 +2093,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeResponseAcceptedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_accepted`
@@ -2102,7 +2102,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeResponseAcceptedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_accepted`
@@ -2111,7 +2111,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeResponseCompletedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_completed`
@@ -2120,7 +2120,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeResponseCompletedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_completed`
@@ -2129,7 +2129,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeResponseFailedAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_failed`
@@ -2138,7 +2138,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeResponseFailedRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_response_failed`
@@ -2147,7 +2147,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeAckAttached`
 - From: `Attached`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_ack`
@@ -2156,7 +2156,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyExternalEnvelopeAckRunning`
 - From: `Running`
-- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer, response_status, in_reply_to)
+- On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
 - Guards:
   - `session_registered`
   - `peer_ingress_ack`

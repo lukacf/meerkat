@@ -2122,6 +2122,9 @@ mod tests {
         let supervisor_name = format!("bridge-response-supervisor-{suffix}");
         let member_runtime =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only(&member_name).expect("member"));
+        let supervisor_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor"),
+        );
         let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
         member_runtime.install_peer_request_response_authority(
             meerkat_comms::PeerRequestResponseAuthority::new(
@@ -2130,12 +2133,31 @@ mod tests {
             ),
         );
 
-        let supervisor_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+        let supervisor_pubkey = supervisor_runtime.public_key();
+        let supervisor_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
             &supervisor_name,
-            PeerId::new(),
+            supervisor_pubkey.to_peer_id().as_str(),
+            *supervisor_pubkey.as_bytes(),
             &format!("inproc://{supervisor_name}"),
         )
         .expect("valid supervisor spec");
+        member_runtime
+            .add_trusted_peer(supervisor_spec.clone())
+            .await
+            .expect("member should trust supervisor");
+
+        let member_pubkey = member_runtime.public_key();
+        let member_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            &member_name,
+            member_pubkey.to_peer_id().as_str(),
+            *member_pubkey.as_bytes(),
+            &format!("inproc://{member_name}"),
+        )
+        .expect("valid member spec");
+        supervisor_runtime
+            .add_trusted_peer(member_spec)
+            .await
+            .expect("supervisor should trust member");
 
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();

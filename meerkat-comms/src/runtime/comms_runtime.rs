@@ -644,6 +644,21 @@ impl CoreCommsRuntime for CommsRuntime {
                     core_status,
                     meerkat_core::ResponseStatus::Completed | meerkat_core::ResponseStatus::Failed
                 );
+                let envelope_id = self
+                    .send_peer_command(
+                        &to,
+                        crate::types::MessageKind::Response {
+                            in_reply_to: in_reply_to.0,
+                            status,
+                            result,
+                            handling_mode,
+                        },
+                    )
+                    .await?;
+
+                // The terminal inbound transition is coupled to the actual
+                // response send outcome: route/transport failure leaves the
+                // request in `Received` so the responder can retry.
                 if is_terminal_reply && let Err(err) = peer_handle.response_replied(corr_id) {
                     tracing::warn!(
                         error = %err,
@@ -655,17 +670,7 @@ impl CoreCommsRuntime for CommsRuntime {
                     )));
                 }
 
-                self.send_peer_command(
-                    &to,
-                    crate::types::MessageKind::Response {
-                        in_reply_to: in_reply_to.0,
-                        status,
-                        result,
-                        handling_mode,
-                    },
-                )
-                .await
-                .map(|envelope_id| SendReceipt::PeerResponseSent {
+                Ok(SendReceipt::PeerResponseSent {
                     envelope_id,
                     in_reply_to,
                 })
@@ -3590,6 +3595,52 @@ mod tests {
         assert!(
             matches!(result, Err(SendError::Validation(ref message)) if message.contains("machine peer interaction authority")),
             "transport-only runtime must fail before emitting PeerResponseSent, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_peer_response_route_failure_keeps_inbound_request_retryable() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let runtime = Arc::new(
+            CommsRuntime::inproc_only(&format!("response-route-failure-{suffix}")).unwrap(),
+        );
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+
+        let interaction_id = Uuid::new_v4();
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+        meerkat_core::handles::PeerInteractionHandle::request_received(
+            peer_handle.as_ref(),
+            corr_id,
+        )
+        .expect("test authority should seed inbound request state");
+
+        let result = CoreCommsRuntime::send(
+            runtime.as_ref(),
+            CommsCommand::PeerResponse {
+                to: missing_peer_route(&format!("missing-response-peer-{suffix}")),
+                in_reply_to: InteractionId(interaction_id),
+                status: meerkat_core::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SendError::PeerNotFound(_))),
+            "test must fail at transport routing, got {result:?}"
+        );
+        assert_eq!(
+            meerkat_core::handles::PeerInteractionHandle::inbound_state(
+                peer_handle.as_ref(),
+                corr_id
+            ),
+            Some(meerkat_core::InboundPeerRequestState::Received),
+            "failed terminal PeerResponse send must leave inbound request state retryable"
         );
     }
 

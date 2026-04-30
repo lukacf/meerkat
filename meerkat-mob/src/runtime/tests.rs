@@ -4704,10 +4704,15 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         });
         let tools = Arc::new(OverlayProbeDispatcher::new());
         let store = Arc::new(OverlayProbeSessionStore);
-        let agent =
-            meerkat_core::agent::build_agent_after_factory_policy(builder, client, tools, store)
-                .await
-                .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent = meerkat_core::agent::build_agent_after_factory_policy(
+            meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
+            builder,
+            client,
+            tools,
+            store,
+        )
+        .await
+        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(OverlayProbeSessionAgent { agent })
     }

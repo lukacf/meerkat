@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+meerkat-agent-build-authority = { workspace = true }
 meerkat-core = { workspace = true, features = ["jsonschema", "internal-agent-factory-build"] }
 meerkat-llm-core = { workspace = true }
 meerkat-client = { workspace = true, default-features = false }

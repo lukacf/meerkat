@@ -184,6 +184,19 @@ function listExpr(values, indent = 8) {
   return `[\n${values.map((v) => `${pad}${q(v)},`).join("\n")}\n${" ".repeat(indent - 4)}]`;
 }
 
+function rustTargetVisibility(key) {
+  if (key === "meerkat-agent-build-authority") {
+    return listExpr([
+      "//:__pkg__",
+      "//meerkat-core:__pkg__",
+      "//meerkat-mob:__pkg__",
+      "//meerkat-session:__pkg__",
+      "//meerkat:__pkg__",
+    ]);
+  }
+  return `["//visibility:public"]`;
+}
+
 const nativeE2eSystemTests = [
   {
     packageKey: "meerkat-cli",
@@ -703,7 +716,7 @@ for (const pkg of localPackages.values()) {
       `    edition = "2024",`,
       `    compile_data = ${compileDataExpr},`,
       `    srcs = ${srcsExpr},`,
-      `    visibility = ["//visibility:public"],`,
+      `    visibility = ${rustTargetVisibility(key)},`,
       `    deps = ${depsExpr},`,
     ];
     if (rule === "rust_binary" || rule === "rust_test") {
@@ -845,7 +858,7 @@ for (const pkg of localPackages.values()) {
         `    edition = "2024",`,
         `    compile_data = ${compileDataExpr},`,
         `    srcs = ${srcsExpr},`,
-        `    visibility = ["//visibility:public"],`,
+        `    visibility = ${rustTargetVisibility(key)},`,
         `    rustc_env = {\n        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},\n    },`,
         `    tags = ${listExpr(["fast", "unit"])},`,
         `    size = ${q(unitSize)},`,
@@ -935,7 +948,7 @@ for (const pkg of localPackages.values()) {
           `    edition = "2024",`,
           `    compile_data = ${compileDataExpr},`,
           `    srcs = glob(["src/**/*.rs"]),`,
-          `    visibility = ["//visibility:public"],`,
+          `    visibility = ${rustTargetVisibility(key)},`,
         ];
         if (rule === "rust_binary") {
           attrs.push(

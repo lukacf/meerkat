@@ -29,6 +29,7 @@ schemars = { workspace = true }
 strum = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
 parking_lot = { workspace = true }
+meerkat-agent-build-authority = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
@@ -47,7 +48,7 @@ jsonschema = ["dep:jsonschema"]
 standalone-agent-builder = []
 # Internal cross-crate bridge used by the `meerkat` facade's AgentFactory.
 # Not part of the default `meerkat-core` public API.
-internal-agent-factory-build = []
+internal-agent-factory-build = ["dep:meerkat-agent-build-authority"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

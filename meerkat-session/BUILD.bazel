@@ -102,6 +102,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-runtime:meerkat_runtime",
@@ -156,6 +157,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-runtime:meerkat_runtime",
@@ -213,6 +215,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-runtime:meerkat_runtime",
@@ -268,6 +271,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-runtime:meerkat_runtime",
@@ -324,6 +328,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",
         "//meerkat-runtime:meerkat_runtime",

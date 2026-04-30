@@ -67,6 +67,7 @@ futures = { workspace = true }
 async-stream = { workspace = true }
 reqwest = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+meerkat-agent-build-authority = { workspace = true }
 meerkat-store = { workspace = true, features = ["jsonl"] }
 meerkat-machine-schema.workspace = true
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }

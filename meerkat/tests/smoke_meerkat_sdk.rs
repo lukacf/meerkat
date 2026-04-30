@@ -1359,6 +1359,7 @@ mod scenario_10_memory {
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
+            meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
             builder,
             llm_adapter,
             memory_tools,

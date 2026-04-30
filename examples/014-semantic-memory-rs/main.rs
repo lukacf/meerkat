@@ -20,7 +20,7 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 014-semantic-memory --features jsonl-store,memory-store-session
+//! ANTHROPIC_API_KEY=... cargo run --example 014-semantic-memory --features jsonl-store,memory-store-session,standalone-agent-builder
 //! ```
 
 use std::sync::Arc;

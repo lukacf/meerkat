@@ -299,9 +299,15 @@ async fn build_agent(
         ))
         .with_hook_engine(Arc::new(hooks));
 
-    meerkat_core::agent::build_agent_after_factory_policy(builder, client, tools, store)
-        .await
-        .expect("factory policy test builder")
+    meerkat_core::agent::build_agent_after_factory_policy(
+        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
+        builder,
+        client,
+        tools,
+        store,
+    )
+    .await
+    .expect("factory policy test builder")
 }
 
 fn test_hooks() -> TestHookEngine {

@@ -87,6 +87,7 @@ pub enum AgentBuildPolicyError {
 #[cfg(feature = "internal-agent-factory-build")]
 #[doc(hidden)]
 pub async fn build_agent_after_factory_policy<C, T, S>(
+    _authority: meerkat_agent_build_authority::AgentFactoryBuildAuthority,
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,

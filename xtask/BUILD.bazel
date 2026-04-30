@@ -389,6 +389,7 @@ rust_test(
         ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//meerkat-agent-build-authority:package_runfiles",
         "//meerkat-anthropic:package_runfiles",
         "//meerkat-auth-core:package_runfiles",
         "//meerkat-cli:package_runfiles",

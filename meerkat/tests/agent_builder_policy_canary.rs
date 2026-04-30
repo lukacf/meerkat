@@ -145,6 +145,14 @@ fn public_factory_policy_finalizer_is_internal_feature_gated(source: &str) -> bo
     cfg_window.contains(r#"#[cfg(feature = "internal-agent-factory-build")]"#)
 }
 
+fn public_factory_policy_finalizer_requires_typed_authority(source: &str) -> bool {
+    let Some(pos) = source.find("pub async fn build_agent_after_factory_policy") else {
+        return true;
+    };
+    let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
+    signature_window.contains("meerkat_agent_build_authority::AgentFactoryBuildAuthority")
+}
+
 fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
     let Some(pos) = source.find("pub use builder::build_agent_after_factory_policy") else {
         return true;
@@ -156,6 +164,20 @@ fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
         .collect::<Vec<_>>()
         .join("\n");
     cfg_window.contains(r#"#[cfg(feature = "internal-agent-factory-build")]"#)
+}
+
+fn bazel_target_block<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("    name = \"{name}\",");
+    let name_pos = source.find(&needle)?;
+    let start = source[..name_pos]
+        .rfind("\nrust_")
+        .map(|pos| pos + 1)
+        .unwrap_or(0);
+    let end = source[name_pos..]
+        .find("\n)\n")
+        .map(|offset| name_pos + offset + 3)
+        .unwrap_or(source.len());
+    Some(&source[start..end])
 }
 
 #[test]
@@ -217,6 +239,67 @@ meerkat-core = {{ path = "{}" }}
 }
 
 #[test]
+fn downstream_meerkat_graph_cannot_forge_factory_policy_finalizer() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_meerkat_graph_cannot_forge_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-meerkat"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat = {{ path = "{}", default-features = false }}
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!(
+            "fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs"
+        ),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("check")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream meerkat + core fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("build_agent_after_factory_policy"),
+        "downstream fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn core_agent_builder_does_not_expose_public_build_bypass() {
     let builder = repo_file("meerkat-core/src/agent/builder.rs");
 
@@ -237,6 +320,14 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
         "meerkat_core must not expose the factory-policy finalizer in its \
          default public API; the facade factory bridge must be internal \
          feature-gated"
+    );
+    assert!(
+        public_factory_policy_finalizer_requires_typed_authority(&builder),
+        "the feature-gated factory-policy finalizer must require a typed \
+         authority that is not minted or re-exported from meerkat-core; a \
+         feature-unified downstream crate must not be able to call the \
+         finalizer with only public SessionMetadata, SessionBuildState, and \
+         a public turn-state handle"
     );
     assert!(
         !builder.contains("pub async fn build_after_factory_policy"),
@@ -288,9 +379,20 @@ fn core_factory_authority_token_is_not_reexported() {
          crates can mint or pass"
     );
     assert!(
+        !agent_mod.contains("AgentFactoryBuildAuthority"),
+        "meerkat_core::agent must not re-export the concrete factory build \
+         authority; downstream crates must not obtain it from core feature \
+         unification"
+    );
+    assert!(
         !lib.contains("AgentFactoryBuildToken"),
         "meerkat_core must not re-export a factory token that downstream crates \
          can mint or pass"
+    );
+    assert!(
+        !lib.contains("AgentFactoryBuildAuthority"),
+        "meerkat_core must not re-export the concrete factory build authority \
+         that the facade owns through a separate direct dependency"
     );
     assert!(
         !agent_mod.contains("AgentFactoryPolicyAuthorityRegistration")
@@ -310,6 +412,30 @@ fn core_factory_authority_token_is_not_reexported() {
         "meerkat facade must not publicly re-export the core builder as a \
          standalone construction shortcut"
     );
+}
+
+#[test]
+fn bazel_factory_authority_target_is_not_publicly_visible() {
+    let Some(authority_bazel) = try_repo_file("meerkat-agent-build-authority/BUILD.bazel") else {
+        // Cargo-only source layouts may not include generated Bazel files.
+        return;
+    };
+    let authority_library = bazel_target_block(&authority_bazel, "meerkat_agent_build_authority")
+        .expect("authority BUILD.bazel must contain its rust_library target");
+
+    assert!(
+        !authority_library.contains("//visibility:public"),
+        "the Bazel authority rust_library must not be public; otherwise a \
+         downstream Bazel target can depend on the public core target, add the \
+         authority target directly, and call the factory-policy finalizer"
+    );
+    for label in ["//:__pkg__", "//meerkat-core:__pkg__", "//meerkat:__pkg__"] {
+        assert!(
+            authority_library.contains(label),
+            "authority target visibility must still allow the canonical \
+             facade/core bridge: missing {label}"
+        );
+    }
 }
 
 #[test]

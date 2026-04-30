@@ -13,8 +13,13 @@ use std::sync::Arc;
 use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
 #[cfg(feature = "openai")]
 use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
+#[cfg(feature = "openai")]
+use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
+
+const AGENT_FACTORY_BUILD_AUTHORITY: meerkat_agent_build_authority::AgentFactoryBuildAuthority =
+    meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory();
 
 /// Default system prompt for wasm32 builds.
 /// Mirrors `meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT` which is gated
@@ -43,9 +48,9 @@ use meerkat_core::SessionId;
 use meerkat_core::SessionMeta;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BlobStore, BudgetLimits, Config, ConnectionRef, CredentialSourceSpec, HookRunOverrides,
-    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
-    SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride,
+    BlobStore, BudgetLimits, Config, ConnectionRef, HookRunOverrides, ModelRegistry, OutputSchema,
+    Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
+    SessionTooling, ToolCategoryOverride,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
@@ -3873,6 +3878,7 @@ impl AgentFactory {
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
+            AGENT_FACTORY_BUILD_AUTHORITY,
             builder,
             llm_adapter,
             tools,
@@ -4016,6 +4022,7 @@ mod tests {
             .max_tokens_per_turn(64)
             .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
         let result = meerkat_core::agent::build_agent_after_factory_policy(
+            AGENT_FACTORY_BUILD_AUTHORITY,
             builder,
             llm_adapter,
             tools,

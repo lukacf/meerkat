@@ -83,6 +83,7 @@ filegroup(
         ],
         allow_empty = True,
     ) + [
+        "//meerkat-agent-build-authority:package_runfiles",
         "//meerkat-anthropic:package_runfiles",
         "//meerkat-auth-core:package_runfiles",
         "//meerkat-cli:package_runfiles",
@@ -141,6 +142,7 @@ sh_test(
 test_suite(
     name = "fast_tests",
     tests = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority_unit_test",
         "//meerkat-anthropic:meerkat_anthropic_unit_test",
         "//meerkat-anthropic:oauth_resolve_test",
         "//meerkat-auth-core:aws_sts_authorizer_test",

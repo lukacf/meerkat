@@ -61,6 +61,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -140,6 +141,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -197,6 +199,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -213,6 +216,8 @@ rust_test(
     size = "small",
     data = [
         ":package_runfiles",
+        "//meerkat-agent-build-authority:cargo_manifest",
+        "//meerkat-agent-build-authority:package_runfiles",
         "//meerkat-comms:cargo_manifest",
         "//meerkat-comms:package_runfiles",
         "//meerkat-core:cargo_manifest",
@@ -235,6 +240,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -293,6 +299,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -317,6 +324,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -375,6 +383,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -403,6 +412,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -461,6 +471,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -485,6 +496,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -543,6 +555,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -569,6 +582,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -627,6 +641,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -654,6 +669,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -712,6 +728,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -737,6 +754,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -795,6 +813,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -820,6 +839,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -878,6 +898,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -907,6 +928,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -965,6 +987,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -989,6 +1012,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1047,6 +1071,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1071,6 +1096,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1129,6 +1155,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1155,6 +1182,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1213,6 +1241,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1241,6 +1270,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1299,6 +1329,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1323,6 +1354,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1381,6 +1413,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1406,6 +1439,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1464,6 +1498,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1492,6 +1527,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",

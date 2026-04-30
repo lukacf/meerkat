@@ -2381,6 +2381,7 @@ dependencies = [
  "futures",
  "indexmap",
  "inventory",
+ "meerkat-agent-build-authority",
  "meerkat-anthropic",
  "meerkat-client",
  "meerkat-comms",
@@ -2414,6 +2415,10 @@ dependencies = [
  "tracing",
  "which",
 ]
+
+[[package]]
+name = "meerkat-agent-build-authority"
+version = "0.6.0"
 
 [[package]]
 name = "meerkat-anthropic"
@@ -2563,6 +2568,7 @@ dependencies = [
  "indexmap",
  "js-sys",
  "jsonschema",
+ "meerkat-agent-build-authority",
  "parking_lot",
  "schemars 1.2.1",
  "serde",
@@ -2816,6 +2822,7 @@ dependencies = [
  "indexmap",
  "jsonschema",
  "meerkat",
+ "meerkat-agent-build-authority",
  "meerkat-client",
  "meerkat-comms",
  "meerkat-contracts",
@@ -3069,6 +3076,7 @@ dependencies = [
  "futures",
  "indexmap",
  "inventory",
+ "meerkat-agent-build-authority",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-runtime",

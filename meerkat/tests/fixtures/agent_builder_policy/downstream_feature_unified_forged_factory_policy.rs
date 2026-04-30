@@ -10,6 +10,7 @@ fn fabricated<T>() -> T {
 }
 
 async fn forged_factory_policy_entrypoint() {
+    let _facade_type_check = std::mem::size_of::<meerkat::AgentBuilder>();
     let mut session = Session::new();
     session
         .set_session_metadata(SessionMetadata {

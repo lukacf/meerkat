@@ -1829,13 +1829,20 @@ impl SessionRuntime {
         session_id: &SessionId,
         run_id: meerkat_core::lifecycle::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
     ) -> Result<
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::service::SessionError,
     > {
         self.service
-            .apply_runtime_context_appends(session_id, run_id, appends, contributing_input_ids)
+            .apply_runtime_context_appends_with_boundary(
+                session_id,
+                run_id,
+                appends,
+                boundary,
+                contributing_input_ids,
+            )
             .await
     }
 
@@ -2447,10 +2454,11 @@ impl SessionRuntime {
             };
             return self
                 .service
-                .apply_runtime_context_appends(
+                .apply_runtime_context_appends_with_boundary(
                     session_id,
                     run_id,
                     pending_system_context_appends(&staged.context_appends),
+                    primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
@@ -4899,6 +4907,71 @@ mod tests {
             llm_client_override: Some(Arc::new(SlowMockLlmClient::new(delay_ms))),
             ..AgentBuildConfig::new("claude-sonnet-4-5")
         }
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_apply_preserves_run_checkpoint_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize runtime session".into(),
+                initial_event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-checkpoint-boundary".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("context-only apply should succeed");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
     }
 
     #[tokio::test]

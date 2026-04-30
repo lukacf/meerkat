@@ -586,10 +586,11 @@ async fn apply_runtime_turn(
         };
         return context
             .session_service
-            .apply_runtime_context_appends(
+            .apply_runtime_context_appends_with_boundary(
                 session_id,
                 run_id,
                 pending_system_context_appends(&staged.context_appends),
+                primitive.apply_boundary(),
                 staged.contributing_input_ids.clone(),
             )
             .await;
@@ -4755,6 +4756,81 @@ mod tests {
                 data: "AAAA".to_string(),
             },
         }])
+    }
+
+    #[tokio::test]
+    async fn rest_context_only_runtime_apply_preserves_run_checkpoint_boundary() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let pre_session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(pre_session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        let create_result = state
+            .session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    resume_session: Some(pre_session),
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = create_result.session_id;
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rest-checkpoint-boundary".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+
+        let output = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &session_id,
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text(String::new()),
+        )
+        .await
+        .expect("context-only apply should succeed");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
     }
 
     #[tokio::test]

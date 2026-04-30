@@ -192,6 +192,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     &self.session_id,
                     run_id,
                     pending_system_context_appends_from_primitive(&staged.context_appends),
+                    primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
@@ -299,10 +300,11 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             };
             return self
                 .session_service
-                .apply_runtime_context_appends(
+                .apply_runtime_context_appends_with_boundary(
                     &self.session_id,
                     run_id,
                     pending_system_context_appends_from_primitive(&staged.context_appends),
+                    primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
                 )
                 .await

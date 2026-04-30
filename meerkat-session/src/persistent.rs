@@ -688,7 +688,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if self.runtime_store.is_none() {
             // Legacy runtime-less compatibility only. This is not a runtime
             // authority path; runtime-backed callers commit through
-            // `RuntimeStore::commit_session_boundary` inside
+            // `RuntimeStore::commit_session_snapshot` inside
             // `save_normalized_session`.
             tracing::debug!(
                 session_id = %session.id(),

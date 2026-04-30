@@ -943,39 +943,32 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
 
     let queue = ingress.queue();
     if let Some(driver_index) = queue.iter().position(should_drive_loop) {
-        let first = &queue[driver_index];
-        let prefix = &queue[..=driver_index];
-        if ingress.is_prompt(first) {
-            let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
-                return vec![first.clone()];
-            };
-            let target_peer_response_terminal_apply_intent =
-                machine_input_peer_response_terminal_apply_intent(driver, first);
-            let first_compatible_index = prefix
-                .iter()
-                .rposition(|id| {
-                    machine_input_execution_kind(driver, id) != Some(target_execution_kind)
-                        || machine_input_peer_response_terminal_apply_intent(driver, id)
-                            != target_peer_response_terminal_apply_intent
-                })
-                .map_or(0, |index| index + 1);
-            return prefix[first_compatible_index..].to_vec();
-        }
+        let Some(first) = queue.first() else {
+            return Vec::new();
+        };
         let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
             return vec![first.clone()];
         };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
-        return queue[..]
-            .iter()
-            .take_while(|id| {
-                !ingress.is_prompt(id)
-                    && machine_input_execution_kind(driver, id) == Some(target_execution_kind)
-                    && machine_input_peer_response_terminal_apply_intent(driver, id)
-                        == target_peer_response_terminal_apply_intent
-            })
-            .cloned()
-            .collect();
+        let driver_is_prompt = ingress.is_prompt(&queue[driver_index]);
+        let mut selected = Vec::new();
+        for id in &queue {
+            if machine_input_execution_kind(driver, id) != Some(target_execution_kind)
+                || machine_input_peer_response_terminal_apply_intent(driver, id)
+                    != target_peer_response_terminal_apply_intent
+            {
+                break;
+            }
+            selected.push(id.clone());
+            if ingress.is_prompt(id) {
+                break;
+            }
+            if driver_is_prompt && selected.len() > driver_index {
+                break;
+            }
+        }
+        return selected;
     }
 
     Vec::new()
@@ -1779,7 +1772,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_batch_selection_excludes_mixed_execution_kind_prefix() {
+    fn prompt_batch_selection_drives_incompatible_prefix_before_prompt() {
         let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
             "mixed-prefix-test",
         ));
@@ -1858,12 +1851,98 @@ mod tests {
             .expect("recover queued prompt input");
         driver.rebuild_queue_projections_after_recovery();
 
-        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+        let entry = DriverEntry::Ephemeral(driver);
+        let selected = machine_select_runtime_loop_batch(&entry);
 
         assert_eq!(
             selected,
-            vec![prompt_id],
-            "prompt-driven batches must not stage older inputs with a different execution kind"
+            vec![resume_id],
+            "a later prompt may drive the queue, but selection must preserve the staged queue prefix when an older input has a different execution kind"
+        );
+        machine_validate_stage_drain_snapshot(&entry, &selected)
+            .expect("selected incompatible prefix must satisfy staging invariants");
+    }
+
+    #[test]
+    fn batch_selection_surfaces_unstamped_no_wake_prefix_before_prompt() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "missing-prefix-before-prompt-selection",
+        ));
+        let prefix_input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let prompt_input = Input::Prompt(crate::input::PromptInput::new("drive the queue", None));
+        let prefix_id = prefix_input.id().clone();
+        let prompt_id = prompt_input.id().clone();
+        let mut prefix_state = InputState::new_accepted(prefix_id.clone());
+        prefix_state.persisted_input = Some(prefix_input.clone());
+        let mut prompt_state = InputState::new_accepted(prompt_id.clone());
+        prompt_state.persisted_input = Some(prompt_input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(prefix_state.clone()));
+        assert!(driver.ledger_mut().recover(prompt_state.clone()));
+
+        driver
+            .admit_recovered_to_ingress(
+                prefix_id.clone(),
+                ContentShape::from_kind(prefix_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prefix_input),
+                false,
+                &prefix_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::None,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prefix input");
+        driver
+            .admit_recovered_to_ingress(
+                prompt_id,
+                ContentShape::from_kind(prompt_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prompt_input),
+                true,
+                &prompt_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+        driver.clear_admitted_runtime_semantics_for_test(&prefix_id);
+
+        let entry = DriverEntry::Ephemeral(driver);
+        let selected = machine_select_runtime_loop_batch(&entry);
+
+        assert_eq!(
+            selected,
+            vec![prefix_id],
+            "an unstamped no-wake prefix entry must be selected before the later prompt so runtime-loop failure handling can consume the queue prefix"
+        );
+        machine_validate_stage_drain_snapshot(&entry, &selected)
+            .expect("selected unstamped prefix must satisfy staging invariants");
+        assert!(
+            machine_batch_runtime_semantics(&entry, &selected).is_none(),
+            "selected unstamped prefix must flow into the runtime-loop metadata conflict path"
         );
     }
 

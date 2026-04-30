@@ -50,11 +50,10 @@ use meerkat_core::{
     SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
     SurfaceSessionRecoveryOverrides, SystemMessage, build_recovered_session,
 };
-use meerkat_runtime::RuntimeDriverError;
 use meerkat_runtime::{
-    HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure,
-    SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
-    SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
+    HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
+    RuntimeState, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
+    SessionLlmReconfigureHost, SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
 };
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 
@@ -3523,11 +3522,33 @@ impl SessionRuntime {
             return Ok(());
         }
 
-        match self.service.interrupt(session_id).await {
+        match self
+            .runtime_adapter
+            .hard_cancel_current_run(session_id, "RPC session runtime interrupt")
+            .await
+        {
             Ok(()) => Ok(()),
-            // The service returns NotRunning when no turn is active — map to no-op.
-            Err(SessionError::NotRunning { .. }) => Ok(()),
-            Err(e) => Err(session_error_to_rpc(e)),
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Idle | RuntimeState::Attached,
+            }) => Ok(()),
+            Err(RuntimeDriverError::NotReady {
+                state: RuntimeState::Destroyed,
+            })
+            | Err(RuntimeDriverError::Destroyed) => Err(RpcError {
+                code: error::SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            }),
+            Err(RuntimeDriverError::NotReady { state }) => Err(RpcError {
+                code: error::INVALID_REQUEST,
+                message: format!("Session is not interruptible while runtime is {state}"),
+                data: None,
+            }),
+            Err(e) => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("Failed to interrupt session: {e}"),
+                data: None,
+            }),
         }
     }
 

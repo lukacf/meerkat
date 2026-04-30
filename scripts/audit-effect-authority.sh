@@ -107,6 +107,22 @@ EOF
   rm -rf "$tmpdir"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-rpc/src"
+  cat >"$tmpdir/meerkat-rpc/src/session_runtime.rs" <<'EOF'
+impl SessionRuntime {
+    pub async fn interrupt(&self, session_id: &SessionId) {
+        let _ = self.service.interrupt(session_id).await;
+    }
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: public session-runtime interrupt fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-runtime/src"
   cat >"$tmpdir/meerkat-runtime/src/comms_drain.rs" <<'EOF'
 async fn bad(machine: Machine, session_id: SessionId) {
@@ -209,6 +225,41 @@ strip_core_executor_interrupt_impls() {
   ' "$1"
 }
 
+strip_cfg_test_modules() {
+  awk '
+    function brace_delta(line, opened, closed, copy) {
+      copy = line
+      opened = gsub(/\{/, "{", copy)
+      copy = line
+      closed = gsub(/\}/, "}", copy)
+      return opened - closed
+    }
+    /^[[:space:]]*#\[cfg\(test\)\]/ {
+      pending_test_attr = 1
+      print
+      next
+    }
+    pending_test_attr && /^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{/ {
+      in_test = 1
+      pending_test_attr = 0
+      depth = brace_delta($0)
+      next
+    }
+    pending_test_attr && /^[[:space:]]*(pub[[:space:]]+)?(async[[:space:]]+)?(fn|struct|enum|impl|trait|type|const|static|use)[[:space:]]/ {
+      pending_test_attr = 0
+    }
+    in_test {
+      depth += brace_delta($0)
+      if (depth <= 0) {
+        in_test = 0
+        depth = 0
+      }
+      next
+    }
+    { print }
+  '
+}
+
 run_control_name="RunControl""Command"
 core_control_name="CoreExecutor""Control"
 report_matches "$run_control_name references remain" "$(run_rg "\\b${run_control_name}\\b")"
@@ -286,6 +337,7 @@ for surface_file in \
   "$root/meerkat-rpc/src/handlers/session.rs" \
   "$root/meerkat-rpc/src/handlers/turn.rs" \
   "$root/meerkat-rpc/src/realtime_ws.rs" \
+  "$root/meerkat-rpc/src/session_runtime.rs" \
   "$root/meerkat-cli/src/main.rs" \
   "$root/meerkat-openai/src/realtime_attachment.rs" \
   "$root/meerkat-mob/src/runtime/local_bridge.rs" \
@@ -293,7 +345,8 @@ for surface_file in \
 do
   if [[ -f "$surface_file" ]]; then
     found="$(strip_core_executor_interrupt_impls "$surface_file" \
-      | rg -n '\b(runtime|service|svc|session_service|cancel_svc|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run\(' 2>/dev/null || true)"
+      | strip_cfg_test_modules \
+      | rg -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run\(' 2>/dev/null || true)"
     if [[ -n "$found" ]]; then
       public_interrupt_bypasses+="$surface_file"$'\n'"$found"$'\n'
     fi

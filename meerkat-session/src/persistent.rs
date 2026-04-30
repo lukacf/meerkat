@@ -645,16 +645,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         let mut selected = None;
-        for runtime_id in Self::runtime_id_candidates_for_session(id) {
-            if let Some(session) =
-                Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await?
-            {
-                let replace = selected
-                    .as_ref()
-                    .is_none_or(|existing: &Session| session.updated_at() > existing.updated_at());
-                if replace {
-                    selected = Some(session);
+        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
+            .into_iter()
+            .enumerate()
+        {
+            match Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await {
+                Ok(Some(session)) => {
+                    let replace = selected.as_ref().is_none_or(|existing: &Session| {
+                        session.updated_at() > existing.updated_at()
+                    });
+                    if replace {
+                        selected = Some(session);
+                    }
                 }
+                Ok(None) => {}
+                Err(err) if candidate_index > 0 && selected.is_some() => {
+                    tracing::warn!(
+                        session_id = %id,
+                        runtime_id = %runtime_id,
+                        error = ?err,
+                        "ignoring legacy runtime session snapshot fallback error because canonical authority was already loaded"
+                    );
+                }
+                Err(err) => return Err(err),
             }
         }
         Ok(selected)
@@ -2411,6 +2424,7 @@ mod tests {
     struct GatedSnapshotRuntimeStore {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
+        session_snapshot_overrides: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
         boundary_commits: Mutex<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>>,
     }
 
@@ -2419,6 +2433,7 @@ mod tests {
             Self {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
+                session_snapshot_overrides: Mutex::new(HashMap::new()),
                 boundary_commits: Mutex::new(Vec::new()),
             }
         }
@@ -2449,6 +2464,13 @@ mod tests {
 
         async fn reset_boundary_commits(&self) {
             self.boundary_commits.lock().await.clear();
+        }
+
+        async fn override_session_snapshot(&self, runtime_id: LogicalRuntimeId, snapshot: Vec<u8>) {
+            self.session_snapshot_overrides
+                .lock()
+                .await
+                .insert(runtime_id, snapshot);
         }
     }
 
@@ -2537,6 +2559,15 @@ mod tests {
         ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
             if self.should_hide_session_snapshot_load() {
                 return Ok(None);
+            }
+            if let Some(snapshot) = self
+                .session_snapshot_overrides
+                .lock()
+                .await
+                .get(runtime_id)
+                .cloned()
+            {
+                return Ok(Some(snapshot));
             }
             self.inner.load_session_snapshot(runtime_id).await
         }
@@ -5032,6 +5063,59 @@ mod tests {
             authoritative.messages().len(),
             legacy_session.messages().len(),
             "runtime-backed resume must not hide a newer legacy raw alias snapshot when both aliases exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_authority_ignores_corrupt_legacy_alias_after_canonical_snapshot() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let mut canonical_session = Session::new();
+        canonical_session.push(Message::User(UserMessage::text(
+            "canonical runtime alias row".to_string(),
+        )));
+        let id = canonical_session.id().clone();
+        let canonical_runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        runtime_store
+            .commit_session_boundary(
+                &canonical_runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&canonical_session)
+                        .expect("canonical session should serialize"),
+                },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("test should seed a canonical runtime snapshot");
+
+        runtime_store
+            .override_session_snapshot(
+                LogicalRuntimeId::legacy_session_uuid_alias(&id),
+                b"{not valid json".to_vec(),
+            )
+            .await;
+
+        let authoritative = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("valid canonical authority must not be poisoned by corrupt legacy fallback")
+            .expect("canonical runtime snapshot should exist");
+        assert_eq!(
+            authoritative.messages().len(),
+            canonical_session.messages().len(),
+            "canonical runtime authority must win over corrupt legacy fallback data"
         );
     }
 

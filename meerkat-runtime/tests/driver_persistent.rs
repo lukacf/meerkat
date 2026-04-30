@@ -1074,3 +1074,75 @@ async fn recover_consumes_committed_applied_pending_inputs() {
         "committed applied inputs should not be replayed after recovery"
     );
 }
+
+#[tokio::test]
+async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
+    use meerkat_core::lifecycle::RunId;
+    use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
+    use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let session_id = SessionId::new();
+    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
+    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
+    let input = make_prompt("already committed under canonical alias");
+    let input_id = input.id().clone();
+    let run_id = RunId::new();
+
+    let mut canonical_state = InputState::new_accepted(input_id.clone());
+    canonical_state.persisted_input = Some(input.clone());
+    canonical_state.durability = Some(InputDurability::Durable);
+    canonical_state.attempt_count = 1;
+    let canonical_stored = StoredInputState {
+        state: canonical_state.clone(),
+        seed: InputStateSeed {
+            phase: InputLifecycleState::AppliedPendingConsumption,
+            last_run_id: Some(run_id.clone()),
+            last_boundary_sequence: Some(0),
+            terminal_outcome: None,
+            attempt_count: 1,
+        },
+    };
+    store
+        .atomic_apply(
+            &canonical_rid,
+            None,
+            RunBoundaryReceipt {
+                run_id: run_id.clone(),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: vec![input_id.clone()],
+                conversation_digest: None,
+                message_count: 1,
+                sequence: 0,
+            },
+            vec![canonical_stored.clone()],
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut legacy_state = canonical_state;
+    legacy_state.updated_at = canonical_stored.state.updated_at + chrono::Duration::milliseconds(1);
+    let legacy_stored = StoredInputState {
+        state: legacy_state,
+        seed: canonical_stored.seed.clone(),
+    };
+    store
+        .persist_input_state(&legacy_rid, &legacy_stored)
+        .await
+        .unwrap();
+
+    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
+    driver.recover().await.unwrap();
+
+    assert_eq!(
+        driver.inner_ref().input_phase(&input_id),
+        Some(InputLifecycleState::Consumed),
+        "duplicate legacy row must still consult the canonical boundary receipt"
+    );
+    assert!(
+        driver.dequeue_next().is_none(),
+        "canonical committed input must not be replayed because the newer duplicate row came from the legacy alias"
+    );
+}

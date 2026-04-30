@@ -2886,7 +2886,7 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
     let destroy_task = tokio::spawn({
         let adapter = Arc::clone(&adapter);
         let runtime_id = runtime_id.clone();

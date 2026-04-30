@@ -430,7 +430,7 @@ async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
     ));
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
-    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
 
     let input = make_prompt("destroy rollback");
     let input_id = input.id().clone();

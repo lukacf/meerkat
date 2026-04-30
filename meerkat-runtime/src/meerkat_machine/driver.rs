@@ -1509,12 +1509,11 @@ pub(crate) async fn machine_recover_persistent_driver(
 ) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered_payloads = Vec::new();
 
-    for (stored_runtime_id, bundle) in load_input_states_for_storage_aliases(store, runtime_id)
+    for (_stored_runtime_id, bundle) in load_input_states_for_storage_aliases(store, runtime_id)
         .await
         .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
     {
-        let bundle =
-            machine_normalize_recovered_input_state(store, &stored_runtime_id, bundle).await?;
+        let bundle = machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
 
         if driver.input_state(&bundle.state.input_id).is_none() {
             let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {

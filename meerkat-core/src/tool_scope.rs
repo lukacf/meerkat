@@ -223,8 +223,7 @@ pub trait ToolVisibilityOwner: Send + Sync {
 
     fn request_deferred_tools(
         &self,
-        names: BTreeSet<String>,
-        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError>;
 
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError>;
@@ -307,20 +306,20 @@ impl ToolVisibilityOwner for LocalToolVisibilityOwner {
 
     fn request_deferred_tools(
         &self,
-        names: BTreeSet<String>,
-        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
         let mut state = self
             .state
             .write()
             .map_err(|_| ToolScopeStageError::LockPoisoned)?;
+        let names = authorities.keys().cloned().collect::<BTreeSet<_>>();
         let extended = state
             .staged_requested_deferred_names
             .union(&names)
             .cloned()
             .collect();
         let mut combined_witnesses = state.requested_witnesses.clone();
-        combined_witnesses.extend(witnesses);
+        combined_witnesses.extend(authorities);
         let missing = missing_visibility_witness_names(&extended, &combined_witnesses);
         if !missing.is_empty() {
             return Err(ToolScopeStageError::MissingWitnesses { names: missing });
@@ -759,7 +758,8 @@ impl ToolScope {
         tool: &ToolDef,
     ) -> bool {
         witness.is_some_and(|witness| {
-            witness.has_identity_witness() && Self::witness_matches_tool(Some(witness), tool)
+            witness.has_provenance_identity_witness()
+                && Self::witness_matches_tool(Some(witness), tool)
         })
     }
 
@@ -982,14 +982,13 @@ impl ToolScope {
         self.visibility_owner.stage_requested_deferred_names(names)
     }
 
-    /// Add durable requested deferred names for the next boundary.
-    pub fn add_requested_deferred_names(
+    /// Add durable requested deferred authorities for the next boundary.
+    pub fn add_requested_deferred_authorities(
         &self,
-        names: &BTreeSet<String>,
-        witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        authorities: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
         self.visibility_owner
-            .request_deferred_tools(names.clone(), witnesses.clone())
+            .request_deferred_tools(authorities.clone())
     }
 
     #[cfg(test)]
@@ -1176,7 +1175,7 @@ fn missing_visibility_witness_names(
         .filter(|name| {
             witnesses
                 .get(name.as_str())
-                .is_none_or(|witness| !witness.has_identity_witness())
+                .is_none_or(|witness| !witness.has_provenance_identity_witness())
         })
         .cloned()
         .collect()
@@ -1339,8 +1338,7 @@ mod tests {
         );
 
         scope
-            .add_requested_deferred_names(
-                &["deferred".to_string()].into_iter().collect(),
+            .add_requested_deferred_authorities(
                 &[(
                     "deferred".to_string(),
                     crate::ToolVisibilityWitness {
@@ -1585,8 +1583,7 @@ mod tests {
         );
 
         scope
-            .add_requested_deferred_names(
-                &["deferred".to_string()].into_iter().collect(),
+            .add_requested_deferred_authorities(
                 &[(
                     "deferred".to_string(),
                     crate::ToolVisibilityWitness {
@@ -1658,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_deferred_names_require_witnesses() {
+    fn requested_deferred_authorities_require_provenance_witnesses() {
         let requested = tool_with_provenance("deferred", "owner-a");
         let scope = ToolScope::new_with_projection_names(
             vec![Arc::clone(&requested)].into(),
@@ -1667,11 +1664,18 @@ mod tests {
         );
 
         let err = scope
-            .add_requested_deferred_names(
-                &["deferred".to_string()].into_iter().collect(),
-                &std::collections::BTreeMap::new(),
+            .add_requested_deferred_authorities(
+                &[(
+                    "deferred".to_string(),
+                    crate::ToolVisibilityWitness {
+                        stable_owner_key: Some("callback:owner-a".to_string()),
+                        last_seen_provenance: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
             )
-            .expect_err("requesting a deferred tool without a witness must fail");
+            .expect_err("requesting a deferred tool without provenance authority must fail");
 
         assert!(
             err.to_string().contains("deferred"),
@@ -1697,8 +1701,7 @@ mod tests {
         );
 
         let err = scope
-            .add_requested_deferred_names(
-                &["deferred".to_string()].into_iter().collect(),
+            .add_requested_deferred_authorities(
                 &[(
                     "deferred".to_string(),
                     crate::ToolVisibilityWitness::default(),
@@ -1733,12 +1736,11 @@ mod tests {
         );
 
         scope
-            .add_requested_deferred_names(
-                &["deferred_a".to_string()].into_iter().collect(),
+            .add_requested_deferred_authorities(
                 &[(
                     "deferred_a".to_string(),
                     crate::ToolVisibilityWitness {
-                        stable_owner_key: Some("owner-a".to_string()),
+                        stable_owner_key: Some("callback:owner-a".to_string()),
                         last_seen_provenance: requested_a.provenance.clone(),
                     },
                 )]
@@ -1748,14 +1750,11 @@ mod tests {
             .expect("initial deferred request should stage witness");
 
         scope
-            .add_requested_deferred_names(
-                &["deferred_a".to_string(), "deferred_b".to_string()]
-                    .into_iter()
-                    .collect(),
+            .add_requested_deferred_authorities(
                 &[(
                     "deferred_b".to_string(),
                     crate::ToolVisibilityWitness {
-                        stable_owner_key: Some("owner-b".to_string()),
+                        stable_owner_key: Some("callback:owner-b".to_string()),
                         last_seen_provenance: requested_b.provenance.clone(),
                     },
                 )]

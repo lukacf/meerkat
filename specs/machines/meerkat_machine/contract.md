@@ -164,7 +164,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InterruptCurrentRun`
 - `CancelAfterBoundary`
 - `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
-- `RequestDeferredTools`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
+- `RequestDeferredTools`(authorities: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
 - `Recover`
 - `Retire`(session_id: SessionId)
@@ -269,7 +269,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `StageVisibilityFilter`(filter: ToolFilter)
 - `CommitVisibilityFilter`(filter: ToolFilter, revision: u64)
 - `StageDeferredNames`(names: Set<String>)
-- `CommitDeferredNames`(names: Set<String>, witnesses: Map<String, ToolVisibilityWitness>)
+- `CommitDeferredNames`(authorities: Map<String, ToolVisibilityWitness>)
 - `SyncVisibilityRevisions`(active_revision: u64, staged_revision: u64, active_deferred_names: Set<String>, staged_deferred_names: Set<String>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>)
 - `SurfaceRegister`(surface_id: String)
 - `SurfaceStageAdd`(surface_id: String, now_ms: u64)
@@ -1185,51 +1185,46 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RequestDeferredToolsIdle`
 - From: `Idle`
-- On: `RequestDeferredTools`(names, witnesses)
+- On: `RequestDeferredTools`(authorities)
 - Guards:
   - `session_registered`
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
+  - `deferred_authorities_non_empty`
   - `deferred_authorities_have_identity`
 - To: `Idle`
 
 ### `RequestDeferredToolsAttached`
 - From: `Attached`
-- On: `RequestDeferredTools`(names, witnesses)
+- On: `RequestDeferredTools`(authorities)
 - Guards:
   - `session_registered`
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
+  - `deferred_authorities_non_empty`
   - `deferred_authorities_have_identity`
 - To: `Attached`
 
 ### `RequestDeferredToolsRunning`
 - From: `Running`
-- On: `RequestDeferredTools`(names, witnesses)
+- On: `RequestDeferredTools`(authorities)
 - Guards:
   - `session_registered`
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
+  - `deferred_authorities_non_empty`
   - `deferred_authorities_have_identity`
 - To: `Running`
 
 ### `RequestDeferredToolsRetired`
 - From: `Retired`
-- On: `RequestDeferredTools`(names, witnesses)
+- On: `RequestDeferredTools`(authorities)
 - Guards:
   - `session_registered`
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
+  - `deferred_authorities_non_empty`
   - `deferred_authorities_have_identity`
 - To: `Retired`
 
 ### `RequestDeferredToolsStopped`
 - From: `Stopped`
-- On: `RequestDeferredTools`(names, witnesses)
+- On: `RequestDeferredTools`(authorities)
 - Guards:
   - `session_registered`
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
+  - `deferred_authorities_non_empty`
   - `deferred_authorities_have_identity`
 - To: `Stopped`
 
@@ -4334,50 +4329,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CommitDeferredNamesIdle`
 - From: `Idle`
-- On: `CommitDeferredNames`(names, witnesses)
+- On: `CommitDeferredNames`(authorities)
 - Guards:
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
   - `deferred_authorities_have_identity`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Idle`
 
 ### `CommitDeferredNamesAttached`
 - From: `Attached`
-- On: `CommitDeferredNames`(names, witnesses)
+- On: `CommitDeferredNames`(authorities)
 - Guards:
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
   - `deferred_authorities_have_identity`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Attached`
 
 ### `CommitDeferredNamesRunning`
 - From: `Running`
-- On: `CommitDeferredNames`(names, witnesses)
+- On: `CommitDeferredNames`(authorities)
 - Guards:
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
   - `deferred_authorities_have_identity`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Running`
 
 ### `CommitDeferredNamesRetired`
 - From: `Retired`
-- On: `CommitDeferredNames`(names, witnesses)
+- On: `CommitDeferredNames`(authorities)
 - Guards:
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
   - `deferred_authorities_have_identity`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Retired`
 
 ### `CommitDeferredNamesStopped`
 - From: `Stopped`
-- On: `CommitDeferredNames`(names, witnesses)
+- On: `CommitDeferredNames`(authorities)
 - Guards:
-  - `deferred_authorities_cover_names`
-  - `deferred_authorities_are_name_scoped`
   - `deferred_authorities_have_identity`
 - Emits: `RefreshVisibleSurfaceSet`
 - To: `Stopped`

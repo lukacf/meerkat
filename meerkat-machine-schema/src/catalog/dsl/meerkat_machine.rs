@@ -240,12 +240,8 @@ pub struct ToolVisibilityWitness {
 }
 
 impl ToolVisibilityWitness {
-    fn has_identity_witness(&self) -> bool {
-        self.stable_owner_key.is_some() || self.last_seen_provenance.is_some()
-    }
-
     fn len(&self) -> u64 {
-        u64::from(self.has_identity_witness())
+        u64::from(self.last_seen_provenance.is_some())
     }
 }
 
@@ -1823,7 +1819,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             InterruptCurrentRun,
             CancelAfterBoundary,
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness> },
-            RequestDeferredTools { names: Set<String>, witnesses: Map<String, ToolVisibilityWitness> },
+            RequestDeferredTools { authorities: Map<String, ToolVisibilityWitness> },
             PublishCommittedVisibleSet {
                 active_filter: ToolFilter,
                 staged_filter: ToolFilter,
@@ -2010,7 +2006,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             StageVisibilityFilter { filter: ToolFilter },
             CommitVisibilityFilter { filter: ToolFilter, revision: u64 },
             StageDeferredNames { names: Set<String> },
-            CommitDeferredNames { names: Set<String>, witnesses: Map<String, ToolVisibilityWitness> },
+            CommitDeferredNames { authorities: Map<String, ToolVisibilityWitness> },
             // Sync the DSL monotonic staged-revision counter to at least the
             // max of externally-installed active/staged revisions. Fired
             // from the shell's `replace_visibility_state` path (recovery
@@ -3206,21 +3202,16 @@ macro_rules! meerkat_catalog_machine_dsl {
         // 6. RequestDeferredTools: per-phase self-loop, guard session_registered
         transition RequestDeferredTools {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequestDeferredTools { names, witnesses }
+            on input RequestDeferredTools { authorities }
             guard "session_registered" { self.session_id != None }
-            guard "deferred_authorities_cover_names" {
-                for_all(requested_name in names, witnesses.contains_key(requested_name))
-            }
-            guard "deferred_authorities_are_name_scoped" {
-                for_all(witnessed_name in witnesses.keys(), names.contains(witnessed_name))
-            }
+            guard "deferred_authorities_non_empty" { authorities != EmptyMap }
             guard "deferred_authorities_have_identity" {
-                deferred_authorities_have_identity(names, witnesses)
+                deferred_authorities_have_identity(authorities.keys(), authorities)
             }
             update {
                 self.next_staged_visibility_revision = self.next_staged_visibility_revision + 1;
-                self.staged_deferred_names = names;
-                self.staged_deferred_authorities = witnesses;
+                self.staged_deferred_names = authorities.keys();
+                self.staged_deferred_authorities = authorities;
                 self.staged_visibility_revision = self.next_staged_visibility_revision;
             }
             to Idle
@@ -7334,19 +7325,13 @@ macro_rules! meerkat_catalog_machine_dsl {
         // CommitDeferredNames: promote staged deferred authority to active
         transition CommitDeferredNames {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CommitDeferredNames { names, witnesses }
-            guard "deferred_authorities_cover_names" {
-                for_all(requested_name in names, witnesses.contains_key(requested_name))
-            }
-            guard "deferred_authorities_are_name_scoped" {
-                for_all(witnessed_name in witnesses.keys(), names.contains(witnessed_name))
-            }
+            on input CommitDeferredNames { authorities }
             guard "deferred_authorities_have_identity" {
-                deferred_authorities_have_identity(names, witnesses)
+                deferred_authorities_have_identity(authorities.keys(), authorities)
             }
             update {
-                self.active_deferred_names = names;
-                self.active_deferred_authorities = witnesses;
+                self.active_deferred_names = authorities.keys();
+                self.active_deferred_authorities = authorities;
             }
             to Idle
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }

@@ -567,12 +567,8 @@ impl ToolVisibilityWitness {
         Self::from(id)
     }
 
-    fn has_identity_witness(&self) -> bool {
-        self.stable_owner_key.is_some() || self.last_seen_provenance.is_some()
-    }
-
     fn len(&self) -> u64 {
-        u64::from(self.has_identity_witness())
+        u64::from(self.last_seen_provenance.is_some())
     }
 }
 

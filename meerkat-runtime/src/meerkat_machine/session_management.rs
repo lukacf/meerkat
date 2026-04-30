@@ -738,16 +738,14 @@ impl MeerkatMachine {
     pub async fn request_deferred_tools(
         &self,
         session_id: &SessionId,
-        names: std::collections::BTreeSet<String>,
-        witnesses: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        authorities: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
     ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_command(
                 None,
                 MeerkatMachineCommand::RequestDeferredTools {
                     session_id: session_id.clone(),
-                    names,
-                    witnesses,
+                    authorities,
                 },
             )
             .await

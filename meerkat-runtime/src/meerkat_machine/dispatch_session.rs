@@ -584,8 +584,7 @@ impl MeerkatMachine {
             }
             MeerkatMachineCommand::RequestDeferredTools {
                 session_id,
-                names,
-                witnesses,
+                authorities,
             } => {
                 if !self.sessions.read().await.contains_key(&session_id) {
                     return Err(RuntimeDriverError::NotReady {
@@ -617,11 +616,11 @@ impl MeerkatMachine {
                     )
                 };
                 // Delegate to the owner — `request_deferred_tools` fires
-                // the witness-bearing `RequestDeferredTools` DSL input (with
-                // the extended set) to mint the revision and then projects
-                // onto owner state.
+                // the authority-bearing `RequestDeferredTools` DSL input (with
+                // the extended authority set) to mint the revision and then
+                // projects onto owner state.
                 let revision = owner
-                    .request_deferred_tools(names, witnesses)
+                    .request_deferred_tools(authorities)
                     .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
                 Ok(MeerkatMachineCommandResult::VisibilityRevision(revision))
             }

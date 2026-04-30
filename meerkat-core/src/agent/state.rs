@@ -3388,8 +3388,7 @@ mod tests {
                 outcome
                     .session_effects
                     .push(crate::ops::SessionEffect::RequestDeferredTools {
-                        names: ["deferred_tool".to_string()].into_iter().collect(),
-                        witnesses: [(
+                        authorities: [(
                             "deferred_tool".to_string(),
                             crate::ToolVisibilityWitness {
                                 stable_owner_key: Some("callback:test".to_string()),

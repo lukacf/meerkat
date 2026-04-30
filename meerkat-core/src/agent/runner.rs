@@ -262,12 +262,12 @@ where
                     authority.grant_manage_mob_in_place(mob_id.clone());
                     build_state_changed = true;
                 }
-                crate::ops::SessionEffect::RequestDeferredTools { names, witnesses } => {
+                crate::ops::SessionEffect::RequestDeferredTools { authorities } => {
                     self.tool_scope
-                        .add_requested_deferred_names(names, witnesses)
+                        .add_requested_deferred_authorities(authorities)
                         .map_err(|err| {
                             AgentError::InternalError(format!(
-                                "failed to record requested deferred tool names: {err}"
+                                "failed to record requested deferred tool authorities: {err}"
                             ))
                         })?;
                     visibility_changed = true;

@@ -138,7 +138,7 @@ fn missing_visibility_witness_names(
         .filter(|name| {
             witnesses
                 .get(name.as_str())
-                .is_none_or(|witness| !witness.has_identity_witness())
+                .is_none_or(|witness| !witness.has_provenance_identity_witness())
         })
         .cloned()
         .collect()
@@ -322,12 +322,11 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn request_deferred_tools(
         &self,
-        names: std::collections::BTreeSet<String>,
-        witnesses: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
         // `request_deferred_tools` extends the staged set and carries the
-        // witness map through the DSL input so deferred admission is
-        // authority-visible, not a shell-only side projection.
+        // authority map through the DSL input so deferred admission is
+        // authority-visible, not a shell-only name projection.
         let (extended, combined_witnesses): (
             std::collections::BTreeSet<String>,
             std::collections::BTreeMap<String, ToolVisibilityWitness>,
@@ -335,13 +334,14 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
             let state = self.state.read().map_err(|_| ToolScopeStageError::Owner {
                 message: "machine visibility state lock poisoned".to_string(),
             })?;
+            let names = authorities.keys().cloned().collect();
             let extended = state
                 .staged_requested_deferred_names
                 .union(&names)
                 .cloned()
                 .collect();
             let mut combined_witnesses = state.requested_witnesses.clone();
-            combined_witnesses.extend(witnesses);
+            combined_witnesses.extend(authorities);
             (extended, combined_witnesses)
         };
         let missing = missing_visibility_witness_names(&extended, &combined_witnesses);
@@ -352,8 +352,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         let dsl_witnesses = dsl_witnesses(&staged_authorities);
         let revision = self.mint_revision_via_dsl(
             super::dsl::MeerkatMachineInput::RequestDeferredTools {
-                names: extended.clone(),
-                witnesses: dsl_witnesses,
+                authorities: dsl_witnesses,
             },
             "RequestDeferredTools",
         )?;
@@ -367,18 +366,17 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
     }
 
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
-        let (names, witnesses) = {
+        let (names, authorities) = {
             let state = self.state.read().map_err(|_| ToolScopeApplyError::Owner {
                 message: "machine visibility state lock poisoned".to_string(),
             })?;
             let names = state.staged_requested_deferred_names.clone();
-            let witnesses = authority_witnesses_for_names(&names, &state.requested_witnesses);
-            (names, witnesses)
+            let authorities = authority_witnesses_for_names(&names, &state.requested_witnesses);
+            (names, authorities)
         };
         self.apply_visibility_dsl_input(
             super::dsl::MeerkatMachineInput::CommitDeferredNames {
-                names: names.clone(),
-                witnesses: dsl_witnesses(&witnesses),
+                authorities: dsl_witnesses(&authorities),
             },
             "CommitDeferredNames",
         )?;

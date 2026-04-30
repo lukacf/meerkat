@@ -7,7 +7,7 @@ use crate::error::ToolError;
 use crate::session::ToolVisibilityWitness;
 use crate::types::{Message, ToolNameSet};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Unique identifier for an operation
@@ -87,8 +87,7 @@ pub enum SessionEffect {
     GrantManageMob { mob_id: String },
     /// Record durable deferred-tool requests for subsequent boundaries.
     RequestDeferredTools {
-        names: BTreeSet<String>,
-        witnesses: BTreeMap<String, ToolVisibilityWitness>,
+        authorities: BTreeMap<String, ToolVisibilityWitness>,
     },
     /// Append durable assistant blocks produced by a tool after the tool has
     /// committed any external payloads (for example generated image blobs).

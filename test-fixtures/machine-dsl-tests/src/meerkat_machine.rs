@@ -58,7 +58,7 @@ machine! {
             InterruptCurrentRun,
             CancelAfterBoundary,
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness> },
-            RequestDeferredTools { names: Set<String>, witnesses: Map<String, ToolVisibilityWitness> },
+            RequestDeferredTools { authorities: Map<String, ToolVisibilityWitness> },
             PublishCommittedVisibleSet {
                 active_filter: ToolFilter,
                 staged_filter: ToolFilter,
@@ -370,7 +370,7 @@ machine! {
         // 6. RequestDeferredTools: per-phase self-loop, guard session_registered
         transition RequestDeferredTools {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequestDeferredTools { names, witnesses }
+            on input RequestDeferredTools { authorities }
             guard "session_registered" { self.session_id != None }
             update {}
             to Idle

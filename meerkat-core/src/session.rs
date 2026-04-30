@@ -234,6 +234,10 @@ impl ToolVisibilityWitness {
     pub fn has_identity_witness(&self) -> bool {
         self.stable_owner_key.is_some() || self.last_seen_provenance.is_some()
     }
+
+    pub fn has_provenance_identity_witness(&self) -> bool {
+        self.last_seen_provenance.is_some()
+    }
 }
 
 /// Canonical durable session-local tool visibility intent.

@@ -69,12 +69,34 @@ fn empty_witness() -> KernelValue {
 }
 
 fn owner_witness(owner_key: &str) -> KernelValue {
+    let provenance_source = owner_key
+        .strip_prefix("callback:")
+        .unwrap_or(owner_key)
+        .to_string();
     named_value(
         "ToolVisibilityWitness",
-        KernelValue::Map(BTreeMap::from([(
-            string_key("stable_owner_key"),
-            KernelValue::String(owner_key.to_string()),
-        )])),
+        KernelValue::Map(BTreeMap::from([
+            (
+                string_key("stable_owner_key"),
+                KernelValue::String(owner_key.to_string()),
+            ),
+            (
+                string_key("last_seen_provenance"),
+                named_value(
+                    "ToolProvenance",
+                    KernelValue::Map(BTreeMap::from([
+                        (
+                            string_key("kind"),
+                            named_string("ToolSourceKind", "Callback"),
+                        ),
+                        (
+                            string_key("source_id"),
+                            KernelValue::String(provenance_source),
+                        ),
+                    ])),
+                ),
+            ),
+        ])),
     )
 }
 
@@ -294,16 +316,13 @@ fn session_tool_visibility_kernel_accepts_deferred_request_without_phase_change(
             &attached,
             &KernelInput {
                 variant: input("RequestDeferredTools"),
-                fields: BTreeMap::from([
-                    (field("names"), string_set(&["search", "view_image"])),
-                    (
-                        field("witnesses"),
-                        witness_map(&[
-                            ("search", owner_witness("callback:search")),
-                            ("view_image", provenance_witness("view-image")),
-                        ]),
-                    ),
-                ]),
+                fields: BTreeMap::from([(
+                    field("authorities"),
+                    witness_map(&[
+                        ("search", owner_witness("callback:search")),
+                        ("view_image", provenance_witness("view-image")),
+                    ]),
+                )]),
             },
         )
         .expect("request deferred tools")
@@ -322,13 +341,10 @@ fn session_tool_visibility_kernel_materializes_deferred_authority_in_state() {
             &attached,
             &KernelInput {
                 variant: input("RequestDeferredTools"),
-                fields: BTreeMap::from([
-                    (field("names"), string_set(&["search"])),
-                    (
-                        field("witnesses"),
-                        witness_map(&[("search", witness.clone())]),
-                    ),
-                ]),
+                fields: BTreeMap::from([(
+                    field("authorities"),
+                    witness_map(&[("search", witness.clone())]),
+                )]),
             },
         )
         .expect("request deferred tools")
@@ -355,13 +371,10 @@ fn session_tool_visibility_kernel_rejects_deferred_names_without_witnesses() {
             &attached,
             &KernelInput {
                 variant: input("RequestDeferredTools"),
-                fields: BTreeMap::from([
-                    (field("names"), string_set(&["search"])),
-                    (field("witnesses"), KernelValue::Map(BTreeMap::new())),
-                ]),
+                fields: BTreeMap::from([(field("authorities"), KernelValue::Map(BTreeMap::new()))]),
             },
         )
-        .expect_err("missing witness must be rejected before staging names");
+        .expect_err("empty authority set must be rejected before staging names");
 
     assert!(
         format!("{err:?}").contains("NoMatchingTransition"),
@@ -378,13 +391,10 @@ fn session_tool_visibility_kernel_rejects_deferred_names_with_empty_witness() {
             &attached,
             &KernelInput {
                 variant: input("RequestDeferredTools"),
-                fields: BTreeMap::from([
-                    (field("names"), string_set(&["search"])),
-                    (
-                        field("witnesses"),
-                        witness_map(&[("search", empty_witness())]),
-                    ),
-                ]),
+                fields: BTreeMap::from([(
+                    field("authorities"),
+                    witness_map(&[("search", empty_witness())]),
+                )]),
             },
         )
         .expect_err("empty witness must be rejected before staging names");
@@ -404,10 +414,10 @@ fn session_tool_visibility_kernel_rejects_deferred_names_with_serialized_default
             &attached,
             &KernelInput {
                 variant: input("RequestDeferredTools"),
-                fields: BTreeMap::from([
-                    (field("names"), string_set(&["search"])),
-                    (field("witnesses"), witness_string_map(&[("search", "{}")])),
-                ]),
+                fields: BTreeMap::from([(
+                    field("authorities"),
+                    witness_string_map(&[("search", "{}")]),
+                )]),
             },
         )
         .expect_err("serialized default witness must not be accepted as typed authority");

@@ -89,31 +89,21 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn start_immediate_append(
-        &self,
-        run_id: RunId,
-        admitted_content_shape: meerkat_core::turn_execution_authority::ContentShape,
-    ) -> Result<(), DslTransitionError> {
+    fn start_immediate_append(&self, run_id: RunId) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartImmediateAppend {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
-                admitted_content_shape: mm_dsl::ContentShape::from(admitted_content_shape),
             },
             "TurnStateHandle::start_immediate_append",
         )
     }
 
-    fn start_immediate_context(
-        &self,
-        run_id: RunId,
-        admitted_content_shape: meerkat_core::turn_execution_authority::ContentShape,
-    ) -> Result<(), DslTransitionError> {
+    fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::StartImmediateContext {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
-                admitted_content_shape: mm_dsl::ContentShape::from(admitted_content_shape),
             },
             "TurnStateHandle::start_immediate_context",
         )
@@ -554,6 +544,19 @@ mod tests {
         let snapshot = handle.snapshot();
         assert_eq!(snapshot.turn_phase, TurnPhase::Completed);
         assert_eq!(snapshot.active_run_id, None);
+    }
+
+    #[test]
+    fn immediate_append_derives_content_shape() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(10));
+
+        handle.start_immediate_append(run_id).unwrap();
+
+        assert_eq!(
+            handle.snapshot().admitted_content_shape,
+            Some(meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend)
+        );
     }
 
     #[test]

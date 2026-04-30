@@ -1,3 +1,4 @@
+use meerkat_core::turn_execution_authority::ContentShape;
 use meerkat_machine_codegen::{render_machine_ci_cfg, render_machine_semantic_model};
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
@@ -30,6 +31,19 @@ fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
 fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
     let rendered = render_machine_ci_cfg(&meerkat_machine(), false);
 
+    let content_shape_values = ContentShape::ALL
+        .into_iter()
+        .map(|shape| format!("\"{}\"", shape.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        rendered.contains(&format!("ContentShapeValues = {{{content_shape_values}}}")),
+        "ContentShapeValues must come from the closed core content-shape contract:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("ContentShapeValues = {\"contentshape_1\""),
+        "ContentShapeValues must not fall back to open placeholder strings:\n{rendered}"
+    );
     assert!(
         rendered.contains("OperationKindValues = {\"MobMemberChild\", \"BackgroundToolOp\"}"),
         "OperationKindValues must come from the closed StringEnum binding:\n{rendered}"
@@ -39,6 +53,24 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
             "OperationStatusValues = {\"Absent\", \"Provisioning\", \"Running\", \"Retiring\", \"Completed\", \"Failed\", \"Aborted\", \"Cancelled\", \"Retired\", \"Terminated\"}"
         ),
         "OperationStatusValues must come from the closed StringEnum binding:\n{rendered}"
+    );
+}
+
+#[test]
+fn meerkat_semantic_model_renders_content_shape_wire_labels() {
+    let rendered = render_machine_semantic_model(&meerkat_machine());
+
+    assert!(
+        rendered.contains("admitted_content_shape' = Some(\"immediate_append\")"),
+        "derived immediate content-shape assignments must use stable wire labels:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("arg_admitted_content_shape = \"conversation\""),
+        "content-shape guards must compare against stable wire labels:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("admitted_content_shape' = Some(\"ImmediateAppend\")"),
+        "semantic model must not mix schema variant names with wire-label domains:\n{rendered}"
     );
 }
 

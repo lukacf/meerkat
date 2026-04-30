@@ -1151,7 +1151,10 @@ fn render_expr(expr: &Expr) -> String {
         Expr::Bool(value) => value.to_string().to_uppercase(),
         Expr::U64(value) => value.to_string(),
         Expr::String(value) => tla_string(value),
-        Expr::NamedVariant { variant, .. } => tla_string(variant),
+        Expr::NamedVariant { enum_name, variant } => tla_string(known_enum_variant_wire_label(
+            enum_name.as_str(),
+            variant.as_str(),
+        )),
         Expr::EmptySet => "{}".to_owned(),
         Expr::EmptyMap => "[x \\in {} |-> None]".to_owned(),
         Expr::SeqLiteral(items) => format!(
@@ -1474,7 +1477,8 @@ fn render_named_type_definition(
                 if index == 0 {
                     pushln!(out, "    #[default]");
                 }
-                pushln!(out, "    #[serde(rename = \"{}\")]", variant.as_str());
+                let wire_label = known_enum_variant_wire_label(&rust_name, variant.as_str());
+                pushln!(out, "    #[serde(rename = {})]", tla_string(wire_label));
                 pushln!(out, "    {},", rust_ident(variant.as_str()));
             }
             pushln!(out, "}}");
@@ -1482,11 +1486,12 @@ fn render_named_type_definition(
             pushln!(out, "    pub fn as_str(&self) -> &'static str {{");
             pushln!(out, "        match self {{");
             for variant in variants {
+                let wire_expr = known_enum_variant_wire_expr(&rust_name, variant.as_str());
                 pushln!(
                     out,
-                    "            Self::{} => \"{}\",",
+                    "            Self::{} => {},",
                     rust_ident(variant.as_str()),
-                    variant.as_str()
+                    wire_expr
                 );
             }
             pushln!(out, "        }}");
@@ -1500,10 +1505,11 @@ fn render_named_type_definition(
             );
             pushln!(out, "        match value {{");
             for variant in variants {
+                let wire_label = known_enum_variant_wire_label(&rust_name, variant.as_str());
                 pushln!(
                     out,
                     "            \"{}\" => Ok(Self::{}),",
-                    variant.as_str(),
+                    wire_label,
                     rust_ident(variant.as_str())
                 );
             }
@@ -1720,14 +1726,6 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
                 "ImmediateAppend",
                 "ImmediateContextAppend",
             ],
-            "ContentShape" => vec![
-                "Conversation",
-                "ConversationAndContext",
-                "Context",
-                "Empty",
-                "ImmediateAppend",
-                "ImmediateContext",
-            ],
             "TurnTerminalOutcome" => vec![
                 "None",
                 "Completed",
@@ -1940,10 +1938,10 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
     )
 }
 
-#[cfg(not(test))]
 fn known_enum_variant_wire_label(enum_name: &str, variant: &str) -> String {
-    if enum_name == "ContentShape"
-        && let Some(shape) = known_enum_content_shape(variant)
+    if enum_name == meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME
+        && let Some(shape) =
+            meerkat_core::turn_execution_authority::ContentShape::from_schema_variant(variant)
     {
         return shape.as_str().to_owned();
     }
@@ -1951,51 +1949,19 @@ fn known_enum_variant_wire_label(enum_name: &str, variant: &str) -> String {
     variant.to_owned()
 }
 
-#[cfg(not(test))]
+#[cfg_attr(test, allow(dead_code))]
 fn known_enum_variant_wire_expr(enum_name: &str, variant: &str) -> String {
-    if enum_name == "ContentShape"
-        && let Some(shape) = known_enum_content_shape(variant)
+    if enum_name == meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME
+        && let Some(shape) =
+            meerkat_core::turn_execution_authority::ContentShape::from_schema_variant(variant)
     {
         return format!(
             "meerkat_core::turn_execution_authority::ContentShape::{}.as_str()",
-            shape_variant_ident(shape)
+            shape.schema_variant()
         );
     }
 
     tla_string(variant)
-}
-
-#[cfg(not(test))]
-fn known_enum_content_shape(
-    variant: &str,
-) -> Option<meerkat_core::turn_execution_authority::ContentShape> {
-    use meerkat_core::turn_execution_authority::ContentShape;
-
-    Some(match variant {
-        "Conversation" => ContentShape::Conversation,
-        "ConversationAndContext" => ContentShape::ConversationAndContext,
-        "Context" => ContentShape::Context,
-        "Empty" => ContentShape::Empty,
-        "ImmediateAppend" => ContentShape::ImmediateAppend,
-        "ImmediateContext" => ContentShape::ImmediateContext,
-        _ => return None,
-    })
-}
-
-#[cfg(not(test))]
-fn shape_variant_ident(
-    shape: meerkat_core::turn_execution_authority::ContentShape,
-) -> &'static str {
-    use meerkat_core::turn_execution_authority::ContentShape;
-
-    match shape {
-        ContentShape::Conversation => "Conversation",
-        ContentShape::ConversationAndContext => "ConversationAndContext",
-        ContentShape::Context => "Context",
-        ContentShape::Empty => "Empty",
-        ContentShape::ImmediateAppend => "ImmediateAppend",
-        ContentShape::ImmediateContext => "ImmediateContext",
-    }
 }
 
 #[cfg(not(test))]

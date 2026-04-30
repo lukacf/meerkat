@@ -593,17 +593,9 @@ pub trait TurnStateHandle: Send + Sync {
         max_extraction_retries: u64,
     ) -> Result<(), DslTransitionError>;
 
-    fn start_immediate_append(
-        &self,
-        run_id: RunId,
-        admitted_content_shape: ContentShape,
-    ) -> Result<(), DslTransitionError>;
+    fn start_immediate_append(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
-    fn start_immediate_context(
-        &self,
-        run_id: RunId,
-        admitted_content_shape: ContentShape,
-    ) -> Result<(), DslTransitionError>;
+    fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError>;
 
     fn primitive_applied(&self) -> Result<(), DslTransitionError>;
 

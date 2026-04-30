@@ -598,7 +598,7 @@ where
                 Ok(())
             }
             TurnExecutionInput::StartImmediateAppend { run_id } => {
-                handle.start_immediate_append(run_id.clone(), ContentShape::ImmediateAppend)
+                handle.start_immediate_append(run_id.clone())
             }
             TurnExecutionInput::StartImmediateContext { run_id }
                 if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
@@ -606,7 +606,7 @@ where
                 Ok(())
             }
             TurnExecutionInput::StartImmediateContext { run_id } => {
-                handle.start_immediate_context(run_id.clone(), ContentShape::ImmediateContext)
+                handle.start_immediate_context(run_id.clone())
             }
             TurnExecutionInput::PrimitiveApplied {
                 run_id: _,

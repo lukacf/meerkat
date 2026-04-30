@@ -153,12 +153,14 @@ impl LocalState {
                 fields = LocalFields::init();
                 fields.active_run = Some(run_id.clone());
                 fields.primitive_kind = TurnPrimitiveKind::ImmediateAppend;
+                fields.admitted_content_shape = Some(ContentShape::ImmediateAppend);
                 ApplyingPrimitive
             }
             (Ready | Completed | Failed | Cancelled, StartImmediateContext { run_id }) => {
                 fields = LocalFields::init();
                 fields.active_run = Some(run_id.clone());
                 fields.primitive_kind = TurnPrimitiveKind::ImmediateContextAppend;
+                fields.admitted_content_shape = Some(ContentShape::ImmediateContext);
                 ApplyingPrimitive
             }
             (
@@ -633,45 +635,25 @@ impl TurnStateHandle for TestTurnStateHandle {
         _max_extraction_retries: u64,
     ) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
-        match primitive_kind {
-            TurnPrimitiveKind::ConversationTurn => {
-                guard.apply(TurnExecutionInput::StartConversationRun { run_id })
-            }
-            TurnPrimitiveKind::ImmediateAppend => {
-                guard.apply(TurnExecutionInput::StartImmediateAppend { run_id })
-            }
-            TurnPrimitiveKind::ImmediateContextAppend => {
-                guard.apply(TurnExecutionInput::StartImmediateContext { run_id })
-            }
-            TurnPrimitiveKind::None => Err(DslTransitionError::guard_rejected(
+        if primitive_kind != TurnPrimitiveKind::ConversationTurn {
+            return Err(DslTransitionError::guard_rejected(
                 "test-turn-state-handle",
-                "start_conversation_run with primitive_kind=None".to_string(),
-            )),
-        }?;
+                format!("start_conversation_run with primitive_kind={primitive_kind:?}"),
+            ));
+        }
+        guard.apply(TurnExecutionInput::StartConversationRun { run_id })?;
         guard.fields.admitted_content_shape = Some(admitted_content_shape);
         Ok(())
     }
 
-    fn start_immediate_append(
-        &self,
-        run_id: RunId,
-        admitted_content_shape: ContentShape,
-    ) -> Result<(), DslTransitionError> {
+    fn start_immediate_append(&self, run_id: RunId) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
-        guard.apply(TurnExecutionInput::StartImmediateAppend { run_id })?;
-        guard.fields.admitted_content_shape = Some(admitted_content_shape);
-        Ok(())
+        guard.apply(TurnExecutionInput::StartImmediateAppend { run_id })
     }
 
-    fn start_immediate_context(
-        &self,
-        run_id: RunId,
-        admitted_content_shape: ContentShape,
-    ) -> Result<(), DslTransitionError> {
+    fn start_immediate_context(&self, run_id: RunId) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
-        guard.apply(TurnExecutionInput::StartImmediateContext { run_id })?;
-        guard.fields.admitted_content_shape = Some(admitted_content_shape);
-        Ok(())
+        guard.apply(TurnExecutionInput::StartImmediateContext { run_id })
     }
 
     fn primitive_applied(&self) -> Result<(), DslTransitionError> {

@@ -205,8 +205,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Fail`(run_id: RunId)
 - `Recycle`
 - `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
-- `StartImmediateAppend`(run_id: RunId, admitted_content_shape: ContentShape)
-- `StartImmediateContext`(run_id: RunId, admitted_content_shape: ContentShape)
+- `StartImmediateAppend`(run_id: RunId)
+- `StartImmediateContext`(run_id: RunId)
 - `PrimitiveApplied`
 - `LlmReturnedToolCalls`(tool_count: u64)
 - `LlmReturnedTerminal`
@@ -2216,6 +2216,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
 - Guards:
   - `turn_resettable`
+  - `conversation_shape_matches_primitive`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
@@ -2224,6 +2225,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
 - Guards:
   - `turn_resettable`
+  - `conversation_shape_matches_primitive`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
@@ -2232,12 +2234,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `StartConversationRun`(run_id, primitive_kind, admitted_content_shape, vision_enabled, image_tool_results_enabled, max_extraction_retries)
 - Guards:
   - `turn_resettable`
+  - `conversation_shape_matches_primitive`
 - Emits: `TurnRunStarted`
 - To: `Running`
 
 ### `StartImmediateAppendInitializing`
 - From: `Initializing`
-- On: `StartImmediateAppend`(run_id, admitted_content_shape)
+- On: `StartImmediateAppend`(run_id)
 - Guards:
   - `turn_resettable`
 - Emits: `TurnRunStarted`
@@ -2245,7 +2248,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StartImmediateAppendAttached`
 - From: `Attached`
-- On: `StartImmediateAppend`(run_id, admitted_content_shape)
+- On: `StartImmediateAppend`(run_id)
 - Guards:
   - `turn_resettable`
 - Emits: `TurnRunStarted`
@@ -2253,7 +2256,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StartImmediateAppendRunning`
 - From: `Running`
-- On: `StartImmediateAppend`(run_id, admitted_content_shape)
+- On: `StartImmediateAppend`(run_id)
 - Guards:
   - `turn_resettable`
 - Emits: `TurnRunStarted`
@@ -2261,7 +2264,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StartImmediateContextInitializing`
 - From: `Initializing`
-- On: `StartImmediateContext`(run_id, admitted_content_shape)
+- On: `StartImmediateContext`(run_id)
 - Guards:
   - `turn_resettable`
 - Emits: `TurnRunStarted`
@@ -2269,7 +2272,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StartImmediateContextAttached`
 - From: `Attached`
-- On: `StartImmediateContext`(run_id, admitted_content_shape)
+- On: `StartImmediateContext`(run_id)
 - Guards:
   - `turn_resettable`
 - Emits: `TurnRunStarted`
@@ -2277,7 +2280,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StartImmediateContextRunning`
 - From: `Running`
-- On: `StartImmediateContext`(run_id, admitted_content_shape)
+- On: `StartImmediateContext`(run_id)
 - Guards:
   - `turn_resettable`
 - Emits: `TurnRunStarted`

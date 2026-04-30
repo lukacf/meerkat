@@ -82,6 +82,81 @@ impl std::fmt::Display for CommsRuntimeId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ContentShape {
+    #[default]
+    #[serde(rename = "conversation")]
+    Conversation,
+    #[serde(rename = "conversation+context")]
+    ConversationAndContext,
+    #[serde(rename = "context")]
+    Context,
+    #[serde(rename = "empty")]
+    Empty,
+    #[serde(rename = "immediate_append")]
+    ImmediateAppend,
+    #[serde(rename = "immediate_context")]
+    ImmediateContext,
+}
+impl ContentShape {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Conversation => {
+                meerkat_core::turn_execution_authority::ContentShape::Conversation.as_str()
+            }
+            Self::ConversationAndContext => {
+                meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext
+                    .as_str()
+            }
+            Self::Context => meerkat_core::turn_execution_authority::ContentShape::Context.as_str(),
+            Self::Empty => meerkat_core::turn_execution_authority::ContentShape::Empty.as_str(),
+            Self::ImmediateAppend => {
+                meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend.as_str()
+            }
+            Self::ImmediateContext => {
+                meerkat_core::turn_execution_authority::ContentShape::ImmediateContext.as_str()
+            }
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ContentShape {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "conversation" => Ok(Self::Conversation),
+            "conversation+context" => Ok(Self::ConversationAndContext),
+            "context" => Ok(Self::Context),
+            "empty" => Ok(Self::Empty),
+            "immediate_append" => Ok(Self::ImmediateAppend),
+            "immediate_context" => Ok(Self::ImmediateContext),
+            other => Err(format!("invalid ContentShape value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ContentShape {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ContentShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum DrainExitReason {
     #[default]
     #[serde(rename = "IdleTimeout")]
@@ -3312,61 +3387,6 @@ impl std::fmt::Display for WorkOrigin {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum ContentShape {
-    #[default]
-    #[serde(rename = "conversation")]
-    Conversation,
-    #[serde(rename = "conversation+context")]
-    ConversationAndContext,
-    #[serde(rename = "context")]
-    Context,
-    #[serde(rename = "empty")]
-    Empty,
-    #[serde(rename = "immediate_append")]
-    ImmediateAppend,
-    #[serde(rename = "immediate_context")]
-    ImmediateContext,
-}
-impl ContentShape {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Conversation => {
-                meerkat_core::turn_execution_authority::ContentShape::Conversation.as_str()
-            }
-            Self::ConversationAndContext => {
-                meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext
-                    .as_str()
-            }
-            Self::Context => meerkat_core::turn_execution_authority::ContentShape::Context.as_str(),
-            Self::Empty => meerkat_core::turn_execution_authority::ContentShape::Empty.as_str(),
-            Self::ImmediateAppend => {
-                meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend.as_str()
-            }
-            Self::ImmediateContext => {
-                meerkat_core::turn_execution_authority::ContentShape::ImmediateContext.as_str()
-            }
-        }
-    }
-}
-impl std::fmt::Display for ContentShape {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum ExternalToolSurfaceFailureCause {
     #[default]
     PendingFailed,
@@ -4115,12 +4135,10 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartImmediateAppend {
         pub run_id: RunId,
-        pub admitted_content_shape: ContentShape,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartImmediateContext {
         pub run_id: RunId,
-        pub admitted_content_shape: ContentShape,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PrimitiveApplied {}

@@ -1917,8 +1917,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 image_tool_results_enabled: bool,
                 max_extraction_retries: u64,
             },
-            StartImmediateAppend { run_id: RunId, admitted_content_shape: Enum<ContentShape> },
-            StartImmediateContext { run_id: RunId, admitted_content_shape: Enum<ContentShape> },
+            StartImmediateAppend { run_id: RunId },
+            StartImmediateContext { run_id: RunId },
             PrimitiveApplied,
             LlmReturnedToolCalls { tool_count: u64 },
             LlmReturnedTerminal,
@@ -5004,6 +5004,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
             }
+            guard "conversation_shape_matches_primitive" {
+                primitive_kind == TurnPrimitiveKind::ConversationTurn
+                && (admitted_content_shape == ContentShape::Conversation
+                    || admitted_content_shape == ContentShape::ConversationAndContext
+                    || admitted_content_shape == ContentShape::Context
+                    || admitted_content_shape == ContentShape::Empty)
+            }
             update {
                 self.current_run_id = Some(run_id);
                 self.pre_run_phase = Some(PreRunPhase::Attached);
@@ -5040,6 +5047,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Completed
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
+            }
+            guard "conversation_shape_matches_primitive" {
+                primitive_kind == TurnPrimitiveKind::ConversationTurn
+                && (admitted_content_shape == ContentShape::Conversation
+                    || admitted_content_shape == ContentShape::ConversationAndContext
+                    || admitted_content_shape == ContentShape::Context
+                    || admitted_content_shape == ContentShape::Empty)
             }
             update {
                 self.current_run_id = Some(run_id);
@@ -5078,6 +5092,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 || self.turn_phase == TurnPhase::Failed
                 || self.turn_phase == TurnPhase::Cancelled
             }
+            guard "conversation_shape_matches_primitive" {
+                primitive_kind == TurnPrimitiveKind::ConversationTurn
+                && (admitted_content_shape == ContentShape::Conversation
+                    || admitted_content_shape == ContentShape::ConversationAndContext
+                    || admitted_content_shape == ContentShape::Context
+                    || admitted_content_shape == ContentShape::Empty)
+            }
             update {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
@@ -5107,7 +5128,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition StartImmediateAppendInitializing {
-            on input StartImmediateAppend { run_id, admitted_content_shape }
+            on input StartImmediateAppend { run_id }
             guard { self.lifecycle_phase == Phase::Initializing }
             guard "turn_resettable" {
                 self.turn_phase == TurnPhase::Ready
@@ -5120,7 +5141,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
-                self.admitted_content_shape = Some(admitted_content_shape);
+                self.admitted_content_shape = Some(ContentShape::ImmediateAppend);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
                 self.tool_calls_pending = 0;
@@ -5144,7 +5165,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnRunStarted { run_id: run_id }
         }
         transition StartImmediateAppendAttached {
-            on input StartImmediateAppend { run_id, admitted_content_shape }
+            on input StartImmediateAppend { run_id }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "turn_resettable" {
                 self.turn_phase == TurnPhase::Ready
@@ -5157,7 +5178,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
-                self.admitted_content_shape = Some(admitted_content_shape);
+                self.admitted_content_shape = Some(ContentShape::ImmediateAppend);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
                 self.tool_calls_pending = 0;
@@ -5181,7 +5202,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnRunStarted { run_id: run_id }
         }
         transition StartImmediateAppendRunning {
-            on input StartImmediateAppend { run_id, admitted_content_shape }
+            on input StartImmediateAppend { run_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_resettable" {
                 self.turn_phase == TurnPhase::Ready
@@ -5193,7 +5214,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateAppend);
-                self.admitted_content_shape = Some(admitted_content_shape);
+                self.admitted_content_shape = Some(ContentShape::ImmediateAppend);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
                 self.tool_calls_pending = 0;
@@ -5218,7 +5239,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition StartImmediateContextInitializing {
-            on input StartImmediateContext { run_id, admitted_content_shape }
+            on input StartImmediateContext { run_id }
             guard { self.lifecycle_phase == Phase::Initializing }
             guard "turn_resettable" {
                 self.turn_phase == TurnPhase::Ready
@@ -5231,7 +5252,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
-                self.admitted_content_shape = Some(admitted_content_shape);
+                self.admitted_content_shape = Some(ContentShape::ImmediateContext);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
                 self.tool_calls_pending = 0;
@@ -5255,7 +5276,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnRunStarted { run_id: run_id }
         }
         transition StartImmediateContextAttached {
-            on input StartImmediateContext { run_id, admitted_content_shape }
+            on input StartImmediateContext { run_id }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "turn_resettable" {
                 self.turn_phase == TurnPhase::Ready
@@ -5268,7 +5289,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.pre_run_phase = Some(PreRunPhase::Attached);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
-                self.admitted_content_shape = Some(admitted_content_shape);
+                self.admitted_content_shape = Some(ContentShape::ImmediateContext);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
                 self.tool_calls_pending = 0;
@@ -5292,7 +5313,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnRunStarted { run_id: run_id }
         }
         transition StartImmediateContextRunning {
-            on input StartImmediateContext { run_id, admitted_content_shape }
+            on input StartImmediateContext { run_id }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_resettable" {
                 self.turn_phase == TurnPhase::Ready
@@ -5304,7 +5325,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.current_run_id = Some(run_id);
                 self.turn_phase = TurnPhase::ApplyingPrimitive;
                 self.primitive_kind = Some(TurnPrimitiveKind::ImmediateContextAppend);
-                self.admitted_content_shape = Some(admitted_content_shape);
+                self.admitted_content_shape = Some(ContentShape::ImmediateContext);
                 self.vision_enabled = false;
                 self.image_tool_results_enabled = false;
                 self.tool_calls_pending = 0;

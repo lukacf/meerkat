@@ -117,23 +117,21 @@ fn primitive_turn_start_input(
     run_id: &RunId,
     primitive: &RunPrimitive,
 ) -> Option<crate::meerkat_machine::dsl::MeerkatMachineInput> {
-    let admitted_content_shape = crate::meerkat_machine::dsl::ContentShape::from(
-        primitive_admitted_content_shape(primitive),
-    );
     match primitive {
         RunPrimitive::ImmediateAppend(_) => Some(
             crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateAppend {
                 run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-                admitted_content_shape,
             },
         ),
         RunPrimitive::ImmediateContextAppend(_) => Some(
             crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
                 run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-                admitted_content_shape,
             },
         ),
         RunPrimitive::StagedInput(_) if primitive.is_peer_response_terminal_context_and_run() => {
+            let admitted_content_shape = crate::meerkat_machine::dsl::ContentShape::from(
+                primitive_admitted_content_shape(primitive),
+            );
             Some(
                 crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
                     run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
@@ -149,30 +147,41 @@ fn primitive_turn_start_input(
         RunPrimitive::StagedInput(_) if primitive.is_context_only_apply_without_turn() => Some(
             crate::meerkat_machine::dsl::MeerkatMachineInput::StartImmediateContext {
                 run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-                admitted_content_shape,
             },
         ),
         RunPrimitive::StagedInput(staged) if staged.appends.is_empty() => None,
-        RunPrimitive::StagedInput(_) => Some(
-            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
-                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-                primitive_kind: crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
-                admitted_content_shape,
-                vision_enabled: false,
-                image_tool_results_enabled: false,
-                max_extraction_retries: 0,
-            },
-        ),
-        _ => Some(
-            crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
-                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-                primitive_kind: crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
-                admitted_content_shape,
-                vision_enabled: false,
-                image_tool_results_enabled: false,
-                max_extraction_retries: 0,
-            },
-        ),
+        RunPrimitive::StagedInput(_) => {
+            let admitted_content_shape = crate::meerkat_machine::dsl::ContentShape::from(
+                primitive_admitted_content_shape(primitive),
+            );
+            Some(
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                    primitive_kind:
+                        crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
+                    admitted_content_shape,
+                    vision_enabled: false,
+                    image_tool_results_enabled: false,
+                    max_extraction_retries: 0,
+                },
+            )
+        }
+        _ => {
+            let admitted_content_shape = crate::meerkat_machine::dsl::ContentShape::from(
+                primitive_admitted_content_shape(primitive),
+            );
+            Some(
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StartConversationRun {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                    primitive_kind:
+                        crate::meerkat_machine::dsl::TurnPrimitiveKind::ConversationTurn,
+                    admitted_content_shape,
+                    vision_enabled: false,
+                    image_tool_results_enabled: false,
+                    max_extraction_retries: 0,
+                },
+            )
+        }
     }
 }
 

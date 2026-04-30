@@ -158,6 +158,26 @@ pub enum ContentShape {
 }
 
 impl ContentShape {
+    pub const SCHEMA_TYPE_NAME: &'static str = "ContentShape";
+
+    pub const ALL: [Self; 6] = [
+        Self::Conversation,
+        Self::ConversationAndContext,
+        Self::Context,
+        Self::Empty,
+        Self::ImmediateAppend,
+        Self::ImmediateContext,
+    ];
+
+    pub const SCHEMA_VARIANTS: [&'static str; 6] = [
+        Self::Conversation.schema_variant(),
+        Self::ConversationAndContext.schema_variant(),
+        Self::Context.schema_variant(),
+        Self::Empty.schema_variant(),
+        Self::ImmediateAppend.schema_variant(),
+        Self::ImmediateContext.schema_variant(),
+    ];
+
     pub const fn from_staged_presence(has_conversation: bool, has_context: bool) -> Self {
         match (has_conversation, has_context) {
             (true, true) => Self::ConversationAndContext,
@@ -176,6 +196,23 @@ impl ContentShape {
             Self::ImmediateAppend => "immediate_append",
             Self::ImmediateContext => "immediate_context",
         }
+    }
+
+    pub const fn schema_variant(self) -> &'static str {
+        match self {
+            Self::Conversation => "Conversation",
+            Self::ConversationAndContext => "ConversationAndContext",
+            Self::Context => "Context",
+            Self::Empty => "Empty",
+            Self::ImmediateAppend => "ImmediateAppend",
+            Self::ImmediateContext => "ImmediateContext",
+        }
+    }
+
+    pub fn from_schema_variant(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|shape| shape.schema_variant() == value)
     }
 }
 
@@ -365,6 +402,22 @@ mod tests {
         for (shape, label) in shapes {
             assert_eq!(shape.as_str(), label);
             assert_eq!(shape.to_string(), label);
+            assert_eq!(
+                ContentShape::from_schema_variant(shape.schema_variant()),
+                Some(shape)
+            );
         }
+
+        assert_eq!(
+            ContentShape::SCHEMA_VARIANTS,
+            [
+                "Conversation",
+                "ConversationAndContext",
+                "Context",
+                "Empty",
+                "ImmediateAppend",
+                "ImmediateContext"
+            ]
+        );
     }
 }

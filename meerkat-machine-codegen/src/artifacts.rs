@@ -2845,11 +2845,22 @@ fn string_enum_binding_samples(
         Some(RustTypeAtom::StringEnum { variants }) => Some(
             variants
                 .iter()
-                .map(|variant| tla_string(variant.as_str()))
+                .map(|variant| tla_string(string_enum_wire_label(name, variant.as_str())))
                 .collect(),
         ),
         _ => None,
     }
+}
+
+fn string_enum_wire_label(name: &str, variant: &str) -> String {
+    if name == meerkat_core::turn_execution_authority::ContentShape::SCHEMA_TYPE_NAME
+        && let Some(shape) =
+            meerkat_core::turn_execution_authority::ContentShape::from_schema_variant(variant)
+    {
+        return shape.as_str().to_owned();
+    }
+
+    variant.to_owned()
 }
 
 /// Consult the schema's named-type binding table to decide whether a
@@ -4791,7 +4802,9 @@ impl<'a> CompositionTlaCompiler<'a> {
             }
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
-            Expr::NamedVariant { variant, .. } => tla_string(variant),
+            Expr::NamedVariant { enum_name, variant } => {
+                tla_string(string_enum_wire_label(enum_name.as_str(), variant.as_str()))
+            }
             Expr::None => "None".into(),
             Expr::Some(inner) => format!("Some({})", self.render_literal_expr(inner)),
             Expr::SeqLiteral(items) => {
@@ -6630,7 +6643,9 @@ impl<'a> MachineTlaCompiler<'a> {
             }
             Expr::U64(value) => value.to_string(),
             Expr::String(value) => tla_string(value),
-            Expr::NamedVariant { variant, .. } => tla_string(variant),
+            Expr::NamedVariant { enum_name, variant } => {
+                tla_string(string_enum_wire_label(enum_name.as_str(), variant.as_str()))
+            }
             Expr::EmptySet => "{}".into(),
             Expr::EmptyMap => "[x \\in {} |-> None]".into(),
             Expr::SeqLiteral(items) => format!(

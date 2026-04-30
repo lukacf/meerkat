@@ -17,8 +17,8 @@ use meerkat_machine_schema::catalog::{
 };
 use meerkat_machine_schema::identity::{EnumVariantId, RustTypeAtom};
 use meerkat_machine_schema::{
-    CompositionDriver, CompositionDriverRustBinding, DriverDispatchRoute, RouteTargetKind,
-    WatchedEffect, canonical_machine_schemas,
+    CompositionDriver, CompositionDriverRustBinding, DriverDispatchRoute, Expr, RouteTargetKind,
+    TriggerMatch, Update, WatchedEffect, canonical_machine_schemas,
 };
 
 #[test]
@@ -284,6 +284,111 @@ fn generated_meerkat_operation_kind_uses_string_enum_binding() {
                 "    #[serde(rename = \"{variant}\")]\n    {variant},"
             )),
             "OperationKind serde must preserve raw value `{variant}`:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn generated_meerkat_schema_content_shape_binding_is_closed() {
+    use meerkat_core::turn_execution_authority::ContentShape;
+
+    let schema = meerkat_machine();
+    let binding = schema
+        .named_types
+        .iter()
+        .find(|binding| binding.name.as_str() == ContentShape::SCHEMA_TYPE_NAME)
+        .expect("ContentShape binding");
+
+    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
+        panic!("ContentShape binding must be a closed StringEnum");
+    };
+    let variants = variants
+        .iter()
+        .map(|variant| variant.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        variants.as_slice(),
+        ContentShape::SCHEMA_VARIANTS.as_slice()
+    );
+}
+
+#[test]
+fn generated_meerkat_immediate_starts_derive_content_shape() {
+    use meerkat_core::turn_execution_authority::ContentShape;
+
+    let schema = meerkat_machine();
+    for input_name in ["StartImmediateAppend", "StartImmediateContext"] {
+        let input = schema
+            .inputs
+            .variant_named(input_name)
+            .expect("immediate start input");
+        assert!(
+            input.field_named("admitted_content_shape").is_err(),
+            "{input_name} must derive its content shape instead of accepting caller-supplied shape"
+        );
+    }
+
+    for (input_name, expected_shape) in [
+        ("StartImmediateAppend", ContentShape::ImmediateAppend),
+        ("StartImmediateContext", ContentShape::ImmediateContext),
+    ] {
+        for phase in ["Initializing", "Attached", "Running"] {
+            let transition_name = format!("{input_name}{phase}");
+            let transition = schema
+                .transitions
+                .iter()
+                .find(|transition| transition.name.as_str() == transition_name)
+                .expect("immediate start transition");
+
+            let TriggerMatch::Input { variant, bindings } = &transition.on else {
+                panic!("{transition_name} must trigger on an input");
+            };
+            assert_eq!(variant.as_str(), input_name);
+            assert!(
+                !bindings
+                    .iter()
+                    .any(|binding| binding.as_str() == "admitted_content_shape"),
+                "{transition_name} must not bind caller-supplied content shape"
+            );
+
+            let assigned_shape = transition
+                .updates
+                .iter()
+                .find_map(|update| match update {
+                    Update::Assign { field, expr }
+                        if field.as_str() == "admitted_content_shape" =>
+                    {
+                        Some(expr)
+                    }
+                    _ => None,
+                })
+                .expect("admitted_content_shape assignment");
+
+            let Expr::Some(inner) = assigned_shape else {
+                panic!("{transition_name} must assign Some(ContentShape::...)");
+            };
+            let Expr::NamedVariant { enum_name, variant } = inner.as_ref() else {
+                panic!("{transition_name} must assign a typed ContentShape variant");
+            };
+            assert_eq!(enum_name.as_str(), ContentShape::SCHEMA_TYPE_NAME);
+            assert_eq!(variant.as_str(), expected_shape.schema_variant());
+        }
+    }
+
+    for phase in ["Initializing", "Attached", "Running"] {
+        let transition_name = format!("StartConversationRun{phase}");
+        let transition = schema
+            .transitions
+            .iter()
+            .find(|transition| transition.name.as_str() == transition_name)
+            .expect("conversation start transition");
+        assert!(
+            transition
+                .guards
+                .iter()
+                .any(|guard| guard.name == "conversation_shape_matches_primitive"),
+            "{transition_name} must reject immediate-only shapes on conversation starts"
         );
     }
 }

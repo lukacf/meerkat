@@ -1106,6 +1106,7 @@ pub(crate) fn machine_validate_run_failed(
 pub(crate) async fn machine_normalize_recovered_input_state(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
+    stored_runtime_id: &LogicalRuntimeId,
     mut bundle: StoredInputState,
 ) -> Result<StoredInputState, RuntimeDriverError> {
     let applied_boundary_committed = if matches!(
@@ -1117,12 +1118,16 @@ pub(crate) async fn machine_normalize_recovered_input_state(
                 bundle.seed.last_run_id.clone(),
                 bundle.seed.last_boundary_sequence,
             ) {
-                (Some(run_id), Some(sequence)) => {
-                    load_boundary_receipt_for_storage_aliases(store, runtime_id, &run_id, sequence)
-                        .await
-                        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-                        .is_some()
-                }
+                (Some(run_id), Some(sequence)) => load_boundary_receipt_for_storage_aliases(
+                    store,
+                    runtime_id,
+                    stored_runtime_id,
+                    &run_id,
+                    sequence,
+                )
+                .await
+                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                .is_some(),
                 _ => false,
             },
         )
@@ -1138,15 +1143,31 @@ pub(crate) async fn machine_normalize_recovered_input_state(
 pub(super) async fn load_boundary_receipt_for_storage_aliases(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
+    stored_runtime_id: &LogicalRuntimeId,
     run_id: &RunId,
     sequence: u64,
 ) -> Result<Option<RunBoundaryReceipt>, crate::store::RuntimeStoreError> {
-    for candidate in runtime_id.storage_alias_candidates() {
-        if let Some(receipt) = store
+    let selected_primary_alias = stored_runtime_id == runtime_id;
+    let mut primary_alias_loaded = false;
+    for (candidate_index, candidate) in runtime_id
+        .storage_alias_candidates()
+        .into_iter()
+        .enumerate()
+    {
+        match store
             .load_boundary_receipt(&candidate, run_id, sequence)
-            .await?
+            .await
         {
-            return Ok(Some(receipt));
+            Ok(Some(receipt)) => return Ok(Some(receipt)),
+            Ok(None) => {
+                if candidate_index == 0 {
+                    primary_alias_loaded = true;
+                }
+            }
+            Err(_err) if candidate_index > 0 && primary_alias_loaded && selected_primary_alias => {
+                continue;
+            }
+            Err(err) => return Err(err),
         }
     }
     Ok(None)
@@ -1182,10 +1203,12 @@ async fn load_input_states_for_storage_aliases(
             {
                 let candidate_updated_at = state.state.updated_at();
                 let existing_updated_at = existing_state.state.updated_at();
-                if candidate_updated_at > existing_updated_at
-                    || (candidate_updated_at == existing_updated_at
-                        && candidate_index < *existing_index)
-                {
+                let should_replace = if candidate_index == *existing_index {
+                    candidate_updated_at > existing_updated_at
+                } else {
+                    candidate_index < *existing_index
+                };
+                if should_replace {
                     *existing_index = candidate_index;
                     *existing_runtime_id = candidate.clone();
                     *existing_state = state;
@@ -1520,11 +1543,13 @@ pub(crate) async fn machine_recover_persistent_driver(
 ) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered_payloads = Vec::new();
 
-    for (_stored_runtime_id, bundle) in load_input_states_for_storage_aliases(store, runtime_id)
+    for (stored_runtime_id, bundle) in load_input_states_for_storage_aliases(store, runtime_id)
         .await
         .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
     {
-        let bundle = machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
+        let bundle =
+            machine_normalize_recovered_input_state(store, runtime_id, &stored_runtime_id, bundle)
+                .await?;
 
         if driver.input_state(&bundle.state.input_id).is_none() {
             let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {

@@ -903,6 +903,7 @@ impl MeerkatMachine {
                     Some(store) => super::driver::load_boundary_receipt_for_storage_aliases(
                         store.as_ref(),
                         &runtime_id,
+                        &runtime_id,
                         &run_id,
                         sequence,
                     )

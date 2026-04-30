@@ -147,35 +147,27 @@ pub fn spawn_comms_drain(
                         );
                     }
                     PeerInputClass::ResponseProgress | PeerInputClass::ResponseTerminal => {
-                        // Terminal-vs-progress class is fixed at peer ingress
-                        // by `PeerIngressMachinePolicy`; the drain only maps a
-                        // terminal response's already-typed status into the
-                        // peer-interaction DSL disposition companion.
-                        let terminal_status = match &candidate.interaction.content {
-                            meerkat_core::interaction::InteractionContent::Response {
-                                status,
-                                ..
-                            } => match meerkat_core::interaction::classify_response_terminality(
-                                *status,
-                            ) {
-                                meerkat_core::interaction::TerminalityClass::Terminal {
-                                    disposition,
-                                } => match disposition {
-                                    meerkat_core::interaction::TerminalDisposition::Completed => {
-                                        Some(meerkat_core::handles::PeerTerminalDisposition::Completed)
-                                    }
-                                    meerkat_core::interaction::TerminalDisposition::Failed => {
-                                        Some(meerkat_core::handles::PeerTerminalDisposition::Failed)
-                                    }
-                                    _ => None,
-                                },
-                                meerkat_core::interaction::TerminalityClass::Progress => None,
+                        // Response progress/terminal status is fixed by the
+                        // ingress classifier and carried on the candidate. Do
+                        // not re-match raw `ResponseStatus` here.
+                        let terminal_status = match candidate.response_terminality {
+                            Some(meerkat_core::interaction::TerminalityClass::Terminal {
+                                disposition,
+                            }) => match disposition {
+                                meerkat_core::interaction::TerminalDisposition::Completed => {
+                                    Some(meerkat_core::handles::PeerTerminalDisposition::Completed)
+                                }
+                                meerkat_core::interaction::TerminalDisposition::Failed => {
+                                    Some(meerkat_core::handles::PeerTerminalDisposition::Failed)
+                                }
                                 _ => None,
                             },
-                            _ => None,
+                            Some(meerkat_core::interaction::TerminalityClass::Progress) | None => {
+                                None
+                            }
+                            Some(_) => None,
                         };
-                        let is_terminal =
-                            matches!(candidate.class, PeerInputClass::ResponseTerminal);
+                        let is_terminal = terminal_status.is_some();
 
                         if is_terminal {
                             // Terminal response — single admission with
@@ -1860,6 +1852,7 @@ mod tests {
             from_peer_id: None,
             lifecycle_peer: None,
             source_peer_id: None,
+            response_terminality: None,
         };
 
         assert!(
@@ -2104,6 +2097,7 @@ mod tests {
             from_peer_id: None,
             lifecycle_peer: Some("peer-1".to_string()),
             source_peer_id: None,
+            response_terminality: None,
         }
     }
 
@@ -2443,6 +2437,7 @@ mod tests {
             from_peer_id: Some(typed_peer_id(PEER_ID_SUPERVISOR)),
             lifecycle_peer: None,
             source_peer_id: None,
+            response_terminality: None,
         };
 
         assert!(
@@ -3230,6 +3225,7 @@ mod tests {
             from_peer_id,
             lifecycle_peer: None,
             source_peer_id: None,
+            response_terminality: None,
         }
     }
 

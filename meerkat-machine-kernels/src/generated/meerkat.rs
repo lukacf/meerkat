@@ -1372,6 +1372,196 @@ impl std::fmt::Display for OperationKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerIngressAdmittedKind {
+    #[default]
+    Message,
+    Request,
+    Response,
+    Ack,
+    PlainEvent,
+}
+impl PeerIngressAdmittedKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Message => "Message",
+            Self::Request => "Request",
+            Self::Response => "Response",
+            Self::Ack => "Ack",
+            Self::PlainEvent => "PlainEvent",
+        }
+    }
+}
+impl std::fmt::Display for PeerIngressAdmittedKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressAuthClass {
+    #[default]
+    Required,
+    SupervisorBridgeExempt,
+}
+impl PeerIngressAuthClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Required => "Required",
+            Self::SupervisorBridgeExempt => "SupervisorBridgeExempt",
+        }
+    }
+}
+impl std::fmt::Display for PeerIngressAuthClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressEnvelopeClass {
+    #[default]
+    Message,
+    Request,
+    Lifecycle,
+    Response,
+    Ack,
+}
+impl PeerIngressEnvelopeClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Message => "Message",
+            Self::Request => "Request",
+            Self::Lifecycle => "Lifecycle",
+            Self::Response => "Response",
+            Self::Ack => "Ack",
+        }
+    }
+}
+impl std::fmt::Display for PeerIngressEnvelopeClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressInputClass {
+    #[default]
+    ActionableMessage,
+    ActionableRequest,
+    ResponseProgress,
+    ResponseTerminal,
+    PeerLifecycleAdded,
+    PeerLifecycleRetired,
+    PeerLifecycleUnwired,
+    SilentRequest,
+    Ack,
+    PlainEvent,
+}
+impl PeerIngressInputClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ActionableMessage => "ActionableMessage",
+            Self::ActionableRequest => "ActionableRequest",
+            Self::ResponseProgress => "ResponseProgress",
+            Self::ResponseTerminal => "ResponseTerminal",
+            Self::PeerLifecycleAdded => "PeerLifecycleAdded",
+            Self::PeerLifecycleRetired => "PeerLifecycleRetired",
+            Self::PeerLifecycleUnwired => "PeerLifecycleUnwired",
+            Self::SilentRequest => "SilentRequest",
+            Self::Ack => "Ack",
+            Self::PlainEvent => "PlainEvent",
+        }
+    }
+}
+impl std::fmt::Display for PeerIngressInputClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressLifecycleClass {
+    #[default]
+    PeerAdded,
+    PeerRetired,
+    PeerUnwired,
+}
+impl PeerIngressLifecycleClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PeerAdded => "PeerAdded",
+            Self::PeerRetired => "PeerRetired",
+            Self::PeerUnwired => "PeerUnwired",
+        }
+    }
+}
+impl std::fmt::Display for PeerIngressLifecycleClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressOwnerKind {
     #[default]
     Unattached,
@@ -1388,6 +1578,74 @@ impl PeerIngressOwnerKind {
     }
 }
 impl std::fmt::Display for PeerIngressOwnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressResponseStatus {
+    #[default]
+    Accepted,
+    Completed,
+    Failed,
+}
+impl PeerIngressResponseStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::fmt::Display for PeerIngressResponseStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressResponseTerminality {
+    #[default]
+    Progress,
+    TerminalCompleted,
+    TerminalFailed,
+}
+impl PeerIngressResponseTerminality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Progress => "Progress",
+            Self::TerminalCompleted => "TerminalCompleted",
+            Self::TerminalFailed => "TerminalFailed",
+        }
+    }
+}
+impl std::fmt::Display for PeerIngressResponseTerminality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3671,9 +3929,20 @@ pub mod signals {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClassifyExternalEnvelope {}
+    pub struct ClassifyExternalEnvelope {
+        pub item_id: String,
+        pub from_peer: String,
+        pub envelope_kind: PeerIngressEnvelopeClass,
+        pub request_intent: String,
+        pub lifecycle_kind: PeerIngressLifecycleClass,
+        pub lifecycle_peer_param: Option<String>,
+        pub response_status: PeerIngressResponseStatus,
+        pub in_reply_to: String,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClassifyPlainEvent {}
+    pub struct ClassifyPlainEvent {
+        pub source_name: String,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnsureDrainRunning {}
 }
@@ -3877,6 +4146,16 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EnqueueClassifiedEntry {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PeerIngressClassified {
+        pub class: PeerIngressInputClass,
+        pub kind: PeerIngressAdmittedKind,
+        pub auth: PeerIngressAuthClass,
+        pub lifecycle_kind: Option<PeerIngressLifecycleClass>,
+        pub lifecycle_peer: Option<String>,
+        pub request_id: Option<String>,
+        pub response_terminality: Option<PeerIngressResponseTerminality>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SpawnDrainTask {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ScheduleSurfaceCompletion {
@@ -4046,6 +4325,7 @@ pub enum Effect {
     WaitAllSatisfied(effects::WaitAllSatisfied),
     CollectCompletedResult(effects::CollectCompletedResult),
     EnqueueClassifiedEntry(effects::EnqueueClassifiedEntry),
+    PeerIngressClassified(effects::PeerIngressClassified),
     SpawnDrainTask(effects::SpawnDrainTask),
     ScheduleSurfaceCompletion(effects::ScheduleSurfaceCompletion),
     RefreshVisibleSurfaceSet(effects::RefreshVisibleSurfaceSet),
@@ -4122,6 +4402,7 @@ pub enum EffectKind {
     WaitAllSatisfied,
     CollectCompletedResult,
     EnqueueClassifiedEntry,
+    PeerIngressClassified,
     SpawnDrainTask,
     ScheduleSurfaceCompletion,
     RefreshVisibleSurfaceSet,
@@ -4335,8 +4616,36 @@ pub enum TransitionId {
     AcceptWithoutWakeIdle,
     AcceptWithoutWakeAttached,
     AcceptWithoutWakeRunning,
-    ClassifyExternalEnvelopeAttached,
-    ClassifyExternalEnvelopeRunning,
+    ClassifyExternalEnvelopeMessageAttached,
+    ClassifyExternalEnvelopeMessageRunning,
+    ClassifyExternalEnvelopeRequestPeerAddedAttached,
+    ClassifyExternalEnvelopeRequestPeerAddedRunning,
+    ClassifyExternalEnvelopeRequestPeerRetiredAttached,
+    ClassifyExternalEnvelopeRequestPeerRetiredRunning,
+    ClassifyExternalEnvelopeRequestPeerUnwiredAttached,
+    ClassifyExternalEnvelopeRequestPeerUnwiredRunning,
+    ClassifyExternalEnvelopeRequestSupervisorSilentAttached,
+    ClassifyExternalEnvelopeRequestSupervisorSilentRunning,
+    ClassifyExternalEnvelopeRequestSilentAttached,
+    ClassifyExternalEnvelopeRequestSilentRunning,
+    ClassifyExternalEnvelopeRequestSupervisorAttached,
+    ClassifyExternalEnvelopeRequestSupervisorRunning,
+    ClassifyExternalEnvelopeRequestActionableAttached,
+    ClassifyExternalEnvelopeRequestActionableRunning,
+    ClassifyExternalEnvelopeLifecycleAddedAttached,
+    ClassifyExternalEnvelopeLifecycleAddedRunning,
+    ClassifyExternalEnvelopeLifecycleRetiredAttached,
+    ClassifyExternalEnvelopeLifecycleRetiredRunning,
+    ClassifyExternalEnvelopeLifecycleUnwiredAttached,
+    ClassifyExternalEnvelopeLifecycleUnwiredRunning,
+    ClassifyExternalEnvelopeResponseAcceptedAttached,
+    ClassifyExternalEnvelopeResponseAcceptedRunning,
+    ClassifyExternalEnvelopeResponseCompletedAttached,
+    ClassifyExternalEnvelopeResponseCompletedRunning,
+    ClassifyExternalEnvelopeResponseFailedAttached,
+    ClassifyExternalEnvelopeResponseFailedRunning,
+    ClassifyExternalEnvelopeAckAttached,
+    ClassifyExternalEnvelopeAckRunning,
     ClassifyPlainEventAttached,
     ClassifyPlainEventRunning,
     PrepareIdle,

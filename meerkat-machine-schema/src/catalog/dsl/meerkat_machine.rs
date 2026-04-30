@@ -520,6 +520,83 @@ pub struct CommsRuntimeId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct MobId(pub String);
 
+/// Parsed transport envelope class for peer ingress.
+///
+/// This is the mechanical shape comms may derive from a wire envelope before
+/// semantic admission. The DSL consumes it to own the peer-input class,
+/// auth-exemption, lifecycle, silent-routing, and response-terminal facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressEnvelopeClass {
+    #[default]
+    Message,
+    Request,
+    Lifecycle,
+    Response,
+    Ack,
+}
+
+/// DSL-owned admitted ingress kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAdmittedKind {
+    #[default]
+    Message,
+    Request,
+    Response,
+    Ack,
+    PlainEvent,
+}
+
+/// DSL-owned peer input class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressInputClass {
+    #[default]
+    ActionableMessage,
+    ActionableRequest,
+    ResponseProgress,
+    ResponseTerminal,
+    PeerLifecycleAdded,
+    PeerLifecycleRetired,
+    PeerLifecycleUnwired,
+    SilentRequest,
+    Ack,
+    PlainEvent,
+}
+
+/// DSL-owned peer lifecycle classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressLifecycleClass {
+    #[default]
+    PeerAdded,
+    PeerRetired,
+    PeerUnwired,
+}
+
+/// DSL-owned peer ingress auth classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressAuthClass {
+    #[default]
+    Required,
+    SupervisorBridgeExempt,
+}
+
+/// Parsed response status for peer ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressResponseStatus {
+    #[default]
+    Accepted,
+    Completed,
+    Failed,
+}
+
+/// DSL-owned response progress/terminal classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressResponseTerminality {
+    #[default]
+    Progress,
+    TerminalCompleted,
+    TerminalFailed,
+}
+
 /// Peer-ingress transport capability ownership kind (W2-G / issue #264).
 ///
 /// Paired with `peer_ingress_comms_runtime_id` and `peer_ingress_mob_id` in
@@ -2147,8 +2224,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             Initialize,
             BoundaryApplied { revision: u64 },
             DrainQueuedRun { run_id: RunId },
-            ClassifyExternalEnvelope,
-            ClassifyPlainEvent,
+            ClassifyExternalEnvelope {
+                item_id: String,
+                from_peer: String,
+                envelope_kind: Enum<PeerIngressEnvelopeClass>,
+                request_intent: String,
+                lifecycle_kind: Enum<PeerIngressLifecycleClass>,
+                lifecycle_peer_param: Option<String>,
+                response_status: Enum<PeerIngressResponseStatus>,
+                in_reply_to: String,
+            },
+            ClassifyPlainEvent { source_name: String },
             EnsureDrainRunning,
         }
 
@@ -2211,6 +2297,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             WaitAllSatisfied { wait_request_id: WaitRequestId, operation_ids: Set<OperationId> },
             CollectCompletedResult,
             EnqueueClassifiedEntry,
+            PeerIngressClassified {
+                class: Enum<PeerIngressInputClass>,
+                kind: Enum<PeerIngressAdmittedKind>,
+                auth: Enum<PeerIngressAuthClass>,
+                lifecycle_kind: Option<Enum<PeerIngressLifecycleClass>>,
+                lifecycle_peer: Option<String>,
+                request_id: Option<String>,
+                response_terminality: Option<Enum<PeerIngressResponseTerminality>>,
+            },
             SpawnDrainTask,
             // `surface_id` stays `String`: it's an opaque surface identity,
             // not a closed classifier. `operation` is the same typed
@@ -2355,6 +2450,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition WaitAllSatisfied => external handoff ops_barrier_satisfaction,
         disposition CollectCompletedResult => local,
         disposition EnqueueClassifiedEntry => local,
+        disposition PeerIngressClassified => local,
         disposition SpawnDrainTask => local,
         disposition ScheduleSurfaceCompletion => external handoff surface_completion,
         disposition RefreshVisibleSurfaceSet => external handoff surface_snapshot_alignment,
@@ -3960,38 +4056,846 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit IngressAccepted
         }
 
-        // 27. ClassifyExternalEnvelope/ClassifyPlainEvent: Attached/Running, emit EnqueueClassifiedEntry
-        transition ClassifyExternalEnvelopeAttached {
-            on signal ClassifyExternalEnvelope
+        // 27. Peer-ingress classification: Attached/Running self-loops.
+        //
+        // Comms supplies only parsed transport facts. The DSL owns the
+        // semantic classification result emitted on `PeerIngressClassified`:
+        // peer input class, auth exemption, lifecycle subject, silent routing,
+        // and response terminality. The legacy `EnqueueClassifiedEntry` effect
+        // remains as the coarse queue signal for existing machine audits.
+        transition ClassifyExternalEnvelopeMessageAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_message" { envelope_kind == PeerIngressEnvelopeClass::Message }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableMessage,
+                kind: PeerIngressAdmittedKind::Message,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: None,
+                response_terminality: None
+            }
         }
-        transition ClassifyExternalEnvelopeRunning {
-            on signal ClassifyExternalEnvelope
+        transition ClassifyExternalEnvelopeMessageRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_message" { envelope_kind == PeerIngressEnvelopeClass::Message }
             update {}
             to Running
             emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableMessage,
+                kind: PeerIngressAdmittedKind::Message,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerAddedAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_added" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_added"
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleAdded,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerAddedRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_added" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_added"
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleAdded,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerRetiredAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_retired"
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerRetiredRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_retired"
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerUnwiredAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_unwired"
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestPeerUnwiredRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_request_peer_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "mob.peer_unwired"
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorSilentAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorSilentRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSilentAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent != "supervisor.bridge"
+                && request_intent != "mob.peer_added"
+                && request_intent != "mob.peer_retired"
+                && request_intent != "mob.peer_unwired"
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSilentRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_silent_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent != "supervisor.bridge"
+                && request_intent != "mob.peer_added"
+                && request_intent != "mob.peer_retired"
+                && request_intent != "mob.peer_unwired"
+                && self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::SilentRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestSupervisorRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_supervisor_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent == "supervisor.bridge"
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::SupervisorBridgeExempt,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestActionableAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_actionable_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent != "supervisor.bridge"
+                && request_intent != "mob.peer_added"
+                && request_intent != "mob.peer_retired"
+                && request_intent != "mob.peer_unwired"
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeRequestActionableRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_actionable_request" {
+                envelope_kind == PeerIngressEnvelopeClass::Request
+                && request_intent != "supervisor.bridge"
+                && request_intent != "mob.peer_added"
+                && request_intent != "mob.peer_retired"
+                && request_intent != "mob.peer_unwired"
+                && !self.silent_intent_overrides.contains(request_intent)
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ActionableRequest,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(item_id),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleAddedAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_added" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerAdded
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleAdded,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleAddedRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_added" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerAdded
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleAdded,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerAdded),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleRetiredAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleRetiredRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_retired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerRetired
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleRetired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerRetired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleUnwiredAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeLifecycleUnwiredRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_lifecycle_unwired" {
+                envelope_kind == PeerIngressEnvelopeClass::Lifecycle
+                && lifecycle_kind == PeerIngressLifecycleClass::PeerUnwired
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PeerLifecycleUnwired,
+                kind: PeerIngressAdmittedKind::Request,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: Some(PeerIngressLifecycleClass::PeerUnwired),
+                lifecycle_peer: Some(if lifecycle_peer_param.is_some()
+                    && lifecycle_peer_param.get("value") != ""
+                {
+                    lifecycle_peer_param.get("value")
+                } else {
+                    from_peer
+                }),
+                request_id: None,
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeResponseAcceptedAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_response_accepted" {
+                envelope_kind == PeerIngressEnvelopeClass::Response
+                && response_status == PeerIngressResponseStatus::Accepted
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ResponseProgress,
+                kind: PeerIngressAdmittedKind::Response,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: Some(PeerIngressResponseTerminality::Progress)
+            }
+        }
+        transition ClassifyExternalEnvelopeResponseAcceptedRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_response_accepted" {
+                envelope_kind == PeerIngressEnvelopeClass::Response
+                && response_status == PeerIngressResponseStatus::Accepted
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ResponseProgress,
+                kind: PeerIngressAdmittedKind::Response,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: Some(PeerIngressResponseTerminality::Progress)
+            }
+        }
+        transition ClassifyExternalEnvelopeResponseCompletedAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_response_completed" {
+                envelope_kind == PeerIngressEnvelopeClass::Response
+                && response_status == PeerIngressResponseStatus::Completed
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ResponseTerminal,
+                kind: PeerIngressAdmittedKind::Response,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: Some(PeerIngressResponseTerminality::TerminalCompleted)
+            }
+        }
+        transition ClassifyExternalEnvelopeResponseCompletedRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_response_completed" {
+                envelope_kind == PeerIngressEnvelopeClass::Response
+                && response_status == PeerIngressResponseStatus::Completed
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ResponseTerminal,
+                kind: PeerIngressAdmittedKind::Response,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: Some(PeerIngressResponseTerminality::TerminalCompleted)
+            }
+        }
+        transition ClassifyExternalEnvelopeResponseFailedAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_response_failed" {
+                envelope_kind == PeerIngressEnvelopeClass::Response
+                && response_status == PeerIngressResponseStatus::Failed
+            }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ResponseTerminal,
+                kind: PeerIngressAdmittedKind::Response,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: Some(PeerIngressResponseTerminality::TerminalFailed)
+            }
+        }
+        transition ClassifyExternalEnvelopeResponseFailedRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_response_failed" {
+                envelope_kind == PeerIngressEnvelopeClass::Response
+                && response_status == PeerIngressResponseStatus::Failed
+            }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::ResponseTerminal,
+                kind: PeerIngressAdmittedKind::Response,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: Some(PeerIngressResponseTerminality::TerminalFailed)
+            }
+        }
+        transition ClassifyExternalEnvelopeAckAttached {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_ack" { envelope_kind == PeerIngressEnvelopeClass::Ack }
+            update {}
+            to Attached
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::Ack,
+                kind: PeerIngressAdmittedKind::Ack,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: None
+            }
+        }
+        transition ClassifyExternalEnvelopeAckRunning {
+            on signal ClassifyExternalEnvelope {
+                item_id, from_peer, envelope_kind, request_intent, lifecycle_kind,
+                lifecycle_peer_param, response_status, in_reply_to
+            }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_registered" { self.session_id != None }
+            guard "peer_ingress_ack" { envelope_kind == PeerIngressEnvelopeClass::Ack }
+            update {}
+            to Running
+            emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::Ack,
+                kind: PeerIngressAdmittedKind::Ack,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: Some(in_reply_to),
+                response_terminality: None
+            }
         }
         transition ClassifyPlainEventAttached {
-            on signal ClassifyPlainEvent
+            on signal ClassifyPlainEvent { source_name }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "session_registered" { self.session_id != None }
             update {}
             to Attached
             emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PlainEvent,
+                kind: PeerIngressAdmittedKind::PlainEvent,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: None,
+                response_terminality: None
+            }
         }
         transition ClassifyPlainEventRunning {
-            on signal ClassifyPlainEvent
+            on signal ClassifyPlainEvent { source_name }
             guard { self.lifecycle_phase == Phase::Running }
             guard "session_registered" { self.session_id != None }
             update {}
             to Running
             emit EnqueueClassifiedEntry
+            emit PeerIngressClassified {
+                class: PeerIngressInputClass::PlainEvent,
+                kind: PeerIngressAdmittedKind::PlainEvent,
+                auth: PeerIngressAuthClass::Required,
+                lifecycle_kind: None,
+                lifecycle_peer: None,
+                request_id: None,
+                response_terminality: None
+            }
         }
 
         // 28. Prepare: Idle→Running, Attached→Running

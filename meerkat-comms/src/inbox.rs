@@ -20,8 +20,9 @@ use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem, MessageKind};
 use meerkat_core::{
     InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
-    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressKind,
-    PeerIngressMachinePolicy, PeerIngressQueueSnapshot, PeerInputClass,
+    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressEnvelopeFacts,
+    PeerIngressEnvelopeKind, PeerIngressKind, PeerIngressMachinePolicy, PeerIngressQueueSnapshot,
+    PeerInputClass, TerminalityClass,
 };
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
@@ -102,6 +103,7 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) lifecycle_peer: Option<String>,
     pub(crate) request_id: Option<InteractionId>,
     pub(crate) admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
+    pub(crate) response_terminality: Option<TerminalityClass>,
     pub(crate) text_projection: String,
 }
 
@@ -564,6 +566,7 @@ impl InboxSender {
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
             admission_diagnostic: decision.admission_diagnostic,
+            response_terminality: result.response_terminality,
             text_projection: result.text_projection,
         };
         match classified_queue.lock().try_push(entry) {
@@ -740,6 +743,7 @@ impl InboxSender {
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
             admission_diagnostic: decision.admission_diagnostic,
+            response_terminality: result.response_terminality,
             text_projection: result.text_projection,
         };
         // Enqueue only on classified queue (no raw double-enqueue).
@@ -792,14 +796,41 @@ impl Drop for Inbox {
 }
 
 fn ingress_auth_decision(kind: &MessageKind) -> PeerIngressAuthDecision {
-    match kind {
-        MessageKind::Request { intent, .. } => {
-            PeerIngressMachinePolicy::default()
-                .classify_request_intent(intent)
-                .auth
-        }
-        _ => PeerIngressAuthDecision::Required,
-    }
+    let facts = PeerIngressEnvelopeFacts {
+        item_id: String::new(),
+        from_peer: String::new(),
+        from_peer_id: meerkat_core::comms::PeerId::from_uuid(uuid::Uuid::nil()),
+        kind: match kind {
+            MessageKind::Message { body, .. } => {
+                PeerIngressEnvelopeKind::Message { body: body.clone() }
+            }
+            MessageKind::Request { intent, params, .. } => PeerIngressEnvelopeKind::Request {
+                intent: intent.clone(),
+                params: params.clone(),
+            },
+            MessageKind::Lifecycle { kind, params } => PeerIngressEnvelopeKind::Lifecycle {
+                kind: *kind,
+                params: params.clone(),
+            },
+            MessageKind::Response {
+                in_reply_to,
+                status,
+                result,
+                ..
+            } => PeerIngressEnvelopeKind::Response {
+                in_reply_to: in_reply_to.to_string(),
+                status: (*status).into(),
+                result: result.clone(),
+            },
+            MessageKind::Ack { in_reply_to } => PeerIngressEnvelopeKind::Ack {
+                in_reply_to: in_reply_to.to_string(),
+            },
+        },
+    };
+    PeerIngressMachinePolicy::default()
+        .classify_external_envelope(&facts)
+        .classification
+        .auth
 }
 
 fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
@@ -826,6 +857,7 @@ fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
             InboxItem::PlainEvent { .. } => None,
         },
         admission_diagnostic: entry.admission_diagnostic,
+        response_terminality: entry.response_terminality,
     }
 }
 
@@ -1107,6 +1139,7 @@ mod tests {
             trusted_peers: Arc::new(parking_lot::RwLock::new(trusted)),
             ingress_policy: Arc::new(PeerIngressMachinePolicy::default()),
             peer_comms_handle: Arc::new(parking_lot::RwLock::new(peer_comms_handle)),
+            require_machine_authority: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -1140,7 +1173,9 @@ mod tests {
     impl meerkat_core::handles::PeerCommsHandle for RejectingPeerCommsHandle {
         fn classify_external_envelope(
             &self,
-        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            _facts: meerkat_core::PeerIngressEnvelopeFacts,
+        ) -> Result<meerkat_core::PeerIngressAdmission, meerkat_core::handles::DslTransitionError>
+        {
             self.external_calls.fetch_add(1, Ordering::SeqCst);
             Err(meerkat_core::handles::DslTransitionError::guard_rejected(
                 "test_peer_comms::classify_external_envelope",
@@ -1148,8 +1183,12 @@ mod tests {
             ))
         }
 
-        fn classify_plain_event(&self) -> Result<(), meerkat_core::handles::DslTransitionError> {
-            Ok(())
+        fn classify_plain_event(
+            &self,
+            facts: meerkat_core::PeerIngressPlainEventFacts,
+        ) -> Result<meerkat_core::PeerIngressAdmission, meerkat_core::handles::DslTransitionError>
+        {
+            Ok(PeerIngressMachinePolicy::default().classify_plain_event_facts(&facts))
         }
 
         fn set_peer_ingress_context(

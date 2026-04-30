@@ -92,6 +92,33 @@ fn canonical_machine_registry_is_individually_valid() {
 }
 
 #[test]
+fn peer_ingress_lifecycle_subject_signal_carries_candidate_not_selected_subject() {
+    let schema = meerkat_machine();
+    let signal = schema
+        .signals
+        .variant_named("ClassifyExternalEnvelope")
+        .expect("ClassifyExternalEnvelope signal");
+    let fields = signal
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        fields.iter().any(|name| *name == "from_peer"),
+        "fallback peer identity should remain a typed input fact"
+    );
+    assert!(
+        fields.iter().any(|name| *name == "lifecycle_peer_param"),
+        "machine should receive the parsed lifecycle peer parameter candidate"
+    );
+    assert!(
+        !fields.iter().any(|name| *name == "lifecycle_peer"),
+        "preselected lifecycle subjects must not cross the machine signal seam"
+    );
+}
+
+#[test]
 fn meerkat_deferred_tool_witness_named_type_is_structural_authority() {
     let schema = meerkat_machine();
     let witness_type = NamedTypeId::parse("ToolVisibilityWitness").expect("named type");
@@ -289,6 +316,7 @@ fn meerkat_machine_absorbs_runtime_ingress_turn_tool_and_peer_domains() {
         "PostAdmissionSignal",
         "SubmitOpEvent",
         "EnqueueClassifiedEntry",
+        "PeerIngressClassified",
         "SpawnDrainTask",
         "EmitExternalToolDelta",
         "CommittedVisibleSetPublished",

@@ -187,13 +187,15 @@ pub use image_content::{
 pub use image_generation::*;
 pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
-    PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision, PeerIngressAuthExemption,
-    PeerIngressAuthorityPhase, PeerIngressClassification, PeerIngressDiagnosticDisplay,
-    PeerIngressEntrySnapshot, PeerIngressKind, PeerIngressMachinePolicy, PeerIngressQueueSnapshot,
-    PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus, SendResponseCallProjection,
-    TerminalDisposition, TerminalityClass, classify_response_terminality,
-    format_peer_ack_projection, format_peer_message_projection, format_peer_request_projection,
-    format_peer_response_projection, peer_lifecycle_subject,
+    PeerIngressAdmission, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
+    PeerIngressAuthExemption, PeerIngressAuthorityPhase, PeerIngressClassification,
+    PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressEnvelopeFacts,
+    PeerIngressEnvelopeKind, PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts,
+    PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus,
+    SendResponseCallProjection, TerminalDisposition, TerminalityClass,
+    classify_response_terminality, format_peer_ack_projection, format_peer_message_projection,
+    format_peer_request_projection, format_peer_response_projection, peer_lifecycle_subject,
+    render_peer_ingress_admitted_text,
 };
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,

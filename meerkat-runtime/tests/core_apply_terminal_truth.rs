@@ -39,16 +39,13 @@ fn extract_braced_item<'a>(contents: &'a str, marker: &str) -> &'a str {
     panic!("unterminated braced item after `{marker}`");
 }
 
-fn assert_terminal_intent_validation_precedes_consumption(source: &str, owner: &str) {
+fn assert_terminal_intent_validation_precedes_markers(source: &str, owner: &str, markers: &[&str]) {
     let validation = source
         .find("primitive.peer_response_terminal_apply_intent_violation()")
         .unwrap_or_else(|| {
             panic!("{owner} must reject malformed terminal peer-response intent before applying it")
         });
-    for consumption in [
-        "primitive.is_context_only_apply_without_turn()",
-        "primitive.is_peer_response_terminal_context_and_run()",
-    ] {
+    for consumption in markers {
         let consumption = source
             .find(consumption)
             .unwrap_or_else(|| panic!("{owner} missing `{consumption}`"));
@@ -57,6 +54,15 @@ fn assert_terminal_intent_validation_precedes_consumption(source: &str, owner: &
             "{owner} must validate terminal peer-response intent before `{consumption}`"
         );
     }
+}
+
+fn assert_terminal_context_and_run_stages_pre_turn_appends(source: &str, owner: &str) {
+    assert!(
+        source.contains("primitive.is_peer_response_terminal_context_and_run()")
+            && source.contains("pending_system_context_appends(&staged.context_appends)")
+            && source.contains("pre_turn_context_appends"),
+        "{owner} must stage terminal context-and-run context into the admitted turn request"
+    );
 }
 
 #[test]
@@ -103,15 +109,25 @@ fn terminal_context_and_run_adapters_use_canonical_primitive_intent() {
         runtime_backed_apply.contains("primitive.is_context_only_apply_without_turn()"),
         "runtime-backed context shortcut must use the canonical primitive intent helper"
     );
-    assert_terminal_intent_validation_precedes_consumption(
+    assert_terminal_intent_validation_precedes_markers(
         runtime_backed_apply,
         "runtime-backed apply",
+        &[
+            "primitive.is_context_only_apply_without_turn()",
+            "start_turn_request_from_primitive(&primitive)",
+        ],
+    );
+    assert!(
+        runtime_backed_apply.contains("start_turn_request_from_primitive(&primitive)")
+            && runtime_backed_apply.contains(".apply_runtime_turn("),
+        "runtime-backed apply must build one admitted turn request before applying the reaction turn"
     );
 
-    assert!(
-        runtime_backed_apply.contains("primitive.is_peer_response_terminal_context_and_run()")
-            && runtime_backed_apply.contains("apply_runtime_system_context_for_turn"),
-        "runtime-backed terminal context-and-run apply must append context before the reaction turn"
+    let runtime_backed_request =
+        extract_braced_item(&runtime_backed, "fn start_turn_request_from_primitive");
+    assert_terminal_context_and_run_stages_pre_turn_appends(
+        runtime_backed_request,
+        "runtime-backed turn request builder",
     );
 
     let mcp_runtime_apply =
@@ -120,13 +136,16 @@ fn terminal_context_and_run_adapters_use_canonical_primitive_intent() {
         mcp_runtime_apply.contains("primitive.is_context_only_apply_without_turn()"),
         "MCP runtime ingress must not re-derive context-only terminal behavior from append shape"
     );
-    assert_terminal_intent_validation_precedes_consumption(
+    assert_terminal_intent_validation_precedes_markers(
         mcp_runtime_apply,
         "MCP runtime ingress apply",
+        &[
+            "primitive.is_context_only_apply_without_turn()",
+            "let pre_turn_context_appends = match primitive",
+        ],
     );
-    assert!(
-        mcp_runtime_apply.contains("primitive.is_peer_response_terminal_context_and_run()")
-            && mcp_runtime_apply.contains("apply_runtime_system_context_for_turn"),
-        "MCP runtime ingress must append terminal context-and-run context before the reaction turn"
+    assert_terminal_context_and_run_stages_pre_turn_appends(
+        mcp_runtime_apply,
+        "MCP runtime ingress apply",
     );
 }

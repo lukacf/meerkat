@@ -312,7 +312,7 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
         meerkat_core::agent::CommsRuntime::drain_peer_input_candidates(&receiver).await;
     assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates[0].auth,
+        candidates[0].auth(),
         Some(PeerIngressAuthDecision::Exempt(
             PeerIngressAuthExemption::SupervisorBridge
         )),

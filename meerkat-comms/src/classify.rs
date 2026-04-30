@@ -7,8 +7,8 @@ use crate::peer_types::ContentShape as PeerContentShape;
 use crate::trust::TrustedPeers;
 use crate::types::{InboxItem, MessageKind};
 use meerkat_core::{
-    InteractionId, PeerIngressAdmission, PeerIngressAuthDecision, PeerIngressEnvelopeFacts,
-    PeerIngressConvention, PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity,
+    InteractionId, PeerIngressAdmission, PeerIngressAuthDecision, PeerIngressConvention,
+    PeerIngressEnvelopeFacts, PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity,
     PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts, PeerInputClass,
     TerminalityClass, handles::PeerCommsHandle,
 };

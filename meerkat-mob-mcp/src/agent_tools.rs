@@ -2246,7 +2246,8 @@ mod tests {
                 .into_iter()
                 .map(|interaction| {
                     let id = interaction.id;
-                    let (class, kind, convention, response_terminality) = match &interaction.content {
+                    let (class, kind, convention, response_terminality) = match &interaction.content
+                    {
                         InteractionContent::Message { .. } => (
                             PeerInputClass::ActionableMessage,
                             meerkat_core::PeerIngressKind::Message,
@@ -2267,9 +2268,8 @@ mod tests {
                             status,
                             ..
                         } => {
-                            let classification =
-                                meerkat_core::PeerIngressMachinePolicy::default()
-                                    .classify_response(*status);
+                            let classification = meerkat_core::PeerIngressMachinePolicy::default()
+                                .classify_response(*status);
                             (
                                 classification.class,
                                 meerkat_core::PeerIngressKind::Response,

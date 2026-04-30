@@ -6,7 +6,6 @@ use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
 };
-#[cfg(test)]
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, TerminalityClass};
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::HandlingMode;

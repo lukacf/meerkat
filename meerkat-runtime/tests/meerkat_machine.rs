@@ -187,6 +187,16 @@ impl RuntimeStore for HarnessRuntimeStore {
             .await
     }
 
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
@@ -406,6 +416,57 @@ async fn lifecycle_commit_failure_restores_staged_session_dsl_state() {
         adapter.list_active_inputs(&sid).await.unwrap(),
         vec![input_id],
         "failed retire must restore active input projection",
+    );
+}
+
+#[tokio::test]
+async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
+    let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+
+    let input = make_prompt("destroy rollback");
+    let input_id = input.id().clone();
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, input)
+        .await
+        .expect("input admission should succeed before lifecycle failure");
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("accepted input should produce a completion handle");
+
+    let err = meerkat_runtime::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect_err("destroy should surface lifecycle commit failure");
+    assert!(
+        err.to_string()
+            .contains("synthetic atomic_lifecycle_commit failure"),
+        "unexpected error: {err}",
+    );
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle,
+        "failed destroy must restore the session DSL phase",
+    );
+    assert_eq!(
+        adapter.list_active_inputs(&sid).await.unwrap(),
+        vec![input_id],
+        "failed destroy must restore active input projection",
+    );
+    assert_ne!(
+        store.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "failed destroy must not persist destroyed runtime truth",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), handle.wait())
+            .await
+            .is_err(),
+        "failed destroy must not terminate completion waiters",
     );
 }
 

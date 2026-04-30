@@ -430,6 +430,16 @@ impl RuntimeStore for FailingOpsLifecycleStore {
             .await
     }
 
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: meerkat_runtime::SessionDelta,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,

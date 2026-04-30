@@ -1729,7 +1729,7 @@ impl AgentFactory {
         // Phase 3: propagate persisted connection_ref so resume re-resolves
         // through the same realm binding. The caller keeps precedence —
         // if build_config already carries a connection_ref, leave it.
-        if build_config.connection_ref.is_none() {
+        if !mask.connection_ref && build_config.connection_ref.is_none() {
             build_config.connection_ref = metadata
                 .connection_ref
                 .clone()

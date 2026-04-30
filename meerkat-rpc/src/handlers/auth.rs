@@ -1192,7 +1192,9 @@ pub async fn handle_auth_logout(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use meerkat_core::handles::{AuthLeaseHandle, AuthLeaseSnapshot, DslTransitionError};
+    use meerkat_core::handles::{
+        AuthLeaseHandle, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    };
 
     fn raw_params(value: serde_json::Value) -> Box<RawValue> {
         serde_json::value::to_raw_value(&value).unwrap()
@@ -1312,7 +1314,7 @@ mod tests {
             &self,
             _lease_key: &LeaseKey,
             _expires_at: u64,
-        ) -> Result<(), DslTransitionError> {
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
             Err(DslTransitionError::guard_rejected(
                 "acquire_lease",
                 "test rejection",
@@ -1332,8 +1334,8 @@ mod tests {
             _lease_key: &LeaseKey,
             _new_expires_at: u64,
             _now: u64,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn refresh_failed(
@@ -1356,6 +1358,7 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                generation: 0,
             }
         }
     }
@@ -1367,8 +1370,8 @@ mod tests {
             &self,
             _lease_key: &LeaseKey,
             _expires_at: u64,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -1384,8 +1387,8 @@ mod tests {
             _lease_key: &LeaseKey,
             _new_expires_at: u64,
             _now: u64,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn refresh_failed(
@@ -1411,6 +1414,7 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: Some(meerkat_core::handles::AuthLeasePhase::Valid),
                 expires_at: Some(1_800_000_000),
+                generation: 1,
             }
         }
     }

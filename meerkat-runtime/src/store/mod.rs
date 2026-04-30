@@ -42,7 +42,7 @@ pub enum RuntimeStoreError {
     Internal(String),
 }
 
-/// Describes session-level writes to be committed atomically with receipts.
+/// Describes a serialized session snapshot for boundary and snapshot-only commits.
 #[derive(Debug, Clone)]
 pub struct SessionDelta {
     /// Serialized session snapshot (opaque to RuntimeStore).
@@ -101,6 +101,16 @@ pub trait RuntimeStore: Send + Sync {
         contributing_input_ids: Vec<InputId>,
         input_updates: Vec<StoredInputState>,
     ) -> Result<RunBoundaryReceipt, RuntimeStoreError>;
+
+    /// Atomically persist a session snapshot that is not a run boundary.
+    ///
+    /// Session-control snapshots update durable session authority without
+    /// producing a [`RunBoundaryReceipt`].
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError>;
 
     /// Atomically persist session delta + receipt + input state updates.
     ///

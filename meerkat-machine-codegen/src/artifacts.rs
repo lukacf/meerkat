@@ -2708,6 +2708,13 @@ fn sample_values(
 fn known_named_domain_samples(name: &str, sample_cardinality: usize) -> Option<Vec<&'static str>> {
     let samples = match name {
         "FlowNodeKind" => &["Loop", "Step"][..],
+        "ExternalToolSurfaceFailureCause" => {
+            return Some(vec![
+                "PendingFailed",
+                "SurfaceDraining",
+                "SurfaceUnavailable",
+            ]);
+        }
         _ => return None,
     };
     Some(

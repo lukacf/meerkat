@@ -12,7 +12,7 @@ use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, GeminiProviderTag, KeepAliveMode, KeepAlivePolicy, ModelId,
     OpenAiProviderTag, PeerResponseTerminalApplyIntent, ProviderParamsOverride, ProviderTag,
     ReasoningEffort, ReasoningMode, RuntimeExecutionKind, RuntimeTurnMetadata, TurnInstruction,
-    TurnInstructionKind, TurnMetadataMergeConflict,
+    TurnInstructionKind, TurnMetadataMergeConflict, TurnMetadataOverride,
 };
 use meerkat_core::provider::Provider;
 use meerkat_core::service::TurnToolOverlay;
@@ -40,7 +40,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
         ]),
         model: Some(ModelId::new("claude-opus-4-7")),
         provider: Some(Provider::Anthropic),
-        provider_params: Some(ProviderParamsOverride {
+        provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             temperature: Some(0.2),
             top_p: Some(0.9),
             max_output_tokens: Some(1024),
@@ -50,15 +50,13 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 thinking_budget_tokens: Some(2048),
                 ..Default::default()
             })),
-        }),
-        clear_provider_params: false,
-        connection_ref: Some(ConnectionRef {
+        })),
+        connection_ref: Some(TurnMetadataOverride::Set(ConnectionRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("default_anthropic")
                 .expect("valid binding"),
             profile: None,
-        }),
-        clear_connection_ref: false,
+        })),
         keep_alive: Some(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
             policy: KeepAliveMode::Pinned,
@@ -86,13 +84,13 @@ fn every_field_round_trips_through_json() {
 fn provider_tag_openai_round_trips() {
     let meta = RuntimeTurnMetadata {
         provider: Some(Provider::OpenAI),
-        provider_params: Some(ProviderParamsOverride {
+        provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
                 reasoning_effort: Some(ReasoningEffort::High),
                 ..Default::default()
             })),
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     };
     let json = serde_json::to_value(&meta).expect("serialize");
@@ -104,13 +102,13 @@ fn provider_tag_openai_round_trips() {
 fn provider_tag_gemini_round_trips() {
     let meta = RuntimeTurnMetadata {
         provider: Some(Provider::Gemini),
-        provider_params: Some(ProviderParamsOverride {
+        provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             provider_tag: Some(ProviderTag::Gemini(GeminiProviderTag {
                 candidate_count: Some(4),
                 ..Default::default()
             })),
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     };
     let json = serde_json::to_value(&meta).expect("serialize");
@@ -129,10 +127,10 @@ fn empty_metadata_round_trips_without_allocating_fields() {
 }
 
 #[test]
-fn clear_flags_round_trip_and_are_not_empty() {
+fn clear_overrides_round_trip_and_are_not_empty() {
     let meta = RuntimeTurnMetadata {
-        clear_provider_params: true,
-        clear_connection_ref: true,
+        provider_params: Some(TurnMetadataOverride::Clear),
+        connection_ref: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     assert!(!meta.is_empty());
@@ -141,12 +139,130 @@ fn clear_flags_round_trip_and_are_not_empty() {
     assert_eq!(
         json,
         serde_json::json!({
-            "clear_provider_params": true,
-            "clear_connection_ref": true,
+            "provider_params": { "action": "clear" },
+            "connection_ref": { "action": "clear" },
         })
     );
     let parsed: RuntimeTurnMetadata = serde_json::from_value(json).expect("deserialize");
     assert_eq!(meta, parsed);
+}
+
+#[test]
+fn set_overrides_round_trip_with_explicit_action() {
+    let provider_params = ProviderParamsOverride {
+        temperature: Some(0.25),
+        ..Default::default()
+    };
+    let connection_ref = ConnectionRef {
+        realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
+        binding: meerkat_core::connection::BindingId::parse("default").expect("valid binding"),
+        profile: None,
+    };
+    let meta = RuntimeTurnMetadata {
+        provider_params: Some(TurnMetadataOverride::Set(provider_params.clone())),
+        connection_ref: Some(TurnMetadataOverride::Set(connection_ref.clone())),
+        ..Default::default()
+    };
+
+    let json = serde_json::to_value(&meta).expect("serialize");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "provider_params": {
+                "action": "set",
+                "value": { "temperature": 0.25 },
+            },
+            "connection_ref": {
+                "action": "set",
+                "value": {
+                    "realm": "dev",
+                    "binding": "default",
+                },
+            },
+        })
+    );
+    let parsed: RuntimeTurnMetadata = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(
+        parsed.provider_params,
+        Some(TurnMetadataOverride::Set(provider_params))
+    );
+    assert_eq!(
+        parsed.connection_ref,
+        Some(TurnMetadataOverride::Set(connection_ref))
+    );
+}
+
+#[test]
+fn legacy_clear_only_payloads_deserialize_as_clear_overrides() {
+    let parsed: RuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+        "clear_provider_params": true,
+        "clear_connection_ref": true,
+    }))
+    .expect("legacy clear-only payloads remain accepted");
+
+    assert_eq!(
+        parsed.provider_params,
+        Some(TurnMetadataOverride::Clear),
+        "legacy provider clear must become a clear override"
+    );
+    assert_eq!(
+        parsed.connection_ref,
+        Some(TurnMetadataOverride::Clear),
+        "legacy connection clear must become a clear override"
+    );
+}
+
+#[test]
+fn legacy_set_and_clear_payloads_fail_at_boundary() {
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+        "provider_params": { "temperature": 0.2 },
+        "clear_provider_params": true,
+    }))
+    .expect_err("provider_params set plus legacy clear must fail");
+    assert!(
+        err.to_string().contains("clear_provider_params"),
+        "unexpected error: {err}"
+    );
+
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+        "connection_ref": {
+            "realm": "dev",
+            "binding": "default",
+        },
+        "clear_connection_ref": true,
+    }))
+    .expect_err("connection_ref set plus legacy clear must fail");
+    assert!(
+        err.to_string().contains("clear_connection_ref"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn malformed_tagged_override_payloads_fail_at_boundary() {
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+        "provider_params": {
+            "action": 1,
+            "value": { "temperature": 0.2 },
+        },
+    }))
+    .expect_err("non-string override action must fail");
+    assert!(
+        err.to_string().contains("action"),
+        "unexpected error: {err}"
+    );
+
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+        "connection_ref": {
+            "action": "clear",
+            "value": {
+                "realm": "dev",
+                "binding": "default",
+            },
+        },
+    }))
+    .expect_err("clear override with value must fail");
+    assert!(err.to_string().contains("clear"), "unexpected error: {err}");
 }
 
 #[test]
@@ -223,19 +339,19 @@ fn merge_scalar_conflict_refuses_provider() {
 #[test]
 fn merge_scalar_conflict_refuses_connection_ref() {
     let mut left = RuntimeTurnMetadata {
-        connection_ref: Some(ConnectionRef {
+        connection_ref: Some(TurnMetadataOverride::Set(ConnectionRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("a").expect("valid binding"),
             profile: None,
-        }),
+        })),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        connection_ref: Some(ConnectionRef {
+        connection_ref: Some(TurnMetadataOverride::Set(ConnectionRef {
             realm: meerkat_core::connection::RealmId::parse("dev").expect("valid realm"),
             binding: meerkat_core::connection::BindingId::parse("b").expect("valid binding"),
             profile: None,
-        }),
+        })),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");
@@ -245,28 +361,28 @@ fn merge_scalar_conflict_refuses_connection_ref() {
 #[test]
 fn merge_refuses_provider_params_set_and_clear() {
     let mut left = RuntimeTurnMetadata {
-        provider_params: Some(ProviderParamsOverride {
+        provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             temperature: Some(0.2),
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        clear_provider_params: true,
+        provider_params: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");
     assert_eq!(err.field, "provider_params");
 
     let mut left = RuntimeTurnMetadata {
-        clear_provider_params: true,
+        provider_params: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        provider_params: Some(ProviderParamsOverride {
+        provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
             top_p: Some(0.9),
             ..Default::default()
-        }),
+        })),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");
@@ -281,22 +397,22 @@ fn merge_refuses_connection_ref_set_and_clear() {
         profile: None,
     };
     let mut left = RuntimeTurnMetadata {
-        connection_ref: Some(connection_ref.clone()),
+        connection_ref: Some(TurnMetadataOverride::Set(connection_ref.clone())),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        clear_connection_ref: true,
+        connection_ref: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");
     assert_eq!(err.field, "connection_ref");
 
     let mut left = RuntimeTurnMetadata {
-        clear_connection_ref: true,
+        connection_ref: Some(TurnMetadataOverride::Clear),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        connection_ref: Some(connection_ref),
+        connection_ref: Some(TurnMetadataOverride::Set(connection_ref)),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");

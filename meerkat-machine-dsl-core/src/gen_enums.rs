@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
 use crate::ast::{EnumDef, MachineDef};
 use crate::gen_state::gen_type;
@@ -19,6 +19,12 @@ pub fn generate(def: &MachineDef) -> TokenStream {
 
 fn gen_enum(enum_def: &EnumDef) -> TokenStream {
     let name = &enum_def.name;
+    let variant_name = format_ident!("{name}Variant");
+    let variant_idents: Vec<_> = enum_def
+        .variants
+        .iter()
+        .map(|variant| &variant.name)
+        .collect();
     let variants: Vec<_> = enum_def
         .variants
         .iter()
@@ -45,6 +51,24 @@ fn gen_enum(enum_def: &EnumDef) -> TokenStream {
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub enum #name {
             #(#variants),*
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum #variant_name {
+            #(#variant_idents),*
+        }
+
+        impl #name {
+            #[doc(hidden)]
+            pub const VARIANT_MANIFEST: &'static [#variant_name] = &[
+                #(#variant_name::#variant_idents),*
+            ];
+
+            #[doc(hidden)]
+            #[must_use]
+            pub fn variant_manifest() -> &'static [#variant_name] {
+                Self::VARIANT_MANIFEST
+            }
         }
     }
 }

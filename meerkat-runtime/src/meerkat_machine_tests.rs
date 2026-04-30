@@ -2595,6 +2595,209 @@ async fn persistent_destroy_synchronizes_driver_control_projection_shadow() {
 }
 
 #[tokio::test]
+async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
+    struct BlockingDestroyCommitStore {
+        inner: Arc<crate::store::InMemoryRuntimeStore>,
+        destroy_commit_started: Notify,
+        release_destroy_commit: Notify,
+    }
+
+    impl BlockingDestroyCommitStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(crate::store::InMemoryRuntimeStore::new()),
+                destroy_commit_started: Notify::new(),
+                release_destroy_commit: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStore for BlockingDestroyCommitStore {
+        async fn commit_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: crate::store::SessionDelta,
+            run_id: RunId,
+            boundary: RunApplyBoundary,
+            contributing_input_ids: Vec<InputId>,
+            input_updates: Vec<crate::input_state::StoredInputState>,
+        ) -> Result<RunBoundaryReceipt, crate::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_boundary(
+                    runtime_id,
+                    session_delta,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    input_updates,
+                )
+                .await
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: crate::store::SessionDelta,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<crate::store::SessionDelta>,
+            receipt: RunBoundaryReceipt,
+            input_updates: Vec<crate::input_state::StoredInputState>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<Option<RunBoundaryReceipt>, crate::store::RuntimeStoreError> {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &crate::input_state::StoredInputState,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
+        {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn persist_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: RuntimeState,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.persist_runtime_state(runtime_id, state).await
+        }
+
+        async fn load_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeState>, crate::store::RuntimeStoreError> {
+            self.inner.load_runtime_state(runtime_id).await
+        }
+
+        async fn atomic_lifecycle_commit(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            runtime_state: RuntimeState,
+            input_states: &[crate::input_state::StoredInputState],
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+                .await?;
+            if runtime_state == RuntimeState::Destroyed {
+                self.destroy_commit_started.notify_one();
+                self.release_destroy_commit.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(BlockingDestroyCommitStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let destroy_task = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let runtime_id = runtime_id.clone();
+        async move { crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id).await }
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        store.destroy_commit_started.notified(),
+    )
+    .await
+    .expect("destroy should reach the durable lifecycle commit");
+
+    assert_eq!(
+        store.inner.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "test probe should observe the store after durable destroyed commit",
+    );
+
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions
+        .get(&session_id)
+        .expect("destroy keeps the session entry available for terminal snapshots");
+    assert_eq!(
+        entry.control_snapshot().phase,
+        RuntimeState::Destroyed,
+        "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
+    );
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+        RuntimeState::Destroyed,
+        "durable destroyed state must not race ahead of canonical DSL destroy truth",
+    );
+    drop(authority);
+    drop(sessions);
+
+    store.release_destroy_commit.notify_waiters();
+    let report = tokio::time::timeout(Duration::from_secs(2), destroy_task)
+        .await
+        .expect("destroy task should finish after releasing the store")
+        .expect("destroy task should not panic")
+        .expect("destroy should succeed");
+    assert_eq!(report.inputs_abandoned, 0);
+}
+
+#[tokio::test]
 async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_but_preserves_wait_all()
  {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -4429,6 +4632,169 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
             "expected first attached steered prompt to complete before queued peer input runs, got {other:?}"
         ),
     }
+}
+
+#[tokio::test]
+async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
+    struct LiveControlHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorControl for LiveControlHandle {
+        async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(command, RunControlCommand::InterruptYielding) {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    struct BlockingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        queued_control_calls: Arc<AtomicUsize>,
+        live_control_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+            Some(Arc::new(LiveControlHandle {
+                calls: Arc::clone(&self.live_control_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(command, RunControlCommand::InterruptYielding) {
+                self.queued_control_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let queued_control_calls = Arc::new(AtomicUsize::new(0));
+    let live_control_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+                queued_control_calls: Arc::clone(&queued_control_calls),
+                live_control_calls: Arc::clone(&live_control_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let first_input = Input::Prompt(crate::input::PromptInput::new(
+        "attached service ext running turn",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, _completion_handle) = adapter
+        .accept_input_with_completion(&session_id, first_input)
+        .await
+        .expect("attached steered prompt should be accepted");
+    assert!(outcome.is_accepted());
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("first apply should start");
+
+    live_control_calls.store(0, Ordering::SeqCst);
+    queued_control_calls.store(0, Ordering::SeqCst);
+
+    let peer_input = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "peer-service-ext-interrupt".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: "interrupt through service ext ingest".into(),
+        payload: None,
+        blocks: None,
+        handling_mode: None,
+    });
+
+    let peer_outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        adapter.as_ref(),
+        &session_id,
+        peer_input,
+    )
+    .await
+    .expect("service ext accept_input should accept running peer input");
+    assert!(peer_outcome.is_accepted());
+
+    assert_eq!(
+        live_control_calls.load(Ordering::SeqCst),
+        1,
+        "service ext Ingest should signal the live out-of-band control handle while apply is blocked"
+    );
+    assert_eq!(
+        queued_control_calls.load(Ordering::SeqCst),
+        0,
+        "ordered runtime-loop control still cannot drain until apply returns"
+    );
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+
+    allow_finish.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if queued_control_calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued control should still drain after apply returns");
 }
 
 #[tokio::test]

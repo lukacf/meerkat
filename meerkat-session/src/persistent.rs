@@ -688,7 +688,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if self.runtime_store.is_none() {
             // Legacy runtime-less compatibility only. This is not a runtime
             // authority path; runtime-backed callers commit through
-            // `RuntimeStore::commit_session_boundary` inside
+            // `RuntimeStore::commit_session_snapshot` inside
             // `save_normalized_session`.
             tracing::debug!(
                 session_id = %session.id(),
@@ -1045,13 +1045,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
             runtime_store
-                .commit_session_boundary(
+                .commit_session_snapshot(
                     &Self::runtime_id_for_session(session.id()),
                     SessionDelta { session_snapshot },
-                    RunId::new(),
-                    RunApplyBoundary::Immediate,
-                    vec![],
-                    vec![],
                 )
                 .await
                 .map_err(|err| {
@@ -1203,9 +1199,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Apply a runtime-driven turn and return the authoritative boundary receipt.
     ///
-    /// In runtime-backed mode, the returned serialized session snapshot is meant
-    /// to be committed by `RuntimeStore::atomic_apply`, making the runtime store
-    /// the sole durable writer for that turn.
+    /// In runtime-backed mode, the serialized session snapshot is committed
+    /// before this method returns, making the runtime store the sole durable
+    /// writer for that turn.
     pub async fn apply_runtime_turn(
         &self,
         id: &SessionId,
@@ -2384,6 +2380,7 @@ mod tests {
     struct GatedSnapshotRuntimeStore {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
+        boundary_commits: Mutex<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>>,
     }
 
     impl GatedSnapshotRuntimeStore {
@@ -2391,6 +2388,7 @@ mod tests {
             Self {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
+                boundary_commits: Mutex::new(Vec::new()),
             }
         }
 
@@ -2413,6 +2411,14 @@ mod tests {
             }
             false
         }
+
+        async fn boundary_commits(&self) -> Vec<meerkat_core::lifecycle::RunBoundaryReceipt> {
+            self.boundary_commits.lock().await.clone()
+        }
+
+        async fn reset_boundary_commits(&self) {
+            self.boundary_commits.lock().await.clear();
+        }
     }
 
     #[async_trait::async_trait]
@@ -2429,7 +2435,8 @@ mod tests {
             meerkat_core::lifecycle::RunBoundaryReceipt,
             meerkat_runtime::store::RuntimeStoreError,
         > {
-            self.inner
+            let receipt = self
+                .inner
                 .commit_session_boundary(
                     runtime_id,
                     session_delta,
@@ -2438,6 +2445,18 @@ mod tests {
                     contributing_input_ids,
                     input_updates,
                 )
+                .await?;
+            self.boundary_commits.lock().await.push(receipt.clone());
+            Ok(receipt)
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: meerkat_runtime::store::SessionDelta,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
                 .await
         }
 
@@ -4468,6 +4487,65 @@ mod tests {
             .expect("projection should mirror committed control state");
         assert_eq!(raw_state.pending.len(), 1);
         assert_eq!(raw_state.pending[0].text, "durable pending context");
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_append_system_context_persists_snapshot_without_boundary_receipt()
+    {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        runtime_store.reset_boundary_commits().await;
+
+        service
+            .append_system_context(
+                &result.session_id,
+                AppendSystemContextRequest {
+                    text: "control snapshot should not mint a receipt".to_string(),
+                    source: Some("api".to_string()),
+                    idempotency_key: Some("no-receipt-control-snapshot".to_string()),
+                },
+            )
+            .await
+            .expect("append_system_context should succeed");
+
+        let boundary_commits = runtime_store.boundary_commits().await;
+        assert!(
+            boundary_commits.is_empty(),
+            "non-run control snapshots must not mint synthetic boundary receipts: {boundary_commits:?}"
+        );
+
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&result.session_id);
+        let snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("control snapshot should still be durable");
+        let stored: Session =
+            serde_json::from_slice(&snapshot).expect("runtime snapshot should deserialize");
+        let state = stored
+            .system_context_state()
+            .expect("runtime snapshot should carry pending control state");
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(
+            state.pending[0].text,
+            "control snapshot should not mint a receipt"
+        );
     }
 
     #[tokio::test]

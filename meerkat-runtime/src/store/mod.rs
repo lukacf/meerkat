@@ -42,7 +42,7 @@ pub enum RuntimeStoreError {
     Internal(String),
 }
 
-/// Describes session-level writes to be committed atomically with receipts.
+/// Describes a serialized session snapshot for boundary and snapshot-only commits.
 #[derive(Debug, Clone)]
 pub struct SessionDelta {
     /// Serialized session snapshot (opaque to RuntimeStore).

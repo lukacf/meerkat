@@ -1199,9 +1199,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Apply a runtime-driven turn and return the authoritative boundary receipt.
     ///
-    /// In runtime-backed mode, the returned serialized session snapshot is meant
-    /// to be committed by `RuntimeStore::atomic_apply`, making the runtime store
-    /// the sole durable writer for that turn.
+    /// In runtime-backed mode, the serialized session snapshot is committed
+    /// before this method returns, making the runtime store the sole durable
+    /// writer for that turn.
     pub async fn apply_runtime_turn(
         &self,
         id: &SessionId,

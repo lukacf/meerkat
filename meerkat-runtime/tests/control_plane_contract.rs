@@ -11,7 +11,9 @@ use std::sync::{
 use std::{fs, path::Path};
 
 use chrono::Utc;
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorError,
+};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
@@ -105,7 +107,7 @@ fn control_plane_contract_async_stop_terminalization_has_one_call_site() {
 struct RecordingExecutor {
     apply_calls: Arc<AtomicUsize>,
     stop_calls: Arc<AtomicUsize>,
-    run_result: Option<RunResult>,
+    terminal: Option<CoreApplyTerminal>,
 }
 
 #[async_trait::async_trait]
@@ -126,8 +128,7 @@ impl CoreExecutor for RecordingExecutor {
                 sequence: 0,
             },
             session_snapshot: None,
-            terminal: None,
-            run_result: self.run_result.clone(),
+            terminal: self.terminal.clone(),
         })
     }
 
@@ -153,7 +154,9 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
             Box::new(RecordingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
                 stop_calls: Arc::clone(&stop_calls),
-                run_result: Some(make_run_result("should not run")),
+                terminal: Some(CoreApplyTerminal::RunResult(make_run_result(
+                    "should not run",
+                ))),
             }),
         )
         .await;
@@ -220,7 +223,9 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
             Box::new(RecordingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
                 stop_calls: Arc::clone(&stop_calls),
-                run_result: Some(make_run_result("should not run")),
+                terminal: Some(CoreApplyTerminal::RunResult(make_run_result(
+                    "should not run",
+                ))),
             }),
         )
         .await;
@@ -353,7 +358,7 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
             Box::new(RecordingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
                 stop_calls: Arc::clone(&stop_calls),
-                run_result: None,
+                terminal: None,
             }),
         )
         .await;

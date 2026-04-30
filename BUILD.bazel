@@ -225,6 +225,7 @@ test_suite(
         "//meerkat-runtime:composition_dispatch_is_the_path_test",
         "//meerkat-runtime:composition_driver_contract_test",
         "//meerkat-runtime:control_plane_contract_test",
+        "//meerkat-runtime:core_apply_terminal_truth_test",
         "//meerkat-runtime:detached_wake_contract_test",
         "//meerkat-runtime:driver_ephemeral_test",
         "//meerkat-runtime:driver_persistent_test",

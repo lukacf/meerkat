@@ -11070,13 +11070,12 @@ default_model = "gemma"
         let output = meerkat_core::lifecycle::CoreExecutor::apply(&mut executor, run_id, primitive)
             .await
             .expect("runtime-backed CLI turn should succeed");
-        assert_eq!(
-            output
-                .run_result
-                .expect("executor should return run result")
-                .text,
-            "streamed"
-        );
+        let Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(result)) =
+            output.terminal
+        else {
+            panic!("executor should return terminal run result");
+        };
+        assert_eq!(result.text, "streamed");
 
         let envelope = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
             .await

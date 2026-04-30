@@ -87,8 +87,8 @@ impl CoreExecutor for ResultExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        Ok(CoreApplyOutput {
-            receipt: RunBoundaryReceipt {
+        Ok(CoreApplyOutput::with_run_result(
+            RunBoundaryReceipt {
                 run_id,
                 boundary: RunApplyBoundary::RunStart,
                 contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -96,9 +96,8 @@ impl CoreExecutor for ResultExecutor {
                 message_count: 0,
                 sequence: 0,
             },
-            session_snapshot: None,
-            terminal: None,
-            run_result: Some(RunResult {
+            None,
+            RunResult {
                 text: "done".into(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
@@ -107,8 +106,8 @@ impl CoreExecutor for ResultExecutor {
                 structured_output: None,
                 schema_warnings: None,
                 skill_diagnostics: None,
-            }),
-        })
+            },
+        ))
     }
     async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
         Ok(())
@@ -131,8 +130,8 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
             primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.apply_count.fetch_add(1, Ordering::SeqCst);
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -140,9 +139,8 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-                run_result: Some(RunResult {
+                None,
+                RunResult {
                     text: "done".into(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
@@ -151,8 +149,8 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
                     structured_output: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
-                }),
-            })
+                },
+            ))
         }
 
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -421,8 +419,8 @@ async fn choke_004_completion_during_running_defers_wake() {
                 self.first_apply_started.notify_one();
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -430,9 +428,8 @@ async fn choke_004_completion_during_running_defers_wake() {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-                run_result: Some(RunResult {
+                None,
+                RunResult {
                     text: "done".into(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
@@ -441,8 +438,8 @@ async fn choke_004_completion_during_running_defers_wake() {
                     structured_output: None,
                     schema_warnings: None,
                     skill_diagnostics: None,
-                }),
-            })
+                },
+            ))
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
             Ok(())
@@ -566,8 +563,8 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                 schema_warnings: None,
                 skill_diagnostics: None,
             };
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -575,14 +572,9 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                terminal: Some(
-                    meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(
-                        run_result.clone(),
-                    ),
-                ),
-                run_result: Some(run_result),
-            })
+                None,
+                run_result,
+            ))
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
             Ok(())

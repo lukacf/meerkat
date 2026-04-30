@@ -1201,7 +1201,6 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3093,7 +3092,6 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3239,7 +3237,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3404,7 +3401,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3651,7 +3647,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3909,7 +3904,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4179,7 +4173,6 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4379,7 +4372,6 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4534,7 +4526,6 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4793,7 +4784,6 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4939,7 +4929,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5272,7 +5261,6 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5469,7 +5457,6 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5670,7 +5657,6 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5810,7 +5796,6 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5991,7 +5976,6 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -7201,7 +7185,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -7471,7 +7454,6 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -7750,7 +7732,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -7991,7 +7972,6 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -8697,7 +8677,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -8904,7 +8883,6 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -9374,7 +9352,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -9561,7 +9538,6 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -10234,7 +10210,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -10425,7 +10400,6 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -11084,7 +11058,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -11336,7 +11309,6 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -12057,7 +12029,6 @@ fn legacy_run_test_output(run_id: RunId, input_id: InputId) -> CoreApplyOutput {
         },
         session_snapshot: None,
         terminal: None,
-        run_result: None,
     }
 }
 
@@ -13585,7 +13556,6 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -13694,7 +13664,6 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -13840,7 +13809,6 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -13946,7 +13914,6 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -14140,7 +14107,6 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -14919,7 +14885,6 @@ impl CoreExecutor for RuntimeParityNoopExecutor {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
 
@@ -14953,7 +14918,6 @@ impl CoreExecutor for RuntimeParityBlockingExecutor {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
 
@@ -16942,7 +16906,6 @@ fn runtime_parity_probe_command(
                     },
                     session_snapshot: None,
                     terminal: None,
-                    run_result: None,
                 },
             }
         }

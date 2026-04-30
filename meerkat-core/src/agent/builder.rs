@@ -18,7 +18,7 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::{
@@ -85,21 +85,19 @@ pub enum AgentBuildPolicyError {
 /// surrounding factory has attached durable session metadata, durable
 /// build-state metadata, and a runtime turn-state handle to the builder.
 #[doc(hidden)]
-pub fn build_agent_after_factory_policy<C, T, S>(
+pub async fn build_agent_after_factory_policy<C, T, S>(
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
     store: Arc<S>,
-) -> impl Future<Output = Result<Agent<C, T, S>, AgentBuildPolicyError>>
+) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
 where
     C: AgentLlmClient + ?Sized,
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
-    async move {
-        builder.validate_factory_policy()?;
-        Ok(builder.build_inner(client, tools, store).await)
-    }
+    builder.validate_factory_policy()?;
+    Ok(builder.build_inner(client, tools, store).await)
 }
 
 impl AgentBuilder {

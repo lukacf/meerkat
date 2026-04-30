@@ -89,6 +89,16 @@ impl RuntimeStore for FailPersistInputStore {
             .await
     }
 
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,

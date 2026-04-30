@@ -234,6 +234,31 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let session = serde_json::from_slice::<meerkat_core::Session>(
+                    &session_delta.session_snapshot,
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                write_session_snapshot_in_txn(&tx, &session)
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
         async fn atomic_apply(
             &self,
             runtime_id: &LogicalRuntimeId,

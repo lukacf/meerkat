@@ -102,6 +102,16 @@ pub trait RuntimeStore: Send + Sync {
         input_updates: Vec<StoredInputState>,
     ) -> Result<RunBoundaryReceipt, RuntimeStoreError>;
 
+    /// Atomically persist a session snapshot that is not a run boundary.
+    ///
+    /// Session-control snapshots update durable session authority without
+    /// producing a [`RunBoundaryReceipt`].
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError>;
+
     /// Atomically persist session delta + receipt + input state updates.
     ///
     /// All three writes MUST commit in a single atomic operation.

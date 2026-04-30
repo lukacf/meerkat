@@ -28,30 +28,10 @@ use meerkat_core::{
 use meerkat_session::ephemeral::SessionSnapshot;
 use meerkat_session::{EphemeralSessionService, SessionAgent, SessionAgentBuilder};
 use serde_json::json;
-use std::any::TypeId;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
-
-struct TestFactoryAuthority;
-
-fn test_factory_authority_type_id() -> TypeId {
-    TypeId::of::<TestFactoryAuthority>()
-}
-
-inventory::submit! {
-    meerkat_core::agent::AgentFactoryPolicyAuthorityRegistration::test_harness(
-        "ephemeral_contract::TestFactoryAuthority",
-        test_factory_authority_type_id,
-    )
-}
-
-fn test_factory_policy_authority()
--> Result<meerkat_core::agent::AgentFactoryPolicyAuthority, SessionError> {
-    meerkat_core::agent::AgentFactoryPolicyAuthority::from_registered_source(&TestFactoryAuthority)
-        .map_err(|err| SessionError::Unsupported(err.to_string()))
-}
 
 fn agent_builder_with_ephemeral_turn_state() -> AgentBuilder {
     let mut session = Session::new();
@@ -782,12 +762,10 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let authority = test_factory_policy_authority()?;
-        let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &authority, builder, client, tools, store,
-        )
-        .await
-        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent =
+            meerkat_core::agent::build_agent_after_factory_policy(builder, client, tools, store)
+                .await
+                .map_err(|err| SessionError::Unsupported(err.to_string()))?;
         Ok(CompactionSessionAgent { agent })
     }
 }
@@ -819,12 +797,10 @@ impl SessionAgentBuilder for RealAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let authority = test_factory_policy_authority()?;
-        let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &authority, builder, client, tools, store,
-        )
-        .await
-        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent =
+            meerkat_core::agent::build_agent_after_factory_policy(builder, client, tools, store)
+                .await
+                .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(RealSessionAgent { agent })
     }

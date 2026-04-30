@@ -2,7 +2,6 @@
 
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
-use std::any::TypeId;
 use std::collections::BTreeMap;
 #[cfg(feature = "skills")]
 use std::collections::BTreeSet;
@@ -79,19 +78,6 @@ use tokio::sync::mpsc;
 use tokio_with_wasm::alias::sync::RwLock;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::mpsc;
-
-struct FactoryPolicyAuthoritySource;
-
-fn agent_factory_policy_authority_source_type_id() -> TypeId {
-    TypeId::of::<FactoryPolicyAuthoritySource>()
-}
-
-inventory::submit! {
-    meerkat_core::agent::AgentFactoryPolicyAuthorityRegistration::canonical_factory(
-        "meerkat::factory::FactoryPolicyAuthoritySource",
-        agent_factory_policy_authority_source_type_id,
-    )
-}
 
 #[cfg(feature = "comms")]
 use crate::compose_tools_with_comms;
@@ -3886,17 +3872,7 @@ impl AgentFactory {
         // 13. Build agent. AgentFactory owns the policy composition above; core
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
-        let factory_policy_authority =
-            meerkat_core::agent::AgentFactoryPolicyAuthority::from_registered_source(
-                &FactoryPolicyAuthoritySource,
-            )
-            .map_err(|err| {
-                BuildAgentError::Config(format!(
-                    "AgentFactory policy authority validation failed: {err}"
-                ))
-            })?;
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &factory_policy_authority,
             builder,
             llm_adapter,
             tools,
@@ -4039,12 +4015,7 @@ mod tests {
             .model("mock-model")
             .max_tokens_per_turn(64)
             .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
-        let authority = meerkat_core::agent::AgentFactoryPolicyAuthority::from_registered_source(
-            &FactoryPolicyAuthoritySource,
-        )
-        .expect("canonical factory policy authority");
         let result = meerkat_core::agent::build_agent_after_factory_policy(
-            &authority,
             builder,
             llm_adapter,
             tools,

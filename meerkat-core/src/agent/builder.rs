@@ -18,7 +18,7 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
-use std::{any::TypeId, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
 use tokio::sync::mpsc;
 
 use super::{
@@ -69,8 +69,6 @@ pub struct AgentBuilder {
 /// required before crossing into core agent construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentBuildPolicyError {
-    #[error("factory policy build requires canonical AgentFactory authority")]
-    InvalidFactoryAuthority,
     #[error("factory policy build requires an explicit session")]
     MissingSession,
     #[error("factory policy build requires session metadata")]
@@ -81,112 +79,6 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
 }
 
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentFactoryPolicyAuthorityRegistrationKind {
-    CanonicalFactory,
-    TestHarness,
-}
-
-/// Registration for a private type that can mint core factory-policy authority.
-///
-/// The canonical facade registers a private source type. Core validates the
-/// source by `TypeId` rather than by caller file paths or stringified Rust type
-/// paths, so downstream code cannot spoof the canonical authority by copying a
-/// source path or module/type name.
-#[doc(hidden)]
-pub struct AgentFactoryPolicyAuthorityRegistration {
-    kind: AgentFactoryPolicyAuthorityRegistrationKind,
-    type_id: fn() -> TypeId,
-}
-
-inventory::collect!(AgentFactoryPolicyAuthorityRegistration);
-
-impl AgentFactoryPolicyAuthorityRegistration {
-    #[doc(hidden)]
-    pub const fn canonical_factory(_label: &'static str, type_id: fn() -> TypeId) -> Self {
-        Self {
-            kind: AgentFactoryPolicyAuthorityRegistrationKind::CanonicalFactory,
-            type_id,
-        }
-    }
-
-    #[doc(hidden)]
-    pub const fn test_harness(_label: &'static str, type_id: fn() -> TypeId) -> Self {
-        Self {
-            kind: AgentFactoryPolicyAuthorityRegistrationKind::TestHarness,
-            type_id,
-        }
-    }
-}
-
-mod factory_policy_private {
-    #[derive(Debug)]
-    pub struct Seal {
-        _private: (),
-    }
-
-    impl Seal {
-        pub(super) fn new() -> Self {
-            Self { _private: () }
-        }
-    }
-}
-
-/// Opaque authority required to cross from facade factory policy into core
-/// agent construction.
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct AgentFactoryPolicyAuthority {
-    source_type_id: TypeId,
-    _seal: factory_policy_private::Seal,
-}
-
-impl AgentFactoryPolicyAuthority {
-    #[doc(hidden)]
-    pub fn from_registered_source<A: 'static>(_source: &A) -> Result<Self, AgentBuildPolicyError> {
-        let source_type_id = TypeId::of::<A>();
-        validate_factory_policy_authority_type_id(source_type_id)?;
-        Ok(Self {
-            source_type_id,
-            _seal: factory_policy_private::Seal::new(),
-        })
-    }
-
-    fn validate(&self) -> Result<(), AgentBuildPolicyError> {
-        validate_factory_policy_authority_type_id(self.source_type_id)
-    }
-}
-
-fn validate_factory_policy_authority_type_id(
-    source_type_id: TypeId,
-) -> Result<(), AgentBuildPolicyError> {
-    let mut canonical_count = 0usize;
-    let mut matched_kind = None;
-
-    for registration in inventory::iter::<AgentFactoryPolicyAuthorityRegistration> {
-        if registration.kind == AgentFactoryPolicyAuthorityRegistrationKind::CanonicalFactory {
-            canonical_count += 1;
-        }
-        if (registration.type_id)() == source_type_id {
-            matched_kind = Some(registration.kind);
-        }
-    }
-
-    if matched_kind == Some(AgentFactoryPolicyAuthorityRegistrationKind::CanonicalFactory)
-        && canonical_count == 1
-    {
-        return Ok(());
-    }
-
-    #[cfg(debug_assertions)]
-    if matched_kind == Some(AgentFactoryPolicyAuthorityRegistrationKind::TestHarness) {
-        return Ok(());
-    }
-
-    Err(AgentBuildPolicyError::InvalidFactoryAuthority)
-}
-
 /// Build an agent after the canonical factory has composed policy metadata.
 ///
 /// This is the production construction seam. It refuses to build unless the
@@ -194,7 +86,6 @@ fn validate_factory_policy_authority_type_id(
 /// build-state metadata, and a runtime turn-state handle to the builder.
 #[doc(hidden)]
 pub fn build_agent_after_factory_policy<C, T, S>(
-    authority: &AgentFactoryPolicyAuthority,
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
@@ -205,9 +96,7 @@ where
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
-    let authority_validation = authority.validate();
     async move {
-        authority_validation?;
         builder.validate_factory_policy()?;
         Ok(builder.build_inner(client, tools, store).await)
     }

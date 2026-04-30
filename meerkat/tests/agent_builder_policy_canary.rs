@@ -77,13 +77,15 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          public builder impl"
     );
     assert!(
-        builder.contains("pub struct AgentFactoryPolicyAuthority")
-            && builder.contains("pub fn from_registered_source<A: 'static>")
-            && builder.contains("let authority_validation = authority.validate();")
-            && builder.contains("authority_validation?")
-            && builder.contains("validate_factory_policy()?"),
+        builder.contains("validate_factory_policy()?")
+            && !builder.contains("pub fn from_registered_source<A: 'static>")
+            && !builder.contains("pub const fn canonical_factory")
+            && !builder.contains("pub const fn test_harness")
+            && !builder.contains("pub struct AgentFactoryPolicyAuthorityRegistration")
+            && !builder.contains("pub enum AgentFactoryPolicyAuthorityRegistrationKind"),
         "canonical factory construction must cross into core through a \
-         validating factory-policy seam requiring a typed factory authority"
+         validating factory-policy seam that does not expose a downstream \
+         registration or authority-minting API"
     );
     assert!(
         !builder.contains("Location::caller")
@@ -118,6 +120,19 @@ fn core_factory_authority_token_is_not_reexported() {
          can mint or pass"
     );
     assert!(
+        !agent_mod.contains("AgentFactoryPolicyAuthorityRegistration")
+            && !agent_mod.contains("AgentFactoryPolicyAuthorityRegistrationKind")
+            && !agent_mod.contains("AgentFactoryPolicyAuthority,"),
+        "meerkat_core::agent must not re-export factory authority registration \
+         or minting types that downstream crates can use to bypass AgentFactory"
+    );
+    assert!(
+        !lib.contains("AgentFactoryPolicyAuthorityRegistration")
+            && !lib.contains("AgentFactoryPolicyAuthority,"),
+        "meerkat_core must not re-export factory authority registration or \
+         minting types that downstream crates can use to bypass AgentFactory"
+    );
+    assert!(
         !facade_lib.contains("CoreAgentBuilder") && !facade_lib.contains("StandaloneAgentBuilder"),
         "meerkat facade must not publicly re-export the core builder as a \
          standalone construction shortcut"
@@ -148,7 +163,11 @@ fn core_factory_authority_is_not_publicly_forgeable() {
     assert!(
         !builder.contains("pub fn agent_factory_policy_authority")
             && !builder.contains("pub const fn new_unchecked")
-            && !builder.contains("pub fn new_unchecked"),
+            && !builder.contains("pub fn new_unchecked")
+            && !builder.contains("pub fn from_registered_source")
+            && !builder.contains("pub const fn canonical_factory")
+            && !builder.contains("pub const fn test_harness")
+            && !builder.contains("inventory::collect!(AgentFactoryPolicyAuthorityRegistration)"),
         "core factory authority must not expose a safe public minting helper \
          or unchecked constructor; downstream callers can otherwise mint the \
          opaque authority and call the factory-policy seam after synthesizing \

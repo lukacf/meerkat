@@ -713,28 +713,12 @@ fn public_agentfactory_value_is_not_core_policy_authority() {
     let builder = std::fs::read_to_string(&builder).expect("read core AgentBuilder implementation");
 
     assert!(
-        builder.contains("pub struct AgentFactoryPolicyAuthority")
-            && builder.contains("pub fn from_registered_source<A: 'static>")
+        builder.contains("validate_factory_policy()?")
+            && !builder.contains("pub struct AgentFactoryPolicyAuthority")
+            && !builder.contains("pub fn from_registered_source<A: 'static>")
             && !builder.contains("Location::caller")
             && !builder.contains("pub fn agent_factory_policy_authority"),
-        "core factory-policy build must require the concrete opaque core \
-         authority boundary; a public AgentFactory value or safe public helper \
-         must not type-check as authority"
-    );
-}
-
-#[test]
-fn core_factory_policy_authority_rejects_public_source_value() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let factory = AgentFactory::new(temp.path().join("sessions"));
-    let result = meerkat_core::agent::AgentFactoryPolicyAuthority::from_registered_source(&factory);
-
-    assert!(
-        matches!(
-            result,
-            Err(meerkat_core::AgentBuildPolicyError::InvalidFactoryAuthority)
-        ),
-        "a safe downstream caller must not mint core factory authority from \
-         the public AgentFactory value"
+        "core factory-policy build must validate factory-composed policy state \
+         without exposing a public core authority type or minting helper"
     );
 }

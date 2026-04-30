@@ -5692,45 +5692,42 @@ mod tests {
             let _ = handle.wait().await;
         }
 
-        let started = tokio::time::timeout(std::time::Duration::from_secs(3), events.next())
-            .await
-            .expect("run_started timeout")
-            .expect("run_started event should exist");
-        match started.payload {
-            AgentEvent::RunStarted { prompt, .. } => {
-                let normalized = prompt.text_content().to_lowercase();
-                assert!(
-                    normalized.contains(
-                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
-                    ),
-                    "run_started prompt should expose runtime system-context source: {normalized}"
-                );
-                assert!(
-                    normalized.contains("birch seventeen"),
-                    "run_started prompt should expose authoritative terminal peer payload: {normalized}"
-                );
+        let (result, usage) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut saw_context_started = false;
+            while let Some(event) = events.next().await {
+                match event.payload {
+                    AgentEvent::RunStarted { prompt, .. } => {
+                        let normalized = prompt.text_content().to_lowercase();
+                        if normalized.contains(
+                            "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                        ) {
+                            assert!(
+                                normalized.contains("birch seventeen"),
+                                "run_started prompt should expose authoritative terminal peer payload: {normalized}"
+                            );
+                            saw_context_started = true;
+                        }
+                    }
+                    AgentEvent::RunCompleted { result, usage, .. } if saw_context_started => {
+                        return (result, usage);
+                    }
+                    _ => {}
+                }
             }
-            other => panic!("expected run_started, got {other:?}"),
-        }
+            panic!("committed runtime context lifecycle events did not arrive");
+        })
+        .await
+        .expect("runtime context lifecycle timeout");
 
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(3), events.next())
-            .await
-            .expect("run_completed timeout")
-            .expect("run_completed event should exist");
-        match completed.payload {
-            AgentEvent::RunCompleted { result, usage, .. } => {
-                assert!(
-                    result.is_empty(),
-                    "context-only runtime apply should not synthesize assistant output: {result:?}"
-                );
-                assert_eq!(
-                    usage,
-                    meerkat_core::types::Usage::default(),
-                    "context-only runtime apply should not report model usage"
-                );
-            }
-            other => panic!("expected run_completed, got {other:?}"),
-        }
+        assert!(
+            result.is_empty(),
+            "context-only runtime apply should not synthesize assistant output: {result:?}"
+        );
+        assert_eq!(
+            usage,
+            meerkat_core::types::Usage::default(),
+            "context-only runtime apply should not report model usage"
+        );
     }
 
     #[cfg(feature = "comms")]
@@ -5851,26 +5848,38 @@ mod tests {
         .await
         .expect("send terminal peer response");
 
-        let started = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
-            .await
-            .expect("run_started timeout")
-            .expect("run_started event should exist");
-        assert!(matches!(started.payload, AgentEvent::RunStarted { .. }));
-
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
-            .await
-            .expect("run_completed timeout")
-            .expect("run_completed event should exist");
-        match completed.payload {
-            AgentEvent::RunCompleted { result, usage, .. } => {
-                assert!(
-                    result.is_empty(),
-                    "context-only drain apply should not synthesize assistant output"
-                );
-                assert_eq!(usage, meerkat_core::types::Usage::default());
+        let (result, usage) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut saw_context_started = false;
+            while let Some(event) = events.next().await {
+                match event.payload {
+                    AgentEvent::RunStarted { prompt, .. } => {
+                        let normalized = prompt.text_content().to_lowercase();
+                        if normalized.contains("peer_response_terminal:")
+                            && normalized.contains("birch seventeen")
+                        {
+                            assert!(
+                                normalized.contains("checksum_token"),
+                                "run_started prompt should expose authoritative terminal peer payload: {normalized}"
+                            );
+                            saw_context_started = true;
+                        }
+                    }
+                    AgentEvent::RunCompleted { result, usage, .. } if saw_context_started => {
+                        return (result, usage);
+                    }
+                    _ => {}
+                }
             }
-            other => panic!("expected run_completed, got {other:?}"),
-        }
+            panic!("committed drain context lifecycle events did not arrive");
+        })
+        .await
+        .expect("runtime context lifecycle timeout");
+
+        assert!(
+            result.is_empty(),
+            "context-only drain apply should not synthesize assistant output"
+        );
+        assert_eq!(usage, meerkat_core::types::Usage::default());
     }
 
     #[tokio::test]

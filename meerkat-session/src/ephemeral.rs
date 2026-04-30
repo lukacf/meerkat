@@ -131,6 +131,10 @@ enum SessionCommand {
         appends: Vec<PendingSystemContextAppend>,
         reply_tx: oneshot::Sender<()>,
     },
+    PublishRuntimeSystemContextEvents {
+        appends: Vec<PendingSystemContextAppend>,
+        reply_tx: oneshot::Sender<()>,
+    },
     AppendExternalUserContent {
         content: ContentInput,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -1062,6 +1066,32 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         handle
             .command_tx
             .send(SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx.await.map_err(|_| {
+            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                "Session task dropped the reply channel".to_string(),
+            ))
+        })
+    }
+
+    pub async fn publish_runtime_system_context_events(
+        &self,
+        id: &SessionId,
+        appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(id)
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .command_tx
+            .send(SessionCommand::PublishRuntimeSystemContextEvents { appends, reply_tx })
             .await
             .map_err(|_| {
                 SessionError::Agent(meerkat_core::error::AgentError::InternalError(
@@ -2345,6 +2375,38 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
     }
 }
 
+fn publish_runtime_system_context_events<A: SessionAgent>(
+    agent: &A,
+    appends: &[PendingSystemContextAppend],
+    control: &SessionTaskControl,
+    next_seq: &mut u64,
+    source_id: &str,
+) {
+    if let Some(prompt) = render_runtime_system_context_event_prompt(appends) {
+        let session_id = agent.session_id();
+        let started = stamp_event_envelope(
+            next_seq,
+            source_id,
+            AgentEvent::RunStarted {
+                session_id: session_id.clone(),
+                prompt: ContentInput::Text(prompt),
+            },
+        );
+        let _ = control.session_event_tx.send(started);
+
+        let completed = stamp_event_envelope(
+            next_seq,
+            source_id,
+            AgentEvent::RunCompleted {
+                session_id,
+                result: String::new(),
+                usage: Usage::default(),
+            },
+        );
+        let _ = control.session_event_tx.send(completed);
+    }
+}
+
 fn lock_deferred_turn_state(
     state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
 ) -> std::sync::MutexGuard<'_, SessionDeferredTurnState> {
@@ -2649,13 +2711,7 @@ async fn session_task<A: SessionAgent>(
                     }
                 }
                 if !pre_turn_context_appends.is_empty() {
-                    apply_runtime_system_context_and_publish(
-                        &mut agent,
-                        &pre_turn_context_appends,
-                        &control,
-                        &mut next_seq,
-                        &source_id,
-                    );
+                    agent.apply_runtime_system_context(&pre_turn_context_appends);
                 }
                 let mut event_stream_open = true;
 
@@ -2824,6 +2880,16 @@ async fn session_task<A: SessionAgent>(
             SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx } => {
                 apply_runtime_system_context_and_publish(
                     &mut agent,
+                    &appends,
+                    &control,
+                    &mut next_seq,
+                    &source_id,
+                );
+                let _ = reply_tx.send(());
+            }
+            SessionCommand::PublishRuntimeSystemContextEvents { appends, reply_tx } => {
+                publish_runtime_system_context_events(
+                    &agent,
                     &appends,
                     &control,
                     &mut next_seq,

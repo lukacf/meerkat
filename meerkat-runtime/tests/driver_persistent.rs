@@ -12,7 +12,7 @@ use meerkat_core::lifecycle::{
     run_receipt::RunBoundaryReceipt,
 };
 use meerkat_core::types::{ContentBlock, ImageData, SessionId};
-use meerkat_runtime::input_state::{InputStateSeed, StoredInputState};
+use meerkat_runtime::input_state::{InputStateSeed, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
@@ -1207,6 +1207,68 @@ async fn recover_migrates_legacy_turn_metadata_execution_stamp() {
         .unwrap()
         .expect("recovered row should be persisted");
     assert_eq!(stored.state.runtime_semantics, Some(semantics));
+}
+
+#[tokio::test]
+async fn recover_allows_legacy_unstamped_terminal_rows() {
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let rid = LogicalRuntimeId::new("test");
+
+    let input = make_prompt("legacy terminal row");
+    let input_id = input.id().clone();
+    let mut state = InputState::new_accepted(input_id.clone());
+    state.persisted_input = Some(input);
+    state.durability = Some(InputDurability::Durable);
+    state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+    store
+        .persist_input_state(
+            &rid,
+            &StoredInputState {
+                state,
+                seed: InputStateSeed {
+                    phase: InputLifecycleState::Consumed,
+                    last_run_id: None,
+                    last_boundary_sequence: None,
+                    terminal_outcome: Some(InputTerminalOutcome::Consumed),
+                    attempt_count: 0,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
+    driver
+        .recover()
+        .await
+        .expect("legacy unstamped terminal row should not block recovery");
+
+    assert!(
+        driver.input_state(&input_id).is_some(),
+        "terminal history should remain queryable after recovery"
+    );
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Consumed)
+    );
+    assert!(
+        driver.active_input_ids().is_empty(),
+        "terminal rows must not become active"
+    );
+    assert!(
+        driver.dequeue_next().is_none(),
+        "terminal rows must not enter runtime queues"
+    );
+
+    let stored = store
+        .load_input_state(&rid, &input_id)
+        .await
+        .unwrap()
+        .expect("terminal row should remain persisted");
+    assert_eq!(stored.seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(stored.state.runtime_semantics, None);
 }
 
 #[tokio::test]

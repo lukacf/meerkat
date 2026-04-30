@@ -1599,6 +1599,15 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
 
         if driver.input_state(&bundle.state.input_id).is_none() {
+            if bundle.seed.phase.is_terminal() {
+                let inserted = driver.ledger_mut().recover(bundle.state.clone());
+                if !inserted {
+                    continue;
+                }
+                driver.recover_terminal_input_lifecycle(&bundle.state.input_id, &bundle.seed)?;
+                continue;
+            }
+
             let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
                 return Err(RuntimeDriverError::Internal(
                     missing_recovered_ingress_entry_reason(&bundle.state),

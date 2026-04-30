@@ -684,6 +684,18 @@ impl EphemeralRuntimeDriver {
         )
     }
 
+    pub(crate) fn recover_terminal_input_lifecycle(
+        &mut self,
+        work_id: &InputId,
+        recovered_seed: &InputStateSeed,
+    ) -> Result<(), RuntimeDriverError> {
+        debug_assert!(
+            recovered_seed.phase.is_terminal(),
+            "terminal recovery path must only be used for terminal input phases"
+        );
+        self.apply_recovered_lifecycle(work_id, recovered_seed, None)
+    }
+
     fn lifecycle_to_input_phase(lifecycle: InputLifecycleState) -> mm_dsl::InputPhase {
         match lifecycle {
             // The DSL never represents the pre-admission `Accepted` state —
@@ -722,8 +734,6 @@ impl EphemeralRuntimeDriver {
         request_id: Option<&RequestId>,
         reservation_key: Option<&ReservationKey>,
     ) -> Result<(), RuntimeDriverError> {
-        let key = Self::dsl_key(work_id);
-        let lifecycle_state = recovered_seed.phase;
         self.record_admission_metadata(
             work_id,
             content_shape,
@@ -735,6 +745,17 @@ impl EphemeralRuntimeDriver {
             request_id,
             reservation_key,
         );
+        self.apply_recovered_lifecycle(work_id, recovered_seed, Some(handling_mode))
+    }
+
+    fn apply_recovered_lifecycle(
+        &mut self,
+        work_id: &InputId,
+        recovered_seed: &InputStateSeed,
+        handling_mode: Option<HandlingMode>,
+    ) -> Result<(), RuntimeDriverError> {
+        let key = Self::dsl_key(work_id);
+        let lifecycle_state = recovered_seed.phase;
         let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
             match recovered_seed.terminal_outcome.clone() {
                 Some(InputTerminalOutcome::Consumed) => (
@@ -768,7 +789,8 @@ impl EphemeralRuntimeDriver {
                 None => (None, None, None, None, 0),
             };
         let lane = matches!(lifecycle_state, InputLifecycleState::Queued)
-            .then(|| mm_dsl::InputLane::from(handling_mode));
+            .then(|| handling_mode.map(mm_dsl::InputLane::from))
+            .flatten();
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RecoverInputLifecycle {
                 input_id: key,

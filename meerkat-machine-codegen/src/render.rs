@@ -1353,7 +1353,15 @@ fn collect_machine_enum_types(schema: &MachineSchema) -> Vec<(String, Vec<String
 
     enums
         .into_iter()
-        .filter_map(|name| known_enum_variants(&name).map(|variants| (rust_ident(&name), variants)))
+        .filter_map(|name| {
+            if matches!(
+                lookup_named_type_atom(schema, &name),
+                Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
+            ) {
+                return None;
+            }
+            known_enum_variants(&name).map(|variants| (rust_ident(&name), variants))
+        })
         .collect()
 }
 

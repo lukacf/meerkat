@@ -410,6 +410,56 @@ impl std::fmt::Display for OperationId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum OperationKind {
+    #[default]
+    #[serde(rename = "MobMemberChild")]
+    MobMemberChild,
+    #[serde(rename = "BackgroundToolOp")]
+    BackgroundToolOp,
+}
+impl OperationKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MobMemberChild => "MobMemberChild",
+            Self::BackgroundToolOp => "BackgroundToolOp",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OperationKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MobMemberChild" => Ok(Self::MobMemberChild),
+            "BackgroundToolOp" => Ok(Self::BackgroundToolOp),
+            other => Err(format!("invalid OperationKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OperationKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OperationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum OperationStatus {
     #[default]
     #[serde(rename = "Absent")]
@@ -1376,38 +1426,6 @@ impl LlmRetryFailureKind {
     }
 }
 impl std::fmt::Display for LlmRetryFailureKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum OperationKind {
-    #[default]
-    MobMemberChild,
-    BackgroundToolOp,
-}
-impl OperationKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::MobMemberChild => "MobMemberChild",
-            Self::BackgroundToolOp => "BackgroundToolOp",
-        }
-    }
-}
-impl std::fmt::Display for OperationKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

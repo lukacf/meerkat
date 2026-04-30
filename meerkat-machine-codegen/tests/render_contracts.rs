@@ -13,6 +13,7 @@ use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
     meerkat_mob_seam_composition, schedule_runtime_bundle_composition,
 };
+use meerkat_machine_schema::identity::{EnumVariantId, RustTypeAtom};
 use meerkat_machine_schema::{
     CompositionDriver, CompositionDriverRustBinding, DriverDispatchRoute, RouteTargetKind,
     WatchedEffect, canonical_machine_schemas,
@@ -260,6 +261,52 @@ fn generated_meerkat_operation_status_is_closed_enum() {
     assert!(
         !rendered.contains("impl From<&str> for OperationStatus"),
         "OperationStatus must not expose unchecked string construction:\n{rendered}"
+    );
+}
+
+#[test]
+fn generated_meerkat_operation_kind_uses_string_enum_binding() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+
+    assert!(
+        rendered.contains("pub enum OperationKind"),
+        "OperationKind must be generated as a closed enum:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("impl std::convert::TryFrom<&str> for OperationKind"),
+        "OperationKind must expose checked string parsing from the authoritative binding:\n{rendered}"
+    );
+    for variant in ["MobMemberChild", "BackgroundToolOp"] {
+        assert!(
+            rendered.contains(&format!(
+                "    #[serde(rename = \"{variant}\")]\n    {variant},"
+            )),
+            "OperationKind serde must preserve raw value `{variant}`:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn generated_meerkat_operation_kind_rejects_string_enum_ident_collisions() {
+    let mut schema = meerkat_machine();
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "OperationKind")
+        .expect("OperationKind binding");
+    binding.rust = RustTypeAtom::StringEnum {
+        variants: vec![
+            EnumVariantId::parse("mob-member").expect("variant slug"),
+            EnumVariantId::parse("mob_member").expect("variant slug"),
+        ],
+    };
+
+    let rendered = render_machine_kernel_module(&schema);
+    assert!(
+        rendered.contains(
+            "compile_error!(\"string enum OperationKind variants `mob-member` and `mob_member` sanitize to duplicate Rust identifier `mob_member`\");"
+        ),
+        "OperationKind must use named-type binding collision checks:\n{rendered}"
     );
 }
 

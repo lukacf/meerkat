@@ -613,10 +613,12 @@ impl GeneratedMachineKernel {
                 self.eval_expr(state, bindings, expr, transition_name)?,
             );
         }
-        Ok(KernelEffect {
+        let effect = KernelEffect {
             variant: effect.variant.clone(),
             fields,
-        })
+        };
+        self.validate_effect_fields(&effect, transition_name)?;
+        Ok(effect)
     }
 
     fn apply_update(
@@ -1255,6 +1257,47 @@ impl GeneratedMachineKernel {
         Ok(())
     }
 
+    fn validate_effect_fields(
+        &self,
+        effect: &KernelEffect,
+        transition_name: &TransitionId,
+    ) -> Result<(), TransitionRefusal> {
+        let variant = self
+            .schema
+            .effects
+            .variant_named(effect.variant.as_str())
+            .map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    format!("unknown effect variant `{}`", effect.variant),
+                )
+            })?;
+        for field in &variant.fields {
+            if !self.type_contains_constrained_string_enum(&field.ty) {
+                continue;
+            }
+            let Some(value) = effect.fields.get(&field.name) else {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!(
+                        "effect `{}` field `{}` is missing",
+                        effect.variant, field.name
+                    ),
+                ));
+            };
+            if !self.value_matches_type(value, &field.ty) {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!(
+                        "effect `{}` field `{}` does not match declared type",
+                        effect.variant, field.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn type_contains_constrained_string_enum(&self, ty: &TypeRef) -> bool {
         match ty {
             TypeRef::Named(name) => matches!(
@@ -1639,6 +1682,39 @@ mod tests {
         };
     }
 
+    fn add_invalid_register_op_effect_status(schema: &mut meerkat_machine_schema::MachineSchema) {
+        let effect_variant = schema
+            .effects
+            .variants
+            .iter_mut()
+            .find(|variant| variant.name.as_str() == "SubmitOpEvent")
+            .expect("SubmitOpEvent effect variant");
+        effect_variant
+            .fields
+            .push(meerkat_machine_schema::FieldSchema {
+                name: field_id("status"),
+                ty: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            });
+
+        let transition = schema
+            .transitions
+            .iter_mut()
+            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
+            .expect("RegisterOpIdle transition");
+        let effect = transition
+            .emit
+            .iter_mut()
+            .find(|effect| effect.variant.as_str() == "SubmitOpEvent")
+            .expect("SubmitOpEvent emit");
+        effect.fields.insert(
+            field_id("status"),
+            meerkat_machine_schema::Expr::NamedVariant {
+                enum_name: enum_type_id("OperationStatus"),
+                variant: enum_variant_id("Launched"),
+            },
+        );
+    }
+
     #[allow(clippy::expect_used)]
     #[test]
     fn every_catalog_machine_builds_an_initial_state() {
@@ -1748,6 +1824,52 @@ mod tests {
             )
             .expect_err("invalid OperationStatus update must not enter state");
         assert!(matches!(refusal, TransitionRefusal::EvaluationError { .. }));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_unknown_effect_payload_value() {
+        let mut schema = meerkat_machine();
+        add_invalid_register_op_effect_status(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+
+        let refusal = kernel
+            .transition(
+                &initialized.next_state,
+                &KernelInput {
+                    variant: input_id("RegisterOp"),
+                    fields: BTreeMap::from([
+                        (field_id("operation_id"), KernelValue::String("op-1".into())),
+                        (
+                            field_id("kind"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("OperationKind"),
+                                variant: enum_variant_id("BackgroundToolOp"),
+                            },
+                        ),
+                    ]),
+                },
+            )
+            .expect_err("invalid OperationStatus effect payload must not be returned");
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("SubmitOpEvent") && reason.contains("status"),
+                    "effect payload refusal should identify the bad field, got: {reason}"
+                );
+            }
+            other => panic!("expected effect payload evaluation error, got {other:?}"),
+        }
     }
 
     #[allow(clippy::expect_used)]

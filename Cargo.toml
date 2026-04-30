@@ -180,7 +180,7 @@ strip = "symbols"
 
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 # ── Lint groups (pedantic is the main "paranoid" level) ──────────────

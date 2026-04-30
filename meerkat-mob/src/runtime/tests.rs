@@ -4705,7 +4705,7 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         let tools = Arc::new(OverlayProbeDispatcher::new());
         let store = Arc::new(OverlayProbeSessionStore);
         let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
+            test_factory_build_authority(),
             builder,
             client,
             tools,
@@ -4715,6 +4715,15 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(OverlayProbeSessionAgent { agent })
+    }
+}
+
+fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    // SAFETY: runtime integration tests compose factory-equivalent policy state
+    // before crossing the core factory-policy finalizer.
+    #[allow(unsafe_code)]
+    unsafe {
+        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
     }
 }
 

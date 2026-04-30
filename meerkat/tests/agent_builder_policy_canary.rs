@@ -153,6 +153,12 @@ fn public_factory_policy_finalizer_requires_typed_authority(source: &str) -> boo
     signature_window.contains("meerkat_agent_build_authority::AgentFactoryBuildAuthority")
 }
 
+fn factory_authority_constructor_requires_unsafe(source: &str) -> bool {
+    source.contains("pub const unsafe fn new_for_agent_factory() -> Self")
+        && !source.contains("pub const fn new_for_agent_factory() -> Self")
+        && !source.contains("pub fn new_for_agent_factory() -> Self")
+}
+
 fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
     let Some(pos) = source.find("pub use builder::build_agent_after_factory_policy") else {
         return true;
@@ -300,6 +306,72 @@ meerkat-core = {{ path = "{}" }}
 }
 
 #[test]
+fn downstream_direct_authority_dep_cannot_safely_forge_factory_policy_finalizer()
+-> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_direct_authority_dep_cannot_safely_forge_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-direct-authority"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat = {{ path = "{}", default-features = false }}
+meerkat-agent-build-authority = {{ path = "{}" }}
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat").display(),
+            repo_root().join("meerkat-agent-build-authority").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!(
+            "fixtures/agent_builder_policy/downstream_direct_authority_forged_factory_policy.rs"
+        ),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("check")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream direct-authority fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsafe function")
+            && (stderr.contains("new_for_agent_factory")
+                || stderr.contains("build_agent_after_factory_policy")),
+        "downstream direct-authority fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn core_agent_builder_does_not_expose_public_build_bypass() {
     let builder = repo_file("meerkat-core/src/agent/builder.rs");
 
@@ -367,6 +439,7 @@ fn core_factory_authority_token_is_not_reexported() {
     let agent_mod = repo_file("meerkat-core/src/agent.rs");
     let lib = repo_file("meerkat-core/src/lib.rs");
     let facade_lib = repo_file("meerkat/src/lib.rs");
+    let authority = repo_file("meerkat-agent-build-authority/src/lib.rs");
 
     assert!(
         agent_mod_reexport_is_internal_feature_gated(&agent_mod),
@@ -411,6 +484,11 @@ fn core_factory_authority_token_is_not_reexported() {
         !facade_lib.contains("CoreAgentBuilder") && !facade_lib.contains("StandaloneAgentBuilder"),
         "meerkat facade must not publicly re-export the core builder as a \
          standalone construction shortcut"
+    );
+    assert!(
+        factory_authority_constructor_requires_unsafe(&authority),
+        "direct dependency on the authority crate must not provide a safe \
+         constructor that downstream code can use to call the core finalizer"
     );
 }
 

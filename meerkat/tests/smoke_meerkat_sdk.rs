@@ -1358,8 +1358,16 @@ mod scenario_10_memory {
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
+        let authority = {
+            // SAFETY: this smoke test composes factory-equivalent persisted
+            // session/build metadata and runtime turn-state handle above.
+            #[allow(unsafe_code)]
+            unsafe {
+                meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
+            }
+        };
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
+            authority,
             builder,
             llm_adapter,
             memory_tools,

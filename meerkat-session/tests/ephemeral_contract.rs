@@ -763,7 +763,7 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
         let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
+            test_factory_build_authority(),
             builder,
             client,
             tools,
@@ -803,7 +803,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
         let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
+            test_factory_build_authority(),
             builder,
             client,
             tools,
@@ -813,6 +813,15 @@ impl SessionAgentBuilder for RealAgentBuilder {
         .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(RealSessionAgent { agent })
+    }
+}
+
+fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    // SAFETY: session integration tests construct factory-equivalent session
+    // metadata, build state, and runtime turn-state handles before finalizing.
+    #[allow(unsafe_code)]
+    unsafe {
+        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
     }
 }
 

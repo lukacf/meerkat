@@ -19,7 +19,15 @@ use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
 const AGENT_FACTORY_BUILD_AUTHORITY: meerkat_agent_build_authority::AgentFactoryBuildAuthority =
-    meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory();
+    agent_factory_build_authority();
+
+#[allow(unsafe_code)]
+const fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority
+{
+    // SAFETY: this constant is private to the facade factory module and is only
+    // passed after `AgentFactory::build_agent` has composed factory policy.
+    unsafe { meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory() }
+}
 
 /// Default system prompt for wasm32 builds.
 /// Mirrors `meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT` which is gated

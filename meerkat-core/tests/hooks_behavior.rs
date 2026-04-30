@@ -300,7 +300,7 @@ async fn build_agent(
         .with_hook_engine(Arc::new(hooks));
 
     meerkat_core::agent::build_agent_after_factory_policy(
-        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory(),
+        test_factory_build_authority(),
         builder,
         client,
         tools,
@@ -308,6 +308,15 @@ async fn build_agent(
     )
     .await
     .expect("factory policy test builder")
+}
+
+fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    // SAFETY: this helper is confined to core integration tests that construct
+    // factory-equivalent session policy state before finalizing.
+    #[allow(unsafe_code)]
+    unsafe {
+        meerkat_agent_build_authority::AgentFactoryBuildAuthority::new_for_agent_factory()
+    }
 }
 
 fn test_hooks() -> TestHookEngine {

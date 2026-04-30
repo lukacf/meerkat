@@ -18,7 +18,15 @@ impl AgentFactoryBuildAuthority {
     /// This constructor intentionally lives outside `meerkat-core`; depending
     /// on `meerkat` must not feature-unify a safe minting API into the core
     /// public surface.
-    pub const fn new_for_agent_factory() -> Self {
+    ///
+    /// # Safety
+    ///
+    /// Callers must only mint this authority from code paths that have already
+    /// composed canonical `AgentFactory` policy metadata. The value is the
+    /// internal proof passed to `meerkat-core`'s factory-policy finalizer; using
+    /// it outside that factory-owned path bypasses the policy boundary.
+    #[allow(unsafe_code)]
+    pub const unsafe fn new_for_agent_factory() -> Self {
         Self { _private: () }
     }
 }

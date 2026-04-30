@@ -1353,7 +1353,7 @@ enum AuthCommands {
 
     /// Delete an auth profile's persisted credentials from the TokenStore.
     /// The realm config entry itself is declarative — this removes the
-    /// secret/token material bound to `<realm>:<profile_id>`.
+    /// secret/token material bound to the profile's owning `<realm>:<binding_id>`.
     ProfileDelete {
         /// Realm id.
         #[arg(long, default_value = "dev")]

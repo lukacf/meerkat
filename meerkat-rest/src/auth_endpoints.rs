@@ -6,9 +6,9 @@
 //! credentials are visible to the AgentFactory's `resolve_binding`
 //! path.
 //!
-//! OAuth state and PKCE verifier correlation is owned server-side by
-//! `OAuthFlowRegistry`; complete consumes the state before exchanging
-//! the provider code.
+//! OAuth state, PKCE verifier, and device-code correlation is owned
+//! server-side by the runtime-scoped OAuth flow authority; complete consumes
+//! terminal flow state through that authority.
 
 use std::sync::Arc;
 
@@ -33,9 +33,7 @@ use meerkat_providers::auth_oauth::{
     request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
-use meerkat_providers::oauth_flow::{
-    OAuthFlowError, global_oauth_flow_registry, resolve_oauth_provider,
-};
+use meerkat_providers::oauth_flow::{OAuthFlowError, resolve_oauth_provider};
 
 use crate::AppState;
 
@@ -172,6 +170,42 @@ fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
         CredentialSourceSpec::Command { .. } => "command",
         CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
     }
+}
+
+fn oauth_device_state_error(err: OAuthFlowError) -> (StatusCode, String) {
+    match err {
+        OAuthFlowError::Missing => (
+            StatusCode::BAD_REQUEST,
+            "oauth device code is missing or expired".to_string(),
+        ),
+        other => (
+            StatusCode::BAD_REQUEST,
+            format!("oauth device state verification failed: {other}"),
+        ),
+    }
+}
+
+fn consume_terminal_device_flow(
+    state: &AppState,
+    device_code: &str,
+    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+) -> Result<(), (StatusCode, String)> {
+    state
+        .oauth_flows
+        .consume_device_code(device_code, provider)
+        .map(|_| ())
+        .map_err(oauth_device_state_error)
+}
+
+fn finish_device_flow_poll(
+    state: &AppState,
+    device_code: &str,
+    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+) -> Result<(), (StatusCode, String)> {
+    state
+        .oauth_flows
+        .finish_device_code_poll(device_code, provider)
+        .map_err(oauth_device_state_error)
 }
 
 async fn save_tokens_and_publish_lifecycle(
@@ -595,7 +629,10 @@ pub struct LoginStartBody {
     pub redirect_uri: String,
 }
 
-pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse {
+pub async fn start_login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginStartBody>,
+) -> impl IntoResponse {
     let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
         Ok(v) => v,
         Err(e) => {
@@ -608,7 +645,7 @@ pub async fn start_login(Json(body): Json<LoginStartBody>) -> impl IntoResponse 
     };
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().to_string();
-    let state_token = match global_oauth_flow_registry().start(
+    let state_token = match state.oauth_flows.start(
         resolved.identity,
         body.redirect_uri.clone(),
         verifier,
@@ -712,11 +749,10 @@ pub async fn complete_login(
             .into_response();
     }
 
-    let flow = match global_oauth_flow_registry().consume(
-        &body.state,
-        resolved.identity,
-        &body.redirect_uri,
-    ) {
+    let flow = match state
+        .oauth_flows
+        .consume(&body.state, resolved.identity, &body.redirect_uri)
+    {
         Ok(flow) => flow,
         Err(OAuthFlowError::Missing) => {
             return (
@@ -826,7 +862,10 @@ pub struct DeviceStartBody {
     pub provider: String,
 }
 
-pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoResponse {
+pub async fn start_device_login(
+    State(state): State<AppState>,
+    Json(body): Json<DeviceStartBody>,
+) -> impl IntoResponse {
     let resolved = match resolve_oauth_provider(&body.provider, "") {
         Ok(v) => v,
         Err(e) => {
@@ -851,19 +890,38 @@ pub async fn start_device_login(Json(body): Json<DeviceStartBody>) -> impl IntoR
     }
     let http = reqwest::Client::new();
     match request_device_code(&http, &resolved.endpoints).await {
-        Ok(resp) => (
-            StatusCode::OK,
-            Json(WireDeviceStart {
-                device_code: resp.device_code,
-                user_code: resp.user_code,
-                verification_uri: resp.verification_uri,
-                verification_uri_complete: resp.verification_uri_complete,
-                expires_in: resp.expires_in,
-                interval: resp.interval,
-                provider: body.provider,
-            }),
-        )
-            .into_response(),
+        Ok(resp) => {
+            if let Err(err) = state.oauth_flows.admit_device_code(
+                resolved.identity,
+                resp.device_code.clone(),
+                std::time::Duration::from_secs(resp.expires_in),
+            ) {
+                let (status, message) = match err {
+                    OAuthFlowError::CapacityExceeded { .. } => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "oauth state registry is at capacity".to_string(),
+                    ),
+                    other => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("oauth device state initialization failed: {other}"),
+                    ),
+                };
+                return (status, Json(serde_json::json!({ "error": message }))).into_response();
+            }
+            (
+                StatusCode::OK,
+                Json(WireDeviceStart {
+                    device_code: resp.device_code,
+                    user_code: resp.user_code,
+                    verification_uri: resp.verification_uri,
+                    verification_uri_complete: resp.verification_uri_complete,
+                    expires_in: resp.expires_in,
+                    interval: resp.interval,
+                    provider: body.provider,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({
@@ -959,6 +1017,13 @@ pub async fn complete_device_login(
         )
             .into_response();
     }
+    if let Err(err) = state
+        .oauth_flows
+        .begin_device_code_poll(&body.device_code, resolved.identity)
+    {
+        let (status, message) = oauth_device_state_error(err);
+        return (status, Json(serde_json::json!({ "error": message }))).into_response();
+    }
     let http = reqwest::Client::new();
     let outcome = match poll_device_code(
         &http,
@@ -970,6 +1035,7 @@ pub async fn complete_device_login(
     {
         Ok(o) => o,
         Err(e) => {
+            let _ = finish_device_flow_poll(&state, &body.device_code, resolved.identity);
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -980,27 +1046,60 @@ pub async fn complete_device_login(
         }
     };
     match outcome {
-        DevicePollOutcome::Pending => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "state": "pending" })),
-        )
-            .into_response(),
-        DevicePollOutcome::SlowDown => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({ "state": "slow_down" })),
-        )
-            .into_response(),
-        DevicePollOutcome::AccessDenied => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "state": "access_denied" })),
-        )
-            .into_response(),
-        DevicePollOutcome::Expired => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "state": "expired" })),
-        )
-            .into_response(),
+        DevicePollOutcome::Pending => {
+            match finish_device_flow_poll(&state, &body.device_code, resolved.identity) {
+                Ok(()) => (
+                    StatusCode::ACCEPTED,
+                    Json(serde_json::json!({ "state": "pending" })),
+                )
+                    .into_response(),
+                Err((status, message)) => {
+                    (status, Json(serde_json::json!({ "error": message }))).into_response()
+                }
+            }
+        }
+        DevicePollOutcome::SlowDown => {
+            match finish_device_flow_poll(&state, &body.device_code, resolved.identity) {
+                Ok(()) => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({ "state": "slow_down" })),
+                )
+                    .into_response(),
+                Err((status, message)) => {
+                    (status, Json(serde_json::json!({ "error": message }))).into_response()
+                }
+            }
+        }
+        DevicePollOutcome::AccessDenied => {
+            match consume_terminal_device_flow(&state, &body.device_code, resolved.identity) {
+                Ok(()) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "state": "access_denied" })),
+                )
+                    .into_response(),
+                Err((status, message)) => {
+                    (status, Json(serde_json::json!({ "error": message }))).into_response()
+                }
+            }
+        }
+        DevicePollOutcome::Expired => {
+            match consume_terminal_device_flow(&state, &body.device_code, resolved.identity) {
+                Ok(()) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "state": "expired" })),
+                )
+                    .into_response(),
+                Err((status, message)) => {
+                    (status, Json(serde_json::json!({ "error": message }))).into_response()
+                }
+            }
+        }
         DevicePollOutcome::Ready(result) => {
+            if let Err((status, message)) =
+                consume_terminal_device_flow(&state, &body.device_code, resolved.identity)
+            {
+                return (status, Json(serde_json::json!({ "error": message }))).into_response();
+            }
             let expires_at = result
                 .expires_in_secs
                 .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
@@ -1390,6 +1489,51 @@ mod tests {
             .set_auth_lease_handle(Arc::clone(&auth_lease));
         state.auth_lease = auth_lease;
         state.token_store = Arc::new(EphemeralTokenStore::new());
+    }
+
+    #[tokio::test]
+    async fn rest_login_start_records_flow_on_app_state_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let unrelated_temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let unrelated_state = AppState::load_from(unrelated_temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let redirect_uri = "http://127.0.0.1:0/callback";
+
+        let response = start_login(
+            State(state.clone()),
+            Json(LoginStartBody {
+                provider: "openai".to_string(),
+                redirect_uri: redirect_uri.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let state_token = result["state"].as_str().expect("state");
+        assert!(matches!(
+            unrelated_state.oauth_flows.consume(
+                state_token,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            ),
+            Err(OAuthFlowError::Missing)
+        ));
+        let flow = state
+            .oauth_flows
+            .consume(
+                state_token,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            )
+            .expect("starting app state owns the flow");
+        assert!(!flow.pkce_verifier.is_empty());
     }
 
     #[tokio::test]

@@ -176,6 +176,11 @@ pub struct AppState {
     pub token_store: Arc<dyn meerkat_providers::auth_store::TokenStore>,
     /// Process-local AuthMachine lifecycle registry for auth endpoints.
     pub auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    /// Runtime-scoped OAuth login flow authority. Public auth handlers use
+    /// this seam instead of process-global OAuth state so login lifecycle
+    /// admission/consume stays aligned with this runtime's AuthMachine
+    /// authority boundary.
+    pub oauth_flows: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
     /// Provider-runtime registry shared with the AgentFactory's auth
     /// resolution path.
     pub provider_registry: Arc<meerkat_providers::ProviderRuntimeRegistry>,
@@ -359,6 +364,8 @@ impl AppState {
             };
         let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
             Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let oauth_flows: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> =
+            Arc::new(meerkat_providers::oauth_flow::OAuthFlowRegistry::default());
         let mut factory = AgentFactory::new(store_path.clone())
             .with_token_store(Arc::clone(&token_store))
             .session_store(session_store.clone())
@@ -449,6 +456,7 @@ impl AppState {
             )),
             token_store,
             auth_lease,
+            oauth_flows,
             provider_registry,
         })
     }

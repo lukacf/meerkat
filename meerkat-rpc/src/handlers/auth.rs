@@ -1,7 +1,7 @@
 //! `auth/*` + `realm/*` method handlers.
 //!
 //! Real implementations using the shared `SessionRuntime.token_store()`.
-//! OAuth login is split across two calls (server keeps state -> PKCE verifier):
+//! OAuth login is split across two calls (runtime authority keeps state -> PKCE verifier):
 //!
 //!   auth/login/start     → returns authorize_url + state
 //!   auth/login/complete  → verifies state, exchanges code → persists
@@ -27,9 +27,7 @@ use meerkat_providers::auth_oauth::{
     request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
-use meerkat_providers::oauth_flow::{
-    OAuthFlowError, global_oauth_flow_registry, resolve_oauth_provider,
-};
+use meerkat_providers::oauth_flow::{OAuthFlowError, resolve_oauth_provider};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
@@ -235,6 +233,51 @@ fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
         CredentialSourceSpec::PlatformDefault => "platform_default",
         CredentialSourceSpec::Command { .. } => "command",
         CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
+}
+
+fn oauth_device_state_error(id: Option<RpcId>, err: OAuthFlowError) -> RpcResponse {
+    match err {
+        OAuthFlowError::Missing => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            "oauth device code is missing or expired",
+        ),
+        other => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("oauth device state verification failed: {other}"),
+        ),
+    }
+}
+
+fn consume_terminal_device_flow(
+    id: Option<RpcId>,
+    runtime: &SessionRuntime,
+    device_code: &str,
+    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+) -> Option<RpcResponse> {
+    match runtime
+        .oauth_flow_authority()
+        .consume_device_code(device_code, provider)
+    {
+        Ok(_) => None,
+        Err(err) => Some(oauth_device_state_error(id, err)),
+    }
+}
+
+fn finish_device_flow_poll(
+    id: Option<RpcId>,
+    runtime: &SessionRuntime,
+    device_code: &str,
+    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+) -> Option<RpcResponse> {
+    match runtime
+        .oauth_flow_authority()
+        .finish_device_code_poll(device_code, provider)
+    {
+        Ok(()) => None,
+        Err(err) => Some(oauth_device_state_error(id, err)),
     }
 }
 
@@ -589,7 +632,11 @@ pub async fn handle_auth_profile_delete(
 
 // --- OAuth login ------------------------------------------------------
 
-pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue>) -> RpcResponse {
+pub async fn handle_auth_login_start(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
     let parsed: LoginStartParams = match parse_params(params) {
         Ok(v) => v,
         Err(r) => return r.with_id(id),
@@ -602,7 +649,7 @@ pub async fn handle_auth_login_start(id: Option<RpcId>, params: Option<&RawValue
     };
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().clone();
-    let state_token = match global_oauth_flow_registry().start(
+    let state_token = match runtime.oauth_flow_authority().start(
         resolved.identity,
         parsed.redirect_uri.clone(),
         verifier,
@@ -689,7 +736,7 @@ pub async fn handle_auth_login_complete(
         );
     }
 
-    let flow = match global_oauth_flow_registry().consume(
+    let flow = match runtime.oauth_flow_authority().consume(
         &parsed.state,
         resolved.identity,
         &parsed.redirect_uri,
@@ -791,6 +838,7 @@ pub async fn handle_auth_login_complete(
 pub async fn handle_auth_login_device_start(
     id: Option<RpcId>,
     params: Option<&RawValue>,
+    runtime: &SessionRuntime,
 ) -> RpcResponse {
     let parsed: DeviceStartParams = match parse_params(params) {
         Ok(v) => v,
@@ -812,18 +860,33 @@ pub async fn handle_auth_login_device_start(
     }
     let http = reqwest::Client::new();
     match request_device_code(&http, &resolved.endpoints).await {
-        Ok(resp) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "device_code": resp.device_code,
-                "user_code": resp.user_code,
-                "verification_uri": resp.verification_uri,
-                "verification_uri_complete": resp.verification_uri_complete,
-                "expires_in": resp.expires_in,
-                "interval": resp.interval,
-                "provider": parsed.provider,
-            }),
-        ),
+        Ok(resp) => {
+            if let Err(err) = runtime.oauth_flow_authority().admit_device_code(
+                resolved.identity,
+                resp.device_code.clone(),
+                std::time::Duration::from_secs(resp.expires_in),
+            ) {
+                let message = match err {
+                    OAuthFlowError::CapacityExceeded { .. } => {
+                        "oauth state registry is at capacity".to_string()
+                    }
+                    other => format!("oauth device state initialization failed: {other}"),
+                };
+                return RpcResponse::error(id, error::INTERNAL_ERROR, message);
+            }
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "device_code": resp.device_code,
+                    "user_code": resp.user_code,
+                    "verification_uri": resp.verification_uri,
+                    "verification_uri_complete": resp.verification_uri_complete,
+                    "expires_in": resp.expires_in,
+                    "interval": resp.interval,
+                    "provider": parsed.provider,
+                }),
+            )
+        }
         Err(e) => RpcResponse::error(
             id,
             error::INTERNAL_ERROR,
@@ -899,6 +962,12 @@ pub async fn handle_auth_login_device_complete(
             ),
         );
     }
+    if let Err(err) = runtime
+        .oauth_flow_authority()
+        .begin_device_code_poll(&parsed.device_code, resolved.identity)
+    {
+        return oauth_device_state_error(id, err);
+    }
     let http = reqwest::Client::new();
     let outcome = match poll_device_code(
         &http,
@@ -910,6 +979,12 @@ pub async fn handle_auth_login_device_complete(
     {
         Ok(o) => o,
         Err(e) => {
+            let _ = finish_device_flow_poll(
+                id.clone(),
+                runtime,
+                &parsed.device_code,
+                resolved.identity,
+            );
             return RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
@@ -918,13 +993,51 @@ pub async fn handle_auth_login_device_complete(
         }
     };
     match outcome {
-        DevicePollOutcome::Pending => RpcResponse::success(id, WireDeviceCompleteResult::Pending),
-        DevicePollOutcome::SlowDown => RpcResponse::success(id, WireDeviceCompleteResult::SlowDown),
-        DevicePollOutcome::AccessDenied => {
-            RpcResponse::success(id, WireDeviceCompleteResult::AccessDenied)
-        }
-        DevicePollOutcome::Expired => RpcResponse::success(id, WireDeviceCompleteResult::Expired),
+        DevicePollOutcome::Pending => match finish_device_flow_poll(
+            id.clone(),
+            runtime,
+            &parsed.device_code,
+            resolved.identity,
+        ) {
+            None => RpcResponse::success(id, WireDeviceCompleteResult::Pending),
+            Some(resp) => resp,
+        },
+        DevicePollOutcome::SlowDown => match finish_device_flow_poll(
+            id.clone(),
+            runtime,
+            &parsed.device_code,
+            resolved.identity,
+        ) {
+            None => RpcResponse::success(id, WireDeviceCompleteResult::SlowDown),
+            Some(resp) => resp,
+        },
+        DevicePollOutcome::AccessDenied => match consume_terminal_device_flow(
+            id.clone(),
+            runtime,
+            &parsed.device_code,
+            resolved.identity,
+        ) {
+            None => RpcResponse::success(id, WireDeviceCompleteResult::AccessDenied),
+            Some(resp) => resp,
+        },
+        DevicePollOutcome::Expired => match consume_terminal_device_flow(
+            id.clone(),
+            runtime,
+            &parsed.device_code,
+            resolved.identity,
+        ) {
+            None => RpcResponse::success(id, WireDeviceCompleteResult::Expired),
+            Some(resp) => resp,
+        },
         DevicePollOutcome::Ready(result) => {
+            if let Some(resp) = consume_terminal_device_flow(
+                id.clone(),
+                runtime,
+                &parsed.device_code,
+                resolved.identity,
+            ) {
+                return resp;
+            }
             let store = match require_token_store(runtime, id.clone()) {
                 Ok(s) => s,
                 Err(r) => return r,
@@ -1519,6 +1632,42 @@ mod tests {
             handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
         assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+    }
+
+    #[tokio::test]
+    async fn login_start_records_flow_on_session_runtime_authority() {
+        let runtime = test_runtime();
+        let unrelated_runtime = test_runtime();
+        let redirect_uri = "http://127.0.0.1:0/callback";
+        let params = raw_params(serde_json::json!({
+            "provider": "openai",
+            "redirect_uri": redirect_uri
+        }));
+
+        let resp =
+            handle_auth_login_start(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        assert!(resp.error.is_none(), "login start error: {:?}", resp.error);
+        let result: serde_json::Value =
+            serde_json::from_str(resp.result.as_ref().expect("result").get()).unwrap();
+        let state = result["state"].as_str().expect("state");
+        assert!(matches!(
+            unrelated_runtime.oauth_flow_authority().consume(
+                state,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            ),
+            Err(OAuthFlowError::Missing)
+        ));
+        let flow = runtime
+            .oauth_flow_authority()
+            .consume(
+                state,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            )
+            .expect("starting runtime owns the flow");
+        assert!(!flow.pkce_verifier.is_empty());
     }
 
     #[tokio::test]

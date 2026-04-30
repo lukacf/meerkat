@@ -1,11 +1,11 @@
-//! Short-lived OAuth state registry.
+//! Short-lived OAuth login flow authority.
 //!
-//! The server owns the state -> PKCE verifier correlation. Start records a
-//! flow before returning the authorize URL; complete must consume that state
-//! before exchanging the authorization code.
+//! Runtime surfaces own an explicit authority instance for state -> PKCE
+//! verifier and device-code lifecycle correlation. Start records a flow before
+//! returning it to the client; complete must verify and consume that state
+//! through the same authority before committing terminal login state.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -188,6 +188,20 @@ pub struct OAuthFlowRecord {
     pub created_at: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDeviceFlowRecord {
+    pub provider: OAuthProviderIdentity,
+    pub device_code: String,
+    pub created_at: Instant,
+    pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OAuthDeviceFlowState {
+    record: OAuthDeviceFlowRecord,
+    poll_in_progress: bool,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum OAuthFlowError {
     #[error("oauth state is missing or expired")]
@@ -203,6 +217,55 @@ pub enum OAuthFlowError {
     StateGenerationFailed,
     #[error("oauth state registry is at capacity ({max_outstanding} outstanding flows)")]
     CapacityExceeded { max_outstanding: usize },
+    #[error("oauth device code poll is already in progress")]
+    DevicePollInProgress,
+}
+
+pub trait OAuthFlowAuthority: Send + Sync {
+    fn start(
+        &self,
+        provider: OAuthProviderIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+    ) -> Result<String, OAuthFlowError>;
+
+    fn consume(
+        &self,
+        state: &str,
+        provider: OAuthProviderIdentity,
+        redirect_uri: &str,
+    ) -> Result<OAuthFlowRecord, OAuthFlowError>;
+
+    fn admit_device_code(
+        &self,
+        provider: OAuthProviderIdentity,
+        device_code: String,
+        expires_in: Duration,
+    ) -> Result<(), OAuthFlowError>;
+
+    fn verify_device_code(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError>;
+
+    fn begin_device_code_poll(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError>;
+
+    fn finish_device_code_poll(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<(), OAuthFlowError>;
+
+    fn consume_device_code(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError>;
 }
 
 #[derive(Debug)]
@@ -210,6 +273,7 @@ pub struct OAuthFlowRegistry {
     ttl: Duration,
     max_outstanding: usize,
     flows: Mutex<HashMap<String, OAuthFlowRecord>>,
+    device_flows: Mutex<HashMap<String, OAuthDeviceFlowState>>,
 }
 
 impl OAuthFlowRegistry {
@@ -222,6 +286,7 @@ impl OAuthFlowRegistry {
             ttl,
             max_outstanding: max_outstanding.max(1),
             flows: Mutex::new(HashMap::new()),
+            device_flows: Mutex::new(HashMap::new()),
         }
     }
 
@@ -231,16 +296,95 @@ impl OAuthFlowRegistry {
         redirect_uri: impl Into<String>,
         pkce_verifier: impl Into<String>,
     ) -> Result<String, OAuthFlowError> {
+        <Self as OAuthFlowAuthority>::start(
+            self,
+            provider,
+            redirect_uri.into(),
+            pkce_verifier.into(),
+        )
+    }
+
+    pub fn consume(
+        &self,
+        state: &str,
+        provider: OAuthProviderIdentity,
+        redirect_uri: &str,
+    ) -> Result<OAuthFlowRecord, OAuthFlowError> {
+        <Self as OAuthFlowAuthority>::consume(self, state, provider, redirect_uri)
+    }
+
+    pub fn admit_device_code(
+        &self,
+        provider: OAuthProviderIdentity,
+        device_code: impl Into<String>,
+        expires_in: Duration,
+    ) -> Result<(), OAuthFlowError> {
+        <Self as OAuthFlowAuthority>::admit_device_code(
+            self,
+            provider,
+            device_code.into(),
+            expires_in,
+        )
+    }
+
+    pub fn verify_device_code(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        <Self as OAuthFlowAuthority>::verify_device_code(self, device_code, provider)
+    }
+
+    pub fn begin_device_code_poll(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        <Self as OAuthFlowAuthority>::begin_device_code_poll(self, device_code, provider)
+    }
+
+    pub fn finish_device_code_poll(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<(), OAuthFlowError> {
+        <Self as OAuthFlowAuthority>::finish_device_code_poll(self, device_code, provider)
+    }
+
+    pub fn consume_device_code(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        <Self as OAuthFlowAuthority>::consume_device_code(self, device_code, provider)
+    }
+}
+
+impl Default for OAuthFlowRegistry {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(10 * 60))
+    }
+}
+
+impl OAuthFlowAuthority for OAuthFlowRegistry {
+    fn start(
+        &self,
+        provider: OAuthProviderIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+    ) -> Result<String, OAuthFlowError> {
         let state = new_state_token()?;
         let record = OAuthFlowRecord {
             provider,
-            redirect_uri: redirect_uri.into(),
-            pkce_verifier: pkce_verifier.into(),
+            redirect_uri,
+            pkce_verifier,
             created_at: Instant::now(),
         };
         let mut flows = self.flows.lock();
+        let mut device_flows = self.device_flows.lock();
         prune_expired_locked(&mut flows, self.ttl);
-        if flows.len() >= self.max_outstanding {
+        prune_expired_device_locked(&mut device_flows);
+        if flows.len() + device_flows.len() >= self.max_outstanding {
             return Err(OAuthFlowError::CapacityExceeded {
                 max_outstanding: self.max_outstanding,
             });
@@ -249,7 +393,7 @@ impl OAuthFlowRegistry {
         Ok(state)
     }
 
-    pub fn consume(
+    fn consume(
         &self,
         state: &str,
         provider: OAuthProviderIdentity,
@@ -271,11 +415,121 @@ impl OAuthFlowRegistry {
         }
         Ok(record)
     }
-}
 
-pub fn global_oauth_flow_registry() -> &'static OAuthFlowRegistry {
-    static REGISTRY: OnceLock<OAuthFlowRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(|| OAuthFlowRegistry::new(Duration::from_secs(10 * 60)))
+    fn admit_device_code(
+        &self,
+        provider: OAuthProviderIdentity,
+        device_code: String,
+        expires_in: Duration,
+    ) -> Result<(), OAuthFlowError> {
+        let mut flows = self.flows.lock();
+        let mut device_flows = self.device_flows.lock();
+        prune_expired_locked(&mut flows, self.ttl);
+        prune_expired_device_locked(&mut device_flows);
+        if flows.len() + device_flows.len() >= self.max_outstanding {
+            return Err(OAuthFlowError::CapacityExceeded {
+                max_outstanding: self.max_outstanding,
+            });
+        }
+        let now = Instant::now();
+        let record = OAuthDeviceFlowRecord {
+            provider,
+            device_code: device_code.clone(),
+            created_at: now,
+            expires_at: now + expires_in,
+        };
+        device_flows.insert(
+            device_code,
+            OAuthDeviceFlowState {
+                record,
+                poll_in_progress: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn verify_device_code(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        let mut flows = self.device_flows.lock();
+        prune_expired_device_locked(&mut flows);
+        let Some(record) = flows.get(device_code) else {
+            return Err(OAuthFlowError::Missing);
+        };
+        if record.record.provider != provider {
+            return Err(OAuthFlowError::ProviderMismatch {
+                expected: record.record.provider,
+                actual: provider,
+            });
+        }
+        Ok(record.record.clone())
+    }
+
+    fn begin_device_code_poll(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        let mut flows = self.device_flows.lock();
+        prune_expired_device_locked(&mut flows);
+        let Some(state) = flows.get_mut(device_code) else {
+            return Err(OAuthFlowError::Missing);
+        };
+        if state.record.provider != provider {
+            return Err(OAuthFlowError::ProviderMismatch {
+                expected: state.record.provider,
+                actual: provider,
+            });
+        }
+        if state.poll_in_progress {
+            return Err(OAuthFlowError::DevicePollInProgress);
+        }
+        state.poll_in_progress = true;
+        Ok(state.record.clone())
+    }
+
+    fn finish_device_code_poll(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<(), OAuthFlowError> {
+        let mut flows = self.device_flows.lock();
+        let Some(state) = flows.get_mut(device_code) else {
+            prune_expired_device_locked(&mut flows);
+            return Err(OAuthFlowError::Missing);
+        };
+        if state.record.provider != provider {
+            return Err(OAuthFlowError::ProviderMismatch {
+                expected: state.record.provider,
+                actual: provider,
+            });
+        }
+        state.poll_in_progress = false;
+        prune_expired_device_locked(&mut flows);
+        Ok(())
+    }
+
+    fn consume_device_code(
+        &self,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        let mut flows = self.device_flows.lock();
+        let Some(state) = flows.remove(device_code) else {
+            prune_expired_device_locked(&mut flows);
+            return Err(OAuthFlowError::Missing);
+        };
+        prune_expired_device_locked(&mut flows);
+        if state.record.provider != provider {
+            return Err(OAuthFlowError::ProviderMismatch {
+                expected: state.record.provider,
+                actual: provider,
+            });
+        }
+        Ok(state.record)
+    }
 }
 
 fn new_state_token() -> Result<String, OAuthFlowError> {
@@ -289,6 +543,11 @@ fn new_state_token() -> Result<String, OAuthFlowError> {
 
 fn prune_expired_locked(flows: &mut HashMap<String, OAuthFlowRecord>, ttl: Duration) {
     flows.retain(|_, record| record.created_at.elapsed() <= ttl);
+}
+
+fn prune_expired_device_locked(flows: &mut HashMap<String, OAuthDeviceFlowState>) {
+    let now = Instant::now();
+    flows.retain(|_, state| state.poll_in_progress || state.record.expires_at >= now);
 }
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -468,6 +727,182 @@ mod tests {
                 )
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn oauth_state_cannot_cross_login_lifecycle_authorities() {
+        let admitting_authority = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let unrelated_authority = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let state = admitting_authority
+            .start(
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback",
+                "verifier",
+            )
+            .expect("state generation succeeds");
+
+        assert!(matches!(
+            unrelated_authority.consume(
+                &state,
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback"
+            ),
+            Err(OAuthFlowError::Missing)
+        ));
+
+        let record = admitting_authority
+            .consume(
+                &state,
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback",
+            )
+            .expect("admitting authority owns the flow");
+        assert_eq!(record.pkce_verifier, "verifier");
+    }
+
+    #[test]
+    fn oauth_device_flow_is_retained_until_terminal_consume() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+
+        let observed = registry
+            .verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("pending device flow remains visible");
+        assert_eq!(observed.device_code, "device-code");
+
+        let consumed = registry
+            .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("terminal device flow consumes");
+        assert_eq!(consumed.provider, OAuthProviderIdentity::GoogleCodeAssist);
+        assert!(matches!(
+            registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::Missing)
+        ));
+    }
+
+    #[test]
+    fn oauth_device_flow_rejects_provider_mismatch() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+
+        assert!(matches!(
+            registry.verify_device_code("device-code", OAuthProviderIdentity::OpenAiChatGpt),
+            Err(OAuthFlowError::ProviderMismatch { .. })
+        ));
+        assert!(
+            registry
+                .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn oauth_device_flow_expired_records_are_pruned() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry.device_flows.lock().insert(
+            "device-code".to_string(),
+            OAuthDeviceFlowState {
+                record: OAuthDeviceFlowRecord {
+                    provider: OAuthProviderIdentity::GoogleCodeAssist,
+                    device_code: "device-code".to_string(),
+                    created_at: Instant::now()
+                        .checked_sub(Duration::from_secs(601))
+                        .expect("test duration is representable"),
+                    expires_at: Instant::now()
+                        .checked_sub(Duration::from_secs(1))
+                        .expect("test duration is representable"),
+                },
+                poll_in_progress: false,
+            },
+        );
+
+        assert!(matches!(
+            registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::Missing)
+        ));
+    }
+
+    #[test]
+    fn oauth_device_terminal_consume_survives_local_expiry_boundary() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry.device_flows.lock().insert(
+            "device-code".to_string(),
+            OAuthDeviceFlowState {
+                record: OAuthDeviceFlowRecord {
+                    provider: OAuthProviderIdentity::GoogleCodeAssist,
+                    device_code: "device-code".to_string(),
+                    created_at: Instant::now()
+                        .checked_sub(Duration::from_secs(601))
+                        .expect("test duration is representable"),
+                    expires_at: Instant::now()
+                        .checked_sub(Duration::from_secs(1))
+                        .expect("test duration is representable"),
+                },
+                poll_in_progress: false,
+            },
+        );
+
+        let consumed = registry
+            .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("terminal provider result should still consume verified local state");
+        assert_eq!(consumed.device_code, "device-code");
+        assert!(matches!(
+            registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::Missing)
+        ));
+    }
+
+    #[test]
+    fn oauth_device_terminal_consume_survives_intervening_prune_while_polling() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+        registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("poll begins");
+        assert!(matches!(
+            registry.begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::DevicePollInProgress)
+        ));
+        {
+            let mut flows = registry.device_flows.lock();
+            flows
+                .get_mut("device-code")
+                .expect("device flow exists")
+                .record
+                .expires_at = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test duration is representable");
+        }
+
+        registry
+            .start(
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback",
+                "verifier",
+            )
+            .expect("unrelated start should not prune in-flight poll");
+        let consumed = registry
+            .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("terminal provider result should consume in-flight expired state");
+        assert_eq!(consumed.device_code, "device-code");
     }
 
     #[test]

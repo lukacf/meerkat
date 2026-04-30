@@ -3759,6 +3759,7 @@ impl AgentFactory {
                 builder =
                     builder.with_tool_visibility_owner(Arc::clone(&bindings.tool_visibility_owner));
                 builder = builder.with_turn_state_handle(Arc::clone(&bindings.turn_state));
+                builder = builder.require_runtime_execution_kind_stamp();
                 builder = builder
                     .with_external_tool_surface_handle(Arc::clone(&bindings.external_tool_surface));
                 builder = builder.with_auth_lease_handle(Arc::clone(&bindings.auth_lease));

@@ -1645,6 +1645,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             })?;
         }
 
+        let initial_execution_kind = req.build.as_ref().and_then(|build| {
+            matches!(
+                build.runtime_build_mode,
+                meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(_)
+            )
+            .then_some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        });
+
         // Run the first turn
         let (result_tx, result_rx) = oneshot::channel();
         if command_tx
@@ -1656,7 +1664,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 result_tx,
                 skill_references: req.skill_references,
                 flow_tool_overlay: None,
-                execution_kind: None, // non-runtime substrate-direct path
+                execution_kind: initial_execution_kind,
             })
             .await
             .is_err()

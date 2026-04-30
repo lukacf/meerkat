@@ -251,7 +251,7 @@ where
                     .to_string(),
             )
         })?;
-        if self.runtime_execution_kind.is_none() {
+        if self.runtime_execution_kind_required && self.runtime_execution_kind.is_none() {
             return Err(AgentError::InternalError(
                 "runtime_execution_kind not set: turn-state handle is attached but \
                  the runtime build mode did not classify the execution kind"

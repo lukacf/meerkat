@@ -235,6 +235,7 @@ async fn prepare_turn_state_for_primitive(
         })
 }
 
+#[cfg(test)]
 pub(crate) fn try_inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,
@@ -278,6 +279,7 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,
@@ -286,6 +288,7 @@ pub(crate) fn inputs_to_primitive_with_boundary(
     try_inputs_to_primitive_with_boundary(inputs, boundary, &semantics)
 }
 
+#[cfg(test)]
 pub(crate) fn inputs_to_primitive(
     inputs: &[(InputId, Input)],
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
@@ -296,11 +299,13 @@ pub(crate) fn inputs_to_primitive(
     inputs_to_primitive_with_boundary(inputs, boundary)
 }
 
+#[cfg(test)]
 fn fallback_unadmitted_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
     let policy = crate::policy_table::DefaultPolicyTable::resolve(input, true);
     crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind())
 }
 
+#[cfg(test)]
 fn fallback_batch_semantics(
     inputs: &[(InputId, Input)],
 ) -> Vec<crate::ingress_types::RuntimeInputSemantics> {
@@ -311,11 +316,26 @@ fn fallback_batch_semantics(
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
+#[cfg(test)]
 pub(crate) fn input_to_primitive(
     input: &Input,
     input_id: InputId,
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     inputs_to_primitive(&[(input_id, input.clone())])
+}
+
+pub(crate) fn admitted_input_to_primitive(
+    input: &Input,
+    input_id: InputId,
+    projection: crate::ingress_types::RuntimeInputProjection,
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
+    try_projected_inputs_to_primitive_with_boundary(
+        &[(input_id, input.clone())],
+        &[projection],
+        semantics.boundary,
+        &[semantics],
+    )
 }
 
 /// Spawn the per-session runtime loop with optional completion registry.
@@ -2145,6 +2165,31 @@ mod tests {
         assert_eq!(
             meta.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+        );
+    }
+
+    #[test]
+    fn admitted_input_primitive_uses_runtime_stamped_execution_kind() {
+        let input = make_prompt("test prompt");
+        let id = input.id().clone();
+        let primitive = admitted_input_to_primitive(
+            &input,
+            id,
+            crate::input::runtime_input_projection(&input),
+            crate::ingress_types::RuntimeInputSemantics {
+                boundary: RunApplyBoundary::RunStart,
+                execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                peer_response_terminal_apply_intent: None,
+            },
+        )
+        .expect("single input metadata cannot conflict");
+        let meta = primitive
+            .turn_metadata()
+            .expect("should have turn_metadata");
+        assert_eq!(
+            meta.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending),
+            "primitive construction must use the runtime-stamped execution kind, not the local input kind"
         );
     }
 

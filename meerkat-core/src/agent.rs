@@ -980,6 +980,8 @@ where
         Option<Arc<std::sync::RwLock<crate::service::MobToolAuthorityContext>>>,
     /// Runtime-backed turn-state handle, provided by the session runtime bindings.
     pub(crate) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
+    /// True when the runtime control plane must stamp execution kind metadata.
+    pub(crate) runtime_execution_kind_required: bool,
     /// Typed execution intent for the current run, when this turn is owned by
     /// the runtime control plane rather than a direct surface call.
     pub(crate) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,

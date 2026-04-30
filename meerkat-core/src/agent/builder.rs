@@ -57,6 +57,7 @@ pub struct AgentBuilder {
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
+    pub(super) runtime_execution_kind_required: bool,
     pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
@@ -95,6 +96,7 @@ impl AgentBuilder {
             epoch_cursor_state: None,
             tool_visibility_owner: None,
             turn_state_handle: None,
+            runtime_execution_kind_required: false,
             runtime_execution_kind: None,
             external_tool_surface_handle: None,
             auth_lease_handle: None,
@@ -332,6 +334,7 @@ impl AgentBuilder {
             epoch_cursor_state: self.epoch_cursor_state,
             completion_enrichment: self.completion_enrichment,
             mob_authority_handle: None,
+            runtime_execution_kind_required: self.runtime_execution_kind_required,
             runtime_execution_kind: self.runtime_execution_kind,
             turn_state_handle: self.turn_state_handle,
             external_tool_surface_handle: self.external_tool_surface_handle,
@@ -529,6 +532,12 @@ impl AgentBuilder {
     /// Set the runtime-backed turn-state diagnostic handle for this build.
     pub fn with_turn_state_handle(mut self, handle: Arc<dyn crate::TurnStateHandle>) -> Self {
         self.turn_state_handle = Some(handle);
+        self
+    }
+
+    /// Require runtime-stamped execution kind metadata before executing turns.
+    pub fn require_runtime_execution_kind_stamp(mut self) -> Self {
+        self.runtime_execution_kind_required = true;
         self
     }
 
@@ -771,10 +780,12 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .require_runtime_execution_kind_stamp()
             .build(client, tools, store)
             .await;
 
         assert_eq!(agent.runtime_execution_kind, None);
+        assert!(agent.runtime_execution_kind_required);
     }
 
     #[tokio::test]
@@ -787,6 +798,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .require_runtime_execution_kind_stamp()
             .build(client, tools, store)
             .await;
 
@@ -815,6 +827,7 @@ mod tests {
             .with_turn_state_handle(Arc::new(
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
+            .require_runtime_execution_kind_stamp()
             .build(client, tools, store)
             .await;
 

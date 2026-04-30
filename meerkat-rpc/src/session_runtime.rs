@@ -836,7 +836,7 @@ impl SessionRuntime {
             provider_params,
             render_metadata: None,
             connection_ref,
-            execution_kind: None,
+            execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             peer_response_terminal_apply_intent: None,
         };
         (!metadata.is_empty()).then_some(metadata)
@@ -3217,6 +3217,12 @@ impl SessionRuntime {
                 .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
                 .unwrap_or(false),
         };
+        let turn_metadata = Self::turn_metadata_from_overrides(
+            skill_references.clone(),
+            flow_tool_overlay.clone(),
+            additional_instructions.clone(),
+            overrides.as_ref(),
+        );
 
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
@@ -3226,7 +3232,7 @@ impl SessionRuntime {
             event_tx: Some(event_tx.clone()),
             skill_references: skill_references.clone(),
             flow_tool_overlay: flow_tool_overlay.clone(),
-            turn_metadata: None,
+            turn_metadata,
         };
 
         if self.live_session_is_stale(session_id).await? {

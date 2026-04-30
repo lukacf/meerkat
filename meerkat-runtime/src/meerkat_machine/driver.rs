@@ -946,16 +946,31 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         let first = &queue[driver_index];
         let prefix = &queue[..=driver_index];
         if ingress.is_prompt(first) {
-            return prefix.to_vec();
+            let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
+                return Vec::new();
+            };
+            let target_peer_response_terminal_apply_intent =
+                machine_input_peer_response_terminal_apply_intent(driver, first);
+            let first_compatible_index = prefix
+                .iter()
+                .rposition(|id| {
+                    machine_input_execution_kind(driver, id) != Some(target_execution_kind)
+                        || machine_input_peer_response_terminal_apply_intent(driver, id)
+                            != target_peer_response_terminal_apply_intent
+                })
+                .map_or(0, |index| index + 1);
+            return prefix[first_compatible_index..].to_vec();
         }
+        let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
+            return Vec::new();
+        };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
         return queue[..]
             .iter()
             .take_while(|id| {
                 !ingress.is_prompt(id)
-                    && machine_input_execution_kind(driver, id)
-                        == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+                    && machine_input_execution_kind(driver, id) == Some(target_execution_kind)
                     && machine_input_peer_response_terminal_apply_intent(driver, id)
                         == target_peer_response_terminal_apply_intent
             })
@@ -1685,6 +1700,29 @@ pub(crate) async fn machine_stop_runtime(
 mod tests {
     use super::*;
 
+    fn queued_seed() -> InputStateSeed {
+        let mut seed = InputStateSeed::new_accepted();
+        seed.phase = InputLifecycleState::Queued;
+        seed
+    }
+
+    fn queue_policy(
+        wake_mode: crate::policy::WakeMode,
+        drain_policy: crate::policy::DrainPolicy,
+    ) -> crate::policy::PolicyDecision {
+        crate::policy::PolicyDecision {
+            apply_mode: crate::policy::ApplyMode::StageRunStart,
+            wake_mode,
+            queue_mode: crate::policy::QueueMode::Fifo,
+            consume_point: crate::policy::ConsumePoint::OnRunComplete,
+            drain_policy,
+            routing_disposition: crate::policy::RoutingDisposition::Queue,
+            record_transcript: true,
+            emit_operator_content: true,
+            policy_version: crate::policy_table::DEFAULT_POLICY_VERSION,
+        }
+    }
+
     #[test]
     fn machine_batch_execution_kind_requires_admitted_semantics() {
         let driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(
@@ -1696,6 +1734,95 @@ mod tests {
             machine_batch_execution_kind(&driver, &[unstamped_input]),
             None,
             "missing runtime semantics must not locally default to ContentTurn"
+        );
+    }
+
+    #[test]
+    fn prompt_batch_selection_excludes_mixed_execution_kind_prefix() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "mixed-prefix-test",
+        ));
+        let resume_input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let prompt_input = Input::Prompt(crate::input::PromptInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::Operator,
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text: "drive the queue".into(),
+            blocks: None,
+            turn_metadata: None,
+        });
+        let resume_id = resume_input.id().clone();
+        let prompt_id = prompt_input.id().clone();
+        let mut resume_state = InputState::new_accepted(resume_id.clone());
+        resume_state.persisted_input = Some(resume_input.clone());
+        let mut prompt_state = InputState::new_accepted(prompt_id.clone());
+        prompt_state.persisted_input = Some(prompt_input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(resume_state.clone()));
+        assert!(driver.ledger_mut().recover(prompt_state.clone()));
+
+        driver
+            .admit_recovered_to_ingress(
+                resume_id.clone(),
+                ContentShape(resume_input.kind_id().to_string()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&resume_input),
+                false,
+                &resume_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::None,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued resume input");
+        driver
+            .admit_recovered_to_ingress(
+                prompt_id.clone(),
+                ContentShape(prompt_input.kind_id().to_string()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prompt_input),
+                true,
+                &prompt_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+
+        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+
+        assert_eq!(
+            selected,
+            vec![prompt_id],
+            "prompt-driven batches must not stage older inputs with a different execution kind"
         );
     }
 }

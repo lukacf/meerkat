@@ -1151,9 +1151,16 @@ mod tests {
             .await
             .map_err(|err| format!("{err}"))?;
         let (run_tx, _run_rx) = mpsc::channel(8);
-        SessionAgent::run_with_events(&mut agent, "inspect".to_string().into(), run_tx)
-            .await
-            .map_err(|err| format!("{err}"))?;
+        SessionAgent::run_turn_with_events(
+            &mut agent,
+            "inspect".to_string().into(),
+            HandlingMode::Queue,
+            None,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            run_tx,
+        )
+        .await
+        .map_err(|err| format!("{err}"))?;
 
         let tool_names = capture.tool_names();
         assert!(
@@ -1212,9 +1219,16 @@ mod tests {
             .await
             .map_err(|err| format!("{err}"))?;
         let (run_tx, _run_rx) = mpsc::channel(8);
-        SessionAgent::run_with_events(&mut agent, "inspect".to_string().into(), run_tx)
-            .await
-            .map_err(|err| format!("{err}"))?;
+        SessionAgent::run_turn_with_events(
+            &mut agent,
+            "inspect".to_string().into(),
+            HandlingMode::Queue,
+            None,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            run_tx,
+        )
+        .await
+        .map_err(|err| format!("{err}"))?;
 
         let tool_names = capture.tool_names();
         assert!(tool_names.iter().any(|name| name == "generate_image"));

@@ -51,11 +51,6 @@ pub struct CoreApplyOutput {
     /// Optional serialized session snapshot to durably commit atomically with
     /// the receipt and input-state updates.
     pub session_snapshot: Option<Vec<u8>>,
-    /// Compatibility mirror of the completed run result, if one exists.
-    ///
-    /// Canonical terminal semantics live in `terminal`. Keep this field while
-    /// runtime-backed surfaces migrate off the legacy `Option<RunResult>` seam.
-    pub run_result: Option<RunResult>,
     /// Canonical terminal outcome for runtime-backed execution.
     ///
     /// `None` means the primitive committed successfully but did not produce a
@@ -72,7 +67,6 @@ impl CoreApplyOutput {
         Self {
             receipt,
             session_snapshot,
-            run_result: Some(run_result.clone()),
             terminal: Some(CoreApplyTerminal::RunResult(run_result)),
         }
     }
@@ -86,7 +80,6 @@ impl CoreApplyOutput {
         Self {
             receipt,
             session_snapshot,
-            run_result: None,
             terminal: Some(CoreApplyTerminal::CallbackPending {
                 tool_name: tool_name.into(),
                 args,
@@ -101,7 +94,6 @@ impl CoreApplyOutput {
         Self {
             receipt,
             session_snapshot,
-            run_result: None,
             terminal: None,
         }
     }

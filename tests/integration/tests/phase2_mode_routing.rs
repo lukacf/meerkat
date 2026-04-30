@@ -290,7 +290,6 @@ impl MobSessionService for MockSessionService {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
 }

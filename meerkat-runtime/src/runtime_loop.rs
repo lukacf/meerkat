@@ -79,30 +79,24 @@ pub(crate) fn merge_batch_turn_metadata(
 fn resolve_completion_waiters(
     registry: &mut crate::completion::CompletionRegistry,
     input_ids: &[InputId],
-    run_result: Option<meerkat_core::types::RunResult>,
     terminal: Option<CoreApplyTerminal>,
 ) {
-    if let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal {
-        for input_id in input_ids {
-            registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
-        }
-        return;
-    }
-
-    if let Some(result) = run_result {
-        for input_id in input_ids {
-            registry.resolve_completed(input_id, result.clone());
-        }
-        return;
-    }
-
     match terminal {
-        Some(CoreApplyTerminal::RunResult(_) | CoreApplyTerminal::NoPendingBoundary) | None => {
+        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
+            for input_id in input_ids {
+                registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
+            }
+        }
+        Some(CoreApplyTerminal::RunResult(result)) => {
+            for input_id in input_ids {
+                registry.resolve_completed(input_id, result.clone());
+            }
+        }
+        Some(CoreApplyTerminal::NoPendingBoundary) | None => {
             for input_id in input_ids {
                 registry.resolve_without_result(input_id);
             }
         }
-        Some(CoreApplyTerminal::CallbackPending { .. }) => unreachable!(),
     }
 }
 
@@ -733,7 +727,6 @@ async fn process_queue(
                         let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
                             receipt,
                             session_snapshot,
-                            run_result,
                             terminal,
                         } = output;
                         drop(d);
@@ -758,7 +751,7 @@ async fn process_queue(
                         // Resolve completion waiters unconditionally
                         if let Some(completions) = completions.as_ref() {
                             let mut reg = completions.lock().await;
-                            resolve_completion_waiters(&mut reg, &input_ids, run_result, terminal);
+                            resolve_completion_waiters(&mut reg, &input_ids, terminal);
                         }
                     }
                     Err(e) => {
@@ -1958,7 +1951,6 @@ mod tests {
         resolve_completion_waiters(
             &mut registry,
             std::slice::from_ref(&input_id),
-            None,
             Some(CoreApplyTerminal::CallbackPending {
                 tool_name: "external_mock".to_string(),
                 args: serde_json::json!({ "value": "browser" }),
@@ -1971,6 +1963,36 @@ mod tests {
                 assert_eq!(args, serde_json::json!({ "value": "browser" }));
             }
             other => panic!("Expected CallbackPending, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_completion_waiters_surfaces_terminal_run_result() {
+        let mut registry = crate::completion::CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+        let run_result = meerkat_core::types::RunResult {
+            text: "terminal authority".to_string(),
+            session_id: SessionId::new(),
+            usage: meerkat_core::types::Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+
+        resolve_completion_waiters(
+            &mut registry,
+            std::slice::from_ref(&input_id),
+            Some(CoreApplyTerminal::RunResult(run_result)),
+        );
+
+        match handle.wait().await {
+            crate::completion::CompletionOutcome::Completed(result) => {
+                assert_eq!(result.text, "terminal authority");
+            }
+            other => panic!("Expected Completed, got {other:?}"),
         }
     }
 

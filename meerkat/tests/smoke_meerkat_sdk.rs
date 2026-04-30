@@ -1715,8 +1715,8 @@ mod scenario_22_runtime_host_comms {
                 &result.text[..result.text.len().min(100)]
             );
 
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id: _run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -1724,10 +1724,9 @@ mod scenario_22_runtime_host_comms {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-                run_result: Some(result),
-            })
+                None,
+                result,
+            ))
         }
 
         async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {

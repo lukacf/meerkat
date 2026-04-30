@@ -606,7 +606,6 @@ impl CoreExecutor for NoopExecutor {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
     async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {

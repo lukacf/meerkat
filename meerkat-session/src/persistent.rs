@@ -1192,7 +1192,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
-                run_result: None,
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
             },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
@@ -3809,7 +3808,6 @@ mod tests {
             output.receipt.contributing_input_ids,
             contributing_input_ids
         );
-        assert!(output.run_result.is_none());
         assert!(matches!(
             output.terminal,
             Some(CoreApplyTerminal::NoPendingBoundary)

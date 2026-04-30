@@ -39,6 +39,7 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -79,6 +80,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -137,6 +139,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -199,6 +202,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -260,6 +264,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -321,6 +326,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -382,6 +388,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -441,6 +448,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -500,6 +508,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -559,6 +568,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -623,6 +633,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -682,6 +693,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -741,6 +753,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -800,6 +813,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -859,6 +873,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -922,6 +937,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -981,6 +997,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1040,6 +1057,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1101,6 +1119,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1160,6 +1179,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1219,6 +1239,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1280,6 +1301,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1339,6 +1361,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1398,6 +1421,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1457,6 +1481,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1519,6 +1544,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],
@@ -1581,6 +1607,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
     ],

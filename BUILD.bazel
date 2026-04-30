@@ -175,7 +175,6 @@ test_suite(
         "//meerkat-contracts:skill_ref_wire_no_legacy_test",
         "//meerkat-core:connection_ref_no_string_form_test",
         "//meerkat-core:fork_at_rotates_session_id_test",
-        "//meerkat-core:hooks_behavior_test",
         "//meerkat-core:hooks_contracts_test",
         "//meerkat-core:image_generation_contracts_test",
         "//meerkat-core:meerkat_core_unit_test",

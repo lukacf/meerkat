@@ -45,10 +45,18 @@ default = ["schema", "jsonschema"]
 schema = []
 jsonschema = ["dep:jsonschema"]
 standalone-agent-builder = []
+# Internal cross-crate bridge used by the `meerkat` facade's AgentFactory.
+# Not part of the default `meerkat-core` public API.
+internal-agent-factory-build = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[[test]]
+name = "hooks_behavior"
+path = "tests/hooks_behavior.rs"
+required-features = ["internal-agent-factory-build"]
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "js-sys"]  # cfg(target_arch = "wasm32")

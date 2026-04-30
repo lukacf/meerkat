@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn repo_root() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -19,6 +22,81 @@ fn try_repo_file(relative: &str) -> Option<String> {
     let mut path = repo_root();
     path.push(relative);
     fs::read_to_string(&path).ok()
+}
+
+fn find_runfile_tool(root: &Path, suffix: &str) -> Option<PathBuf> {
+    let mut queue = VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                queue.push_back(path);
+            } else if path.to_string_lossy().ends_with(suffix) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn bazel_cargo_check_env() -> Vec<(&'static str, OsString)> {
+    let mut env = Vec::new();
+    let Some(runfiles_dir) = std::env::var_os("RUNFILES_DIR").map(PathBuf::from) else {
+        return env;
+    };
+
+    let manifest_dir = runfiles_dir.join("_main/meerkat").canonicalize().ok();
+    if let Some(manifest_dir) = manifest_dir {
+        env.push(("CARGO_MANIFEST_DIR", manifest_dir.into_os_string()));
+    }
+
+    if std::env::var_os("CARGO").is_none() {
+        if let Some(cargo) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/cargo") {
+            env.push(("CARGO", cargo.into_os_string()));
+        } else {
+            env.push(("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO", OsString::from("1")));
+        }
+    }
+
+    if std::env::var_os("RUSTC").is_none()
+        && let Some(rustc) = find_runfile_tool(&runfiles_dir, "rust_toolchain/bin/rustc")
+    {
+        env.push(("RUSTC", rustc.into_os_string()));
+    }
+
+    if std::env::var_os("CARGO_HOME").is_none()
+        && let Some(cargo_home) = std::env::var_os("MEERKAT_HOST_CARGO_HOME")
+    {
+        env.push(("CARGO_HOME", cargo_home));
+    }
+
+    env
+}
+
+fn run_in_configured_bazel_child(
+    test_name: &'static str,
+    env: Vec<(&'static str, OsString)>,
+) -> std::io::Result<bool> {
+    if env.is_empty() || std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_ENV_CONFIGURED").is_some() {
+        return Ok(false);
+    }
+
+    let current_exe = std::env::current_exe()?;
+    let status = Command::new(current_exe)
+        .arg("--exact")
+        .arg(test_name)
+        .arg("--nocapture")
+        .env("MEERKAT_DOWNSTREAM_CANARY_ENV_CONFIGURED", "1")
+        .envs(env)
+        .status()?;
+    assert!(
+        status.success(),
+        "configured downstream canary child failed: {status}"
+    );
+    Ok(true)
 }
 
 fn rust_files_under(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -54,6 +132,90 @@ fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
     cfg_window.contains(r#"#[cfg(any(test, feature = "standalone-agent-builder"))]"#)
 }
 
+fn public_factory_policy_finalizer_is_internal_feature_gated(source: &str) -> bool {
+    let Some(pos) = source.find("pub async fn build_agent_after_factory_policy") else {
+        return true;
+    };
+    let cfg_window = source[..pos]
+        .lines()
+        .rev()
+        .take(5)
+        .collect::<Vec<_>>()
+        .join("\n");
+    cfg_window.contains(r#"#[cfg(feature = "internal-agent-factory-build")]"#)
+}
+
+fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
+    let Some(pos) = source.find("pub use builder::build_agent_after_factory_policy") else {
+        return true;
+    };
+    let cfg_window = source[..pos]
+        .lines()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    cfg_window.contains(r#"#[cfg(feature = "internal-agent-factory-build")]"#)
+}
+
+#[test]
+fn downstream_safe_code_cannot_forge_factory_policy_finalizer() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_safe_code_cannot_forge_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_forged_factory_policy.rs"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("check")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream core-only fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("build_agent_after_factory_policy")
+            && (stderr.contains("not found") || stderr.contains("cannot find")),
+        "downstream fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
 #[test]
 fn core_agent_builder_does_not_expose_public_build_bypass() {
     let builder = repo_file("meerkat-core/src/agent/builder.rs");
@@ -69,6 +231,12 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
         "meerkat_core::AgentBuilder must not expose public standalone \
          build(client, tools, store) in its default production API; low-level \
          standalone construction must be test/embedding opt-in"
+    );
+    assert!(
+        public_factory_policy_finalizer_is_internal_feature_gated(&builder),
+        "meerkat_core must not expose the factory-policy finalizer in its \
+         default public API; the facade factory bridge must be internal \
+         feature-gated"
     );
     assert!(
         !builder.contains("pub async fn build_after_factory_policy"),
@@ -109,6 +277,11 @@ fn core_factory_authority_token_is_not_reexported() {
     let lib = repo_file("meerkat-core/src/lib.rs");
     let facade_lib = repo_file("meerkat/src/lib.rs");
 
+    assert!(
+        agent_mod_reexport_is_internal_feature_gated(&agent_mod),
+        "meerkat_core::agent must not re-export the factory-policy finalizer \
+         in the default public API"
+    );
     assert!(
         !agent_mod.contains("AgentFactoryBuildToken"),
         "meerkat_core::agent must not re-export a factory token that downstream \

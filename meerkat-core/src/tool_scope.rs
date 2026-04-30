@@ -181,6 +181,8 @@ pub enum ToolScopeStageError {
     UnknownTools { names: Vec<String> },
     #[error("Missing tool visibility witness(es) for deferred tool(s): {names:?}")]
     MissingWitnesses { names: Vec<String> },
+    #[error("Invalid tool visibility witness(es) for deferred tool(s): {names:?}")]
+    InvalidWitnesses { names: Vec<String> },
     #[error("Tool scope state lock poisoned")]
     LockPoisoned,
     #[error("Tool visibility owner error: {message}")]
@@ -226,6 +228,12 @@ pub trait ToolVisibilityOwner: Send + Sync {
         authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError>;
 
+    fn replace_deferred_tool_authority_catalog(
+        &self,
+        _catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) {
+    }
+
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError>;
 }
 
@@ -234,6 +242,8 @@ pub trait ToolVisibilityOwner: Send + Sync {
 pub struct LocalToolVisibilityOwner {
     state: Arc<RwLock<SessionToolVisibilityState>>,
     next_revision: Arc<AtomicU64>,
+    deferred_authority_catalog:
+        Arc<RwLock<std::collections::BTreeMap<String, ToolVisibilityWitness>>>,
 }
 
 impl LocalToolVisibilityOwner {
@@ -241,6 +251,7 @@ impl LocalToolVisibilityOwner {
         Self {
             state: Arc::new(RwLock::new(SessionToolVisibilityState::default())),
             next_revision: Arc::new(AtomicU64::new(0)),
+            deferred_authority_catalog: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 }
@@ -324,11 +335,27 @@ impl ToolVisibilityOwner for LocalToolVisibilityOwner {
         if !missing.is_empty() {
             return Err(ToolScopeStageError::MissingWitnesses { names: missing });
         }
+        {
+            let catalog = self
+                .deferred_authority_catalog
+                .read()
+                .map_err(|_| ToolScopeStageError::LockPoisoned)?;
+            validate_deferred_authorities_for_names(&extended, &combined_witnesses, &catalog)?;
+        }
         let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
         state.staged_requested_deferred_names = extended;
         state.requested_witnesses = combined_witnesses;
         state.staged_revision = revision.0;
         Ok(revision)
+    }
+
+    fn replace_deferred_tool_authority_catalog(
+        &self,
+        catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) {
+        if let Ok(mut guard) = self.deferred_authority_catalog.write() {
+            *guard = catalog;
+        }
     }
 
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {
@@ -435,6 +462,10 @@ impl ToolScope {
         deferred_tool_names: HashSet<String>,
         visibility_owner: Arc<dyn ToolVisibilityOwner>,
     ) -> Self {
+        let deferred_tool_names: ToolNameSet = deferred_tool_names.into_iter().collect();
+        visibility_owner.replace_deferred_tool_authority_catalog(
+            deferred_authority_catalog_for_base_tools(&base_tools, &deferred_tool_names),
+        );
         let known_base_names: ToolNameSet = base_tools
             .iter()
             .map(|tool| tool.name.to_string())
@@ -445,7 +476,7 @@ impl ToolScope {
                 base_tools,
                 known_base_names,
                 control_tool_names: control_tool_names.into_iter().collect(),
-                deferred_tool_names: deferred_tool_names.into_iter().collect(),
+                deferred_tool_names,
                 active_turn_allow: None,
                 active_turn_deny: ToolNameSet::new(),
             })),
@@ -618,6 +649,11 @@ impl ToolScope {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
+        self.visibility_owner
+            .replace_deferred_tool_authority_catalog(deferred_authority_catalog_for_base_tools(
+                &state.base_tools,
+                &state.deferred_tool_names,
+            ));
 
         Ok(ToolScopeBoundaryResult {
             previous_base_names: previous_base_names.to_string_set(),
@@ -987,6 +1023,31 @@ impl ToolScope {
         &self,
         authorities: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| ToolScopeStageError::LockPoisoned)?;
+        let visibility_state =
+            self.visibility_owner
+                .visibility_state()
+                .map_err(|err| ToolScopeStageError::Owner {
+                    message: err.to_string(),
+                })?;
+        let names = authorities.keys().cloned().collect::<BTreeSet<_>>();
+        let extended = visibility_state
+            .staged_requested_deferred_names
+            .union(&names)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut combined_witnesses = visibility_state.requested_witnesses.clone();
+        combined_witnesses.extend(authorities.clone());
+        let catalog = deferred_authority_catalog_for_base_tools(
+            &state.base_tools,
+            &state.deferred_tool_names,
+        );
+        validate_deferred_authorities_for_names(&extended, &combined_witnesses, &catalog)?;
+        drop(state);
+
         self.visibility_owner
             .request_deferred_tools(authorities.clone())
     }
@@ -1119,6 +1180,60 @@ fn validate_filter(
     unknown.sort_unstable();
     unknown.dedup();
     Err(ToolScopeStageError::UnknownTools { names: unknown })
+}
+
+fn deferred_authority_catalog_for_base_tools(
+    base_tools: &[Arc<ToolDef>],
+    deferred_tool_names: &ToolNameSet,
+) -> std::collections::BTreeMap<String, ToolVisibilityWitness> {
+    base_tools
+        .iter()
+        .filter(|tool| deferred_tool_names.contains(tool.name.as_str()))
+        .filter_map(|tool| {
+            let provenance = tool.provenance.as_ref()?;
+            Some((
+                tool.name.to_string(),
+                ToolVisibilityWitness {
+                    stable_owner_key: stable_owner_key_for_tool(tool),
+                    last_seen_provenance: Some(provenance.clone()),
+                },
+            ))
+        })
+        .collect()
+}
+
+pub(crate) fn validate_deferred_authorities_for_names(
+    names: &BTreeSet<String>,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    authority_catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Result<(), ToolScopeStageError> {
+    let missing = missing_visibility_witness_names(names, witnesses);
+    if !missing.is_empty() {
+        return Err(ToolScopeStageError::MissingWitnesses { names: missing });
+    }
+
+    let mut invalid = names
+        .iter()
+        .filter(|name| {
+            let witness = witnesses.get(name.as_str());
+            let expected = authority_catalog.get(name.as_str());
+            !matches!(
+                (witness, expected),
+                (Some(witness), Some(expected))
+                    if witness.stable_owner_key == expected.stable_owner_key
+                        && witness.last_seen_provenance == expected.last_seen_provenance
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if invalid.is_empty() {
+        return Ok(());
+    }
+
+    invalid.sort_unstable();
+    invalid.dedup();
+    Err(ToolScopeStageError::InvalidWitnesses { names: invalid })
 }
 
 fn durable_filter_names(state: &SessionToolVisibilityState) -> ToolNameSet {

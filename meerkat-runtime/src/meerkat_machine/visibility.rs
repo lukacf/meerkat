@@ -13,6 +13,8 @@ use super::*;
 #[derive(Default)]
 pub struct MachineToolVisibilityOwner {
     pub state: StdRwLock<SessionToolVisibilityState>,
+    deferred_authority_catalog:
+        StdRwLock<std::collections::BTreeMap<String, ToolVisibilityWitness>>,
     /// Handle to the per-session DSL authority — set by
     /// `MeerkatMachine::session_management` immediately after the owner is
     /// created. When present, staging-path trait calls mint their revision
@@ -37,6 +39,14 @@ impl std::fmt::Debug for MachineToolVisibilityOwner {
                     .ok()
                     .and_then(|slot| slot.as_ref().map(|_| "bound"))
                     .unwrap_or("unbound"),
+            )
+            .field(
+                "deferred_authority_catalog",
+                &self
+                    .deferred_authority_catalog
+                    .read()
+                    .map(|catalog| catalog.len())
+                    .unwrap_or_default(),
             )
             .finish()
     }
@@ -156,6 +166,30 @@ fn authority_witnesses_for_names(
                 .map(|witness| (name.clone(), witness.clone()))
         })
         .collect()
+}
+
+fn invalid_deferred_authority_names(
+    names: &std::collections::BTreeSet<String>,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    authority_catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Vec<String> {
+    let mut invalid = names
+        .iter()
+        .filter(|name| {
+            let witness = witnesses.get(name.as_str());
+            let expected = authority_catalog.get(name.as_str());
+            !matches!(
+                (witness, expected),
+                (Some(witness), Some(expected))
+                    if witness.stable_owner_key == expected.stable_owner_key
+                        && witness.last_seen_provenance == expected.last_seen_provenance
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    invalid.sort_unstable();
+    invalid.dedup();
+    invalid
 }
 
 fn dsl_witnesses(
@@ -348,6 +382,19 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         if !missing.is_empty() {
             return Err(ToolScopeStageError::MissingWitnesses { names: missing });
         }
+        let invalid = {
+            let authority_catalog =
+                self.deferred_authority_catalog
+                    .read()
+                    .map_err(|_| ToolScopeStageError::Owner {
+                        message: "machine visibility deferred authority catalog lock poisoned"
+                            .to_string(),
+                    })?;
+            invalid_deferred_authority_names(&extended, &combined_witnesses, &authority_catalog)
+        };
+        if !invalid.is_empty() {
+            return Err(ToolScopeStageError::InvalidWitnesses { names: invalid });
+        }
         let staged_authorities = authority_witnesses_for_names(&extended, &combined_witnesses);
         let dsl_witnesses = dsl_witnesses(&staged_authorities);
         let revision = self.mint_revision_via_dsl(
@@ -363,6 +410,17 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         state.requested_witnesses = combined_witnesses;
         state.staged_revision = revision.0;
         Ok(revision)
+    }
+
+    fn replace_deferred_tool_authority_catalog(
+        &self,
+        catalog: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    ) {
+        let mut guard = self
+            .deferred_authority_catalog
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = catalog;
     }
 
     fn boundary_applied(&self) -> Result<SessionToolVisibilityState, ToolScopeApplyError> {

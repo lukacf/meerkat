@@ -1343,7 +1343,7 @@ mod scenario_10_memory {
         let llm_adapter = Arc::new(self::LlmClientAdapter::new(llm_client, smoke_model()));
         let (_store, store_adapter, _temp_dir) = create_temp_store().await;
 
-        let mut agent = CoreAgentBuilder::new()
+        let builder = CoreAgentBuilder::new()
             .model(smoke_model())
             .max_tokens_per_turn(512)
             .system_prompt(
@@ -1356,10 +1356,17 @@ mod scenario_10_memory {
             .compactor(compactor)
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-            ))
-            .build_after_factory_policy(llm_adapter, memory_tools, store_adapter)
-            .await
-            .expect("factory-policy memory smoke builder");
+            ));
+        let factory_authority = AgentFactory::new(".rkat/sessions");
+        let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
+            &factory_authority,
+            builder,
+            llm_adapter,
+            memory_tools,
+            store_adapter,
+        )
+        .await
+        .expect("factory-policy memory smoke builder");
 
         // Turn 1: Distinctive content
         let r1 = agent

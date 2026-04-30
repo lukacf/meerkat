@@ -92,8 +92,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_turn_state_handle(Arc::new(
             meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
         ))
-        .build_after_factory_policy(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
-        .await?;
+        .build_standalone(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
+        .await;
 
     // Simulate a long conversation that will trigger compaction.
     // Each prompt asks for detailed explanations to accumulate tokens quickly.

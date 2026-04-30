@@ -162,8 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_turn_state_handle(Arc::new(
             meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
         ))
-        .build_after_factory_policy(Arc::new(llm), Arc::new(gateway), store)
-        .await?;
+        .build_standalone(Arc::new(llm), Arc::new(gateway), store)
+        .await;
 
     // ── Step 6: Ask the agent to recall from memory ──────────────────────────
 

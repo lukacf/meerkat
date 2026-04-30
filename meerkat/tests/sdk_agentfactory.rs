@@ -718,14 +718,20 @@ async fn core_agentbuilder_factory_policy_rejects_missing_metadata() {
     let store = Arc::new(TestSessionStore::new());
     let store_adapter = Arc::new(factory.build_store_adapter(store).await);
 
-    let result = meerkat_core::AgentBuilder::new()
+    let builder = meerkat_core::AgentBuilder::new()
         .model("mock-model")
         .max_tokens_per_turn(64)
         .with_turn_state_handle(Arc::new(
             meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-        ))
-        .build_after_factory_policy(llm_adapter, tools, store_adapter)
-        .await;
+        ));
+    let result = meerkat_core::agent::build_agent_after_factory_policy(
+        &factory,
+        builder,
+        llm_adapter,
+        tools,
+        store_adapter,
+    )
+    .await;
 
     match result {
         Err(AgentBuildPolicyError::MissingSession) => {}

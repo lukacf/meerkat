@@ -755,7 +755,12 @@ for (const pkg of localPackages.values()) {
         data.push("//:workspace_rust_sources");
       }
       if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
-        data.push("//:workspace_runfiles");
+        data.push(
+          "//:workspace_runfiles",
+          "//meerkat-rest:package_runfiles",
+          "//meerkat-rpc:package_runfiles",
+          "//meerkat-runtime:package_runfiles",
+        );
       }
       if (key === "meerkat-machine-codegen" && target.name === "runtime_schema_parity") {
         data.push("//:workspace_runfiles");

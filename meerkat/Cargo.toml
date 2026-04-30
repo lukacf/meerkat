@@ -90,6 +90,7 @@ session-store = [
 ]
 session-compaction = ["meerkat-session/session-compaction"]
 memory-store-session = ["dep:meerkat-memory"]
+standalone-agent-builder = ["meerkat-core/standalone-agent-builder"]
 
 # Optional subsystems
 comms = ["dep:meerkat-comms", "dep:parking_lot", "meerkat-tools/comms"]
@@ -158,12 +159,12 @@ required-features = ["jsonl-store", "skills"]
 [[example]]
 name = "013-context-compaction"
 path = "../examples/013-context-compaction-rs/main.rs"
-required-features = ["jsonl-store", "session-compaction"]
+required-features = ["jsonl-store", "session-compaction", "standalone-agent-builder"]
 
 [[example]]
 name = "014-semantic-memory"
 path = "../examples/014-semantic-memory-rs/main.rs"
-required-features = ["jsonl-store", "memory-store-session"]
+required-features = ["jsonl-store", "memory-store-session", "standalone-agent-builder"]
 
 [[example]]
 name = "015-session-persistence"

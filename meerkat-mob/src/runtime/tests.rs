@@ -69,6 +69,10 @@ use std::time::{Duration, Instant, SystemTime};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 
+struct TestFactoryAuthority;
+
+impl meerkat_core::agent::AgentFactoryPolicyAuthority for TestFactoryAuthority {}
+
 fn default_supervisor_authority_record() -> SupervisorAuthorityRecord {
     SupervisorAuthorityRecord::generate(
         super::bridge_protocol::supervisor_bridge_default_protocol_version(),
@@ -4704,10 +4708,15 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         });
         let tools = Arc::new(OverlayProbeDispatcher::new());
         let store = Arc::new(OverlayProbeSessionStore);
-        let agent = builder
-            .build_after_factory_policy(client, tools, store)
-            .await
-            .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent = meerkat_core::agent::build_agent_after_factory_policy(
+            &TestFactoryAuthority,
+            builder,
+            client,
+            tools,
+            store,
+        )
+        .await
+        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(OverlayProbeSessionAgent { agent })
     }

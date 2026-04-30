@@ -1074,6 +1074,8 @@ pub struct AgentFactory {
         Option<Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>>,
 }
 
+impl meerkat_core::agent::AgentFactoryPolicyAuthority for AgentFactory {}
+
 impl std::fmt::Debug for AgentFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("AgentFactory");
@@ -3872,12 +3874,17 @@ impl AgentFactory {
         // 13. Build agent. AgentFactory owns the policy composition above; core
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
-        let mut agent = builder
-            .build_after_factory_policy(llm_adapter, tools, store_adapter)
-            .await
-            .map_err(|err| {
-                BuildAgentError::Config(format!("AgentFactory policy validation failed: {err}"))
-            })?;
+        let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
+            self,
+            builder,
+            llm_adapter,
+            tools,
+            store_adapter,
+        )
+        .await
+        .map_err(|err| {
+            BuildAgentError::Config(format!("AgentFactory policy validation failed: {err}"))
+        })?;
 
         if let Some(provider) = hoisted_control_visibility_provider {
             provider.set_scope(agent.tool_scope().clone());

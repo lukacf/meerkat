@@ -33,6 +33,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
+struct TestFactoryAuthority;
+
+impl meerkat_core::agent::AgentFactoryPolicyAuthority for TestFactoryAuthority {}
+
 fn agent_builder_with_ephemeral_turn_state() -> AgentBuilder {
     let mut session = Session::new();
     session
@@ -762,10 +766,15 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = builder
-            .build_after_factory_policy(client, tools, store)
-            .await
-            .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent = meerkat_core::agent::build_agent_after_factory_policy(
+            &TestFactoryAuthority,
+            builder,
+            client,
+            tools,
+            store,
+        )
+        .await
+        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
         Ok(CompactionSessionAgent { agent })
     }
 }
@@ -797,10 +806,15 @@ impl SessionAgentBuilder for RealAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = builder
-            .build_after_factory_policy(client, tools, store)
-            .await
-            .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent = meerkat_core::agent::build_agent_after_factory_policy(
+            &TestFactoryAuthority,
+            builder,
+            client,
+            tools,
+            store,
+        )
+        .await
+        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(RealSessionAgent { agent })
     }

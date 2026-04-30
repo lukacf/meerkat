@@ -18,6 +18,10 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::{Mutex, mpsc};
 
+struct TestFactoryAuthority;
+
+impl meerkat_core::agent::AgentFactoryPolicyAuthority for TestFactoryAuthority {}
+
 #[derive(Clone, Copy)]
 enum ClientMode {
     TextOnly,
@@ -292,15 +296,22 @@ async fn build_agent(
     let tools = Arc::new(RecordingToolDispatcher::new(seen_args));
     let store = Arc::new(NoopStore);
 
-    AgentBuilder::new()
+    let builder = AgentBuilder::new()
         .resume_session(factory_policy_session())
         .with_turn_state_handle(Arc::new(
             meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new(),
         ))
-        .with_hook_engine(Arc::new(hooks))
-        .build_after_factory_policy(client, tools, store)
-        .await
-        .expect("factory policy test builder")
+        .with_hook_engine(Arc::new(hooks));
+
+    meerkat_core::agent::build_agent_after_factory_policy(
+        &TestFactoryAuthority,
+        builder,
+        client,
+        tools,
+        store,
+    )
+    .await
+    .expect("factory policy test builder")
 }
 
 fn test_hooks() -> TestHookEngine {

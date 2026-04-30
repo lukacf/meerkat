@@ -79,6 +79,48 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
 }
 
+mod factory_policy_private {
+    pub struct Seal;
+}
+
+/// Marker for the canonical facade factory crossing into core construction.
+///
+/// This keeps factory-policy build authority out of the public `AgentBuilder`
+/// method surface. Repository production code should implement and use this
+/// only from `meerkat::AgentFactory`; tests that need a low-level policy-shaped
+/// core builder must make that authority explicit.
+#[doc(hidden)]
+pub trait AgentFactoryPolicyAuthority: Send + Sync {
+    #[doc(hidden)]
+    fn __agent_factory_policy_authority(&self) -> factory_policy_private::Seal {
+        factory_policy_private::Seal
+    }
+}
+
+/// Build an agent after the canonical factory has composed policy metadata.
+///
+/// This is the production construction seam. It refuses to build unless the
+/// surrounding factory has attached durable session metadata, durable
+/// build-state metadata, and a runtime turn-state handle to the builder.
+#[doc(hidden)]
+pub async fn build_agent_after_factory_policy<C, T, S, A>(
+    authority: &A,
+    builder: AgentBuilder,
+    client: Arc<C>,
+    tools: Arc<T>,
+    store: Arc<S>,
+) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
+where
+    C: AgentLlmClient + ?Sized,
+    T: AgentToolDispatcher + ?Sized,
+    S: AgentSessionStore + ?Sized,
+    A: AgentFactoryPolicyAuthority + ?Sized,
+{
+    let _seal = authority.__agent_factory_policy_authority();
+    builder.validate_factory_policy()?;
+    Ok(builder.build_inner(client, tools, store).await)
+}
+
 impl AgentBuilder {
     /// Create a new agent builder with default config
     pub fn new() -> Self {
@@ -224,26 +266,6 @@ impl AgentBuilder {
     pub fn compactor(mut self, compactor: Arc<dyn crate::compact::Compactor>) -> Self {
         self.compactor = Some(compactor);
         self
-    }
-
-    /// Build after the canonical factory has composed policy metadata.
-    ///
-    /// This is the production construction seam. It refuses to build unless
-    /// the surrounding factory has attached durable session metadata, durable
-    /// build-state metadata, and a runtime turn-state handle to the builder.
-    pub async fn build_after_factory_policy<C, T, S>(
-        self,
-        client: Arc<C>,
-        tools: Arc<T>,
-        store: Arc<S>,
-    ) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
-    where
-        C: AgentLlmClient + ?Sized,
-        T: AgentToolDispatcher + ?Sized,
-        S: AgentSessionStore + ?Sized,
-    {
-        self.validate_factory_policy()?;
-        Ok(self.build_inner(client, tools, store).await)
     }
 
     /// Build a standalone low-level agent without facade/factory policy.

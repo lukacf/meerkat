@@ -65,15 +65,17 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          standalone construction must be test/embedding opt-in"
     );
     assert!(
-        !builder.contains("pub async fn build_with_factory_policy"),
+        !builder.contains("pub async fn build_after_factory_policy"),
         "meerkat_core::AgentBuilder must not expose a public factory-policy \
-         seam backed by a publicly mintable token"
+         build method; canonical factory authority must live outside the \
+         public builder impl"
     );
     assert!(
-        builder.contains("pub async fn build_after_factory_policy")
-            && builder.contains("self.validate_factory_policy()?"),
+        builder.contains("pub async fn build_agent_after_factory_policy")
+            && builder.contains("AgentFactoryPolicyAuthority")
+            && builder.contains("validate_factory_policy()?"),
         "canonical factory construction must cross into core through a \
-         validating factory-policy seam"
+         validating factory-authority seam"
     );
     assert!(
         !builder.contains("pub struct AgentFactoryBuildToken")
@@ -159,6 +161,44 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
              core factory-token seam: {}",
             path.display()
         );
+        if path != root.join("meerkat/src/factory.rs") {
+            assert!(
+                !source.contains("build_agent_after_factory_policy(")
+                    && !source.contains(".build_after_factory_policy("),
+                "production source must not bypass AgentFactory through the \
+                 core factory-authority seam: {}",
+                path.display()
+            );
+            assert!(
+                !source.contains("AgentFactoryPolicyAuthority"),
+                "production source must not mint core factory authority outside \
+                 AgentFactory: {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn bazel_canary_runfiles_include_required_production_crates() {
+    let bazel = repo_file("meerkat/BUILD.bazel");
+
+    assert!(
+        bazel.contains("//:workspace_runfiles"),
+        "Bazel canary must include workspace runfiles so BuildBuddy sees the \
+         same source tree as Cargo"
+    );
+
+    for label in [
+        "//meerkat-runtime:package_runfiles",
+        "//meerkat-rest:package_runfiles",
+        "//meerkat-rpc:package_runfiles",
+    ] {
+        assert!(
+            bazel.contains(label),
+            "Bazel canary must explicitly include {label} so BuildBuddy scans \
+             production crates that can host factory bypasses"
+        );
     }
 }
 
@@ -176,6 +216,17 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
         !factory.contains(".build_standalone("),
         "AgentFactory must not enter meerkat_core through the standalone \
          test/embedding seam"
+    );
+    assert!(
+        factory.contains("build_agent_after_factory_policy(")
+            && !factory.contains(".build_after_factory_policy("),
+        "AgentFactory must enter meerkat_core through the explicit \
+         factory-authority seam rather than a public AgentBuilder method"
+    );
+    assert!(
+        factory.contains("impl meerkat_core::agent::AgentFactoryPolicyAuthority for AgentFactory"),
+        "AgentFactory must be the production authority type for the core \
+         factory-policy seam"
     );
     assert!(
         !comms_agent.contains("pub struct CommsAgentBuilder"),

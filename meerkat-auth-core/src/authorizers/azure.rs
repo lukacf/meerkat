@@ -94,6 +94,7 @@ struct TokenResponse {
 struct CachedToken {
     access_token: String,
     expires_at: DateTime<Utc>,
+    lease_generation: Option<u64>,
 }
 
 pub struct AzureAdAuthorizer {
@@ -184,22 +185,26 @@ impl AzureAdAuthorizer {
         Ok(CachedToken {
             access_token: body.access_token,
             expires_at,
+            lease_generation: None,
         })
     }
 
     fn cached_expires_at(&self) -> Option<DateTime<Utc>> {
+        if let Some(observer) = &self.lease_observer {
+            return observer.expires_at();
+        }
         self.cache.lock().as_ref().map(|token| token.expires_at)
     }
 
     fn fresh_cached_token(&self, now: DateTime<Utc>) -> Result<Option<String>, AuthError> {
-        if let Some((access_token, expires_at)) = {
+        if let Some((access_token, expires_at, lease_generation)) = {
             let guard = self.cache.lock();
             guard
                 .as_ref()
-                .map(|t| (t.access_token.clone(), t.expires_at))
+                .map(|t| (t.access_token.clone(), t.expires_at, t.lease_generation))
         } {
             let fresh = if let Some(observer) = &self.lease_observer {
-                observer.cached_token_is_fresh(&self.label, expires_at, now)?
+                observer.cached_token_is_fresh(&self.label, expires_at, lease_generation, now)?
             } else {
                 token_is_fresh_at(expires_at, now)
             };
@@ -228,7 +233,7 @@ impl AzureAdAuthorizer {
         };
 
         // Miss — fetch a fresh token.
-        let new_token = match self.fetch_token().await {
+        let mut new_token = match self.fetch_token().await {
             Ok(token) => token,
             Err(err) => {
                 if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
@@ -244,7 +249,8 @@ impl AzureAdAuthorizer {
         let access = new_token.access_token.clone();
         let expires_at = new_token.expires_at;
         if let (Some(observer), Some(lifecycle)) = (&self.lease_observer, lifecycle) {
-            observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?;
+            new_token.lease_generation =
+                Some(observer.complete_refresh(&self.label, lifecycle, expires_at, Utc::now())?);
         }
         *self.cache.lock() = Some(new_token);
         Ok(access)

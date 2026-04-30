@@ -28,7 +28,9 @@ use meerkat_core::{
     ExternalToolSurfaceBaseState as CoreExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation as CoreExternalToolSurfaceDeltaOperation,
     ExternalToolSurfaceDeltaPhase as CoreExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase,
+    ExternalToolSurfaceEntrySnapshot,
+    ExternalToolSurfaceFailureCause as CoreExternalToolSurfaceFailureCause,
+    ExternalToolSurfaceGlobalPhase,
     ExternalToolSurfacePendingOp as CoreExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
     ExternalToolSurfaceStagedOp as CoreExternalToolSurfaceStagedOp,
 };
@@ -201,6 +203,7 @@ pub enum ExternalToolSurfaceInput {
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
         applied_at_turn: TurnNumber,
+        cause: CoreExternalToolSurfaceFailureCause,
     },
     CallStarted {
         surface_id: SurfaceId,
@@ -248,6 +251,7 @@ pub enum ExternalToolSurfaceEffect {
         surface_id: SurfaceId,
         operation: SurfaceDeltaOperation,
         phase: SurfaceDeltaPhase,
+        cause: Option<CoreExternalToolSurfaceFailureCause>,
         persisted: bool,
         applied_at_turn: TurnNumber,
     },
@@ -256,7 +260,7 @@ pub enum ExternalToolSurfaceEffect {
     /// Shell should reject the in-flight call attempt with the given reason.
     RejectSurfaceCall {
         surface_id: SurfaceId,
-        reason: String,
+        cause: CoreExternalToolSurfaceFailureCause,
     },
 }
 
@@ -845,6 +849,7 @@ impl ExternalToolSurfaceAuthority {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Add,
                             phase: SurfaceDeltaPhase::Pending,
+                            cause: None,
                             persisted: false,
                             applied_at_turn: *applied_at_turn,
                         });
@@ -901,6 +906,7 @@ impl ExternalToolSurfaceAuthority {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Reload,
                             phase: SurfaceDeltaPhase::Pending,
+                            cause: None,
                             persisted: false,
                             applied_at_turn: *applied_at_turn,
                         });
@@ -954,6 +960,7 @@ impl ExternalToolSurfaceAuthority {
                                 surface_id: surface_id.clone(),
                                 operation: SurfaceDeltaOperation::Remove,
                                 phase: SurfaceDeltaPhase::Draining,
+                                cause: None,
                                 persisted: false,
                                 applied_at_turn: *applied_at_turn,
                             });
@@ -1068,6 +1075,7 @@ impl ExternalToolSurfaceAuthority {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Add,
                             phase: SurfaceDeltaPhase::Applied,
+                            cause: None,
                             persisted: true,
                             applied_at_turn: *applied_at_turn,
                         });
@@ -1105,6 +1113,7 @@ impl ExternalToolSurfaceAuthority {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Reload,
                             phase: SurfaceDeltaPhase::Applied,
+                            cause: None,
                             persisted: true,
                             applied_at_turn: *applied_at_turn,
                         });
@@ -1131,6 +1140,7 @@ impl ExternalToolSurfaceAuthority {
                 pending_task_sequence,
                 staged_intent_sequence,
                 applied_at_turn,
+                cause,
             } => {
                 self.require_operating("PendingFailed")?;
                 let pending = self.fields.pending_op(surface_id);
@@ -1189,6 +1199,7 @@ impl ExternalToolSurfaceAuthority {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Add,
                             phase: SurfaceDeltaPhase::Failed,
+                            cause: Some(*cause),
                             persisted: true,
                             applied_at_turn: *applied_at_turn,
                         });
@@ -1218,6 +1229,7 @@ impl ExternalToolSurfaceAuthority {
                             surface_id: surface_id.clone(),
                             operation: SurfaceDeltaOperation::Reload,
                             phase: SurfaceDeltaPhase::Failed,
+                            cause: Some(*cause),
                             persisted: true,
                             applied_at_turn: *applied_at_turn,
                         });
@@ -1258,7 +1270,7 @@ impl ExternalToolSurfaceAuthority {
                     SurfaceBaseState::Removing => {
                         effects.push(ExternalToolSurfaceEffect::RejectSurfaceCall {
                             surface_id: surface_id.clone(),
-                            reason: "surface_draining".into(),
+                            cause: CoreExternalToolSurfaceFailureCause::SurfaceDraining,
                         });
                         Ok((
                             ExternalToolSurfacePhase::Operating,
@@ -1270,7 +1282,7 @@ impl ExternalToolSurfaceAuthority {
                     _ => {
                         effects.push(ExternalToolSurfaceEffect::RejectSurfaceCall {
                             surface_id: surface_id.clone(),
-                            reason: "surface_unavailable".into(),
+                            cause: CoreExternalToolSurfaceFailureCause::SurfaceUnavailable,
                         });
                         Ok((
                             ExternalToolSurfacePhase::Operating,
@@ -1382,6 +1394,7 @@ impl ExternalToolSurfaceAuthority {
                     surface_id: surface_id.clone(),
                     operation: SurfaceDeltaOperation::Remove,
                     phase: SurfaceDeltaPhase::Applied,
+                    cause: None,
                     persisted: true,
                     applied_at_turn: *applied_at_turn,
                 });
@@ -1442,6 +1455,7 @@ impl ExternalToolSurfaceAuthority {
                     surface_id: surface_id.clone(),
                     operation: SurfaceDeltaOperation::Remove,
                     phase: SurfaceDeltaPhase::Forced,
+                    cause: None,
                     persisted: true,
                     applied_at_turn: *applied_at_turn,
                 });
@@ -1901,6 +1915,7 @@ mod tests {
             pending_task_sequence,
             staged_intent_sequence,
             applied_at_turn,
+            cause: CoreExternalToolSurfaceFailureCause::PendingFailed,
         }
     }
 
@@ -2127,8 +2142,9 @@ mod tests {
         assert!(!auth.is_visible(&sid));
         assert!(t.effects.iter().any(|e| matches!(
             e,
-            ExternalToolSurfaceEffect::EmitExternalToolDelta { phase, .. }
+            ExternalToolSurfaceEffect::EmitExternalToolDelta { phase, cause, .. }
                 if *phase == SurfaceDeltaPhase::Failed
+                    && *cause == Some(CoreExternalToolSurfaceFailureCause::PendingFailed)
         )));
     }
 
@@ -2148,6 +2164,12 @@ mod tests {
         // Surface stays active (reload failure keeps old connection).
         assert!(auth.is_visible(&sid));
         assert_eq!(auth.surface_base(&sid), SurfaceBaseState::Active);
+        assert!(t.effects.iter().any(|e| matches!(
+            e,
+            ExternalToolSurfaceEffect::EmitExternalToolDelta { phase, cause, .. }
+                if *phase == SurfaceDeltaPhase::Failed
+                    && *cause == Some(CoreExternalToolSurfaceFailureCause::PendingFailed)
+        )));
     }
 
     #[test]
@@ -2226,8 +2248,8 @@ mod tests {
         assert_eq!(t.transition_name, "CallStartedRejectWhileRemoving");
         assert!(t.effects.iter().any(|e| matches!(
             e,
-            ExternalToolSurfaceEffect::RejectSurfaceCall { reason, .. }
-                if reason == "surface_draining"
+            ExternalToolSurfaceEffect::RejectSurfaceCall { cause, .. }
+                if *cause == CoreExternalToolSurfaceFailureCause::SurfaceDraining
         )));
     }
 
@@ -2243,8 +2265,8 @@ mod tests {
         assert_eq!(t.transition_name, "CallStartedRejectWhileUnavailable");
         assert!(t.effects.iter().any(|e| matches!(
             e,
-            ExternalToolSurfaceEffect::RejectSurfaceCall { reason, .. }
-                if reason == "surface_unavailable"
+            ExternalToolSurfaceEffect::RejectSurfaceCall { cause, .. }
+                if *cause == CoreExternalToolSurfaceFailureCause::SurfaceUnavailable
         )));
     }
 

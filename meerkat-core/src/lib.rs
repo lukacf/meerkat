@@ -268,9 +268,10 @@ pub use tool_catalog::{
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
-    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp, LocalToolVisibilityOwner, ToolFilter,
-    ToolScope, ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceFailureCause,
+    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
+    ExternalToolSurfaceStagedOp, LocalToolVisibilityOwner, ToolFilter, ToolScope,
+    ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot,
     ToolScopeStageError, ToolVisibilityOwner,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};

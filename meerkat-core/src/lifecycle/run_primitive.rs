@@ -3,6 +3,7 @@
 //! Core's entire world is: conversation mutations, run boundaries, and staged inputs.
 //! It knows nothing about input acceptance, policy, queueing, or topology.
 
+use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
@@ -331,6 +332,18 @@ pub enum AnthropicEffort {
     XHigh,
 }
 
+impl AnthropicEffort {
+    pub fn as_legacy_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
 /// Typed shape of Anthropic's data-residency knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -613,9 +626,9 @@ impl AnthropicProviderTag {
                     _ => return Err(LegacyProviderParamsError::unknown_shape("context")),
                 },
                 "web_search" => {
-                    if v.is_object() {
+                    if v.is_object() || v.is_boolean() || v.is_null() {
                         tag.web_search = Some(OpaqueProviderBody::from_value(v));
-                    } else if !v.is_boolean() && !v.is_null() {
+                    } else {
                         return Err(LegacyProviderParamsError::unknown_shape("web_search"));
                     }
                 }
@@ -673,9 +686,9 @@ impl OpenAiProviderTag {
                     tag.presence_penalty = Some(f as f32);
                 }
                 "web_search" => {
-                    if v.is_object() {
+                    if v.is_object() || v.is_boolean() || v.is_null() {
                         tag.web_search = Some(OpaqueProviderBody::from_value(v));
-                    } else if !v.is_boolean() && !v.is_null() {
+                    } else {
                         return Err(LegacyProviderParamsError::unknown_shape("web_search"));
                     }
                 }
@@ -773,9 +786,9 @@ impl GeminiProviderTag {
                     tag.structured_output = Some(schema);
                 }
                 "google_search" => {
-                    if v.is_object() {
+                    if v.is_object() || v.is_boolean() || v.is_null() {
                         tag.google_search = Some(OpaqueProviderBody::from_value(v));
-                    } else if !v.is_boolean() && !v.is_null() {
+                    } else {
                         return Err(LegacyProviderParamsError::unknown_shape("google_search"));
                     }
                 }
@@ -955,6 +968,32 @@ impl ProviderParamsOverride {
 
         override_params
     }
+
+    pub fn to_legacy_provider_value(&self) -> serde_json::Value {
+        let mut object = serde_json::Map::new();
+        if let Some(value) = self.temperature {
+            object.insert("temperature".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.top_p {
+            object.insert("top_p".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.max_output_tokens {
+            object.insert("max_output_tokens".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.reasoning {
+            object.insert("reasoning".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.thinking_budget_tokens {
+            object.insert(
+                "thinking_budget_tokens".to_string(),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(tag) = self.provider_tag.as_ref() {
+            insert_provider_tag_legacy_fields(&mut object, tag);
+        }
+        serde_json::Value::Object(object)
+    }
 }
 
 fn parse_reasoning_mode(value: &str) -> Option<ReasoningMode> {
@@ -991,6 +1030,182 @@ fn unknown_provider_tag(provider: &str, value: &serde_json::Value) -> ProviderTa
     }
 }
 
+fn insert_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &ProviderTag,
+) {
+    match tag {
+        ProviderTag::Anthropic(tag) => insert_anthropic_provider_tag_legacy_fields(object, tag),
+        ProviderTag::OpenAi(tag) => insert_openai_provider_tag_legacy_fields(object, tag),
+        ProviderTag::Gemini(tag) => insert_gemini_provider_tag_legacy_fields(object, tag),
+        ProviderTag::Unknown { bag } => insert_unknown_provider_tag_legacy_fields(object, bag),
+    }
+}
+
+fn insert_serialized_legacy_field<T: Serialize>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+    value: &T,
+) {
+    if let Ok(value) = serde_json::to_value(value) {
+        object.insert(key.to_string(), value);
+    }
+}
+
+fn insert_anthropic_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &AnthropicProviderTag,
+) {
+    if let Some(thinking) = tag.thinking.as_ref() {
+        insert_serialized_legacy_field(object, "thinking", thinking);
+    }
+    if let Some(value) = tag.thinking_budget_tokens {
+        object.insert("thinking_budget".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.web_search.as_ref() {
+        object.insert("web_search".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.top_k {
+        object.insert("top_k".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.effort {
+        object.insert(
+            "effort".to_string(),
+            serde_json::json!(value.as_legacy_str()),
+        );
+    }
+    if let Some(value) = tag.structured_output.as_ref() {
+        insert_serialized_legacy_field(object, "structured_output", value);
+    }
+    if let Some(value) = tag.inference_geo.as_ref() {
+        match value {
+            AnthropicInferenceGeo::Us => {
+                object.insert("inference_geo".to_string(), serde_json::json!("us"));
+            }
+            AnthropicInferenceGeo::Global => {
+                object.insert("inference_geo".to_string(), serde_json::json!("global"));
+            }
+            AnthropicInferenceGeo::Other { region } => {
+                object.insert("inference_geo".to_string(), serde_json::json!(region));
+            }
+        }
+    }
+    if let Some(value) = tag.compaction.as_ref() {
+        match value {
+            AnthropicCompactionConfig::Auto => {
+                object.insert("compaction".to_string(), serde_json::json!("auto"));
+            }
+            AnthropicCompactionConfig::Custom { edit } => {
+                object.insert("compaction".to_string(), edit.as_value());
+            }
+        }
+    }
+    if matches!(tag.context, Some(AnthropicContextWindow::OneMegabyte)) {
+        object.insert("context".to_string(), serde_json::json!("1m"));
+    }
+    if let Some(value) = tag.supports_temperature_override {
+        object.insert(
+            "__meerkat_supports_temperature".to_string(),
+            serde_json::json!(value),
+        );
+    }
+}
+
+fn insert_openai_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &OpenAiProviderTag,
+) {
+    if let Some(value) = tag.reasoning_effort {
+        insert_serialized_legacy_field(object, "reasoning_effort", &value);
+    }
+    if let Some(value) = tag.seed {
+        object.insert("seed".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.frequency_penalty {
+        object.insert("frequency_penalty".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.presence_penalty {
+        object.insert("presence_penalty".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.web_search.as_ref() {
+        object.insert("web_search".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.structured_output.as_ref() {
+        insert_serialized_legacy_field(object, "structured_output", value);
+    }
+    if let Some(value) = tag.reasoning.as_ref() {
+        object.insert("reasoning".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.chat_template_kwargs.as_ref() {
+        object.insert("chat_template_kwargs".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.thinking.as_ref() {
+        object.insert("thinking".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.supports_temperature_override {
+        object.insert(
+            "__meerkat_supports_temperature".to_string(),
+            serde_json::json!(value),
+        );
+    }
+    if let Some(value) = tag.supports_reasoning_override {
+        object.insert(
+            "__meerkat_supports_reasoning".to_string(),
+            serde_json::json!(value),
+        );
+    }
+}
+
+fn insert_gemini_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &GeminiProviderTag,
+) {
+    if let Some(value) = tag.thinking.as_ref() {
+        insert_serialized_legacy_field(object, "thinking", value);
+    }
+    if let Some(value) = tag.thinking_budget {
+        object.insert("thinking_budget".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.thinking_level {
+        object.insert(
+            "thinking_level".to_string(),
+            serde_json::json!(value.as_str()),
+        );
+    }
+    if let Some(value) = tag.top_k {
+        object.insert("top_k".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.top_p
+        && !object.contains_key("top_p")
+    {
+        object.insert("top_p".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.structured_output.as_ref() {
+        insert_serialized_legacy_field(object, "structured_output", value);
+    }
+    if let Some(value) = tag.google_search.as_ref() {
+        object.insert("google_search".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.candidate_count {
+        object.insert("candidate_count".to_string(), serde_json::json!(value));
+    }
+}
+
+fn insert_unknown_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    bag: &StructuredProviderExtension,
+) {
+    let body = serde_json::from_str::<serde_json::Value>(&bag.body)
+        .unwrap_or_else(|_| serde_json::Value::String(bag.body.clone()));
+    if bag.key == "provider_params"
+        && let serde_json::Value::Object(extension) = body
+    {
+        object.extend(extension);
+        return;
+    }
+    object.insert(bag.key.clone(), body);
+}
+
 /// Error returned when [`merge_batch_turn_metadata`] sees two distinct scalar
 /// overrides for the same field in a single batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,6 +1226,90 @@ impl std::fmt::Display for TurnMetadataMergeConflict {
 
 impl std::error::Error for TurnMetadataMergeConflict {}
 
+/// Tri-state per-turn metadata override.
+///
+/// `None` on the containing field means preserve the durable session value.
+/// `Some(Set(value))` overrides it for this turn, and `Some(Clear)` removes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "action", content = "value", rename_all = "snake_case")]
+pub enum TurnMetadataOverride<T> {
+    Set(T),
+    Clear,
+}
+
+impl<T> TurnMetadataOverride<T> {
+    pub fn set(value: T) -> Self {
+        Self::Set(value)
+    }
+
+    pub const fn clear() -> Self {
+        Self::Clear
+    }
+
+    pub fn as_set(&self) -> Option<&T> {
+        match self {
+            Self::Set(value) => Some(value),
+            Self::Clear => None,
+        }
+    }
+
+    pub fn into_set(self) -> Option<T> {
+        match self {
+            Self::Set(value) => Some(value),
+            Self::Clear => None,
+        }
+    }
+
+    pub const fn is_clear(&self) -> bool {
+        matches!(self, Self::Clear)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for TurnMetadataOverride<T>
+where
+    T: DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        if let Some(object) = raw.as_object() {
+            let Some(action_value) = object.get("action") else {
+                return serde_json::from_value(raw)
+                    .map(Self::Set)
+                    .map_err(de::Error::custom);
+            };
+            let action = action_value.as_str().ok_or_else(|| {
+                de::Error::custom("turn metadata override action must be a string")
+            })?;
+            return match action {
+                "clear" => {
+                    if object.contains_key("value") {
+                        return Err(de::Error::custom("clear override cannot include value"));
+                    }
+                    Ok(Self::Clear)
+                }
+                "set" => {
+                    let value = object
+                        .get("value")
+                        .ok_or_else(|| de::Error::custom("set override is missing value"))?;
+                    serde_json::from_value(value.clone())
+                        .map(Self::Set)
+                        .map_err(de::Error::custom)
+                }
+                other => Err(de::Error::custom(format!(
+                    "unknown turn metadata override action `{other}`"
+                ))),
+            };
+        }
+
+        serde_json::from_value(raw)
+            .map(Self::Set)
+            .map_err(de::Error::custom)
+    }
+}
+
 /// Canonical per-turn runtime metadata carried alongside a
 /// [`StagedRunInput`]. This is the typed seam consumed by the core layer —
 /// `serde_json::Value` does not appear anywhere in this shape.
@@ -1019,7 +1318,7 @@ impl std::error::Error for TurnMetadataMergeConflict {}
 /// `for_input(&Input)` constructor. Other code paths that previously built
 /// a `RuntimeTurnMetadata` literal are updated to call `for_input` or be
 /// deleted.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct RuntimeTurnMetadata {
     /// Handling mode for staged ordinary work when admitted through runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1037,20 +1336,14 @@ pub struct RuntimeTurnMetadata {
     /// Override provider for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
-    /// Override provider-specific parameters for this turn (typed; no Value).
+    /// Override, clear, or preserve provider-specific parameters for this turn
+    /// (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<ProviderParamsOverride>,
-    /// Explicitly clear durable provider params. Omitted `provider_params`
-    /// means inherit the current session value.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_provider_params: bool,
-    /// Explicit connection reference this turn must resolve against.
+    pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    /// Override, clear, or preserve the connection reference this turn must
+    /// resolve against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<ConnectionRef>,
-    /// Explicitly clear durable connection_ref. Omitted `connection_ref`
-    /// means inherit the current session value.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_connection_ref: bool,
+    pub connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
     /// Keep-alive policy for materialized resources for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<KeepAlivePolicy>,
@@ -1071,6 +1364,81 @@ pub struct RuntimeTurnMetadata {
     pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
+#[derive(Deserialize)]
+struct RuntimeTurnMetadataFields {
+    #[serde(default)]
+    handling_mode: Option<HandlingMode>,
+    #[serde(default)]
+    skill_references: Option<Vec<SkillKey>>,
+    #[serde(default)]
+    flow_tool_overlay: Option<TurnToolOverlay>,
+    #[serde(default)]
+    additional_instructions: Option<Vec<TurnInstruction>>,
+    #[serde(default)]
+    model: Option<ModelId>,
+    #[serde(default)]
+    provider: Option<Provider>,
+    #[serde(default)]
+    provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    #[serde(default)]
+    connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
+    #[serde(default)]
+    keep_alive: Option<KeepAlivePolicy>,
+    #[serde(default)]
+    render_metadata: Option<RenderMetadata>,
+    #[serde(default)]
+    execution_kind: Option<RuntimeExecutionKind>,
+    #[serde(default)]
+    peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+}
+
+impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut raw = serde_json::Value::deserialize(deserializer)?;
+        let (clear_provider_params, clear_connection_ref) =
+            if let Some(object) = raw.as_object_mut() {
+                (
+                    take_legacy_clear_bool(object, "clear_provider_params")?,
+                    take_legacy_clear_bool(object, "clear_connection_ref")?,
+                )
+            } else {
+                (false, false)
+            };
+        let fields: RuntimeTurnMetadataFields =
+            serde_json::from_value(raw).map_err(de::Error::custom)?;
+        let provider_params = legacy_override_from_split_fields(
+            fields.provider_params,
+            clear_provider_params,
+            "provider_params",
+            "clear_provider_params",
+        )?;
+        let connection_ref = legacy_override_from_split_fields(
+            fields.connection_ref,
+            clear_connection_ref,
+            "connection_ref",
+            "clear_connection_ref",
+        )?;
+
+        Ok(Self {
+            handling_mode: fields.handling_mode,
+            skill_references: fields.skill_references,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            model: fields.model,
+            provider: fields.provider,
+            provider_params,
+            connection_ref,
+            keep_alive: fields.keep_alive,
+            render_metadata: fields.render_metadata,
+            execution_kind: fields.execution_kind,
+            peer_response_terminal_apply_intent: fields.peer_response_terminal_apply_intent,
+        })
+    }
+}
+
 impl RuntimeTurnMetadata {
     /// True when every field is `None` — used to skip serializing empty
     /// metadata carriers on the wire.
@@ -1082,9 +1450,7 @@ impl RuntimeTurnMetadata {
             && self.model.is_none()
             && self.provider.is_none()
             && self.provider_params.is_none()
-            && !self.clear_provider_params
             && self.connection_ref.is_none()
-            && !self.clear_connection_ref
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
             && self.execution_kind.is_none()
@@ -1109,32 +1475,16 @@ impl RuntimeTurnMetadata {
         )?;
         merge_scalar(&mut self.model, other.model, "model")?;
         merge_scalar(&mut self.provider, other.provider, "provider")?;
-        reject_set_clear_conflict(
-            self.provider_params.is_some(),
-            self.clear_provider_params,
-            other.provider_params.is_some(),
-            other.clear_provider_params,
-            "provider_params",
-        )?;
-        merge_scalar(
+        merge_override(
             &mut self.provider_params,
             other.provider_params,
             "provider_params",
         )?;
-        self.clear_provider_params |= other.clear_provider_params;
-        reject_set_clear_conflict(
-            self.connection_ref.is_some(),
-            self.clear_connection_ref,
-            other.connection_ref.is_some(),
-            other.clear_connection_ref,
-            "connection_ref",
-        )?;
-        merge_scalar(
+        merge_override(
             &mut self.connection_ref,
             other.connection_ref,
             "connection_ref",
         )?;
-        self.clear_connection_ref |= other.clear_connection_ref;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
         merge_scalar(
             &mut self.render_metadata,
@@ -1167,26 +1517,6 @@ impl RuntimeTurnMetadata {
     }
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn reject_set_clear_conflict(
-    lhs_set: bool,
-    lhs_clear: bool,
-    rhs_set: bool,
-    rhs_clear: bool,
-    field: &'static str,
-) -> Result<(), TurnMetadataMergeConflict> {
-    if (lhs_set && rhs_clear) || (lhs_clear && rhs_set) {
-        return Err(TurnMetadataMergeConflict {
-            field,
-            reason: "one input sets the field while another clears it",
-        });
-    }
-    Ok(())
-}
-
 fn merge_scalar<T: PartialEq>(
     lhs: &mut Option<T>,
     rhs: Option<T>,
@@ -1208,6 +1538,66 @@ fn merge_scalar<T: PartialEq>(
                 })
             }
         }
+    }
+}
+
+fn merge_override<T: PartialEq>(
+    lhs: &mut Option<TurnMetadataOverride<T>>,
+    rhs: Option<TurnMetadataOverride<T>>,
+    field: &'static str,
+) -> Result<(), TurnMetadataMergeConflict> {
+    match (lhs.as_ref(), rhs) {
+        (_, None) => Ok(()),
+        (None, Some(override_fact)) => {
+            *lhs = Some(override_fact);
+            Ok(())
+        }
+        (Some(existing), Some(new)) if *existing == new => Ok(()),
+        (Some(TurnMetadataOverride::Set(_)), Some(TurnMetadataOverride::Set(_))) => {
+            Err(TurnMetadataMergeConflict {
+                field,
+                reason: "two inputs in one batch set distinct scalar overrides",
+            })
+        }
+        (Some(_), Some(_)) => Err(TurnMetadataMergeConflict {
+            field,
+            reason: "one input sets the field while another clears it",
+        }),
+    }
+}
+
+fn legacy_override_from_split_fields<T, E>(
+    set_value: Option<TurnMetadataOverride<T>>,
+    clear: bool,
+    set_field: &'static str,
+    clear_field: &'static str,
+) -> Result<Option<TurnMetadataOverride<T>>, E>
+where
+    E: de::Error,
+{
+    if clear && set_value.is_some() {
+        return Err(E::custom(format!(
+            "{clear_field} cannot be combined with {set_field}"
+        )));
+    }
+    if clear {
+        Ok(Some(TurnMetadataOverride::Clear))
+    } else {
+        Ok(set_value)
+    }
+}
+
+fn take_legacy_clear_bool<E>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<bool, E>
+where
+    E: de::Error,
+{
+    match object.remove(field) {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(value),
+        Some(_) => Err(E::custom(format!("{field} must be a boolean"))),
     }
 }
 
@@ -1667,6 +2057,38 @@ mod tests {
             parsed.execution_kind,
             Some(RuntimeExecutionKind::ContentTurn)
         );
+    }
+
+    #[test]
+    fn provider_params_override_projects_back_to_legacy_provider_json() {
+        let legacy = serde_json::json!({
+            "temperature": 0.2,
+            "thinking": { "budget_tokens": 10_000 },
+            "effort": "xhigh",
+            "web_search": null,
+        });
+        let params = ProviderParamsOverride::from_legacy_provider_value("anthropic", &legacy);
+
+        let projected = params.to_legacy_provider_value();
+
+        assert!(projected.get("provider_tag").is_none());
+        let temperature = projected["temperature"].as_f64().expect("temperature");
+        assert!(
+            (temperature - 0.2).abs() < 0.000_001,
+            "unexpected temperature: {temperature}"
+        );
+        assert_eq!(
+            projected["thinking"]["budget_tokens"],
+            serde_json::json!(10_000)
+        );
+        assert_eq!(projected["effort"], serde_json::json!("xhigh"));
+        assert!(
+            projected
+                .as_object()
+                .is_some_and(|obj| obj.contains_key("web_search")),
+            "explicit provider-native null must not be dropped"
+        );
+        assert!(projected["web_search"].is_null());
     }
 
     #[test]

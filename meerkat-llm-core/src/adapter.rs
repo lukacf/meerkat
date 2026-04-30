@@ -71,6 +71,42 @@ impl LlmClientAdapter {
         self
     }
 
+    fn strip_non_object_provider_tool_overrides(tag: ProviderTag) -> ProviderTag {
+        match tag {
+            ProviderTag::Anthropic(mut tag) => {
+                if tag
+                    .web_search
+                    .as_ref()
+                    .is_some_and(|body| !body.as_value().is_object())
+                {
+                    tag.web_search = None;
+                }
+                ProviderTag::Anthropic(tag)
+            }
+            ProviderTag::OpenAi(mut tag) => {
+                if tag
+                    .web_search
+                    .as_ref()
+                    .is_some_and(|body| !body.as_value().is_object())
+                {
+                    tag.web_search = None;
+                }
+                ProviderTag::OpenAi(tag)
+            }
+            ProviderTag::Gemini(mut tag) => {
+                if tag
+                    .google_search
+                    .as_ref()
+                    .is_some_and(|body| !body.as_value().is_object())
+                {
+                    tag.google_search = None;
+                }
+                ProviderTag::Gemini(tag)
+            }
+            other => other,
+        }
+    }
+
     fn apply_generic_provider_overrides(
         &self,
         tag: Option<ProviderTag>,
@@ -143,6 +179,7 @@ impl AgentLlmClient for LlmClientAdapter {
             .or_else(|| self.provider_params.clone());
         let effective_params =
             self.apply_generic_provider_overrides(effective_params, provider_params);
+        let effective_params = effective_params.map(Self::strip_non_object_provider_tool_overrides);
         let effective_max_tokens = provider_params
             .and_then(|params| params.max_output_tokens)
             .unwrap_or(max_tokens);

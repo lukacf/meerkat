@@ -89,6 +89,16 @@ impl RuntimeStore for FailPersistInputStore {
             .await
     }
 
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
+            .await
+    }
+
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,
@@ -831,6 +841,34 @@ async fn destroy_lifecycle_commit_failure_restores_cleanup_projection() {
         inner.load_runtime_state(&rid).await.unwrap(),
         Some(RuntimeState::Destroyed),
         "failed destroy must not write destroyed durable state",
+    );
+}
+
+#[tokio::test]
+async fn direct_destroy_persists_destroyed_runtime_state() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let rid = LogicalRuntimeId::new("test");
+    let mut driver = PersistentRuntimeDriver::new(
+        rid.clone(),
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    );
+
+    let report = driver
+        .destroy()
+        .await
+        .expect("direct persistent destroy should succeed");
+
+    assert_eq!(report.inputs_abandoned, 0);
+    assert_eq!(
+        driver.runtime_state(),
+        RuntimeState::Destroyed,
+        "direct persistent destroy should advance the shared DSL authority",
+    );
+    assert_eq!(
+        store.load_runtime_state(&rid).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "direct persistent destroy should persist destroyed runtime truth",
     );
 }
 

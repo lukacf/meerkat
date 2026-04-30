@@ -122,11 +122,12 @@ pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, commit_runtime_loop_run,
     fail_runtime_loop_run, machine_apply_run_return_projection, machine_batch_execution_kind,
     machine_batch_peer_response_terminal_apply_intent, machine_batch_primitive_projections,
-    machine_begin_run, machine_destroy, machine_executor_attach_projection, machine_input_boundary,
-    machine_prepare_bindings_projection, machine_recover_ephemeral_driver,
-    machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
-    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
-    machine_unregister_session_projection, prepare_runtime_loop_batch_start,
+    machine_begin_run, machine_commit_prepared_destroy, machine_executor_attach_projection,
+    machine_input_boundary, machine_prepare_bindings_projection, machine_prepare_destroy,
+    machine_recover_ephemeral_driver, machine_recover_persistent_driver,
+    machine_recycle_preserving_work, machine_reset, machine_retire,
+    machine_select_runtime_loop_batch, machine_stop_runtime, machine_unregister_session_projection,
+    prepare_runtime_loop_batch_start,
 };
 
 pub(crate) mod driver;
@@ -237,6 +238,7 @@ struct RuntimeSessionEntry {
 struct RuntimeLoopAttachment {
     wake_tx: mpsc::Sender<()>,
     control_tx: mpsc::Sender<RunControlCommand>,
+    control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -297,11 +299,13 @@ impl RuntimeSessionEntry {
         &mut self,
         wake_tx: mpsc::Sender<()>,
         control_tx: mpsc::Sender<RunControlCommand>,
+        control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
         self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
             wake_tx,
             control_tx,
+            control_handle,
             _loop_handle: loop_handle,
         });
     }
@@ -333,6 +337,17 @@ impl RuntimeSessionEntry {
                 if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
             {
                 Some(attachment.control_tx.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+        match &self.phase {
+            RegistrationPhase::Active(attachment)
+                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+            {
+                attachment.control_handle.clone()
             }
             _ => None,
         }
@@ -427,6 +442,14 @@ impl MeerkatMachine {
         context: &str,
     ) -> Result<StagedSessionDslInput, String> {
         let authority = self.session_dsl_authority(session_id).await?;
+        Self::stage_dsl_transition_on_authority(&authority, input, context)
+    }
+
+    fn stage_dsl_transition_on_authority(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, String> {
         let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -457,27 +480,6 @@ impl MeerkatMachine {
             input,
             context,
             CommittedEffectDispatchFailure::RestorePreviousDslState,
-        )
-        .await
-    }
-
-    async fn apply_session_dsl_input_preserving_committed_state(
-        &self,
-        session_id: &SessionId,
-        input: dsl::MeerkatMachineInput,
-        context: &str,
-    ) -> Result<
-        (
-            Box<dsl::MeerkatMachineState>,
-            Vec<dsl::MeerkatMachineEffect>,
-        ),
-        String,
-    > {
-        self.apply_session_dsl_input_with_dispatch_failure(
-            session_id,
-            input,
-            context,
-            CommittedEffectDispatchFailure::PreserveCommittedDslState,
         )
         .await
     }
@@ -604,11 +606,18 @@ impl MeerkatMachine {
         state: Box<dsl::MeerkatMachineState>,
     ) {
         if let Ok(authority) = self.session_dsl_authority(session_id).await {
-            let mut authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *authority = dsl::MeerkatMachineAuthority::from_state(*state);
+            Self::restore_dsl_authority_state(&authority, state);
         }
+    }
+
+    fn restore_dsl_authority_state(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        state: Box<dsl::MeerkatMachineState>,
+    ) {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *authority = dsl::MeerkatMachineAuthority::from_state(*state);
     }
 }
 

@@ -1633,6 +1633,9 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
             "ExternalToolSurfaceDeltaPhase" => {
                 vec!["None", "Pending", "Applied", "Draining", "Failed", "Forced"]
             }
+            "ExternalToolSurfaceFailureCause" => {
+                vec!["PendingFailed", "SurfaceDraining", "SurfaceUnavailable"]
+            }
             "DrainExitReason" => vec![
                 "IdleTimeout",
                 "Dismissed",

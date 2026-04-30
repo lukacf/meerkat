@@ -162,6 +162,7 @@ mod tests {
         let valid = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
+            generation: 1,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &valid).as_public_str(),
@@ -171,6 +172,7 @@ mod tests {
         let expired = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some((now - Duration::seconds(1)).timestamp() as u64),
+            generation: 1,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &expired).as_public_str(),
@@ -180,6 +182,7 @@ mod tests {
         let stale_token_without_machine = AuthLeaseSnapshot {
             phase: None,
             expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
+            generation: 1,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &stale_token_without_machine).as_public_str(),

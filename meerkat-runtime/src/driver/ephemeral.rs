@@ -1238,6 +1238,14 @@ impl EphemeralRuntimeDriver {
         &mut self.steer_queue
     }
 
+    #[cfg(test)]
+    pub(crate) fn clear_admitted_runtime_semantics_for_test(&mut self, input_id: &InputId) {
+        self.runtime_semantics.remove(input_id);
+        if let Some(state) = self.ledger.get_mut(input_id) {
+            state.runtime_semantics = None;
+        }
+    }
+
     pub fn has_queued_input(&self, input_id: &InputId) -> bool {
         let key = Self::dsl_key(input_id);
         self.with_dsl_state(|state| state.input_lane.contains_key(&key))

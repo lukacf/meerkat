@@ -925,7 +925,7 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         }
         let target_boundary = machine_input_boundary(driver, first);
         let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
-            return Vec::new();
+            return vec![first.clone()];
         };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
@@ -947,7 +947,7 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
         let prefix = &queue[..=driver_index];
         if ingress.is_prompt(first) {
             let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
-                return Vec::new();
+                return vec![first.clone()];
             };
             let target_peer_response_terminal_apply_intent =
                 machine_input_peer_response_terminal_apply_intent(driver, first);
@@ -962,7 +962,7 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
             return prefix[first_compatible_index..].to_vec();
         }
         let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
-            return Vec::new();
+            return vec![first.clone()];
         };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
@@ -1864,6 +1864,105 @@ mod tests {
             selected,
             vec![prompt_id],
             "prompt-driven batches must not stage older inputs with a different execution kind"
+        );
+    }
+
+    #[test]
+    fn batch_selection_surfaces_queued_input_missing_runtime_semantics() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "missing-runtime-semantics-selection",
+        ));
+        let input = Input::Prompt(crate::input::PromptInput::new(
+            "unstamped queued prompt",
+            None,
+        ));
+        let input_id = input.id().clone();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(state.clone()));
+        driver
+            .admit_recovered_to_ingress(
+                input_id.clone(),
+                ContentShape::from_kind(input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&input),
+                true,
+                &state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+        driver.clear_admitted_runtime_semantics_for_test(&input_id);
+
+        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+
+        assert_eq!(
+            selected,
+            vec![input_id],
+            "missing runtime semantics must be selected so the runtime loop records a typed failure instead of treating the queue as empty"
+        );
+    }
+
+    #[test]
+    fn batch_selection_surfaces_steered_input_missing_runtime_semantics() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "missing-steer-runtime-semantics-selection",
+        ));
+        let input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let input_id = input.id().clone();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input.clone());
+        let seed = queued_seed();
+        let mut policy = queue_policy(
+            crate::policy::WakeMode::WakeIfIdle,
+            crate::policy::DrainPolicy::SteerBatch,
+        );
+        policy.routing_disposition = crate::policy::RoutingDisposition::Steer;
+
+        assert!(driver.ledger_mut().recover(state.clone()));
+        driver
+            .admit_recovered_to_ingress(
+                input_id.clone(),
+                ContentShape::from_kind(input.kind()),
+                meerkat_core::types::HandlingMode::Steer,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&input),
+                false,
+                &state,
+                &seed,
+                policy,
+                None,
+                None,
+            )
+            .expect("recover steered continuation input");
+        driver.rebuild_queue_projections_after_recovery();
+        driver.clear_admitted_runtime_semantics_for_test(&input_id);
+
+        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+
+        assert_eq!(
+            selected,
+            vec![input_id],
+            "missing runtime semantics in the steer lane must be selected so the runtime loop records a typed failure instead of treating the lane as empty"
         );
     }
 }

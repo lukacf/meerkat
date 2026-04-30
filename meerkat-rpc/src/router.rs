@@ -20,6 +20,8 @@ use meerkat_core::service::SessionHistoryQuery;
 #[cfg(not(feature = "mini-surface"))]
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
+#[cfg(feature = "mob")]
+use meerkat_core::{AgentToolDispatcher, DynamicToolComposite};
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 #[cfg(not(feature = "mini-surface"))]
 use serde::Deserialize;
@@ -45,6 +47,108 @@ const REALTIME_TARGET_TYPE_MOB_MEMBER: &str = "mob_member";
 
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
+}
+
+#[cfg(feature = "mob")]
+fn compose_rpc_mob_external_tools(
+    callback_tools: Arc<dyn AgentToolDispatcher>,
+    configured_tools: Option<Arc<dyn AgentToolDispatcher>>,
+) -> Arc<dyn AgentToolDispatcher> {
+    match configured_tools {
+        Some(configured_tools) => Arc::new(DynamicToolComposite::new(vec![
+            callback_tools,
+            configured_tools,
+        ])),
+        None => callback_tools,
+    }
+}
+
+#[cfg(all(feature = "mob", feature = "mcp"))]
+fn load_configured_mcp_tools_for_rpc_mob(
+    context_root: Option<PathBuf>,
+    user_root: Option<PathBuf>,
+) -> Option<Arc<dyn AgentToolDispatcher>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("build MCP loader runtime: {error}"))
+            .and_then(|runtime| {
+                runtime.block_on(async move {
+                    meerkat_core::mcp_config::McpConfig::load_with_scopes_from_roots(
+                        context_root.as_deref(),
+                        user_root.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| format!("load MCP config: {error}"))
+                })
+            });
+        let _ = tx.send(result);
+    });
+    let servers = match rx.recv() {
+        Ok(Ok(servers)) => servers,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "failed to load configured MCP tools for RPC mob members");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "MCP tool loader thread exited without a result");
+            return None;
+        }
+    };
+    if servers.is_empty() {
+        return None;
+    }
+
+    let mut router = meerkat::McpRouter::new();
+    for scoped in servers {
+        if let Err(error) = router.stage_add(scoped.server) {
+            tracing::warn!(error = %error, "failed to stage configured MCP server for RPC mob members");
+        }
+    }
+    let adapter = Arc::new(meerkat::McpRouterAdapter::new(router));
+    let adapter_for_poll = adapter.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("build MCP connect runtime: {error}"))
+            .map(|runtime| {
+                runtime.block_on(async move {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    loop {
+                        let update = adapter_for_poll.poll_external_updates().await;
+                        if update.pending.is_empty() {
+                            return Ok(());
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            return Err(format!(
+                                "timed out waiting for {} MCP server(s)",
+                                update.pending.len()
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                })
+            });
+        let flattened = match result {
+            Ok(inner) => inner,
+            Err(error) => Err(error),
+        };
+        let _ = tx.send(flattened);
+    });
+    match rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "configured MCP tools for RPC mob members did not fully connect before serving");
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "MCP connect thread exited without a result");
+        }
+    }
+    Some(adapter)
 }
 
 #[cfg(feature = "comms")]
@@ -352,6 +456,13 @@ impl MethodRouter {
         let mob_state = if let Some(existing) = runtime.mob_state() {
             existing
         } else {
+            #[cfg(feature = "mcp")]
+            let configured_mcp_tools = {
+                let (context_root, user_root) = runtime.skill_identity_roots();
+                load_configured_mcp_tools_for_rpc_mob(context_root, user_root)
+            };
+            #[cfg(not(feature = "mcp"))]
+            let configured_mcp_tools: Option<Arc<dyn AgentToolDispatcher>> = None;
             let persistent_mob_root = config_store
                 .metadata()
                 .and_then(|metadata| metadata.resolved_paths)
@@ -365,17 +476,20 @@ impl MethodRouter {
                 });
                 let tools_provider: meerkat_mob::ExternalToolsProvider = Arc::new({
                     let runtime = runtime.clone();
+                    let configured_mcp_tools = configured_mcp_tools.clone();
                     move || {
                         let tx = runtime.callback_request_tx()?;
-                        Some(
+                        let callback_tools: Arc<dyn AgentToolDispatcher> =
                             Arc::new(crate::callback_dispatcher::CallbackToolDispatcher::new(
                                 runtime.registered_tools(),
                                 tx,
                                 runtime.callback_id_counter(),
                                 vec![],
-                            ))
-                                as Arc<dyn meerkat_core::AgentToolDispatcher>,
-                        )
+                            ));
+                        Some(compose_rpc_mob_external_tools(
+                            callback_tools,
+                            configured_mcp_tools.clone(),
+                        ))
                     }
                 });
                 meerkat_mob_mcp::MobMcpState::new_with_runtime_adapter(
@@ -2488,10 +2602,68 @@ mod tests {
         SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
         SourceUuid,
     };
-    use meerkat_core::{Config, ConfigRuntime, MemoryConfigStore, Message, StopReason};
+    use meerkat_core::{
+        Config, ConfigRuntime, MemoryConfigStore, Message, StopReason, ToolCallView, ToolDef,
+        ToolDispatchOutcome, ToolError,
+    };
     use serde::Serialize;
 
     use crate::protocol::RpcId;
+
+    #[cfg(feature = "mob")]
+    struct StaticDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    #[cfg(feature = "mob")]
+    impl StaticDispatcher {
+        fn new(name: &str) -> Self {
+            let tool = Arc::new(ToolDef {
+                name: name.into(),
+                description: format!("tool {name}"),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+                provenance: None,
+            });
+            Self {
+                tools: Arc::from([tool]),
+            }
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[async_trait]
+    impl AgentToolDispatcher for StaticDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.tools.clone()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn rpc_mob_external_tools_keep_callbacks_and_configured_mcp_tools() {
+        let callback_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("callback_tool"));
+        let configured_tools: Arc<dyn AgentToolDispatcher> =
+            Arc::new(StaticDispatcher::new("linear_add_comment"));
+
+        let merged = compose_rpc_mob_external_tools(callback_tools, Some(configured_tools));
+        let names: std::collections::BTreeSet<String> = merged
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert!(names.contains("callback_tool"));
+        assert!(names.contains("linear_add_comment"));
+    }
 
     #[cfg(feature = "comms")]
     #[test]

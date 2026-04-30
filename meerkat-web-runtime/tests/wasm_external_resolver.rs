@@ -1,6 +1,7 @@
 //! T18 (Phase 5): WASM external auth resolver — top-down observable
-//! proof that the JS host can register a callback that yields a bearer
-//! token, and the meerkat WASM runtime reads the registration correctly.
+//! proof that the JS host can register a callback that yields a structured
+//! auth envelope, and the meerkat WASM runtime reads the registration
+//! correctly.
 //!
 //! Plan choke point K9 reads: "browser host registers
 //! `ExternalAuthResolverHandle` via `wasm-bindgen`; calls
@@ -19,8 +20,8 @@ use std::sync::Arc;
 
 use js_sys::Function;
 use meerkat_core::{
-    AuthError, AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ConnectionRef,
-    CredentialSourceSpec, Provider, ResolvedAuthEnvelope,
+    AuthError, AuthProfile, BackendProfile, BindingPolicy, ConnectionRef, CredentialSourceSpec,
+    Provider, ResolvedAuthEnvelope,
     connection::{BindingId, ProfileId, RealmId},
     provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind},
 };
@@ -91,7 +92,12 @@ fn register_callback_sets_resolver_present() {
     let cb = js_sys::eval(
         r#"
             (function (connectionRef) {
-                return Promise.resolve("bearer-" + connectionRef.realm + "-" + connectionRef.binding);
+                return Promise.resolve({
+                    kind: "inline_secret",
+                    secret: "bearer-" + connectionRef.realm + "-" + connectionRef.binding,
+                    metadata: {},
+                    expires_at: "2030-01-02T03:04:05Z"
+                });
             })
         "#,
     )
@@ -130,10 +136,10 @@ fn register_non_function_returns_error() {
     );
 }
 
-/// Back-compat: host pages that still resolve the Promise to a plain bearer
-/// string keep working, but the runtime wraps it in the typed envelope shape.
+/// Host pages must return structured envelopes. A bare bearer string does not
+/// carry enough lease truth to become an `InlineSecret` with default metadata.
 #[wasm_bindgen_test(async)]
-async fn resolver_preserves_legacy_bearer_string_as_inline_secret() {
+async fn resolver_rejects_bare_bearer_string_without_creating_inline_secret() {
     register_eval_callback(
         r#"
             (function (connectionRef) {
@@ -142,22 +148,14 @@ async fn resolver_preserves_legacy_bearer_string_as_inline_secret() {
         "#,
     );
 
-    let envelope = resolve_with_registered_callback()
+    let err = resolve_with_registered_callback()
         .await
-        .expect("resolve bearer string");
-
-    match envelope {
-        ResolvedAuthEnvelope::InlineSecret {
-            secret,
-            metadata,
-            expires_at,
-        } => {
-            assert_eq!(secret, "bearer-browser-chatgpt");
-            assert_eq!(metadata, AuthMetadata::default());
-            assert_eq!(expires_at, None);
-        }
-        other => panic!("unexpected envelope: {other:?}"),
-    }
+        .expect_err("bare bearer strings must not synthesize lease truth");
+    let message = err.to_string();
+    assert!(
+        message.contains("structured auth envelope"),
+        "unexpected bare string rejection: {message}"
+    );
 }
 
 /// Typed JS resolver objects must cross the WASM boundary without losing lease
@@ -276,7 +274,8 @@ async fn resolver_fails_closed_for_missing_credentials() {
 
 /// Raw wasm-bindgen registration intentionally requires a Promise. The
 /// TypeScript SDK adapter provides the JS-facing convenience for callbacks
-/// that return a string synchronously.
+/// that return synchronously, but the resolved auth value must still be
+/// structured.
 #[wasm_bindgen_test(async)]
 async fn resolver_rejects_non_promise_js_results() {
     register_eval_callback("(function (_) { return 'bearer-without-promise'; })");
@@ -299,7 +298,12 @@ async fn self_hosted_connection_ref_uses_registered_wasm_external_resolver() {
             (function (connectionRef) {
                 globalThis.__meerkat_self_hosted_external_ref =
                     connectionRef.realm + ":" + connectionRef.binding;
-                return Promise.resolve("wasm-self-hosted-token");
+                return Promise.resolve({
+                    kind: "inline_secret",
+                    secret: "wasm-self-hosted-token",
+                    metadata: {},
+                    expires_at: "2030-01-02T03:04:05Z"
+                });
             })
         "#,
     )

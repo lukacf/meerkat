@@ -4,14 +4,13 @@
 //! Worker / IndexedDB storage is exposed to any extension or
 //! XSS-hijacked script. Instead, the host page owns the OAuth flow
 //! (browser redirect, PKCE, token endpoint exchange) and hands the
-//! meerkat WASM runtime a *resolved bearer token* via a JS callback.
+//! meerkat WASM runtime a *resolved auth envelope* via a JS callback.
 //!
 //! This module defines:
 //!
 //! - JS callback slot — wasm_bindgen-exposed registration that stores a
-//!   host callback returning a Promise of either a legacy bearer string
-//!   or a typed auth envelope. The
-//!   callback survives across WASM calls (registered once, consulted
+//!   host callback returning a Promise of a typed auth envelope. The callback
+//!   survives across WASM calls (registered once, consulted
 //!   per-session).
 //! - [`register_external_auth_resolver`] — wasm_bindgen entry point
 //!   that the host page calls to install the resolver.
@@ -38,9 +37,8 @@
 //! });
 //! ```
 //!
-//! For compatibility, resolving the Promise to a plain bearer string is
-//! still accepted and wrapped as `ResolvedAuthEnvelope::InlineSecret`
-//! with empty metadata and no expiration. To preserve typed failures,
+//! Hosts must resolve the Promise to a structured auth envelope so lease
+//! metadata and expiration remain explicit. To preserve typed failures,
 //! reject the Promise with a wire auth error object such as
 //! `{ kind: "interactive_login_required" }` or
 //! `{ kind: "refresh_failed", detail: "token endpoint returned 401" }`.
@@ -71,12 +69,10 @@ pub const WASM_EXTERNAL_AUTH_RESOLVER_HANDLE: &str = WASM_EXTERNAL_AUTH_RESOLVER
 
 /// Register a JS-side external-auth resolver. The callback receives a
 /// structural connection reference argument (`{ realm, binding, profile? }`)
-/// and must return a Promise that resolves to either a bearer-token string
-/// or a JSON-serializable `ResolvedAuthEnvelope` object.
+/// and must return a Promise that resolves to a JSON-serializable
+/// `ResolvedAuthEnvelope` object.
 ///
-/// For compatibility, a plain string is still accepted as
-/// `ResolvedAuthEnvelope::InlineSecret` with empty metadata and no expiry.
-/// Hosts that know lease truth should prefer the typed object form:
+/// Lease-bearing credentials must use the typed object form:
 /// `{ kind: "inline_secret", secret, metadata, expires_at? }`.
 /// Structured failures should reject the Promise with a wire auth error
 /// object, e.g. `{ kind: "interactive_login_required" }` or
@@ -231,7 +227,7 @@ fn auth_envelope_from_js_value(
     value: JsValue,
 ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
     if let Some(token) = value.as_string() {
-        return legacy_bearer_envelope(token);
+        return bare_bearer_string_error(token);
     }
 
     if value.is_null() || value.is_undefined() {
@@ -253,18 +249,16 @@ fn auth_envelope_from_js_value(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn legacy_bearer_envelope(
+fn bare_bearer_string_error(
     token: String,
 ) -> Result<meerkat_core::ResolvedAuthEnvelope, meerkat_core::AuthError> {
     if token.trim().is_empty() {
         return Err(meerkat_core::AuthError::MissingSecret);
     }
 
-    Ok(meerkat_core::ResolvedAuthEnvelope::InlineSecret {
-        secret: token,
-        metadata: meerkat_core::AuthMetadata::default(),
-        expires_at: None,
-    })
+    Err(meerkat_core::AuthError::Other(format!(
+        "{WASM_EXTERNAL_AUTH_RESOLVER_ID} resolver returned a bare bearer string; return a structured auth envelope object instead",
+    )))
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -33,8 +33,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 
-struct TestFactoryAuthority;
-
 fn agent_builder_with_ephemeral_turn_state() -> AgentBuilder {
     let mut session = Session::new();
     session
@@ -764,8 +762,9 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
+        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
         let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &TestFactoryAuthority,
+            &factory_policy_authority,
             builder,
             client,
             tools,
@@ -804,8 +803,9 @@ impl SessionAgentBuilder for RealAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
+        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
         let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &TestFactoryAuthority,
+            &factory_policy_authority,
             builder,
             client,
             tools,

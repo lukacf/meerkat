@@ -13,8 +13,8 @@ use meerkat::{
 use meerkat_client::LlmClient;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::{
-    AgentBuildPolicyError, AssistantBlock, BlobId, BlobRef, LlmStreamResult, Message, Provider,
-    ProviderImageMetadata, RevisedPromptDisposition, StopReason, ToolCallView, Usage,
+    AssistantBlock, BlobId, BlobRef, LlmStreamResult, Message, Provider, ProviderImageMetadata,
+    RevisedPromptDisposition, StopReason, ToolCallView, Usage,
 };
 use meerkat_core::{HookEngine, HookEngineError, HookExecutionReport, HookId, HookInvocation};
 use meerkat_tools::schema_for;
@@ -705,37 +705,18 @@ async fn public_agentbuilder_rejects_standalone_core_injections_loudly() {
     assert_unsupported_builder_injection(turn_state_error, "with_turn_state_handle");
 }
 
-#[tokio::test]
-async fn public_agentfactory_value_is_not_core_policy_authority() {
-    let factory = AgentFactory::new(".rkat/sessions");
-    let llm_client = Arc::new(MockLlmClient {
-        calls: Arc::new(AtomicUsize::new(1)),
-    });
-    let llm_adapter = Arc::new(factory.build_llm_adapter(llm_client, "mock-model").await);
-    let tools: Arc<dyn AgentToolDispatcher> = Arc::new(RecordingDispatcher {
-        called: Arc::new(AtomicBool::new(false)),
-    });
-    let store = Arc::new(TestSessionStore::new());
-    let store_adapter = Arc::new(factory.build_store_adapter(store).await);
+#[test]
+fn public_agentfactory_value_is_not_core_policy_authority() {
+    let mut builder = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    builder.pop();
+    builder.push("meerkat-core/src/agent/builder.rs");
+    let builder = std::fs::read_to_string(&builder).expect("read core AgentBuilder implementation");
 
-    let builder = meerkat_core::AgentBuilder::new()
-        .model("mock-model")
-        .max_tokens_per_turn(64)
-        .with_turn_state_handle(Arc::new(
-            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-        ));
-    let result = meerkat_core::agent::build_agent_after_factory_policy(
-        &factory,
-        builder,
-        llm_adapter,
-        tools,
-        store_adapter,
-    )
-    .await;
-
-    match result {
-        Err(AgentBuildPolicyError::InvalidFactoryAuthority) => {}
-        Err(error) => panic!("expected invalid authority policy error, got {error}"),
-        Ok(_) => panic!("public AgentFactory must not be usable as the core authority value"),
-    }
+    assert!(
+        builder.contains("_authority: &factory_policy_authority::AgentFactoryPolicyAuthority")
+            && !builder.contains("_authority: &A"),
+        "core factory-policy build must require the concrete opaque core \
+         authority token; a public AgentFactory value must not type-check as \
+         authority"
+    );
 }

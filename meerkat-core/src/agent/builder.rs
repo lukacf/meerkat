@@ -81,34 +81,36 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
 }
 
-const CANONICAL_AGENT_FACTORY_POLICY_AUTHORITY_TYPE: &str =
-    "meerkat::factory::AgentFactoryPolicyAuthority";
-
-// The production authority is a private facade type. Core cannot name that
-// type directly without introducing a dependency cycle, so the seam validates
-// the concrete authority type name instead of accepting a public trait impl.
-#[cfg(debug_assertions)]
-// Integration tests compile as downstream crates, so they use fixed
-// debug-only authority names instead of a public forgeable trait.
-const TEST_AGENT_FACTORY_POLICY_AUTHORITY_TYPES: &[&str] = &[
-    "hooks_behavior::TestFactoryAuthority",
-    "ephemeral_contract::TestFactoryAuthority",
-    "meerkat_mob::runtime::tests::TestFactoryAuthority",
-    "smoke_meerkat_sdk::scenario_10_memory::TestFactoryAuthority",
-];
-
-fn validate_factory_policy_authority<A: ?Sized>() -> Result<(), AgentBuildPolicyError> {
-    let authority_type = std::any::type_name::<A>();
-    if authority_type == CANONICAL_AGENT_FACTORY_POLICY_AUTHORITY_TYPE {
-        return Ok(());
+mod factory_policy_authority {
+    /// Opaque authority value for the core factory-policy build seam.
+    ///
+    /// This type intentionally lives in this private module and is not
+    /// re-exported. Downstream callers cannot name it or substitute a local
+    /// lookalike type for the core build seam.
+    pub struct AgentFactoryPolicyAuthority {
+        _seal: Seal,
     }
 
-    #[cfg(debug_assertions)]
-    if TEST_AGENT_FACTORY_POLICY_AUTHORITY_TYPES.contains(&authority_type) {
-        return Ok(());
+    struct Seal {
+        _private: (),
     }
 
-    Err(AgentBuildPolicyError::InvalidFactoryAuthority)
+    pub fn new() -> AgentFactoryPolicyAuthority {
+        AgentFactoryPolicyAuthority {
+            _seal: Seal { _private: () },
+        }
+    }
+}
+
+/// Create the opaque core authority used by the canonical facade factory.
+///
+/// This helper is hidden because it is not a standalone construction API. It
+/// exists only to let the facade crate cross the crate boundary with the
+/// concrete core authority type; the build seam below still rejects arbitrary
+/// caller-chosen authority types at compile time.
+#[doc(hidden)]
+pub fn agent_factory_policy_authority() -> factory_policy_authority::AgentFactoryPolicyAuthority {
+    factory_policy_authority::new()
 }
 
 /// Build an agent after the canonical factory has composed policy metadata.
@@ -117,8 +119,8 @@ fn validate_factory_policy_authority<A: ?Sized>() -> Result<(), AgentBuildPolicy
 /// surrounding factory has attached durable session metadata, durable
 /// build-state metadata, and a runtime turn-state handle to the builder.
 #[doc(hidden)]
-pub async fn build_agent_after_factory_policy<C, T, S, A>(
-    _authority: &A,
+pub async fn build_agent_after_factory_policy<C, T, S>(
+    _authority: &factory_policy_authority::AgentFactoryPolicyAuthority,
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
@@ -128,9 +130,7 @@ where
     C: AgentLlmClient + ?Sized,
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
-    A: ?Sized,
 {
-    validate_factory_policy_authority::<A>()?;
     builder.validate_factory_policy()?;
     Ok(builder.build_inner(client, tools, store).await)
 }

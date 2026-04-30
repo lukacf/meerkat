@@ -1284,8 +1284,6 @@ mod scenario_10_memory {
     use meerkat_memory::SimpleMemoryStore;
     use meerkat_session::DefaultCompactor;
 
-    struct TestFactoryAuthority;
-
     #[tokio::test]
     #[ignore = "lane:e2e-smoke"]
     async fn e2e_smoke_memory_compaction_and_search() {
@@ -1359,8 +1357,9 @@ mod scenario_10_memory {
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
+        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &TestFactoryAuthority,
+            &factory_policy_authority,
             builder,
             llm_adapter,
             memory_tools,

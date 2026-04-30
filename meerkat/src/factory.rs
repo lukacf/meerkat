@@ -1000,21 +1000,9 @@ impl meerkat_core::service::VisibleToolSnapshotProvider for DeferredSnapshotProv
     }
 }
 
-#[derive(Clone)]
-struct AgentFactoryPolicyAuthority {
-    _private: (),
-}
-
-impl AgentFactoryPolicyAuthority {
-    fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
 /// Factory for creating agents with standard configuration.
 #[derive(Clone)]
 pub struct AgentFactory {
-    factory_policy_authority: AgentFactoryPolicyAuthority,
     pub store_path: PathBuf,
     /// Runtime root for realm-scoped artifacts (comms identity/trust, hook layers,
     /// skill caches). When unset, falls back to project_root or store_path.
@@ -1332,7 +1320,6 @@ impl AgentFactory {
     /// Filesystem-dependent methods are not available.
     pub fn minimal() -> Self {
         Self {
-            factory_policy_authority: AgentFactoryPolicyAuthority::new(),
             store_path: PathBuf::new(),
             runtime_root: None,
             project_root: None,
@@ -1375,7 +1362,6 @@ impl AgentFactory {
             .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)
             .ok();
         Self {
-            factory_policy_authority: AgentFactoryPolicyAuthority::new(),
             store_path: store_path.into(),
             runtime_root: None,
             project_root: None,
@@ -3886,8 +3872,9 @@ impl AgentFactory {
         // 13. Build agent. AgentFactory owns the policy composition above; core
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
+        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &self.factory_policy_authority,
+            &factory_policy_authority,
             builder,
             llm_adapter,
             tools,
@@ -4030,8 +4017,9 @@ mod tests {
             .model("mock-model")
             .max_tokens_per_turn(64)
             .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
+        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
         let result = meerkat_core::agent::build_agent_after_factory_policy(
-            &factory.factory_policy_authority,
+            &factory_policy_authority,
             builder,
             llm_adapter,
             tools,

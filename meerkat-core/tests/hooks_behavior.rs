@@ -18,8 +18,6 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::{Mutex, mpsc};
 
-struct TestFactoryAuthority;
-
 #[derive(Clone, Copy)]
 enum ClientMode {
     TextOnly,
@@ -301,8 +299,9 @@ async fn build_agent(
         ))
         .with_hook_engine(Arc::new(hooks));
 
+    let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
     meerkat_core::agent::build_agent_after_factory_policy(
-        &TestFactoryAuthority,
+        &factory_policy_authority,
         builder,
         client,
         tools,

@@ -652,6 +652,26 @@ impl MeerkatMachine {
                     None => None,
                 };
 
+                // Deferred-tool authority is owned by the visibility
+                // catalog, so publish must validate caller-supplied state
+                // before projecting names/witnesses into the DSL state.
+                let owner = {
+                    let sessions = self.sessions.read().await;
+                    Arc::clone(
+                        &sessions
+                            .get(&session_id)
+                            .ok_or(RuntimeDriverError::NotReady {
+                                state: RuntimeState::Destroyed,
+                            })?
+                            .tool_visibility_owner,
+                    )
+                };
+                owner
+                    .validate_deferred_authorities_for_visibility_state(&visibility_state)
+                    .map_err(|err| RuntimeDriverError::ValidationFailed {
+                        reason: err.to_string(),
+                    })?;
+
                 // DSL-first: fire the canonical typed `PublishCommittedVisibleSet`
                 // input. The per-phase transitions at `dsl::PublishCommittedVisibleSet*`
                 // own the `VisibleSurfacesMatchAppliedStateInvariant`:
@@ -696,21 +716,10 @@ impl MeerkatMachine {
                     .await
                     .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
 
-                {
-                    let sessions = self.sessions.read().await;
-                    let owner = Arc::clone(
-                        &sessions
-                            .get(&session_id)
-                            .ok_or(RuntimeDriverError::NotReady {
-                                state: RuntimeState::Destroyed,
-                            })?
-                            .tool_visibility_owner,
-                    );
-                    if let Err(err) = owner.replace_visibility_state(*visibility_state.clone()) {
-                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                            .await;
-                        return Err(RuntimeDriverError::Internal(err.to_string()));
-                    }
+                if let Err(err) = owner.replace_visibility_state(*visibility_state.clone()) {
+                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                        .await;
+                    return Err(RuntimeDriverError::Internal(err.to_string()));
                 }
 
                 Ok(MeerkatMachineCommandResult::VisibilityPublished(

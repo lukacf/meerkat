@@ -133,6 +133,40 @@ impl MachineToolVisibilityOwner {
         })?;
         Ok(())
     }
+
+    pub(super) fn validate_deferred_authorities_for_visibility_state(
+        &self,
+        visibility_state: &SessionToolVisibilityState,
+    ) -> Result<(), ToolScopeStageError> {
+        let names = deferred_authority_names_for_visibility_state(visibility_state);
+        if names.is_empty() {
+            return Ok(());
+        }
+        let missing =
+            missing_visibility_witness_names(&names, &visibility_state.requested_witnesses);
+        if !missing.is_empty() {
+            return Err(ToolScopeStageError::MissingWitnesses { names: missing });
+        }
+        let invalid = {
+            let authority_catalog =
+                self.deferred_authority_catalog
+                    .read()
+                    .map_err(|_| ToolScopeStageError::Owner {
+                        message: "machine visibility deferred authority catalog lock poisoned"
+                            .to_string(),
+                    })?;
+            invalid_deferred_authority_names(
+                &names,
+                &visibility_state.requested_witnesses,
+                &authority_catalog,
+            )
+        };
+        if invalid.is_empty() {
+            Ok(())
+        } else {
+            Err(ToolScopeStageError::InvalidWitnesses { names: invalid })
+        }
+    }
 }
 
 pub fn formal_projection_value<T: serde::Serialize>(value: &T) -> String {
@@ -165,6 +199,16 @@ fn authority_witnesses_for_names(
                 .get(name)
                 .map(|witness| (name.clone(), witness.clone()))
         })
+        .collect()
+}
+
+fn deferred_authority_names_for_visibility_state(
+    visibility_state: &SessionToolVisibilityState,
+) -> std::collections::BTreeSet<String> {
+    visibility_state
+        .active_requested_deferred_names
+        .union(&visibility_state.staged_requested_deferred_names)
+        .cloned()
         .collect()
 }
 
@@ -220,6 +264,10 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         &self,
         visibility_state: SessionToolVisibilityState,
     ) -> Result<(), ToolScopeApplyError> {
+        self.validate_deferred_authorities_for_visibility_state(&visibility_state)
+            .map_err(|err| ToolScopeApplyError::Owner {
+                message: format!("invalid deferred visibility authority: {err}"),
+            })?;
         let active_deferred_authorities = dsl_witnesses(&authority_witnesses_for_names(
             &visibility_state.active_requested_deferred_names,
             &visibility_state.requested_witnesses,

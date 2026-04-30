@@ -13164,8 +13164,8 @@ async fn replace_visibility_state_rejects_deferred_names_without_authority() {
         .expect_err("replacement must not install deferred names without typed authority");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
-        "rejection should come from the DSL authority sync: {err}"
+        err.to_string().contains("deferred_tool"),
+        "rejection should name the missing deferred authority: {err}"
     );
     let state = bindings
         .tool_visibility_owner
@@ -13203,8 +13203,8 @@ async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() 
         .expect_err("replacement must not install deferred names with empty typed authority");
 
     assert!(
-        err.to_string().contains("SyncVisibilityRevisions"),
-        "rejection should come from the DSL authority sync: {err}"
+        err.to_string().contains("deferred_tool"),
+        "rejection should name the empty deferred authority: {err}"
     );
     let state = bindings
         .tool_visibility_owner
@@ -13320,6 +13320,67 @@ async fn publish_committed_visible_set_rejects_active_requested_names_outside_st
     assert!(
         matches!(err, RuntimeDriverError::ValidationFailed { .. }),
         "expected ValidationFailed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn publish_committed_visible_set_rejects_deferred_authority_mismatched_with_visible_catalog()
+{
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let catalog_tool = runtime_deferred_tool("deferred_tool", "catalog");
+    seed_deferred_tool_authority_catalog(&bindings, vec![catalog_tool], &["deferred_tool"]);
+
+    let state = meerkat_core::SessionToolVisibilityState {
+        active_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        requested_witnesses: [(
+            "deferred_tool".to_string(),
+            meerkat_core::ToolVisibilityWitness {
+                stable_owner_key: Some("callback:forged".to_string()),
+                last_seen_provenance: Some(callback_tool_provenance("forged")),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        active_revision: 4,
+        staged_revision: 4,
+        ..Default::default()
+    };
+
+    let err = adapter
+        .publish_committed_visible_set(&session_id, state)
+        .await
+        .expect_err("publish must reject forged deferred provenance authority");
+    assert!(
+        matches!(err, RuntimeDriverError::ValidationFailed { .. }),
+        "expected ValidationFailed, got {err:?}"
+    );
+
+    let owner_state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should still be readable");
+    assert!(
+        owner_state.active_requested_deferred_names.is_empty()
+            && owner_state.staged_requested_deferred_names.is_empty(),
+        "failed publish must not install deferred routing names"
+    );
+
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions.get(&session_id).expect("session should exist");
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        authority.state.active_deferred_authorities.is_empty()
+            && authority.state.staged_deferred_authorities.is_empty(),
+        "failed publish must not leave forged deferred authority in the DSL state"
     );
 }
 

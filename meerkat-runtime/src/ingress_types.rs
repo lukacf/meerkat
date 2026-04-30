@@ -93,12 +93,27 @@ pub struct RuntimeInputProjection {
 }
 
 impl RuntimeInputSemantics {
-    pub fn from_policy_and_kind(policy: &PolicyDecision, kind: InputKind) -> Self {
-        let boundary = match policy.apply_mode {
+    fn boundary_from_policy(policy: &PolicyDecision) -> RunApplyBoundary {
+        match policy.apply_mode {
             ApplyMode::StageRunBoundary => RunApplyBoundary::RunCheckpoint,
             ApplyMode::InjectNow => RunApplyBoundary::Immediate,
             ApplyMode::StageRunStart | ApplyMode::Ignore => RunApplyBoundary::RunStart,
-        };
+        }
+    }
+
+    pub fn from_policy_and_execution_kind(
+        policy: &PolicyDecision,
+        execution_kind: RuntimeExecutionKind,
+        peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+    ) -> Self {
+        Self {
+            boundary: Self::boundary_from_policy(policy),
+            execution_kind,
+            peer_response_terminal_apply_intent,
+        }
+    }
+
+    pub fn from_policy_and_kind(policy: &PolicyDecision, kind: InputKind) -> Self {
         let execution_kind = match kind {
             InputKind::Continuation => RuntimeExecutionKind::ResumePending,
             InputKind::Prompt
@@ -123,11 +138,11 @@ impl RuntimeInputSemantics {
             | InputKind::Continuation
             | InputKind::Operation => None,
         };
-        Self {
-            boundary,
+        Self::from_policy_and_execution_kind(
+            policy,
             execution_kind,
             peer_response_terminal_apply_intent,
-        }
+        )
     }
 }
 

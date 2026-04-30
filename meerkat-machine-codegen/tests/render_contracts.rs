@@ -411,7 +411,7 @@ fn render_composition_driver_returns_none_for_driverless_composition() {
 }
 
 #[test]
-fn render_composition_driver_emits_typed_seam_effect_and_route_to_input() {
+fn render_composition_driver_emits_generated_route_facts() {
     let mut composition = meerkat_mob_seam_composition();
     composition.driver = Some(sample_driver());
 
@@ -419,10 +419,10 @@ fn render_composition_driver_emits_typed_seam_effect_and_route_to_input() {
         render_composition_driver(&composition).expect("driver-bearing composition emits");
 
     // Typed identity imports + route descriptors are present; no stringly
-    // tuple tables survive.
+    // tuple tables or generated-shape effect mirrors survive.
     assert!(
         rendered.contains(
-            "use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceId, SignalVariantId};"
+            "use meerkat_machine_schema::identity::{CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId, RouteId, SignalVariantId};"
         ),
         "rendered module must import typed identity newtypes:\n{rendered}"
     );
@@ -440,6 +440,9 @@ fn render_composition_driver_emits_typed_seam_effect_and_route_to_input() {
         "(&str, &str, &str, &str)",
         "(&str, &str)",
         "pub const DRIVER_TYPE",
+        "pub enum MeerkatMobSeamEffect",
+        "crate::generated::mob::Effect",
+        "crate::generated::meerkat::Effect",
     ] {
         assert!(
             !rendered.contains(forbidden),
@@ -447,47 +450,51 @@ fn render_composition_driver_emits_typed_seam_effect_and_route_to_input() {
         );
     }
 
-    // Seam effect enum with one variant per producer instance, wrapping
-    // each participant's generated `Effect` type.
+    // Generated producer, variant, target, and field facts are available
+    // without depending on generated-shape payload enums.
     assert!(
-        rendered.contains("pub enum MeerkatMobSeamEffect"),
-        "rendered module must declare the typed seam-effect enum:\n{rendered}"
+        rendered.contains("pub struct ProducerFacts"),
+        "rendered module must declare producer facts:\n{rendered}"
     );
     assert!(
-        rendered.contains("Mob(crate::generated::mob::Effect)"),
-        "seam-effect enum must wrap the mob producer Effect type:\n{rendered}"
+        rendered.contains("pub fn composition_id() -> CompositionId"),
+        "rendered module must declare composition_id:\n{rendered}"
     );
     assert!(
-        rendered.contains("Meerkat(crate::generated::meerkat::Effect)"),
-        "seam-effect enum must wrap the meerkat producer Effect type:\n{rendered}"
+        rendered.contains("pub mod producers"),
+        "rendered module must declare producer facts module:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod effects"),
+        "rendered module must declare effect variant facts module:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod fields"),
+        "rendered module must declare field facts module:\n{rendered}"
     );
 
-    // route_to_input signature and a sample Input-route arm.
+    // route_to_input signature and a sample Input-route fact.
     assert!(
-        rendered.contains(
-            "pub fn route_to_input(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedInput>"
-        ),
+        rendered.contains("pub fn route_to_input("),
         "rendered module must declare route_to_input:\n{rendered}"
     );
     assert!(
-        rendered.contains("crate::generated::mob::Effect::RequestRuntimeBinding(_)"),
-        "route_to_input must match on the mob RequestRuntimeBinding effect variant:\n{rendered}"
+        rendered.contains("pub fn route_binding_request_reaches_meerkat() -> TypedRoutedInput"),
+        "rendered module must expose the binding route fact:\n{rendered}"
     );
     assert!(
-        rendered.contains("InputVariantId::parse(\"PrepareBindings\")"),
-        "route_to_input must target the PrepareBindings input variant:\n{rendered}"
+        rendered.contains("effects::mob::request_runtime_binding()"),
+        "route_to_input must resolve the generated mob RequestRuntimeBinding variant fact:\n{rendered}"
     );
 
     // Signal-kind routes are emitted through the generated signal surface.
     assert!(
-        rendered.contains(
-            "pub fn route_to_signal(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedSignal>"
-        ),
+        rendered.contains("pub fn route_to_signal("),
         "rendered module must declare route_to_signal:\n{rendered}"
     );
     assert!(
-        rendered.contains("SignalVariantId::parse(\"ObserveRuntimeReady\")"),
-        "route_to_signal must target the ObserveRuntimeReady signal variant:\n{rendered}"
+        rendered.contains("pub fn route_runtime_bound_reaches_mob() -> TypedRoutedSignal"),
+        "rendered module must expose the runtime-bound signal route fact:\n{rendered}"
     );
 
     assert!(
@@ -498,9 +505,9 @@ fn render_composition_driver_emits_typed_seam_effect_and_route_to_input() {
 
 #[test]
 fn render_composition_driver_emission_is_composition_name_agnostic() {
-    // The framework must work for any composition — the seam-effect enum
-    // name derives from the composition slug and the per-producer match
-    // arms stay intact.
+    // The framework must work for any composition: the header and
+    // composition_id follow the composition slug, while the generated fact
+    // resolvers remain available.
     let mut composition = meerkat_mob_seam_composition();
     composition.name = CompositionId::parse("arbitrary_composition").expect("composition slug");
     composition.driver = Some(sample_driver());
@@ -512,13 +519,11 @@ fn render_composition_driver_emission_is_composition_name_agnostic() {
         "codegen must use the composition name in the header:\n{rendered}"
     );
     assert!(
-        rendered.contains("pub enum ArbitraryCompositionEffect"),
-        "seam-effect enum name must derive from the composition slug:\n{rendered}"
+        rendered.contains("CompositionId::parse(\"arbitrary_composition\")"),
+        "composition_id must use the renamed composition slug:\n{rendered}"
     );
     assert!(
-        rendered.contains(
-            "pub fn route_to_input(effect: &ArbitraryCompositionEffect) -> Option<TypedRoutedInput>"
-        ),
-        "route_to_input must reference the renamed seam-effect enum:\n{rendered}"
+        rendered.contains("pub fn route_to_input("),
+        "route_to_input must stay available for renamed compositions:\n{rendered}"
     );
 }

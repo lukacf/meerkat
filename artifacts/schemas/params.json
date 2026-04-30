@@ -684,10 +684,7 @@
     "description": "Request payload for `auth/login/device_complete`.",
     "properties": {
       "binding_id": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "device_code": {
         "type": "string"
@@ -702,15 +699,14 @@
         "type": "string"
       },
       "realm_id": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       }
     },
     "required": [
       "provider",
-      "device_code"
+      "device_code",
+      "realm_id",
+      "binding_id"
     ],
     "title": "DeviceCompleteParams",
     "type": "object"
@@ -719,12 +715,26 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/device_start`.",
     "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "profile_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "provider": {
+        "type": "string"
+      },
+      "realm_id": {
         "type": "string"
       }
     },
     "required": [
-      "provider"
+      "provider",
+      "realm_id",
+      "binding_id"
     ],
     "title": "DeviceStartParams",
     "type": "object"
@@ -798,10 +808,7 @@
     "description": "Request payload for `auth/login/complete`.",
     "properties": {
       "binding_id": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "code": {
         "type": "string"
@@ -816,10 +823,7 @@
         "type": "string"
       },
       "realm_id": {
-        "type": [
-          "string",
-          "null"
-        ]
+        "type": "string"
       },
       "redirect_uri": {
         "type": "string"
@@ -832,7 +836,9 @@
       "provider",
       "code",
       "state",
-      "redirect_uri"
+      "redirect_uri",
+      "realm_id",
+      "binding_id"
     ],
     "title": "LoginCompleteParams",
     "type": "object"
@@ -841,7 +847,19 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/start`.",
     "properties": {
+      "binding_id": {
+        "type": "string"
+      },
+      "profile_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "provider": {
+        "type": "string"
+      },
+      "realm_id": {
         "type": "string"
       },
       "redirect_uri": {
@@ -850,7 +868,9 @@
     },
     "required": [
       "provider",
-      "redirect_uri"
+      "redirect_uri",
+      "realm_id",
+      "binding_id"
     ],
     "title": "LoginStartParams",
     "type": "object"

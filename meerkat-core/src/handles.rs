@@ -1048,7 +1048,7 @@ pub struct AuthLeaseTransition {
 pub const AUTH_LEASE_TTL_REFRESH_WINDOW_SECS: u64 = 60;
 
 /// Auth lease lifecycle DSL handle.
-pub trait AuthLeaseHandle: Send + Sync {
+pub trait AuthLeaseHandle: Send + Sync + std::any::Any {
     /// Fire `AcquireAuthLease { lease_key, expires_at }` — unconditional.
     ///
     /// Moves the binding into `auth_valid_leases` and records its expiry.

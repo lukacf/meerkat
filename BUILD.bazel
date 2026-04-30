@@ -197,6 +197,7 @@ test_suite(
         "//meerkat-machine-kernels:content_shape_wire_contract_test",
         "//meerkat-machine-kernels:kernel_typed_round_trip_test",
         "//meerkat-machine-kernels:meerkat_machine_kernels_unit_test",
+        "//meerkat-machine-schema:auth_machine_oauth_flow_test",
         "//meerkat-machine-schema:auth_machine_release_test",
         "//meerkat-machine-schema:catalog_typed_round_trip_test",
         "//meerkat-machine-schema:identity_roundtrip_test",

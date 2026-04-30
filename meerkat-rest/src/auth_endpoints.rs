@@ -123,25 +123,6 @@ async fn resolve_oauth_target(
     .map_err(|error| (target_error_status(&error), error.to_string()))
 }
 
-fn require_explicit_oauth_identity<'a>(
-    realm_id: Option<&'a RealmId>,
-    binding_id: Option<&'a BindingId>,
-) -> Result<(&'a RealmId, &'a BindingId), (StatusCode, String)> {
-    let realm_id = realm_id.ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "realm_id is required for OAuth login completion".to_string(),
-        )
-    })?;
-    let binding_id = binding_id.ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "binding_id is required for OAuth login completion".to_string(),
-        )
-    })?;
-    Ok((realm_id, binding_id))
-}
-
 fn require_managed_store_source(
     binding_id: &BindingId,
     auth_profile: &meerkat_core::AuthProfile,
@@ -632,12 +613,16 @@ pub async fn test_auth_binding(
 // The server owns the state -> PKCE verifier correlation. The client receives
 // only the authorize URL and state, then posts the provider code with that state.
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct LoginStartBody {
     pub provider: String,
     /// Client-provided redirect URI (typically a loopback binding that
     /// the caller has already bound). The authorize URL will embed this.
     pub redirect_uri: String,
+    pub realm_id: RealmId,
+    pub binding_id: BindingId,
+    #[serde(default)]
+    pub profile_id: Option<ProfileId>,
 }
 
 pub async fn start_login(
@@ -654,9 +639,25 @@ pub async fn start_login(
                 .into_response();
         }
     };
+    let target = match resolve_oauth_target(
+        &state,
+        resolved.provider,
+        Some(&body.realm_id),
+        Some(&body.binding_id),
+        body.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let connection_ref = target.connection_ref;
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().to_string();
     let state_token = match state.oauth_flow_authority().start(
+        connection_ref,
         resolved.identity,
         body.redirect_uri.clone(),
         verifier,
@@ -692,16 +693,14 @@ pub async fn start_login(
         .into_response()
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct LoginCompleteBody {
     pub provider: String,
     pub code: String,
     pub state: String,
     pub redirect_uri: String,
-    #[serde(default)]
-    pub realm_id: Option<RealmId>,
-    #[serde(default)]
-    pub binding_id: Option<BindingId>,
+    pub realm_id: RealmId,
+    pub binding_id: BindingId,
     #[serde(default)]
     pub profile_id: Option<ProfileId>,
 }
@@ -721,18 +720,11 @@ pub async fn complete_login(
         }
     };
     let provider = resolved.provider;
-    let (realm_id, binding_id) =
-        match require_explicit_oauth_identity(body.realm_id.as_ref(), body.binding_id.as_ref()) {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
     let target = match resolve_oauth_target(
         &state,
         provider,
-        Some(realm_id),
-        Some(binding_id),
+        Some(&body.realm_id),
+        Some(&body.binding_id),
         body.profile_id.as_ref(),
     )
     .await
@@ -760,8 +752,9 @@ pub async fn complete_login(
             .into_response();
     }
 
-    let flow = match state.oauth_flow_authority().consume(
+    let flow = match state.oauth_flow_authority().verify(
         &body.state,
+        &connection_ref,
         resolved.identity,
         &body.redirect_uri,
     ) {
@@ -851,6 +844,20 @@ pub async fn complete_login(
     {
         return (status, Json(serde_json::json!({ "error": msg }))).into_response();
     }
+    if let Err(e) = state.oauth_flow_authority().consume(
+        &body.state,
+        &connection_ref,
+        resolved.identity,
+        &body.redirect_uri,
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("oauth state terminal consume failed after token commit: {e}")
+            })),
+        )
+            .into_response();
+    }
 
     tracing::info!(
         target: "meerkat::auth::audit",
@@ -876,9 +883,13 @@ pub async fn complete_login(
         .into_response()
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct DeviceStartBody {
     pub provider: String,
+    pub realm_id: RealmId,
+    pub binding_id: BindingId,
+    #[serde(default)]
+    pub profile_id: Option<ProfileId>,
 }
 
 pub async fn start_device_login(
@@ -907,10 +918,26 @@ pub async fn start_device_login(
         )
             .into_response();
     }
+    let target = match resolve_oauth_target(
+        &state,
+        resolved.provider,
+        Some(&body.realm_id),
+        Some(&body.binding_id),
+        body.profile_id.as_ref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let connection_ref = target.connection_ref;
     let http = reqwest::Client::new();
     match request_device_code(&http, &resolved.endpoints).await {
         Ok(resp) => {
             if let Err(err) = state.oauth_flow_authority().admit_device_code(
+                connection_ref,
                 resolved.identity,
                 resp.device_code.clone(),
                 std::time::Duration::from_secs(resp.expires_in),
@@ -951,14 +978,12 @@ pub async fn start_device_login(
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct DeviceCompleteBody {
     pub provider: String,
     pub device_code: String,
-    #[serde(default)]
-    pub realm_id: Option<RealmId>,
-    #[serde(default)]
-    pub binding_id: Option<BindingId>,
+    pub realm_id: RealmId,
+    pub binding_id: BindingId,
     #[serde(default)]
     pub profile_id: Option<ProfileId>,
 }
@@ -998,18 +1023,11 @@ pub async fn complete_device_login(
         )
             .into_response();
     }
-    let (realm_id, binding_id) =
-        match require_explicit_oauth_identity(body.realm_id.as_ref(), body.binding_id.as_ref()) {
-            Ok(v) => v,
-            Err((status, msg)) => {
-                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
-            }
-        };
     let target = match resolve_oauth_target(
         &state,
         provider,
-        Some(realm_id),
-        Some(binding_id),
+        Some(&body.realm_id),
+        Some(&body.binding_id),
         body.profile_id.as_ref(),
     )
     .await
@@ -1036,10 +1054,11 @@ pub async fn complete_device_login(
         )
             .into_response();
     }
-    let poll_lease = match state
-        .oauth_flow_authority()
-        .begin_device_code_poll(&body.device_code, resolved.identity)
-    {
+    let poll_lease = match state.oauth_flow_authority().begin_device_code_poll(
+        &body.device_code,
+        &connection_ref,
+        resolved.identity,
+    ) {
         Ok(lease) => lease,
         Err(err) => {
             let (status, message) = oauth_device_state_error(err);
@@ -1287,6 +1306,14 @@ mod tests {
         }
     }
 
+    fn openai_connection_ref() -> ConnectionRef {
+        ConnectionRef {
+            realm: RealmId::parse("dev").unwrap(),
+            binding: BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        }
+    }
+
     fn api_key_tokens() -> PersistedTokens {
         api_key_tokens_with_secret("sk-test")
     }
@@ -1501,10 +1528,11 @@ mod tests {
     }
 
     fn install_ephemeral_auth_state(state: &mut AppState) {
-        let auth_lease: Arc<dyn AuthLeaseHandle> = Arc::new(RuntimeAuthLeaseHandle::new());
+        let auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         state
             .runtime_adapter
-            .set_auth_lease_handle(Arc::clone(&auth_lease));
+            .set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
+        let auth_lease: Arc<dyn AuthLeaseHandle> = auth_lease;
         state.auth_lease = auth_lease;
         state.token_store = Arc::new(EphemeralTokenStore::new());
     }
@@ -1519,6 +1547,16 @@ mod tests {
         let unrelated_state = AppState::load_from(unrelated_temp.path().to_path_buf())
             .await
             .unwrap();
+        state
+            .config_runtime
+            .set(config_with_openai_managed_store_binding(), None)
+            .await
+            .unwrap();
+        unrelated_state
+            .config_runtime
+            .set(config_with_openai_managed_store_binding(), None)
+            .await
+            .unwrap();
         let redirect_uri = "http://127.0.0.1:0/callback";
 
         let response = start_login(
@@ -1526,6 +1564,9 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
+                realm_id: RealmId::parse("dev").unwrap(),
+                binding_id: BindingId::parse("default_openai").unwrap(),
+                profile_id: None,
             }),
         )
         .await
@@ -1538,6 +1579,7 @@ mod tests {
         assert!(matches!(
             unrelated_state.oauth_flow_authority().consume(
                 state_token,
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             ),
@@ -1547,6 +1589,7 @@ mod tests {
             .oauth_flow_authority()
             .consume(
                 state_token,
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             )
@@ -1560,6 +1603,11 @@ mod tests {
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
+        state
+            .config_runtime
+            .set(config_with_openai_managed_store_binding(), None)
+            .await
+            .unwrap();
         let redirect_uri = "http://127.0.0.1:0/callback";
 
         let response = start_login(
@@ -1567,6 +1615,9 @@ mod tests {
             Json(LoginStartBody {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
+                realm_id: RealmId::parse("dev").unwrap(),
+                binding_id: BindingId::parse("default_openai").unwrap(),
+                profile_id: None,
             }),
         )
         .await
@@ -1581,6 +1632,7 @@ mod tests {
             .oauth_flow_authority()
             .consume(
                 state_token,
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             )
@@ -1597,6 +1649,7 @@ mod tests {
         state
             .oauth_flow_authority()
             .admit_device_code(
+                managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
                 std::time::Duration::from_secs(600),
@@ -1607,12 +1660,14 @@ mod tests {
             .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
+                &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("device completion poll begins");
         assert!(matches!(
             state.oauth_flow_authority().begin_device_code_poll(
                 "device-code",
+                &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
             Err(OAuthFlowError::DevicePollInProgress)
@@ -1624,6 +1679,7 @@ mod tests {
             .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
+                &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("dropped REST completion poll releases runtime authority");
@@ -1638,6 +1694,7 @@ mod tests {
         state
             .oauth_flow_authority()
             .admit_device_code(
+                managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
                 std::time::Duration::from_secs(600),
@@ -1650,6 +1707,7 @@ mod tests {
             let _poll = authority
                 .begin_device_code_poll(
                     "device-code",
+                    &managed_connection_ref(),
                     meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 )
                 .expect("device completion poll begins");
@@ -1660,6 +1718,7 @@ mod tests {
         assert!(matches!(
             state.oauth_flow_authority().begin_device_code_poll(
                 "device-code",
+                &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
             Err(OAuthFlowError::DevicePollInProgress)
@@ -1672,6 +1731,7 @@ mod tests {
             .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
+                &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("aborted REST completion poll releases runtime authority");
@@ -1739,6 +1799,7 @@ mod tests {
         let authority = state.oauth_flow_authority();
         authority
             .admit_device_code(
+                managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
                 std::time::Duration::from_secs(600),
@@ -1747,6 +1808,7 @@ mod tests {
         let poll_lease = authority
             .begin_device_code_poll(
                 "device-code",
+                &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("device poll lease begins");
@@ -1766,6 +1828,7 @@ mod tests {
         authority
             .begin_device_code_poll(
                 "device-code",
+                &managed_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("failed ready commit keeps device flow retryable");
@@ -2019,28 +2082,26 @@ mod tests {
     }
 
     #[test]
-    fn login_complete_body_does_not_invent_default_identity() {
-        let body: LoginCompleteBody = serde_json::from_value(serde_json::json!({
+    fn login_complete_body_requires_explicit_identity() {
+        let err = serde_json::from_value::<LoginCompleteBody>(serde_json::json!({
             "provider": "anthropic",
             "code": "code",
             "state": "state",
             "redirect_uri": "http://127.0.0.1:0/callback"
         }))
-        .unwrap();
+        .unwrap_err();
 
-        assert!(body.realm_id.is_none());
-        assert!(body.binding_id.is_none());
+        assert!(err.to_string().contains("realm_id"));
     }
 
     #[test]
-    fn device_complete_body_does_not_invent_default_identity() {
-        let body: DeviceCompleteBody = serde_json::from_value(serde_json::json!({
+    fn device_complete_body_requires_explicit_identity() {
+        let err = serde_json::from_value::<DeviceCompleteBody>(serde_json::json!({
             "provider": "anthropic",
             "device_code": "device-code"
         }))
-        .unwrap();
+        .unwrap_err();
 
-        assert!(body.realm_id.is_none());
-        assert!(body.binding_id.is_none());
+        assert!(err.to_string().contains("realm_id"));
     }
 }

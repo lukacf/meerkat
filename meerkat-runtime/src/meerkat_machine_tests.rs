@@ -61,6 +61,15 @@ fn runtime_id_for_session(session_id: &SessionId) -> LogicalRuntimeId {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn oauth_target() -> meerkat_core::ConnectionRef {
+    meerkat_core::ConnectionRef {
+        realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+        binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
+        profile: None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn oauth_flow_authority_is_owned_by_meerkat_machine() {
     let machine = MeerkatMachine::ephemeral();
@@ -69,6 +78,7 @@ fn oauth_flow_authority_is_owned_by_meerkat_machine() {
     let state = machine
         .oauth_flow_authority()
         .start(
+            oauth_target(),
             meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
             redirect_uri.to_string(),
             "verifier".to_string(),
@@ -78,6 +88,7 @@ fn oauth_flow_authority_is_owned_by_meerkat_machine() {
         .oauth_flow_authority()
         .consume(
             &state,
+            &oauth_target(),
             meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
             redirect_uri,
         )
@@ -95,9 +106,110 @@ fn oauth_flow_lifecycle_uses_runtime_authority_seam() {
         "MeerkatMachine must not install the auth-core registry directly"
     );
     assert!(
-        source.contains("RuntimeOAuthFlowHandle::default()"),
+        source.contains("RuntimeOAuthFlowHandle::new_with_auth_lease"),
         "MeerkatMachine should install the runtime OAuth flow authority seam"
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_device_expiry_clears_runtime_lifecycle_membership() {
+    use meerkat_auth_core::oauth_flow::OAuthFlowAuthority as _;
+
+    let authority = crate::handles::RuntimeOAuthFlowHandle::new(Duration::from_millis(1));
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let target = oauth_target();
+    let device_code = "provider-device-code";
+
+    authority
+        .admit_device_code(
+            target.clone(),
+            provider,
+            device_code.to_string(),
+            Duration::from_millis(1),
+        )
+        .expect("device flow admitted");
+    std::thread::sleep(Duration::from_millis(10));
+
+    authority
+        .admit_device_code(
+            target,
+            provider,
+            device_code.to_string(),
+            Duration::from_secs(60),
+        )
+        .expect("registry expiry should expire the AuthMachine flow membership");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_lifecycle_shares_auth_machine_release_authority() {
+    let machine = MeerkatMachine::ephemeral();
+    let target = oauth_target();
+    let redirect_uri = "http://127.0.0.1/callback";
+    let state = machine
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("runtime authority admits OAuth state");
+
+    machine
+        .auth_lease_handle()
+        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
+            &target,
+        ))
+        .expect("auth lease release clears the shared AuthMachine authority");
+
+    assert!(matches!(
+        machine.oauth_flow_authority().consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri,
+        ),
+        Err(meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected { .. })
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
+    let machine = MeerkatMachine::ephemeral();
+    let external_auth = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())
+        as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
+    machine.set_auth_lease_handle(external_auth);
+    let target = oauth_target();
+    let redirect_uri = "http://127.0.0.1/callback";
+    let state = machine
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("runtime authority admits OAuth state");
+
+    machine
+        .auth_lease_handle()
+        .release_lease(&meerkat_core::handles::LeaseKey::from_connection_ref(
+            &target,
+        ))
+        .expect("custom auth handle release clears paired OAuth lifecycle");
+
+    assert!(matches!(
+        machine.oauth_flow_authority().consume(
+            &state,
+            &target,
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri,
+        ),
+        Err(meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected { .. })
+    ));
 }
 
 #[derive(Default)]

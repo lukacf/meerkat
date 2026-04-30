@@ -104,6 +104,79 @@ impl BlobStore for UnavailableBlobStore {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+struct AuthLeaseHandleWithOAuthRelease {
+    inner: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    oauth_lifecycle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl meerkat_core::handles::AuthLeaseHandle for AuthLeaseHandleWithOAuthRelease {
+    fn acquire_lease(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expires_at: u64,
+    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
+    {
+        self.inner.acquire_lease(lease_key, expires_at)
+    }
+
+    fn mark_expiring(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.inner.mark_expiring(lease_key)
+    }
+
+    fn begin_refresh(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.inner.begin_refresh(lease_key)
+    }
+
+    fn complete_refresh(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
+    {
+        self.inner.complete_refresh(lease_key, new_expires_at, now)
+    }
+
+    fn refresh_failed(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        permanent: bool,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.inner.refresh_failed(lease_key, permanent)
+    }
+
+    fn mark_reauth_required(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.inner.mark_reauth_required(lease_key)
+    }
+
+    fn release_lease(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.inner.release_lease(lease_key)?;
+        self.oauth_lifecycle.release_lease(lease_key)?;
+        Ok(())
+    }
+
+    fn snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> meerkat_core::handles::AuthLeaseSnapshot {
+        self.inner.snapshot(lease_key)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 type MeerkatMachineCommandFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<MeerkatMachineCommandResult, MeerkatMachineCommandError>>
@@ -608,17 +681,22 @@ impl MeerkatMachine {
 
     /// Create an ephemeral adapter (all sessions use EphemeralRuntimeDriver).
     pub fn ephemeral() -> Self {
+        let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
+        #[cfg(not(target_arch = "wasm32"))]
+        let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+            std::time::Duration::from_secs(10 * 60),
+            Arc::clone(&auth_lease),
+        ));
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: None,
             blob_store: None,
             llm_reconfigure_host: StdRwLock::new(None),
-            auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
+            auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(
-                Arc::new(crate::handles::RuntimeOAuthFlowHandle::default()),
-            ),
+            oauth_flows: StdRwLock::new(oauth_flows),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -626,17 +704,22 @@ impl MeerkatMachine {
 
     /// Create a persistent adapter with a RuntimeStore.
     pub fn persistent(store: Arc<dyn RuntimeStore>, blob_store: Arc<dyn BlobStore>) -> Self {
+        let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
+        #[cfg(not(target_arch = "wasm32"))]
+        let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+            std::time::Duration::from_secs(10 * 60),
+            Arc::clone(&auth_lease),
+        ));
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(blob_store),
             llm_reconfigure_host: StdRwLock::new(None),
-            auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
+            auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(
-                Arc::new(crate::handles::RuntimeOAuthFlowHandle::default()),
-            ),
+            oauth_flows: StdRwLock::new(oauth_flows),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -648,17 +731,22 @@ impl MeerkatMachine {
     /// explicitly at the blob-store boundary until a real [`BlobStore`] is
     /// supplied.
     pub fn persistent_without_blobs(store: Arc<dyn RuntimeStore>) -> Self {
+        let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
+        #[cfg(not(target_arch = "wasm32"))]
+        let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+            std::time::Duration::from_secs(10 * 60),
+            Arc::clone(&auth_lease),
+        ));
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
         Self {
             sessions: RwLock::new(HashMap::new()),
             mode: RuntimeMode::V9Compliant,
             store: Some(store),
             blob_store: Some(Arc::new(UnavailableBlobStore)),
             llm_reconfigure_host: StdRwLock::new(None),
-            auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
+            auth_lease: StdRwLock::new(auth_lease),
             #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(
-                Arc::new(crate::handles::RuntimeOAuthFlowHandle::default()),
-            ),
+            oauth_flows: StdRwLock::new(oauth_flows),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -681,6 +769,53 @@ impl MeerkatMachine {
     /// this setter lets them align the adapter's runtime-backed traffic with
     /// the surface-visible status handle without creating a competing registry.
     pub fn set_auth_lease_handle(&self, handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let handle = {
+            let erased: Arc<dyn std::any::Any + Send + Sync> = handle.clone();
+            if let Ok(runtime_handle) =
+                Arc::downcast::<crate::handles::RuntimeAuthLeaseHandle>(erased)
+            {
+                self.set_runtime_auth_lease_handle(runtime_handle);
+                return;
+            }
+            let oauth_lifecycle = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
+            *self
+                .oauth_flows
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                    std::time::Duration::from_secs(10 * 60),
+                    Arc::clone(&oauth_lifecycle),
+                ));
+            Arc::new(AuthLeaseHandleWithOAuthRelease {
+                inner: handle,
+                oauth_lifecycle,
+            }) as Arc<dyn meerkat_core::handles::AuthLeaseHandle>
+        };
+        *self
+            .auth_lease
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+    }
+
+    /// Install a runtime AuthMachine authority shared by auth leases and OAuth
+    /// login-flow lifecycle transitions.
+    pub fn set_runtime_auth_lease_handle(
+        &self,
+        handle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+    ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *self
+                .oauth_flows
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                    std::time::Duration::from_secs(10 * 60),
+                    Arc::clone(&handle),
+                ));
+        }
+        let handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = handle;
         *self
             .auth_lease
             .write()

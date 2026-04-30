@@ -965,8 +965,7 @@ impl SessionRuntime {
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -976,7 +975,7 @@ impl SessionRuntime {
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
-        runtime_adapter.set_auth_lease_handle(Arc::clone(&auth_lease));
+        runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {
@@ -1042,8 +1041,7 @@ impl SessionRuntime {
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -1053,7 +1051,7 @@ impl SessionRuntime {
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, max_sessions, persistence);
-        runtime_adapter.set_auth_lease_handle(Arc::clone(&auth_lease));
+        runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
         let service = Arc::new(service);
         runtime_adapter.set_session_llm_reconfigure_host(Arc::new(
             SessionRuntimeLlmReconfigureHost {

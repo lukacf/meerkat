@@ -357,8 +357,7 @@ impl AppState {
                 Ok(store) => store,
                 Err(_) => Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
             };
-        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
-            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let auth_lease = Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let mut factory = AgentFactory::new(store_path.clone())
             .with_token_store(Arc::clone(&token_store))
             .session_store(session_store.clone())
@@ -396,7 +395,8 @@ impl AppState {
         );
         let (session_service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
-        runtime_adapter.set_auth_lease_handle(Arc::clone(&auth_lease));
+        runtime_adapter.set_runtime_auth_lease_handle(Arc::clone(&auth_lease));
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = auth_lease;
         let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();

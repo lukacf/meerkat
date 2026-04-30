@@ -9,45 +9,168 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 
 ### Code Anchors
 - `auth_lease_handle`: `meerkat-runtime/src/handles/auth_lease.rs` — per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, expiring, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it
+- `oauth_flow_handle`: `meerkat-runtime/src/handles/oauth_flow.rs` — per-binding AuthMachine-owned OAuth browser and device flow lifecycle authority for admit, verify, begin poll, finish poll, consume, expire, valid, expiring, refreshing, and reauth required phases
 
 ### Scenarios
 - `acquire_expire_refresh_complete` — lease transitions through valid, expiring, refreshing, and back to valid on successful refresh
 - `reauth_release_and_publication` — reauth required from valid/expiring/refreshing, release lease, emit lifecycle event, and wake refresh loop publication
+- `oauth_browser_flow_lifecycle` — OAuth browser flow admit, verify, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
+- `oauth_device_flow_lifecycle` — OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority
 
 ### Transitions
 - `Acquire`
   - anchors: `auth_lease_handle`
   - scenarios: `acquire_expire_refresh_complete`
 - `MarkExpiring`
-  - anchors: `auth_lease_handle`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
   - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`
 - `BeginRefreshFromValid`
-  - anchors: `auth_lease_handle`
+  - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `BeginRefreshFromExpiring`
-  - anchors: `auth_lease_handle`
+  - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `CompleteRefresh`
-  - anchors: `auth_lease_handle`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
   - scenarios: `acquire_expire_refresh_complete`
 - `RefreshFailedTransient`
-  - anchors: `auth_lease_handle`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
   - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`
 - `RefreshFailedPermanent`
-  - anchors: `auth_lease_handle`
+  - anchors: `auth_lease_handle`, `oauth_flow_handle`
   - scenarios: `acquire_expire_refresh_complete`, `reauth_release_and_publication`
 - `MarkReauthRequiredFromValid`
-  - anchors: `auth_lease_handle`
+  - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `MarkReauthRequiredFromExpiring`
-  - anchors: `auth_lease_handle`
+  - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `MarkReauthRequiredFromRefreshing`
-  - anchors: `auth_lease_handle`
+  - anchors: `oauth_flow_handle`
   - scenarios: `reauth_release_and_publication`
 - `Release`
   - anchors: `auth_lease_handle`
   - scenarios: `reauth_release_and_publication`
+- `AdmitOAuthBrowserFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `AdmitOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `AdmitOAuthBrowserFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `AdmitOAuthBrowserFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `VerifyOAuthBrowserFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `VerifyOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `VerifyOAuthBrowserFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `VerifyOAuthBrowserFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ConsumeOAuthBrowserFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ConsumeOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ConsumeOAuthBrowserFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ConsumeOAuthBrowserFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ExpireOAuthBrowserFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ExpireOAuthBrowserFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ExpireOAuthBrowserFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `ExpireOAuthBrowserFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_browser_flow_lifecycle`
+- `AdmitOAuthDeviceFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `AdmitOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `AdmitOAuthDeviceFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `AdmitOAuthDeviceFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `VerifyOAuthDeviceFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `VerifyOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `VerifyOAuthDeviceFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `VerifyOAuthDeviceFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `BeginOAuthDevicePollValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `BeginOAuthDevicePollExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `BeginOAuthDevicePollRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `BeginOAuthDevicePollReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `FinishOAuthDevicePollValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `FinishOAuthDevicePollExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `FinishOAuthDevicePollRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `FinishOAuthDevicePollReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ConsumeOAuthDeviceFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ConsumeOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ConsumeOAuthDeviceFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ConsumeOAuthDeviceFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ExpireOAuthDeviceFlowValid`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ExpireOAuthDeviceFlowExpiring`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ExpireOAuthDeviceFlowRefreshing`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
+- `ExpireOAuthDeviceFlowReauthRequired`
+  - anchors: `oauth_flow_handle`
+  - scenarios: `oauth_device_flow_lifecycle`
 
 ### Effects
 - `EmitLifecycleEvent`

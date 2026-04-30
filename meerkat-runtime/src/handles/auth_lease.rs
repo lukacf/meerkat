@@ -18,6 +18,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::ConnectionRef;
 use meerkat_core::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
     LeaseKey,
@@ -61,6 +63,7 @@ fn emit_audit(
 /// instances. Lookup-or-insert happens on first `acquire_lease`; release is
 /// also allowed before acquire so token-clear surfaces remain idempotent after
 /// process restart.
+#[derive(Clone)]
 pub struct RuntimeAuthLeaseHandle {
     machines: Arc<Mutex<AuthLeaseRegistry>>,
 }
@@ -142,6 +145,15 @@ impl RuntimeAuthLeaseHandle {
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !create_if_missing
+            && guard.generations.get(lease_key).copied().unwrap_or(0) == 0
+            && !remove_after_accept
+        {
+            return Err(DslTransitionError::new(
+                context,
+                format!("no auth lease registered for lease_key `{lease_key}`"),
+            ));
+        }
         let (from_phase, to_phase) = {
             let entry = if create_if_missing {
                 guard
@@ -179,6 +191,69 @@ impl RuntimeAuthLeaseHandle {
         Ok(accepted_generation)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn apply_oauth_input(
+        &self,
+        target: &ConnectionRef,
+        input: auth_dsl::AuthMachineInput,
+        context: &'static str,
+        create_if_missing: bool,
+    ) -> Result<(), DslTransitionError> {
+        let lease_key = LeaseKey::from_connection_ref(target);
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = if create_if_missing {
+            guard.authorities.entry(lease_key.clone()).or_insert_with(|| {
+                auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState::default())
+            })
+        } else {
+            match guard.authorities.get_mut(&lease_key) {
+                Some(m) => m,
+                None => {
+                    return Err(DslTransitionError::new(
+                        context,
+                        format!("no auth machine registered for lease_key `{lease_key}`"),
+                    ));
+                }
+            }
+        };
+        auth_dsl::AuthMachineMutator::apply(entry, input)
+            .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_oauth_browser_flow_for_test(
+        &self,
+        target: &ConnectionRef,
+        flow_id: &str,
+    ) -> bool {
+        let lease_key = LeaseKey::from_connection_ref(target);
+        self.machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .authorities
+            .get(&lease_key)
+            .is_some_and(|authority| authority.state.oauth_browser_flow_ids.contains(flow_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_oauth_device_flow_for_test(
+        &self,
+        target: &ConnectionRef,
+        flow_id: &str,
+    ) -> bool {
+        let lease_key = LeaseKey::from_connection_ref(target);
+        self.machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .authorities
+            .get(&lease_key)
+            .is_some_and(|authority| authority.state.oauth_device_flow_ids.contains(flow_id))
+    }
+
     fn audit_action_for(input: &auth_dsl::AuthMachineInput) -> &'static str {
         match input {
             auth_dsl::AuthMachineInput::Acquire { .. } => "acquire_lease",
@@ -189,6 +264,24 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::RefreshFailedPermanent => "refresh_failed_permanent",
             auth_dsl::AuthMachineInput::MarkReauthRequired => "mark_reauth_required",
             auth_dsl::AuthMachineInput::Release => "release_lease",
+            auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow { .. } => "admit_oauth_browser_flow",
+            auth_dsl::AuthMachineInput::VerifyOAuthBrowserFlow { .. } => {
+                "verify_oauth_browser_flow"
+            }
+            auth_dsl::AuthMachineInput::ConsumeOAuthBrowserFlow { .. } => {
+                "consume_oauth_browser_flow"
+            }
+            auth_dsl::AuthMachineInput::ExpireOAuthBrowserFlow { .. } => {
+                "expire_oauth_browser_flow"
+            }
+            auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow { .. } => "admit_oauth_device_flow",
+            auth_dsl::AuthMachineInput::VerifyOAuthDeviceFlow { .. } => "verify_oauth_device_flow",
+            auth_dsl::AuthMachineInput::BeginOAuthDevicePoll { .. } => "begin_oauth_device_poll",
+            auth_dsl::AuthMachineInput::FinishOAuthDevicePoll { .. } => "finish_oauth_device_poll",
+            auth_dsl::AuthMachineInput::ConsumeOAuthDeviceFlow { .. } => {
+                "consume_oauth_device_flow"
+            }
+            auth_dsl::AuthMachineInput::ExpireOAuthDeviceFlow { .. } => "expire_oauth_device_flow",
         }
     }
 }
@@ -321,6 +414,13 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = guard.generations.get(lease_key).copied().unwrap_or(0);
+        if generation == 0 {
+            return AuthLeaseSnapshot {
+                phase: None,
+                expires_at: None,
+                generation,
+            };
+        }
         match guard.authorities.get(lease_key) {
             Some(machine) => AuthLeaseSnapshot {
                 phase: Some(map_phase(machine.state.lifecycle_phase)),

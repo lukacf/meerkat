@@ -666,9 +666,23 @@ pub async fn handle_auth_login_start(
             return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
         }
     };
+    let target = match resolve_oauth_target(
+        runtime,
+        resolved.provider,
+        Some(parsed.realm_id.as_str()),
+        Some(parsed.binding_id.as_str()),
+        parsed.profile_id.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
+    let connection_ref = target.connection_ref;
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().clone();
     let state_token = match runtime.oauth_flow_authority().start(
+        connection_ref,
         resolved.identity,
         parsed.redirect_uri.clone(),
         verifier,
@@ -712,14 +726,6 @@ pub async fn handle_auth_login_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (realm_id, binding_id) = match require_explicit_oauth_identity(
-        id.clone(),
-        parsed.realm_id.as_deref(),
-        parsed.binding_id.as_deref(),
-    ) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
     let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
         Ok(v) => v,
         Err(e) => {
@@ -730,8 +736,8 @@ pub async fn handle_auth_login_complete(
     let target = match resolve_oauth_target(
         runtime,
         provider,
-        Some(realm_id),
-        Some(binding_id),
+        Some(parsed.realm_id.as_str()),
+        Some(parsed.binding_id.as_str()),
         parsed.profile_id.as_deref(),
     )
     .await
@@ -759,8 +765,9 @@ pub async fn handle_auth_login_complete(
         Ok(s) => s,
         Err(r) => return r,
     };
-    let flow = match runtime.oauth_flow_authority().consume(
+    let flow = match runtime.oauth_flow_authority().verify(
         &parsed.state,
+        &connection_ref,
         resolved.identity,
         &parsed.redirect_uri,
     ) {
@@ -838,6 +845,18 @@ pub async fn handle_auth_login_complete(
     {
         return resp;
     }
+    if let Err(e) = runtime.oauth_flow_authority().consume(
+        &parsed.state,
+        &connection_ref,
+        resolved.identity,
+        &parsed.redirect_uri,
+    ) {
+        return RpcResponse::error(
+            id,
+            error::INTERNAL_ERROR,
+            format!("oauth state terminal consume failed after token commit: {e}"),
+        );
+    }
     tracing::info!(
         target: "meerkat::auth::audit",
         binding_key = ?connection_ref,
@@ -884,10 +903,24 @@ pub async fn handle_auth_login_device_start(
             ),
         );
     }
+    let target = match resolve_oauth_target(
+        runtime,
+        resolved.provider,
+        Some(parsed.realm_id.as_str()),
+        Some(parsed.binding_id.as_str()),
+        parsed.profile_id.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(r) => return r.with_id(id),
+    };
+    let connection_ref = target.connection_ref;
     let http = reqwest::Client::new();
     match request_device_code(&http, &resolved.endpoints).await {
         Ok(resp) => {
             if let Err(err) = runtime.oauth_flow_authority().admit_device_code(
+                connection_ref,
                 resolved.identity,
                 resp.device_code.clone(),
                 std::time::Duration::from_secs(resp.expires_in),
@@ -938,14 +971,6 @@ pub async fn handle_auth_login_device_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let (realm_id, binding_id) = match require_explicit_oauth_identity(
-        id.clone(),
-        parsed.realm_id.as_deref(),
-        parsed.binding_id.as_deref(),
-    ) {
-        Ok(v) => v,
-        Err(r) => return r,
-    };
     let resolved = match resolve_oauth_provider(&parsed.provider, "") {
         Ok(v) => v,
         Err(e) => return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string()),
@@ -964,8 +989,8 @@ pub async fn handle_auth_login_device_complete(
     let target = match resolve_oauth_target(
         runtime,
         provider,
-        Some(realm_id),
-        Some(binding_id),
+        Some(parsed.realm_id.as_str()),
+        Some(parsed.binding_id.as_str()),
         parsed.profile_id.as_deref(),
     )
     .await
@@ -988,10 +1013,11 @@ pub async fn handle_auth_login_device_complete(
             ),
         );
     }
-    let poll_lease = match runtime
-        .oauth_flow_authority()
-        .begin_device_code_poll(&parsed.device_code, resolved.identity)
-    {
+    let poll_lease = match runtime.oauth_flow_authority().begin_device_code_poll(
+        &parsed.device_code,
+        &connection_ref,
+        resolved.identity,
+    ) {
         Ok(lease) => lease,
         Err(err) => return oauth_device_state_error(id, err),
     };
@@ -1315,6 +1341,14 @@ mod tests {
         test_runtime_with_config(meerkat_core::Config::default())
     }
 
+    fn openai_connection_ref() -> ConnectionRef {
+        ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        }
+    }
+
     fn test_runtime_with_config(config: meerkat_core::Config) -> SessionRuntime {
         let token_store: Arc<dyn TokenStore> =
             Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new());
@@ -1603,24 +1637,22 @@ mod tests {
     }
 
     #[test]
-    fn oauth_completion_params_keep_missing_identity_unowned_by_surface() {
-        let login: LoginCompleteParams = serde_json::from_value(serde_json::json!({
+    fn oauth_completion_params_require_explicit_identity() {
+        let login = serde_json::from_value::<LoginCompleteParams>(serde_json::json!({
             "provider": "anthropic",
             "code": "code",
             "state": "state",
             "redirect_uri": "http://127.0.0.1:0/callback"
         }))
-        .unwrap();
-        assert!(login.realm_id.is_none());
-        assert!(login.binding_id.is_none());
+        .unwrap_err();
+        assert!(login.to_string().contains("realm_id"));
 
-        let device: DeviceCompleteParams = serde_json::from_value(serde_json::json!({
+        let device = serde_json::from_value::<DeviceCompleteParams>(serde_json::json!({
             "provider": "anthropic",
             "device_code": "device-code"
         }))
-        .unwrap();
-        assert!(device.realm_id.is_none());
-        assert!(device.binding_id.is_none());
+        .unwrap_err();
+        assert!(device.to_string().contains("realm_id"));
 
         let provision: ProvisionApiKeyParams = serde_json::from_value(serde_json::json!({
             "access_token": "token"
@@ -1643,7 +1675,7 @@ mod tests {
         let resp =
             handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
-        assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+        assert_invalid_params_message(resp, "missing field `realm_id`");
     }
 
     #[tokio::test]
@@ -1659,17 +1691,20 @@ mod tests {
         let resp =
             handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
-        assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+        assert_invalid_params_message(resp, "missing field `realm_id`");
     }
 
     #[tokio::test]
     async fn login_start_records_flow_on_runtime_authority() {
-        let runtime = test_runtime();
-        let unrelated_runtime = test_runtime();
+        let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
+        let unrelated_runtime =
+            test_runtime_with_config(config_with_openai_managed_store_binding());
         let redirect_uri = "http://127.0.0.1:0/callback";
         let params = raw_params(serde_json::json!({
             "provider": "openai",
-            "redirect_uri": redirect_uri
+            "redirect_uri": redirect_uri,
+            "realm_id": "dev",
+            "binding_id": "default_openai"
         }));
 
         let resp =
@@ -1682,6 +1717,7 @@ mod tests {
         assert!(matches!(
             unrelated_runtime.oauth_flow_authority().consume(
                 state,
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             ),
@@ -1691,6 +1727,7 @@ mod tests {
             .oauth_flow_authority()
             .consume(
                 state,
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             )
@@ -1700,11 +1737,13 @@ mod tests {
 
     #[tokio::test]
     async fn login_start_records_flow_on_runtime_adapter_authority() {
-        let runtime = test_runtime();
+        let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
         let redirect_uri = "http://127.0.0.1:0/callback";
         let params = raw_params(serde_json::json!({
             "provider": "openai",
-            "redirect_uri": redirect_uri
+            "redirect_uri": redirect_uri,
+            "realm_id": "dev",
+            "binding_id": "default_openai"
         }));
 
         let resp =
@@ -1719,6 +1758,7 @@ mod tests {
             .oauth_flow_authority()
             .consume(
                 state,
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             )
@@ -1735,6 +1775,7 @@ mod tests {
         let state = runtime
             .oauth_flow_authority()
             .start(
+                openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri.to_string(),
                 "verifier".to_string(),
@@ -1759,6 +1800,7 @@ mod tests {
             .oauth_flow_authority()
             .consume(
                 &state,
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             )
@@ -1772,6 +1814,7 @@ mod tests {
         runtime
             .oauth_flow_authority()
             .admit_device_code(
+                openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
                 std::time::Duration::from_secs(600),
@@ -1782,12 +1825,14 @@ mod tests {
             .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("device completion poll begins");
         assert!(matches!(
             runtime.oauth_flow_authority().begin_device_code_poll(
                 "device-code",
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
             Err(OAuthFlowError::DevicePollInProgress)
@@ -1799,6 +1844,7 @@ mod tests {
             .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("dropped RPC completion poll releases runtime authority");
@@ -1810,6 +1856,7 @@ mod tests {
         runtime
             .oauth_flow_authority()
             .admit_device_code(
+                openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
                 std::time::Duration::from_secs(600),
@@ -1822,6 +1869,7 @@ mod tests {
             let _poll = authority
                 .begin_device_code_poll(
                     "device-code",
+                    &openai_connection_ref(),
                     meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 )
                 .expect("device completion poll begins");
@@ -1832,6 +1880,7 @@ mod tests {
         assert!(matches!(
             runtime.oauth_flow_authority().begin_device_code_poll(
                 "device-code",
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
             Err(OAuthFlowError::DevicePollInProgress)
@@ -1844,6 +1893,7 @@ mod tests {
             .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
+                &openai_connection_ref(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("aborted RPC completion poll releases runtime authority");
@@ -1861,7 +1911,7 @@ mod tests {
             handle_auth_login_device_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime)
                 .await;
 
-        assert_invalid_params_message(resp, "realm_id is required for OAuth login completion");
+        assert_invalid_params_message(resp, "missing field `realm_id`");
     }
 
     #[tokio::test]
@@ -2065,6 +2115,7 @@ mod tests {
         let authority = runtime.oauth_flow_authority();
         authority
             .admit_device_code(
+                connection_ref.clone(),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
                 std::time::Duration::from_secs(600),
@@ -2073,6 +2124,7 @@ mod tests {
         let poll_lease = authority
             .begin_device_code_poll(
                 "device-code",
+                &connection_ref,
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("device poll lease begins");
@@ -2098,6 +2150,7 @@ mod tests {
         authority
             .begin_device_code_poll(
                 "device-code",
+                &connection_ref,
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("failed ready commit keeps device flow retryable");
@@ -2241,7 +2294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_completion_requires_binding_when_realm_is_present() {
+    async fn oauth_completion_requires_binding_identity() {
         let runtime = test_runtime();
         let params = raw_params(serde_json::json!({
             "provider": "anthropic",
@@ -2254,6 +2307,6 @@ mod tests {
         let resp =
             handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
 
-        assert_invalid_params_message(resp, "binding_id is required for OAuth login completion");
+        assert_invalid_params_message(resp, "missing field `binding_id`");
     }
 }

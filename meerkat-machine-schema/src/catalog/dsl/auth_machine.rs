@@ -13,6 +13,9 @@
 //     from Valid or Expiring; complete only from Refreshing)
 //   * the expiry timestamp, last refresh timestamp, and consecutive
 //     refresh-failure count associated with the lease
+//   * short-lived OAuth login-flow membership for the same binding:
+//     browser PKCE states, admitted device codes, and active device
+//     poll leases
 //
 // Per-binding (rather than one machine with multi-binding state) keeps
 // the TLC state space small, aligns the machine with dogma §1 "one
@@ -32,12 +35,18 @@ macro_rules! auth_catalog_machine_dsl {
                 expires_at: Option<u64>,
                 last_refresh: Option<u64>,
                 refresh_attempt: u64,
+                oauth_browser_flow_ids: Set<String>,
+                oauth_device_flow_ids: Set<String>,
+                oauth_device_poll_ids: Set<String>,
             }
 
             init(Valid) {
                 expires_at = None,
                 last_refresh = None,
                 refresh_attempt = 0,
+                oauth_browser_flow_ids = EmptySet,
+                oauth_device_flow_ids = EmptySet,
+                oauth_device_poll_ids = EmptySet,
             }
 
             terminal [Released]
@@ -59,6 +68,16 @@ macro_rules! auth_catalog_machine_dsl {
                 RefreshFailedPermanent,
                 MarkReauthRequired,
                 Release,
+                AdmitOAuthBrowserFlow { flow_id: String },
+                VerifyOAuthBrowserFlow { flow_id: String },
+                ConsumeOAuthBrowserFlow { flow_id: String },
+                ExpireOAuthBrowserFlow { flow_id: String },
+                AdmitOAuthDeviceFlow { flow_id: String },
+                VerifyOAuthDeviceFlow { flow_id: String },
+                BeginOAuthDevicePoll { flow_id: String },
+                FinishOAuthDevicePoll { flow_id: String },
+                ConsumeOAuthDeviceFlow { flow_id: String },
+                ExpireOAuthDeviceFlow { flow_id: String },
             }
 
             effect AuthMachineEffect {
@@ -159,7 +178,122 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition Release {
                 on input Release
+                update {
+                    self.oauth_browser_flow_ids = EmptySet;
+                    self.oauth_device_flow_ids = EmptySet;
+                    self.oauth_device_poll_ids = EmptySet;
+                }
                 to Released
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition AdmitOAuthBrowserFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input AdmitOAuthBrowserFlow { flow_id }
+                guard "browser_flow_absent" { self.oauth_browser_flow_ids.contains(flow_id) == false }
+                update {
+                    self.oauth_browser_flow_ids.insert(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition VerifyOAuthBrowserFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input VerifyOAuthBrowserFlow { flow_id }
+                guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
+                update {}
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition ConsumeOAuthBrowserFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input ConsumeOAuthBrowserFlow { flow_id }
+                guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
+                update {
+                    self.oauth_browser_flow_ids.remove(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition ExpireOAuthBrowserFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input ExpireOAuthBrowserFlow { flow_id }
+                guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
+                update {
+                    self.oauth_browser_flow_ids.remove(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition AdmitOAuthDeviceFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input AdmitOAuthDeviceFlow { flow_id }
+                guard "device_flow_absent" { self.oauth_device_flow_ids.contains(flow_id) == false }
+                update {
+                    self.oauth_device_flow_ids.insert(flow_id);
+                    self.oauth_device_poll_ids.remove(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition VerifyOAuthDeviceFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input VerifyOAuthDeviceFlow { flow_id }
+                guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
+                update {}
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition BeginOAuthDevicePoll {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input BeginOAuthDevicePoll { flow_id }
+                guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
+                guard "device_poll_absent" { self.oauth_device_poll_ids.contains(flow_id) == false }
+                update {
+                    self.oauth_device_poll_ids.insert(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition FinishOAuthDevicePoll {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input FinishOAuthDevicePoll { flow_id }
+                guard "device_poll_present" { self.oauth_device_poll_ids.contains(flow_id) }
+                update {
+                    self.oauth_device_poll_ids.remove(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition ConsumeOAuthDeviceFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input ConsumeOAuthDeviceFlow { flow_id }
+                guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
+                update {
+                    self.oauth_device_flow_ids.remove(flow_id);
+                    self.oauth_device_poll_ids.remove(flow_id);
+                }
+                to Valid
+                emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
+            }
+
+            transition ExpireOAuthDeviceFlow {
+                per_phase [Valid, Expiring, Refreshing, ReauthRequired]
+                on input ExpireOAuthDeviceFlow { flow_id }
+                guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
+                update {
+                    self.oauth_device_flow_ids.remove(flow_id);
+                    self.oauth_device_poll_ids.remove(flow_id);
+                }
+                to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
             }
         }

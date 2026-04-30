@@ -960,6 +960,9 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
             {
                 break;
             }
+            if !driver_is_prompt && ingress.is_prompt(id) {
+                break;
+            }
             selected.push(id.clone());
             if ingress.is_prompt(id) {
                 break;
@@ -1944,6 +1947,102 @@ mod tests {
             machine_batch_runtime_semantics(&entry, &selected).is_none(),
             "selected unstamped prefix must flow into the runtime-loop metadata conflict path"
         );
+    }
+
+    #[test]
+    fn batch_selection_non_prompt_driver_stops_before_following_prompt() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "non-prompt-driver-before-prompt-selection",
+        ));
+        let event_input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::External {
+                    source_name: "scheduler".into(),
+                },
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: "scheduler_tick".into(),
+            payload: serde_json::json!({"body": "tick"}),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        });
+        let prompt_input = Input::Prompt(crate::input::PromptInput::new(
+            "operator prompt must wait",
+            None,
+        ));
+        let event_id = event_input.id().clone();
+        let prompt_id = prompt_input.id().clone();
+        let mut event_state = InputState::new_accepted(event_id.clone());
+        event_state.persisted_input = Some(event_input.clone());
+        let mut prompt_state = InputState::new_accepted(prompt_id.clone());
+        prompt_state.persisted_input = Some(prompt_input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(event_state.clone()));
+        assert!(driver.ledger_mut().recover(prompt_state.clone()));
+
+        driver
+            .admit_recovered_to_ingress(
+                event_id.clone(),
+                ContentShape::from_kind(event_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&event_input),
+                false,
+                &event_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued event input");
+        driver
+            .admit_recovered_to_ingress(
+                prompt_id,
+                ContentShape::from_kind(prompt_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prompt_input),
+                true,
+                &prompt_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+
+        let entry = DriverEntry::Ephemeral(driver);
+        let selected = machine_select_runtime_loop_batch(&entry);
+
+        assert_eq!(
+            selected,
+            vec![event_id],
+            "a non-prompt-driven batch must not absorb a following prompt into the same run"
+        );
+        machine_validate_stage_drain_snapshot(&entry, &selected)
+            .expect("selected non-prompt batch must satisfy staging invariants");
     }
 
     #[test]

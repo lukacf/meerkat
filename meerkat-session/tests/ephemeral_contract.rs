@@ -762,16 +762,10 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
-        let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &factory_policy_authority,
-            builder,
-            client,
-            tools,
-            store,
-        )
-        .await
-        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent =
+            meerkat_core::agent::build_agent_after_factory_policy(builder, client, tools, store)
+                .await
+                .map_err(|err| SessionError::Unsupported(err.to_string()))?;
         Ok(CompactionSessionAgent { agent })
     }
 }
@@ -803,16 +797,10 @@ impl SessionAgentBuilder for RealAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
-        let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &factory_policy_authority,
-            builder,
-            client,
-            tools,
-            store,
-        )
-        .await
-        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent =
+            meerkat_core::agent::build_agent_after_factory_policy(builder, client, tools, store)
+                .await
+                .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(RealSessionAgent { agent })
     }

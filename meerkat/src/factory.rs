@@ -3872,9 +3872,7 @@ impl AgentFactory {
         // 13. Build agent. AgentFactory owns the policy composition above; core
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
-        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &factory_policy_authority,
             builder,
             llm_adapter,
             tools,
@@ -4017,9 +4015,7 @@ mod tests {
             .model("mock-model")
             .max_tokens_per_turn(64)
             .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
-        let factory_policy_authority = meerkat_core::agent::agent_factory_policy_authority();
         let result = meerkat_core::agent::build_agent_after_factory_policy(
-            &factory_policy_authority,
             builder,
             llm_adapter,
             tools,

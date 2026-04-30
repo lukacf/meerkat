@@ -18,7 +18,7 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
-use std::sync::Arc;
+use std::{future::Future, panic::Location, sync::Arc};
 use tokio::sync::mpsc;
 
 use super::{
@@ -81,36 +81,22 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
 }
 
-mod factory_policy_authority {
-    /// Opaque authority value for the core factory-policy build seam.
-    ///
-    /// This type intentionally lives in this private module and is not
-    /// re-exported. Downstream callers cannot name it or substitute a local
-    /// lookalike type for the core build seam.
-    pub struct AgentFactoryPolicyAuthority {
-        _seal: Seal,
-    }
-
-    struct Seal {
-        _private: (),
-    }
-
-    pub fn new() -> AgentFactoryPolicyAuthority {
-        AgentFactoryPolicyAuthority {
-            _seal: Seal { _private: () },
-        }
-    }
+fn is_allowed_factory_policy_callsite(file: &str) -> bool {
+    let normalized = file.replace('\\', "/");
+    normalized.ends_with("meerkat/src/factory.rs")
+        || (cfg!(debug_assertions)
+            && (normalized.ends_with("meerkat-core/tests/hooks_behavior.rs")
+                || normalized.ends_with("meerkat-session/tests/ephemeral_contract.rs")
+                || normalized.ends_with("meerkat-mob/src/runtime/tests.rs")
+                || normalized.ends_with("meerkat/tests/smoke_meerkat_sdk.rs")))
 }
 
-/// Create the opaque core authority used by the canonical facade factory.
-///
-/// This helper is hidden because it is not a standalone construction API. It
-/// exists only to let the facade crate cross the crate boundary with the
-/// concrete core authority type; the build seam below still rejects arbitrary
-/// caller-chosen authority types at compile time.
-#[doc(hidden)]
-pub fn agent_factory_policy_authority() -> factory_policy_authority::AgentFactoryPolicyAuthority {
-    factory_policy_authority::new()
+fn validate_factory_policy_caller(caller: &Location<'_>) -> Result<(), AgentBuildPolicyError> {
+    if is_allowed_factory_policy_callsite(caller.file()) {
+        Ok(())
+    } else {
+        Err(AgentBuildPolicyError::InvalidFactoryAuthority)
+    }
 }
 
 /// Build an agent after the canonical factory has composed policy metadata.
@@ -119,20 +105,24 @@ pub fn agent_factory_policy_authority() -> factory_policy_authority::AgentFactor
 /// surrounding factory has attached durable session metadata, durable
 /// build-state metadata, and a runtime turn-state handle to the builder.
 #[doc(hidden)]
-pub async fn build_agent_after_factory_policy<C, T, S>(
-    _authority: &factory_policy_authority::AgentFactoryPolicyAuthority,
+#[track_caller]
+pub fn build_agent_after_factory_policy<C, T, S>(
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
     store: Arc<S>,
-) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
+) -> impl Future<Output = Result<Agent<C, T, S>, AgentBuildPolicyError>>
 where
     C: AgentLlmClient + ?Sized,
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
-    builder.validate_factory_policy()?;
-    Ok(builder.build_inner(client, tools, store).await)
+    let caller_validation = validate_factory_policy_caller(Location::caller());
+    async move {
+        caller_validation?;
+        builder.validate_factory_policy()?;
+        Ok(builder.build_inner(client, tools, store).await)
+    }
 }
 
 impl AgentBuilder {

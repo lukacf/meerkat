@@ -713,10 +713,36 @@ fn public_agentfactory_value_is_not_core_policy_authority() {
     let builder = std::fs::read_to_string(&builder).expect("read core AgentBuilder implementation");
 
     assert!(
-        builder.contains("_authority: &factory_policy_authority::AgentFactoryPolicyAuthority")
-            && !builder.contains("_authority: &A"),
+        builder.contains(
+            "let caller_validation = validate_factory_policy_caller(Location::caller());"
+        ) && !builder.contains("_authority: &A")
+            && !builder.contains("pub fn agent_factory_policy_authority"),
         "core factory-policy build must require the concrete opaque core \
-         authority token; a public AgentFactory value must not type-check as \
-         authority"
+         authority boundary; a public AgentFactory value or safe public helper \
+         must not type-check as authority"
+    );
+}
+
+#[tokio::test]
+async fn core_factory_policy_seam_rejects_non_factory_callsite() {
+    let result = meerkat_core::agent::build_agent_after_factory_policy(
+        meerkat_core::AgentBuilder::new(),
+        Arc::new(ImageAgentLlmClient),
+        Arc::new(RecordingDispatcher {
+            called: Arc::new(AtomicBool::new(false)),
+        }),
+        Arc::new(meerkat_store::StoreAdapter::new(Arc::new(
+            TestSessionStore::new(),
+        ))),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(meerkat_core::AgentBuildPolicyError::InvalidFactoryAuthority)
+        ),
+        "a safe downstream callsite must not reach metadata validation by \
+         fabricating public AgentBuilder inputs"
     );
 }

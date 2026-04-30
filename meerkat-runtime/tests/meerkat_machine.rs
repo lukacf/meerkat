@@ -840,7 +840,9 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-    use meerkat_core::{HandlingMode, InteractionContent, InteractionId, ResponseStatus};
+    use meerkat_core::{
+        HandlingMode, InteractionContent, InteractionId, PeerCorrelationId, ResponseStatus,
+    };
     use meerkat_runtime::PeerConvention;
     use tokio::sync::Notify;
     use uuid::Uuid;
@@ -936,7 +938,24 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .await
         .expect("prepare runtime bindings");
     requester_comms.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
-    requester_comms.install_peer_interaction_handle(Arc::clone(&bindings.peer_interaction));
+    requester_comms.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::clone(&bindings.peer_interaction),
+            Arc::clone(&bindings.interaction_stream),
+        ),
+    );
+    let responder_adapter = Arc::new(MeerkatMachine::ephemeral());
+    let responder_sid = SessionId::new();
+    let responder_bindings = responder_adapter
+        .prepare_bindings(responder_sid)
+        .await
+        .expect("prepare responder runtime bindings");
+    responder_comms.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::clone(&responder_bindings.peer_interaction),
+            Arc::clone(&responder_bindings.interaction_stream),
+        ),
+    );
 
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(Notify::new());
@@ -997,6 +1016,10 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         request_at_responder[0].interaction.content,
         InteractionContent::Request { .. }
     ));
+    responder_bindings
+        .peer_interaction
+        .request_received(PeerCorrelationId::from_uuid(request_id))
+        .expect("seed responder inbound request state");
 
     CoreCommsRuntime::send(
         responder_comms.as_ref(),

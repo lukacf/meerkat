@@ -1454,14 +1454,10 @@ fn default_value_for_type(schema: &MachineSchema, ty: &TypeRef) -> KernelValue {
             type_name: name.clone(),
             value: Box::new(default_value_for_named_type(schema, name)),
         },
-        TypeRef::Enum(name) =>
-        {
-            #[allow(clippy::expect_used)]
-            KernelValue::NamedVariant {
-                enum_name: name.clone(),
-                variant: EnumVariantId::parse("_Unset").expect("reserved default enum variant"),
-            }
-        }
+        TypeRef::Enum(name) => KernelValue::NamedVariant {
+            enum_name: name.clone(),
+            variant: default_variant_for_enum_type(schema, name).unwrap_or_else(unset_enum_variant),
+        },
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
         TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),
@@ -1526,6 +1522,24 @@ fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> K
             .map(|variant| KernelValue::String(variant.as_str().to_owned()))
             .unwrap_or_else(|| KernelValue::String(String::new())),
     }
+}
+
+fn default_variant_for_enum_type(
+    schema: &MachineSchema,
+    name: &EnumTypeId,
+) -> Option<EnumVariantId> {
+    let named_type_name = NamedTypeId::parse(name.as_str()).ok()?;
+    match named_type_atom(schema, &named_type_name) {
+        Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
+            variants.first().cloned()
+        }
+        _ => None,
+    }
+}
+
+fn unset_enum_variant() -> EnumVariantId {
+    #[allow(clippy::expect_used)]
+    EnumVariantId::parse("_Unset").expect("reserved default enum variant")
 }
 
 fn named_type_inner_matches(
@@ -1785,6 +1799,37 @@ mod tests {
                 &meerkat_machine_schema::TypeRef::Named(named_type_id("OperationStatus")),
             ),
             "unknown OperationStatus string values must not enter kernel state"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn constrained_enum_state_default_uses_first_allowed_variant() {
+        let mut schema = meerkat_machine();
+        schema
+            .state
+            .fields
+            .push(meerkat_machine_schema::FieldSchema {
+                name: field_id("defaulted_status"),
+                ty: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            });
+
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel
+            .initial_state()
+            .expect("constrained enum default should be a valid state value");
+
+        let status = state
+            .fields
+            .get(&field_id("defaulted_status"))
+            .expect("defaulted status field");
+        assert!(
+            matches!(
+                status,
+                KernelValue::NamedVariant { enum_name, variant }
+                    if enum_name.as_str() == "OperationStatus" && variant.as_str() == "Absent"
+            ),
+            "defaulted OperationStatus should use first allowed variant, got {status:?}"
         );
     }
 

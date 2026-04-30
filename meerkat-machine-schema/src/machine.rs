@@ -245,6 +245,7 @@ impl MachineSchema {
                     name: binding.name.as_str().to_owned(),
                 });
             }
+            validate_named_type_binding_payload(binding)?;
         }
         {
             let mut referenced: IndexSet<String> = IndexSet::new();
@@ -1159,6 +1160,52 @@ impl Expr {
     }
 }
 
+fn validate_named_type_binding_payload(
+    binding: &NamedTypeBinding,
+) -> Result<(), MachineSchemaError> {
+    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
+        return Ok(());
+    };
+    if variants.is_empty() {
+        return Err(MachineSchemaError::InvalidStringEnumBinding {
+            name: binding.name.as_str().to_owned(),
+            reason: "must define at least one variant".to_owned(),
+        });
+    }
+
+    let mut seen_values: IndexSet<&str> = IndexSet::new();
+    let mut seen_rust_idents: IndexMap<String, &str> = IndexMap::new();
+    for variant in variants {
+        let raw = variant.as_str();
+        if !seen_values.insert(raw) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: binding.name.as_str().to_owned(),
+                reason: format!("defines duplicate variant `{raw}`"),
+            });
+        }
+
+        let rust_identifier = string_enum_variant_rust_ident(raw);
+        if let Some(first) = seen_rust_idents.get(&rust_identifier) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: binding.name.as_str().to_owned(),
+                reason: format!(
+                    "variants `{first}` and `{raw}` sanitize to duplicate Rust identifier `{rust_identifier}`"
+                ),
+            });
+        }
+        seen_rust_idents.insert(rust_identifier, raw);
+    }
+
+    Ok(())
+}
+
+fn string_enum_variant_rust_ident(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
 /// Recursively collect every `NamedTypeId` slug referenced by a type tree.
 fn collect_named_type_references_type(ty: &TypeRef, out: &mut IndexSet<String>) {
     match ty {
@@ -1402,6 +1449,7 @@ pub enum MachineSchemaError {
     DuplicateNamedTypeBinding { name: String },
     MissingNamedTypeBinding { name: String },
     UnknownStringEnumVariant { enum_name: String, variant: String },
+    InvalidStringEnumBinding { name: String, reason: String },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -1474,6 +1522,12 @@ impl fmt::Display for MachineSchemaError {
                     "string enum `{enum_name}` does not define variant `{variant}`"
                 )
             }
+            Self::InvalidStringEnumBinding { name, reason } => {
+                write!(
+                    f,
+                    "invalid string enum named-type binding `{name}`: {reason}"
+                )
+            }
         }
     }
 }
@@ -1483,9 +1537,9 @@ impl std::error::Error for MachineSchemaError {}
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use crate::identity::{EnumTypeId, EnumVariantId};
+    use crate::identity::{EnumTypeId, EnumVariantId, NamedTypeId};
     use crate::{
-        Expr, MachineSchema, MachineSchemaError, Update,
+        Expr, MachineSchema, MachineSchemaError, NamedTypeBinding, RustTypeAtom, Update,
         catalog::dsl::dsl_meerkat_machine as meerkat_machine,
     };
 
@@ -1549,6 +1603,18 @@ mod tests {
         };
     }
 
+    fn string_enum_binding(name: &str, variants: &[&str]) -> NamedTypeBinding {
+        NamedTypeBinding {
+            name: NamedTypeId::parse(name).expect("named type slug"),
+            rust: RustTypeAtom::StringEnum {
+                variants: variants
+                    .iter()
+                    .map(|variant| EnumVariantId::parse(*variant).expect("enum variant slug"))
+                    .collect(),
+            },
+        }
+    }
+
     #[test]
     fn validate_rejects_unknown_string_enum_named_variant_in_transition_update() {
         let mut schema = meerkat_machine();
@@ -1561,6 +1627,62 @@ mod tests {
         assert!(
             message.contains("OperationStatus") && message.contains("Launched"),
             "error should identify the invalid string enum variant, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_string_enum_named_type_binding() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .push(string_enum_binding("SyntheticStatus", &[]));
+
+        let err = schema
+            .validate()
+            .expect_err("empty StringEnum bindings must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("SyntheticStatus") && message.contains("at least one variant"),
+            "error should identify the empty StringEnum binding, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_string_enum_named_type_variants() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .push(string_enum_binding("SyntheticStatus", &["Ready", "Ready"]));
+
+        let err = schema
+            .validate()
+            .expect_err("duplicate StringEnum variants must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("SyntheticStatus")
+                && message.contains("Ready")
+                && message.contains("duplicate"),
+            "error should identify the duplicate StringEnum variant, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_string_enum_named_type_variant_ident_collisions() {
+        let mut schema = meerkat_machine();
+        schema.named_types.push(string_enum_binding(
+            "SyntheticStatus",
+            &["foo-bar", "foo_bar"],
+        ));
+
+        let err = schema
+            .validate()
+            .expect_err("StringEnum variant Rust identifier collisions must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("SyntheticStatus")
+                && message.contains("foo-bar")
+                && message.contains("foo_bar"),
+            "error should identify colliding StringEnum variants, got: {message}"
         );
     }
 

@@ -7085,6 +7085,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_interrupt_unknown_session_returns_not_found() {
+        let (router, _notif_rx) = test_router().await;
+        let unknown_session_id = meerkat_core::SessionId::new().to_string();
+
+        let interrupt_req = make_request(
+            "turn/interrupt",
+            serde_json::json!({"session_id": unknown_session_id}),
+        );
+        let interrupt_resp = router.dispatch(interrupt_req).await.unwrap();
+
+        assert_eq!(error_code(&interrupt_resp), error::SESSION_NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn session_create_returns_request_cancelled_and_rolls_back_when_pre_cancelled() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
 

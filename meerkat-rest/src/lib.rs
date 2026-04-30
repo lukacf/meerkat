@@ -3379,10 +3379,27 @@ async fn interrupt_session(
         .hard_cancel_current_run(&session_id, "REST session interrupt")
         .await
     {
-        Ok(()) | Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => Ok(Json(json!({
+        Ok(()) => Ok(Json(json!({
             "session_id": session_id.to_string(),
             "interrupted": true
         }))),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => {
+            match state.session_service.read(&session_id).await {
+                Ok(_) => Ok(Json(json!({
+                    "session_id": session_id.to_string(),
+                    "interrupted": true
+                }))),
+                Err(SessionError::NotFound { .. }) => {
+                    Err(ApiError::NotFound(format!("Session not found: {id}")))
+                }
+                Err(e) => Err(ApiError::Internal(format!(
+                    "Failed to interrupt session: {e}"
+                ))),
+            }
+        }
+        Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+            Err(ApiError::NotFound(format!("Session not found: {id}")))
+        }
         Err(e) => Err(ApiError::Internal(format!(
             "Failed to interrupt session: {e}"
         ))),
@@ -7101,6 +7118,32 @@ mod tests {
                     axum::http::Request::builder()
                         .method("POST")
                         .uri("/requests/nonexistent-req/cancel")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_interrupt_unknown_session_returns_404() {
+            use axum::body::Body;
+            use tower::ServiceExt;
+
+            let temp = TempDir::new().unwrap();
+            let state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            let app = router(state);
+            let unknown_session_id = SessionId::new();
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/sessions/{unknown_session_id}/interrupt"))
                         .body(Body::empty())
                         .unwrap(),
                 )

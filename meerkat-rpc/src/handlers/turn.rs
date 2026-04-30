@@ -318,6 +318,15 @@ pub async fn handle_interrupt(
         Err(RuntimeDriverError::NotReady {
             state: RuntimeState::Idle | RuntimeState::Attached,
         }) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
+        Err(RuntimeDriverError::NotReady { .. }) => match runtime.read_session(&session_id).await {
+            Ok(_) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
+            Err(err) if err.code == error::SESSION_NOT_FOUND => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+            Err(err) => RpcResponse::error(id, err.code, err.message),
+        },
         Err(RuntimeDriverError::Destroyed) => {
             RpcResponse::error(id, error::SESSION_NOT_FOUND, "Session not found")
         }

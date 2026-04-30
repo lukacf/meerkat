@@ -681,15 +681,25 @@ struct MobSessionRuntimeControlHandle {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutorControl for MobSessionRuntimeControlHandle {
     async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
-                self.session_service
-                    .interrupt(&self.bridge_session_id)
-                    .await
-                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
-            }
-            _ => Ok(()),
+        if command.should_interrupt_current_run() {
+            return self
+                .session_service
+                .interrupt(&self.bridge_session_id)
+                .await
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
         }
+        if matches!(command, RunControlCommand::InterruptYielding) {
+            return self
+                .session_service
+                .cancel_after_boundary(&self.bridge_session_id)
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
+        }
+        Ok(())
     }
 }
 
@@ -822,12 +832,20 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
-            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
-                self.session_service
-                    .interrupt(&self.bridge_session_id)
-                    .await
-                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
-            }
+            command if command.should_interrupt_current_run() => self
+                .session_service
+                .interrupt(&self.bridge_session_id)
+                .await
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string())),
+            RunControlCommand::InterruptYielding => self
+                .session_service
+                .cancel_after_boundary(&self.bridge_session_id)
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string())),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 tracing::debug!(
                     bridge_session_id = %self.bridge_session_id,

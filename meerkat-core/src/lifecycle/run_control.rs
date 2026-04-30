@@ -41,6 +41,16 @@ pub enum RunControlCommand {
     InterruptYielding,
 }
 
+impl RunControlCommand {
+    /// Returns true when the command should hard-interrupt the active run.
+    ///
+    /// `InterruptYielding` is intentionally excluded: it is a cooperative
+    /// yield-break hint, not a cancellation path.
+    pub fn should_interrupt_current_run(&self) -> bool {
+        matches!(self, Self::CancelCurrentRun { .. })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -86,5 +96,20 @@ mod tests {
         assert_eq!(json["command"], "interrupt_yielding");
         let parsed: RunControlCommand = serde_json::from_value(json).unwrap();
         assert_eq!(cmd, parsed);
+    }
+
+    #[test]
+    fn interrupt_yielding_is_not_hard_current_run_interrupt() {
+        assert!(
+            !RunControlCommand::InterruptYielding.should_interrupt_current_run(),
+            "InterruptYielding must remain a cooperative yield-break hint, not a hard cancel"
+        );
+        assert!(
+            RunControlCommand::CancelCurrentRun {
+                reason: "user requested cancellation".into(),
+            }
+            .should_interrupt_current_run(),
+            "CancelCurrentRun is the hard interrupt path"
+        );
     }
 }

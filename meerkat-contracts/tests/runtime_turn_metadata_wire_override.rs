@@ -172,7 +172,9 @@ fn wire_metadata_provider_tag_preserves_provider_native_fields() {
     );
     assert!(provider_tag["web_search"].is_null());
 
-    let round_tripped: RuntimeTurnMetadata = wire.into();
+    let parsed_wire: WireRuntimeTurnMetadata =
+        serde_json::from_value(json).expect("deserialize wire metadata");
+    let round_tripped: RuntimeTurnMetadata = parsed_wire.into();
     let Some(TurnMetadataOverride::Set(provider_params)) = round_tripped.provider_params else {
         panic!("provider params set override should survive wire round trip");
     };

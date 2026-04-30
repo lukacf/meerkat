@@ -875,6 +875,15 @@ impl From<WireGeminiThinkingConfig>
     }
 }
 
+fn deserialize_present_json_value_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -885,7 +894,11 @@ pub enum WireProviderTag {
         thinking: Option<WireAnthropicThinkingConfig>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_budget_tokens: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         web_search: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         top_k: Option<u32>,
@@ -911,15 +924,31 @@ pub enum WireProviderTag {
         frequency_penalty: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         presence_penalty: Option<f32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         web_search: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_output: Option<meerkat_core::OutputSchema>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         reasoning: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         chat_template_kwargs: Option<serde_json::Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         thinking: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supports_temperature_override: Option<bool>,
@@ -939,7 +968,11 @@ pub enum WireProviderTag {
         top_p: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         structured_output: Option<meerkat_core::OutputSchema>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         google_search: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate_count: Option<u32>,

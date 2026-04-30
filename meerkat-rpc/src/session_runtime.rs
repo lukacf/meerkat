@@ -8051,6 +8051,7 @@ mod tests {
         let overrides = TurnOverrides {
             provider_params: Some(serde_json::json!({
                 "thinking": { "budget_tokens": 10_000 },
+                "effort": "xhigh",
             })),
             ..Default::default()
         };
@@ -8077,6 +8078,7 @@ mod tests {
             provider_params["thinking"]["budget_tokens"],
             serde_json::json!(10_000)
         );
+        assert_eq!(provider_params["effort"], serde_json::json!("xhigh"));
     }
 
     #[test]

@@ -332,6 +332,18 @@ pub enum AnthropicEffort {
     XHigh,
 }
 
+impl AnthropicEffort {
+    pub fn as_legacy_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
 /// Typed shape of Anthropic's data-residency knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1057,7 +1069,10 @@ fn insert_anthropic_provider_tag_legacy_fields(
         object.insert("top_k".to_string(), serde_json::json!(value));
     }
     if let Some(value) = tag.effort {
-        insert_serialized_legacy_field(object, "effort", &value);
+        object.insert(
+            "effort".to_string(),
+            serde_json::json!(value.as_legacy_str()),
+        );
     }
     if let Some(value) = tag.structured_output.as_ref() {
         insert_serialized_legacy_field(object, "structured_output", value);
@@ -1073,7 +1088,7 @@ fn insert_anthropic_provider_tag_legacy_fields(
             AnthropicInferenceGeo::Other { region } => {
                 object.insert("inference_geo".to_string(), serde_json::json!(region));
             }
-        };
+        }
     }
     if let Some(value) = tag.compaction.as_ref() {
         match value {
@@ -1083,7 +1098,7 @@ fn insert_anthropic_provider_tag_legacy_fields(
             AnthropicCompactionConfig::Custom { edit } => {
                 object.insert("compaction".to_string(), edit.as_value());
             }
-        };
+        }
     }
     if matches!(tag.context, Some(AnthropicContextWindow::OneMegabyte)) {
         object.insert("context".to_string(), serde_json::json!("1m"));
@@ -2049,6 +2064,7 @@ mod tests {
         let legacy = serde_json::json!({
             "temperature": 0.2,
             "thinking": { "budget_tokens": 10_000 },
+            "effort": "xhigh",
         });
         let params = ProviderParamsOverride::from_legacy_provider_value("anthropic", &legacy);
 
@@ -2064,6 +2080,7 @@ mod tests {
             projected["thinking"]["budget_tokens"],
             serde_json::json!(10_000)
         );
+        assert_eq!(projected["effort"], serde_json::json!("xhigh"));
     }
 
     #[test]

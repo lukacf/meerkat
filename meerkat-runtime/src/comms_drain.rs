@@ -328,17 +328,30 @@ pub fn spawn_comms_drain(
                             candidate_class,
                             PeerInputClass::SilentRequest | PeerInputClass::ActionableRequest
                         );
-                        if is_inbound_peer_request
-                            && let Some(handle) = comms_runtime.peer_interaction_handle()
-                        {
+                        if is_inbound_peer_request {
+                            let Some(handle) =
+                                comms_runtime.peer_request_response_authority_handle()
+                            else {
+                                tracing::warn!(
+                                    interaction_id = %interaction_id,
+                                    class = ?candidate_class,
+                                    "comms_drain: rejected inbound peer request without complete peer request authority"
+                                );
+                                comms_runtime.mark_interaction_complete(&interaction_id);
+                                continue;
+                            };
                             let corr_id =
                                 meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
-                            if let Err(err) = handle.request_received(corr_id) {
+                            if handle.inbound_state(corr_id).is_none()
+                                && let Err(err) = handle.request_received(corr_id)
+                            {
                                 tracing::warn!(
                                     error = %err,
                                     corr_id = %corr_id,
                                     "PeerInteractionHandle::request_received rejected"
                                 );
+                                comms_runtime.mark_interaction_complete(&interaction_id);
+                                continue;
                             }
                         }
 
@@ -922,13 +935,18 @@ async fn resolve_peer_route(
 fn record_bridge_inbound_peer_request(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
-) {
-    let Some(handle) = comms_runtime.peer_interaction_handle() else {
-        return;
+) -> bool {
+    let Some(handle) = comms_runtime.peer_request_response_authority_handle() else {
+        tracing::warn!(
+            interaction_id = %candidate.interaction.id,
+            "comms_drain: rejected supervisor bridge request without complete peer request authority"
+        );
+        comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+        return false;
     };
     let corr_id = meerkat_core::PeerCorrelationId::from_uuid(candidate.interaction.id.0);
     if handle.inbound_state(corr_id).is_some() {
-        return;
+        return true;
     }
     if let Err(err) = handle.request_received(corr_id) {
         tracing::warn!(
@@ -936,7 +954,10 @@ fn record_bridge_inbound_peer_request(
             corr_id = %corr_id,
             "PeerInteractionHandle::request_received rejected for supervisor bridge command"
         );
+        comms_runtime.mark_interaction_complete(&candidate.interaction.id);
+        return false;
     }
+    true
 }
 
 async fn send_bridge_failure(
@@ -985,7 +1006,12 @@ async fn try_handle_supervisor_bridge_command(
 
     // Bridge commands are handled before the generic drain branch that records
     // inbound peer-request state, but their replies are semantic PeerResponses.
-    record_bridge_inbound_peer_request(comms_runtime, candidate);
+    // Treat the bridge pre-dispatch as the same authority boundary: if the
+    // inbound request cannot be recorded under complete peer request/response
+    // authority, do not decode or apply bridge side effects.
+    if !record_bridge_inbound_peer_request(comms_runtime, candidate) {
+        return true;
+    }
 
     let command: BridgeCommand = match decode_bridge_command(params.clone()) {
         Ok(cmd) => cmd,
@@ -1826,7 +1852,7 @@ mod tests {
     use meerkat_core::InteractionId;
     use meerkat_core::SendError;
     use meerkat_core::interaction::InboxInteraction;
-    use meerkat_core::interaction::PeerIngressIdentity;
+    use meerkat_core::interaction::{PeerIngressConvention, PeerIngressIdentity};
     use meerkat_core::types::HandlingMode;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -1852,9 +1878,18 @@ mod tests {
         inbound: std::sync::Mutex<HashSet<meerkat_core::PeerCorrelationId>>,
         request_received_count: std::sync::atomic::AtomicUsize,
         response_replied_count: std::sync::atomic::AtomicUsize,
+        reject_request_received: std::sync::atomic::AtomicBool,
     }
 
     impl CountingPeerInteractionHandle {
+        fn rejecting_request_received() -> Self {
+            let handle = Self::default();
+            handle
+                .reject_request_received
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            handle
+        }
+
         fn rejected(
             context: &'static str,
             corr_id: meerkat_core::PeerCorrelationId,
@@ -1911,6 +1946,15 @@ mod tests {
             &self,
             corr_id: meerkat_core::PeerCorrelationId,
         ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            if self
+                .reject_request_received
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(Self::rejected(
+                    "PeerInteractionHandle::request_received",
+                    corr_id,
+                ));
+            }
             let mut inbound = self.inbound.lock().expect("inbound mutex");
             if !inbound.insert(corr_id) {
                 return Err(Self::rejected(
@@ -1961,6 +2005,267 @@ mod tests {
             &self,
             _observer: Arc<dyn meerkat_core::handles::PeerInteractionCleanupObserver>,
         ) {
+        }
+    }
+
+    struct OneShotPeerRequestRuntime {
+        notify: Arc<tokio::sync::Notify>,
+        candidate: std::sync::Mutex<Option<PeerInputCandidate>>,
+        peer_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
+        peer_request_response_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
+        completed_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl OneShotPeerRequestRuntime {
+        fn new(
+            candidate: PeerInputCandidate,
+            peer_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
+        ) -> Self {
+            Self {
+                notify: Arc::new(tokio::sync::Notify::new()),
+                candidate: std::sync::Mutex::new(Some(candidate)),
+                peer_handle,
+                peer_request_response_handle: None,
+                completed_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn with_complete_authority(
+            candidate: PeerInputCandidate,
+            peer_handle: Arc<dyn meerkat_core::handles::PeerInteractionHandle>,
+        ) -> Self {
+            Self {
+                notify: Arc::new(tokio::sync::Notify::new()),
+                candidate: std::sync::Mutex::new(Some(candidate)),
+                peer_handle: Some(peer_handle.clone()),
+                peer_request_response_handle: Some(peer_handle),
+                completed_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn completed_count(&self) -> usize {
+            self.completed_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommsRuntime for OneShotPeerRequestRuntime {
+        async fn drain_messages(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
+            self.notify.clone()
+        }
+
+        fn dismiss_received(&self) -> bool {
+            self.candidate.lock().expect("candidate mutex").is_none()
+        }
+
+        fn peer_interaction_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+            self.peer_handle.clone()
+        }
+
+        fn peer_request_response_authority_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+            self.peer_request_response_handle.clone()
+        }
+
+        async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
+            self.candidate
+                .lock()
+                .expect("candidate mutex")
+                .take()
+                .into_iter()
+                .collect()
+        }
+
+        fn mark_interaction_complete(&self, _id: &InteractionId) {
+            self.completed_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn inbound_peer_request_candidate(class: PeerInputClass) -> PeerInputCandidate {
+        assert!(
+            matches!(
+                class,
+                PeerInputClass::SilentRequest | PeerInputClass::ActionableRequest
+            ),
+            "test helper only builds inbound peer requests"
+        );
+        let id = InteractionId(Uuid::new_v4());
+        let intent = format!("test.inbound.{class:?}");
+        let sender = "partial-authority-peer";
+        PeerInputCandidate {
+            interaction: InboxInteraction {
+                id,
+                from_route: None,
+                from: sender.to_string(),
+                content: InteractionContent::Request {
+                    intent: intent.clone(),
+                    params: json!({ "ok": true }),
+                },
+                rendered_text: String::new(),
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+            },
+            ingress: PeerIngressFact::peer(
+                id,
+                class,
+                meerkat_core::PeerIngressKind::Request,
+                Some(meerkat_core::PeerIngressAuthDecision::Required),
+                PeerIngressIdentity::new(
+                    PeerId::new(),
+                    sender,
+                    PeerIngressConvention::Request {
+                        request_id: id.to_string(),
+                        intent,
+                    },
+                ),
+            ),
+            lifecycle_peer: None,
+            response_terminality: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_peer_request_recording_rejects_inbound_request_before_machine_admission() {
+        for class in [
+            PeerInputClass::SilentRequest,
+            PeerInputClass::ActionableRequest,
+        ] {
+            let adapter = Arc::new(MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            adapter.register_session(session_id.clone()).await;
+
+            let peer_handle = Arc::new(CountingPeerInteractionHandle::rejecting_request_received());
+            let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> = peer_handle;
+            let runtime = Arc::new(OneShotPeerRequestRuntime::with_complete_authority(
+                inbound_peer_request_candidate(class),
+                peer_authority,
+            ));
+            let drain = spawn_comms_drain(
+                adapter.clone(),
+                session_id.clone(),
+                runtime.clone(),
+                Some(Duration::from_millis(10)),
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), drain)
+                .await
+                .expect("drain should exit after one candidate")
+                .expect("drain task should not panic");
+
+            let snapshot = adapter
+                .meerkat_machine_spine_snapshot(&session_id)
+                .await
+                .expect("registered session snapshot");
+            assert_eq!(
+                snapshot.ledger.input_count, 0,
+                "rejected PeerRequestReceived must not admit {class:?} into machine work"
+            );
+            assert_eq!(
+                runtime.completed_count(),
+                1,
+                "rejected {class:?} should be closed at the comms boundary"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_peer_request_authority_rejects_inbound_request_before_machine_admission() {
+        for class in [
+            PeerInputClass::SilentRequest,
+            PeerInputClass::ActionableRequest,
+        ] {
+            let adapter = Arc::new(MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            adapter.register_session(session_id.clone()).await;
+
+            let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+            let peer_authority: Arc<dyn meerkat_core::handles::PeerInteractionHandle> =
+                peer_handle.clone();
+            let runtime = Arc::new(OneShotPeerRequestRuntime::new(
+                inbound_peer_request_candidate(class),
+                Some(peer_authority),
+            ));
+            let drain = spawn_comms_drain(
+                adapter.clone(),
+                session_id.clone(),
+                runtime.clone(),
+                Some(Duration::from_millis(10)),
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), drain)
+                .await
+                .expect("drain should exit after one candidate")
+                .expect("drain task should not panic");
+
+            let snapshot = adapter
+                .meerkat_machine_spine_snapshot(&session_id)
+                .await
+                .expect("registered session snapshot");
+            assert_eq!(
+                peer_handle.request_received_count(),
+                0,
+                "partial authority must not fire PeerRequestReceived for {class:?}"
+            );
+            assert_eq!(
+                snapshot.ledger.input_count, 0,
+                "partial authority must not admit {class:?} into machine work"
+            );
+            assert_eq!(
+                runtime.completed_count(),
+                1,
+                "rejected {class:?} should be closed at the comms boundary"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn absent_peer_request_authority_rejects_inbound_request_before_machine_admission() {
+        for class in [
+            PeerInputClass::SilentRequest,
+            PeerInputClass::ActionableRequest,
+        ] {
+            let adapter = Arc::new(MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            adapter.register_session(session_id.clone()).await;
+
+            let runtime = Arc::new(OneShotPeerRequestRuntime::new(
+                inbound_peer_request_candidate(class),
+                None,
+            ));
+            let drain = spawn_comms_drain(
+                adapter.clone(),
+                session_id.clone(),
+                runtime.clone(),
+                Some(Duration::from_millis(10)),
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), drain)
+                .await
+                .expect("drain should exit after one candidate")
+                .expect("drain task should not panic");
+
+            let snapshot = adapter
+                .meerkat_machine_spine_snapshot(&session_id)
+                .await
+                .expect("registered session snapshot");
+            assert_eq!(
+                snapshot.ledger.input_count, 0,
+                "missing authority must not admit {class:?} into machine work"
+            );
+            assert_eq!(
+                runtime.completed_count(),
+                1,
+                "rejected {class:?} should be closed at the comms boundary"
+            );
         }
     }
 
@@ -2442,6 +2747,9 @@ mod tests {
         add_trusted_peer_errors: HashMap<String, String>,
         remove_trusted_peer_errors: HashMap<String, String>,
         trusted_peer_ids: Arc<tokio::sync::Mutex<HashSet<String>>>,
+        peer_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
+        peer_request_response_handle: Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>>,
+        completed_count: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -2466,6 +2774,23 @@ mod tests {
             self.inbox_notify.clone()
         }
 
+        fn peer_interaction_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+            self.peer_handle.clone()
+        }
+
+        fn peer_request_response_authority_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+            self.peer_request_response_handle.clone()
+        }
+
+        fn mark_interaction_complete(&self, _id: &InteractionId) {
+            self.completed_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
             let peer_id_str = peer.peer_id.as_str();
             if let Some(message) = self.add_trusted_peer_errors.get(&peer_id_str) {
@@ -2488,6 +2813,8 @@ mod tests {
         address: &str,
         bootstrap_token: Option<&str>,
     ) -> BootstrapRuntime {
+        let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+        let peer_handle: Arc<dyn meerkat_core::handles::PeerInteractionHandle> = peer_handle;
         BootstrapRuntime {
             peer_id: peer_id.to_string(),
             address: address.to_string(),
@@ -2496,6 +2823,9 @@ mod tests {
             add_trusted_peer_errors: HashMap::new(),
             remove_trusted_peer_errors: HashMap::new(),
             trusted_peer_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            peer_handle: Some(peer_handle.clone()),
+            peer_request_response_handle: Some(peer_handle),
+            completed_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -3004,6 +3334,95 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn bridge_request_without_complete_peer_authority_fails_before_dispatch() {
+        for install_peer_handle in [false, true] {
+            let payload = sample_bind_payload();
+            let sender = payload.supervisor.peer_id.clone();
+            let mut runtime_impl = bootstrap_runtime(
+                PEER_ID_RECEIVER,
+                "inproc://receiver",
+                Some("expected-token"),
+            );
+            let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+            if install_peer_handle {
+                let peer_handle: Arc<dyn meerkat_core::handles::PeerInteractionHandle> =
+                    peer_handle.clone();
+                runtime_impl.peer_handle = Some(peer_handle);
+            } else {
+                runtime_impl.peer_handle = None;
+            }
+            runtime_impl.peer_request_response_handle = None;
+            let completed_count = runtime_impl.completed_count.clone();
+            let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+            let adapter = Arc::new(MeerkatMachine::ephemeral());
+            let session_id = SessionId::new();
+            adapter.register_session(session_id.clone()).await;
+            let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
+
+            assert!(
+                try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate)
+                    .await,
+                "bridge handler must own bridge requests even when rejecting authority"
+            );
+            assert!(
+                matches!(
+                    adapter.supervisor_binding(&session_id).await,
+                    SupervisorBinding::Unbound
+                ),
+                "bridge request must not mutate supervisor binding without complete authority"
+            );
+            assert_eq!(
+                peer_handle.request_received_count(),
+                0,
+                "peer-only authority must not record PeerRequestReceived through bridge dispatch"
+            );
+            assert_eq!(
+                completed_count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "bridge request rejected at the authority boundary should be marked complete"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_request_rejected_by_peer_authority_fails_before_dispatch() {
+        let payload = sample_bind_payload();
+        let sender = payload.supervisor.peer_id.clone();
+        let mut runtime_impl = bootstrap_runtime(
+            PEER_ID_RECEIVER,
+            "inproc://receiver",
+            Some("expected-token"),
+        );
+        let peer_handle = Arc::new(CountingPeerInteractionHandle::rejecting_request_received());
+        let peer_handle: Arc<dyn meerkat_core::handles::PeerInteractionHandle> = peer_handle;
+        runtime_impl.peer_handle = Some(peer_handle.clone());
+        runtime_impl.peer_request_response_handle = Some(peer_handle);
+        let completed_count = runtime_impl.completed_count.clone();
+        let runtime: Arc<dyn CommsRuntime> = Arc::new(runtime_impl);
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        let candidate = bridge_candidate(&sender, &BridgeCommand::BindMember(payload));
+
+        assert!(
+            try_handle_supervisor_bridge_command(&adapter, &session_id, &runtime, &candidate).await,
+            "bridge handler must own bridge requests even when rejecting authority"
+        );
+        assert!(
+            matches!(
+                adapter.supervisor_binding(&session_id).await,
+                SupervisorBinding::Unbound
+            ),
+            "bridge request must not mutate supervisor binding when PeerRequestReceived is rejected"
+        );
+        assert_eq!(
+            completed_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "bridge request rejected by peer authority should be marked complete"
+        );
+    }
+
     fn authorized_state_for(
         payload: &meerkat_contracts::wire::supervisor_bridge::BridgeBindPayload,
     ) -> SupervisorBinding {
@@ -3374,6 +3793,12 @@ mod tests {
 
         fn inbox_notify(&self) -> Arc<tokio::sync::Notify> {
             self.inbox_notify.clone()
+        }
+
+        fn peer_request_response_authority_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+            Some(Arc::new(CountingPeerInteractionHandle::default()))
         }
 
         async fn add_trusted_peer(&self, _peer: TrustedPeerDescriptor) -> Result<(), SendError> {

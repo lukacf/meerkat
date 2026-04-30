@@ -10,7 +10,9 @@ use std::sync::Arc;
 use meerkat_core::EventEnvelope;
 use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorControl, CoreExecutorError,
+};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::SessionError;
@@ -69,6 +71,50 @@ impl SessionRuntimeExecutor {
     }
 }
 
+struct SessionRuntimeControlHandle {
+    runtime: Arc<SessionRuntime>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorControl for SessionRuntimeControlHandle {
+    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
+                self.runtime
+                    .interrupt(&self.session_id)
+                    .await
+                    .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(feature = "mob")]
+struct MobRpcRuntimeControlHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl CoreExecutorControl for MobRpcRuntimeControlHandle {
+    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
+                self.session_service
+                    .interrupt(&self.session_id)
+                    .await
+                    .map_err(|err| CoreExecutorError::ControlFailed {
+                        reason: err.to_string(),
+                    })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -101,6 +147,13 @@ fn pending_system_context_appends_from_primitive(
 
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
+    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
+        Some(Arc::new(SessionRuntimeControlHandle {
+            runtime: Arc::clone(&self.runtime),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -181,11 +234,12 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
-            RunControlCommand::CancelCurrentRun { .. } => self
-                .runtime
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message }),
+            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
+                self.runtime
+                    .interrupt(&self.session_id)
+                    .await
+                    .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message })
+            }
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self.runtime.discard_live_session(&self.session_id).await;
                 self.runtime
@@ -207,6 +261,13 @@ impl CoreExecutor for SessionRuntimeExecutor {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl CoreExecutor for MobRpcRuntimeExecutor {
+    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
+        Some(Arc::new(MobRpcRuntimeControlHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -295,13 +356,14 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
-            RunControlCommand::CancelCurrentRun { .. } => self
-                .session_service
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::ControlFailed {
-                    reason: e.to_string(),
-                }),
+            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
+                self.session_service
+                    .interrupt(&self.session_id)
+                    .await
+                    .map_err(|e| CoreExecutorError::ControlFailed {
+                        reason: e.to_string(),
+                    })
+            }
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .session_service

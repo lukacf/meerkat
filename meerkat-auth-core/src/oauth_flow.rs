@@ -478,7 +478,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
         let mut flows = self.flows.lock();
         prune_expired_locked(&mut flows, self.ttl);
-        let Some(record) = flows.remove(state) else {
+        let Some(record) = flows.get(state) else {
             return Err(OAuthFlowError::Missing);
         };
         if record.provider != provider {
@@ -490,7 +490,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
         if record.redirect_uri != redirect_uri {
             return Err(OAuthFlowError::RedirectUriMismatch);
         }
-        Ok(record)
+        flows.remove(state).ok_or(OAuthFlowError::Missing)
     }
 
     fn admit_device_code(
@@ -724,6 +724,35 @@ mod tests {
     }
 
     #[test]
+    fn oauth_state_provider_mismatch_does_not_consume_state() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let state = registry
+            .start(
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback",
+                "verifier",
+            )
+            .expect("state generation succeeds");
+        assert!(matches!(
+            registry.consume(
+                &state,
+                OAuthProviderIdentity::AnthropicClaudeAi,
+                "http://127.0.0.1/callback"
+            ),
+            Err(OAuthFlowError::ProviderMismatch { .. })
+        ));
+
+        let record = registry
+            .consume(
+                &state,
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback",
+            )
+            .expect("provider mismatch must leave state retryable");
+        assert_eq!(record.pkce_verifier, "verifier");
+    }
+
+    #[test]
     fn oauth_state_rejects_redirect_uri_mismatch() {
         let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
         let state = registry
@@ -741,6 +770,35 @@ mod tests {
             ),
             Err(OAuthFlowError::RedirectUriMismatch)
         ));
+    }
+
+    #[test]
+    fn oauth_state_redirect_uri_mismatch_does_not_consume_state() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let state = registry
+            .start(
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback",
+                "verifier",
+            )
+            .expect("state generation succeeds");
+        assert!(matches!(
+            registry.consume(
+                &state,
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/other"
+            ),
+            Err(OAuthFlowError::RedirectUriMismatch)
+        ));
+
+        let record = registry
+            .consume(
+                &state,
+                OAuthProviderIdentity::OpenAiChatGpt,
+                "http://127.0.0.1/callback",
+            )
+            .expect("redirect mismatch must leave state retryable");
+        assert_eq!(record.pkce_verifier, "verifier");
     }
 
     #[test]

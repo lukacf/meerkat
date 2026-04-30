@@ -755,6 +755,10 @@ pub async fn handle_auth_login_complete(
         );
     }
 
+    let store = match require_token_store(runtime, id.clone()) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
     let flow = match runtime.oauth_flow_authority().consume(
         &parsed.state,
         resolved.identity,
@@ -777,10 +781,6 @@ pub async fn handle_auth_login_complete(
         }
     };
 
-    let store = match require_token_store(runtime, id.clone()) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
     let http = reqwest::Client::new();
     let result = match exchange_authorization_code(
         &http,
@@ -1321,6 +1321,31 @@ mod tests {
         test_runtime_with_config_and_token_store(config, token_store)
     }
 
+    fn test_runtime_with_config_without_token_store(
+        config: meerkat_core::Config,
+    ) -> SessionRuntime {
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = meerkat::AgentFactory::new(temp.path().join("sessions"));
+        factory.token_store = None;
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(config.clone()));
+        let mut runtime = SessionRuntime::new(
+            factory,
+            config,
+            10,
+            meerkat::PersistenceBundle::new(store, None, blob_store),
+            crate::router::NotificationSink::noop(),
+        );
+        runtime.set_config_runtime(Arc::new(meerkat_core::ConfigRuntime::new(
+            config_store,
+            temp.path().join("config_state.json"),
+        )));
+        runtime
+    }
+
     fn test_runtime_with_config_and_token_store(
         config: meerkat_core::Config,
         token_store: Arc<dyn TokenStore>,
@@ -1699,6 +1724,46 @@ mod tests {
             )
             .expect("runtime AuthMachine authority owns the RPC login flow");
         assert!(!flow.pkce_verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn browser_login_token_store_preflight_failure_does_not_consume_state() {
+        let runtime = test_runtime_with_config_without_token_store(
+            config_with_openai_managed_store_binding(),
+        );
+        let redirect_uri = "http://127.0.0.1:0/callback";
+        let state = runtime
+            .oauth_flow_authority()
+            .start(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("state generation succeeds");
+        let params = raw_params(serde_json::json!({
+            "provider": "openai",
+            "code": "provider-code",
+            "state": state.clone(),
+            "redirect_uri": redirect_uri,
+            "realm_id": "dev",
+            "binding_id": "default_openai"
+        }));
+
+        let resp =
+            handle_auth_login_complete(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        let error = resp.error.expect("missing TokenStore should fail");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(error.message.contains("TokenStore not configured"));
+        let flow = runtime
+            .oauth_flow_authority()
+            .consume(
+                &state,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            )
+            .expect("local preflight failure must leave browser state retryable");
+        assert_eq!(flow.pkce_verifier, "verifier");
     }
 
     #[tokio::test]

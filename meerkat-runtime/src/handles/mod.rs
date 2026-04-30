@@ -50,6 +50,8 @@ mod external_tool_surface;
 mod interaction_stream;
 mod mcp_server_lifecycle;
 mod model_routing;
+#[cfg(not(target_arch = "wasm32"))]
+mod oauth_flow;
 mod peer_comms;
 mod peer_interaction;
 mod realtime_product_turn;
@@ -64,6 +66,8 @@ pub use external_tool_surface::RuntimeExternalToolSurfaceHandle;
 pub use interaction_stream::RuntimeInteractionStreamHandle;
 pub use mcp_server_lifecycle::RuntimeMcpServerLifecycleHandle;
 pub use model_routing::RuntimeModelRoutingHandle;
+#[cfg(not(target_arch = "wasm32"))]
+pub use oauth_flow::RuntimeOAuthFlowHandle;
 pub use peer_comms::RuntimePeerCommsHandle;
 pub use peer_interaction::RuntimePeerInteractionHandle;
 pub use realtime_product_turn::RuntimeRealtimeProductTurnHandle;

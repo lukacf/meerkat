@@ -616,9 +616,9 @@ impl MeerkatMachine {
             llm_reconfigure_host: StdRwLock::new(None),
             auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
             #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(Arc::new(
-                meerkat_auth_core::oauth_flow::OAuthFlowRegistry::default(),
-            )),
+            oauth_flows: StdRwLock::new(
+                Arc::new(crate::handles::RuntimeOAuthFlowHandle::default()),
+            ),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -634,9 +634,9 @@ impl MeerkatMachine {
             llm_reconfigure_host: StdRwLock::new(None),
             auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
             #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(Arc::new(
-                meerkat_auth_core::oauth_flow::OAuthFlowRegistry::default(),
-            )),
+            oauth_flows: StdRwLock::new(
+                Arc::new(crate::handles::RuntimeOAuthFlowHandle::default()),
+            ),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -656,9 +656,9 @@ impl MeerkatMachine {
             llm_reconfigure_host: StdRwLock::new(None),
             auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
             #[cfg(not(target_arch = "wasm32"))]
-            oauth_flows: StdRwLock::new(Arc::new(
-                meerkat_auth_core::oauth_flow::OAuthFlowRegistry::default(),
-            )),
+            oauth_flows: StdRwLock::new(
+                Arc::new(crate::handles::RuntimeOAuthFlowHandle::default()),
+            ),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }

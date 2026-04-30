@@ -86,6 +86,20 @@ fn oauth_flow_authority_is_owned_by_meerkat_machine() {
     assert_eq!(flow.pkce_verifier, "verifier");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_flow_lifecycle_uses_runtime_authority_seam() {
+    let source = include_str!("meerkat_machine/mod.rs");
+    assert!(
+        !source.contains("OAuthFlowRegistry::default()"),
+        "MeerkatMachine must not install the auth-core registry directly"
+    );
+    assert!(
+        source.contains("RuntimeOAuthFlowHandle::default()"),
+        "MeerkatMachine should install the runtime OAuth flow authority seam"
+    );
+}
+
 #[derive(Default)]
 struct RecordingMeerkatSignalSurface {
     log: tokio::sync::Mutex<
@@ -2962,16 +2976,17 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         RuntimeState::Destroyed,
         "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
     );
-    let authority = entry
-        .dsl_authority
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(
-        crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
-        RuntimeState::Destroyed,
-        "durable destroyed state must not race ahead of canonical DSL destroy truth",
-    );
-    drop(authority);
+    {
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+            RuntimeState::Destroyed,
+            "durable destroyed state must not race ahead of canonical DSL destroy truth",
+        );
+    }
     drop(sessions);
 
     store.release_destroy_commit.notify_waiters();

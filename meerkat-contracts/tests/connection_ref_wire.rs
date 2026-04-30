@@ -166,7 +166,7 @@ fn auth_status_wire_with_error_roundtrips() {
         profile_id: "p1".to_string(),
         provider: "openai".to_string(),
         auth_method: "managed_chatgpt_oauth".to_string(),
-        state: "reauth_required".to_string(),
+        state: meerkat_core::AuthStatusPhase::ReauthRequired,
         expires_at: None,
         last_refresh_at: None,
         account_id: Some("acct_42".to_string()),
@@ -187,7 +187,7 @@ fn auth_status_detail_wire_flattens_binding_identity() {
         profile_id: "prod_env_key".to_string(),
         provider: "openai".to_string(),
         auth_method: "api_key".to_string(),
-        state: "valid".to_string(),
+        state: meerkat_core::AuthStatusPhase::Valid,
         expires_at: None,
         last_refresh_at: Some("2026-04-28T00:00:00Z".to_string()),
         account_id: Some("acct_42".to_string()),
@@ -205,6 +205,38 @@ fn auth_status_detail_wire_flattens_binding_identity() {
     assert_eq!(back.identity.connection_ref, status.identity.connection_ref);
     assert_eq!(back.profile_id, status.profile_id);
     assert_eq!(back.has_refresh_token, status.has_refresh_token);
+}
+
+#[test]
+fn auth_status_wire_rejects_unknown_lifecycle_state() {
+    let status = serde_json::json!({
+        "profile_id": "p1",
+        "provider": "openai",
+        "auth_method": "managed_chatgpt_oauth",
+        "state": "credential_present"
+    });
+    assert!(
+        serde_json::from_value::<WireAuthStatus>(status).is_err(),
+        "WireAuthStatus state must be typed lifecycle truth, not an arbitrary string"
+    );
+
+    let detail = serde_json::json!({
+        "realm_id": "dev",
+        "binding_id": "default_openai",
+        "connection_ref": {
+            "realm": "dev",
+            "binding": "default_openai"
+        },
+        "profile_id": "p1",
+        "provider": "openai",
+        "auth_method": "managed_chatgpt_oauth",
+        "state": "credential_present",
+        "has_refresh_token": false
+    });
+    assert!(
+        serde_json::from_value::<WireAuthStatusDetail>(detail).is_err(),
+        "WireAuthStatusDetail state must reject string defaults outside AuthStatusPhase"
+    );
 }
 
 #[cfg(feature = "schema")]

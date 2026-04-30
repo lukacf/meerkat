@@ -16,32 +16,62 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 fn seed_managed_openai_realm_config(root: &std::path::Path) {
+    seed_managed_openai_realm_config_with_ids(root, "default_openai", "default_openai");
+}
+
+fn seed_managed_openai_realm_config_with_ids(
+    root: &std::path::Path,
+    auth_profile_id: &str,
+    binding_id: &str,
+) {
+    seed_openai_realm_config_with_ids_and_method(
+        root,
+        auth_profile_id,
+        binding_id,
+        "openai_api",
+        "api_key",
+    );
+}
+
+fn seed_openai_realm_config_with_ids_and_method(
+    root: &std::path::Path,
+    auth_profile_id: &str,
+    binding_id: &str,
+    backend_kind: &str,
+    auth_method: &str,
+) {
     let realm_dir = root.join("realms").join("dev");
     std::fs::create_dir_all(&realm_dir).expect("mkdir realm config dir");
     std::fs::write(
         realm_dir.join("config.toml"),
-        r#"
+        format!(
+            r#"
 [realm.dev]
-default_binding = "default_openai"
+default_binding = "{binding_id}"
 
 [realm.dev.backend.openai_backend]
 provider = "openai"
-backend_kind = "openai_api"
+backend_kind = "{backend_kind}"
 
-[realm.dev.auth.default_openai]
+[realm.dev.auth.{auth_profile_id}]
 provider = "openai"
-auth_method = "api_key"
-source = { kind = "managed_store" }
+auth_method = "{auth_method}"
+source = {{ kind = "managed_store" }}
 
-[realm.dev.binding.default_openai]
+[realm.dev.binding.{binding_id}]
 backend_profile = "openai_backend"
-auth_profile = "default_openai"
-"#,
+auth_profile = "{auth_profile_id}"
+"#
+        ),
     )
     .expect("write realm config");
 }
 
 fn token_file_path(root: &std::path::Path) -> PathBuf {
+    token_file_path_for_binding(root, "default_openai")
+}
+
+fn token_file_path_for_binding(root: &std::path::Path, binding_id: &str) -> PathBuf {
     #[cfg(target_os = "macos")]
     let config_root = root.join("Library").join("Application Support");
     #[cfg(not(target_os = "macos"))]
@@ -51,11 +81,15 @@ fn token_file_path(root: &std::path::Path) -> PathBuf {
         .join("meerkat")
         .join("credentials")
         .join("dev")
-        .join("default_openai.json")
+        .join(format!("{binding_id}.json"))
 }
 
 fn seed_token_file(root: &std::path::Path, body: &str) {
-    let token_file = token_file_path(root);
+    seed_token_file_for_binding(root, "default_openai", body);
+}
+
+fn seed_token_file_for_binding(root: &std::path::Path, binding_id: &str, body: &str) {
+    let token_file = token_file_path_for_binding(root, binding_id);
     let token_dir = token_file.parent().expect("token file has parent");
     std::fs::create_dir_all(token_dir).expect("mkdir token dir");
     std::fs::write(token_file, body).expect("write token file");
@@ -199,6 +233,55 @@ fn rkat_auth_profile_delete_clears_malformed_token_file() {
 }
 
 #[test]
+fn rkat_auth_profile_delete_clears_binding_scoped_token_when_profile_id_differs() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_managed_openai_realm_config_with_ids(tmp.path(), "openai_managed", "default_openai");
+    seed_token_file_for_binding(tmp.path(), "default_openai", "{ malformed token json");
+
+    let delete = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "profile-delete",
+            "--realm",
+            "dev",
+            "openai_managed",
+            "--yes",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth profile-delete must spawn");
+    if !delete.status.success() {
+        let stderr = String::from_utf8_lossy(&delete.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("profile delete must clear binding-scoped token file; stderr={stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&delete.stdout);
+    assert!(
+        stdout.contains("deleted: dev:default_openai"),
+        "profile delete should report the binding-scoped token key; stdout:\n{stdout}"
+    );
+    assert!(
+        !token_file_path_for_binding(tmp.path(), "default_openai").exists(),
+        "profile delete must remove the token file keyed by the owning binding"
+    );
+}
+
+#[test]
 fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
     let Some(rkat) = rkat_binary() else {
         eprintln!("SKIP: rkat binary unavailable");
@@ -267,6 +350,167 @@ fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
             "status must not expose token-derived `{forbidden}` without lifecycle; stdout:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_managed_openai_realm_config(tmp.path());
+    seed_token_file(tmp.path(), "{ malformed token json");
+
+    let status = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "status",
+            "--realm",
+            "dev",
+            "default_openai",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth status must spawn");
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("status must not be owned by malformed token storage; stderr={stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("state:       unknown"),
+        "status should report lease-unknown without token-store truth; stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("auth_mode:"),
+        "status must not expose token-derived metadata without lifecycle; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn rkat_auth_refresh_uses_binding_scoped_token_when_profile_id_differs() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_openai_realm_config_with_ids_and_method(
+        tmp.path(),
+        "openai_managed",
+        "default_openai",
+        "chatgpt_backend",
+        "managed_chatgpt_oauth",
+    );
+    seed_token_file(
+        tmp.path(),
+        r#"{
+  "auth_mode": "chatgpt_oauth",
+  "primary_secret": "fresh-chatgpt-access",
+  "refresh_token": "refresh-token",
+  "expires_at": 1893456000,
+  "last_refresh": 1700000000,
+  "scopes": ["openid", "email"],
+  "account_id": "acct-fresh"
+}"#,
+    );
+
+    let refresh = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "refresh",
+            "--realm",
+            "dev",
+            "openai_managed",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth refresh must spawn");
+    if !refresh.status.success() {
+        let stderr = String::from_utf8_lossy(&refresh.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("refresh must use the binding-scoped token key; stderr={stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&refresh.stdout);
+    assert!(
+        stdout.contains("profile:       dev:openai_managed"),
+        "refresh should still report the requested auth profile; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("refresh:       ok"),
+        "refresh must not skip when credentials exist under the owning binding; stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("reason:        no persisted credential"),
+        "refresh must not preflight token storage by auth profile id; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn rkat_auth_status_resolves_binding_that_references_auth_profile() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_managed_openai_realm_config_with_ids(tmp.path(), "openai_managed", "default_openai");
+
+    let status = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "status",
+            "--realm",
+            "dev",
+            "openai_managed",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth status must spawn");
+    assert!(
+        status.status.success(),
+        "status must resolve binding-scoped lease identity from auth profile; stderr={}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("binding_id:  default_openai"),
+        "status must report the binding that owns the auth lease key; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("state:       unknown"),
+        "status should still be lease-unknown without a live AuthMachine lifecycle; stdout:\n{stdout}"
+    );
 }
 
 /// `rkat auth profile list --realm <empty>` returns either 0 (empty

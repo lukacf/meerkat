@@ -1072,22 +1072,22 @@ pub async fn get_auth_status(
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    let key = TokenKey::from_connection_ref(&connection_ref);
-    let stored = match state.token_store.load(&key).await {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": format!("TokenStore load failed: {e}") })),
-            )
-                .into_response();
-        }
-    };
     let snapshot = state
         .auth_lease
         .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-    let projection =
-        meerkat_core::project_published_auth_status(chrono::Utc::now(), stored.as_ref(), &snapshot);
+    let now = chrono::Utc::now();
+    let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+    let stored = if phase == meerkat_core::AuthStatusPhase::Unknown {
+        None
+    } else {
+        state
+            .token_store
+            .load(&TokenKey::from_connection_ref(&connection_ref))
+            .await
+            .ok()
+            .flatten()
+    };
+    let projection = meerkat_core::project_published_auth_status(now, stored.as_ref(), &snapshot);
     let tokens = projection.tokens;
     (
         StatusCode::OK,
@@ -1096,7 +1096,7 @@ pub async fn get_auth_status(
             profile_id: auth_profile.id.clone(),
             provider: auth_profile.provider.as_str().to_string(),
             auth_method: auth_profile.auth_method.clone(),
-            state: projection.phase.as_public_str().to_string(),
+            state: projection.phase,
             expires_at: projection.expires_at.map(|e| e.to_rfc3339()),
             last_refresh_at: tokens.and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
             account_id: tokens.and_then(|t| t.account_id.clone()),
@@ -1300,6 +1300,46 @@ mod tests {
         }
     }
 
+    struct LoadFailingTokenStore;
+
+    #[async_trait::async_trait]
+    impl TokenStore for LoadFailingTokenStore {
+        async fn load(
+            &self,
+            _key: &TokenKey,
+        ) -> Result<Option<PersistedTokens>, meerkat_providers::auth_store::TokenStoreError>
+        {
+            Err(meerkat_providers::auth_store::TokenStoreError::Serde(
+                "malformed token fixture".into(),
+            ))
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            _tokens: &PersistedTokens,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            Ok(())
+        }
+
+        async fn clear(
+            &self,
+            _key: &TokenKey,
+        ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
+            Ok(())
+        }
+
+        async fn list(
+            &self,
+        ) -> Result<Vec<TokenKey>, meerkat_providers::auth_store::TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "load_failing"
+        }
+    }
+
     fn config_with_openai_managed_store_binding() -> meerkat_core::Config {
         let mut config = meerkat_core::Config::default();
         let mut section = meerkat_core::RealmConfigSection::default();
@@ -1468,7 +1508,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, "unknown");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
         assert_eq!(detail.expires_at, None);
         assert_eq!(detail.last_refresh_at, None);
         assert_eq!(detail.account_id, None);
@@ -1476,7 +1516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_auth_status_does_not_report_valid_when_token_is_missing() {
+    async fn rest_auth_status_reports_lease_phase_when_token_is_missing() {
         let temp = tempfile::tempdir().unwrap();
         let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
@@ -1517,8 +1557,57 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, "unknown");
-        assert_eq!(detail.expires_at, None);
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
+        assert!(detail.expires_at.is_some());
+        assert!(!detail.has_refresh_token);
+    }
+
+    #[tokio::test]
+    async fn rest_auth_status_reports_lease_phase_when_token_load_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        install_ephemeral_auth_state(&mut state);
+        state.token_store = Arc::new(LoadFailingTokenStore);
+        state
+            .config_runtime
+            .set(config_with_openai_managed_store_binding(), None)
+            .await
+            .unwrap();
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("dev").unwrap(),
+            binding: BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        let now = chrono::Utc::now().timestamp() as u64;
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(meerkat_core::SessionId::new())
+            .await
+            .unwrap();
+        bindings
+            .auth_lease
+            .acquire_lease(&lease_key, now + 3600)
+            .unwrap();
+
+        let detail = auth_status_detail(
+            get_auth_status(
+                State(state),
+                Path(BindingId::parse("default_openai").unwrap()),
+                Query(RealmQuery {
+                    realm_id: RealmId::parse("dev").unwrap(),
+                    profile_id: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
+        assert!(detail.expires_at.is_some());
+        assert_eq!(detail.account_id, None);
         assert!(!detail.has_refresh_token);
     }
 
@@ -1568,7 +1657,7 @@ mod tests {
             get_auth_status(State(state.clone()), Path(binding_id()), Query(query())).await,
         )
         .await;
-        assert_eq!(detail.state, "valid");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
 
         let bindings = state
             .runtime_adapter
@@ -1580,7 +1669,7 @@ mod tests {
             get_auth_status(State(state.clone()), Path(binding_id()), Query(query())).await,
         )
         .await;
-        assert_eq!(detail.state, "expiring");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Expiring);
 
         bindings
             .auth_lease
@@ -1594,7 +1683,7 @@ mod tests {
             get_auth_status(State(state), Path(binding_id()), Query(query())).await,
         )
         .await;
-        assert_eq!(detail.state, "reauth_required");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::ReauthRequired);
     }
 
     #[test]

@@ -4625,6 +4625,169 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
 }
 
 #[tokio::test]
+async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
+    struct LiveControlHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorControl for LiveControlHandle {
+        async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(command, RunControlCommand::InterruptYielding) {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    struct BlockingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        queued_control_calls: Arc<AtomicUsize>,
+        live_control_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+            Some(Arc::new(LiveControlHandle {
+                calls: Arc::clone(&self.live_control_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+                run_result: None,
+            })
+        }
+
+        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(command, RunControlCommand::InterruptYielding) {
+                self.queued_control_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let queued_control_calls = Arc::new(AtomicUsize::new(0));
+    let live_control_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+                queued_control_calls: Arc::clone(&queued_control_calls),
+                live_control_calls: Arc::clone(&live_control_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let first_input = Input::Prompt(crate::input::PromptInput::new(
+        "attached service ext running turn",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, _completion_handle) = adapter
+        .accept_input_with_completion(&session_id, first_input)
+        .await
+        .expect("attached steered prompt should be accepted");
+    assert!(outcome.is_accepted());
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("first apply should start");
+
+    live_control_calls.store(0, Ordering::SeqCst);
+    queued_control_calls.store(0, Ordering::SeqCst);
+
+    let peer_input = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "peer-service-ext-interrupt".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: "interrupt through service ext ingest".into(),
+        payload: None,
+        blocks: None,
+        handling_mode: None,
+    });
+
+    let peer_outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        adapter.as_ref(),
+        &session_id,
+        peer_input,
+    )
+    .await
+    .expect("service ext accept_input should accept running peer input");
+    assert!(peer_outcome.is_accepted());
+
+    assert_eq!(
+        live_control_calls.load(Ordering::SeqCst),
+        1,
+        "service ext Ingest should signal the live out-of-band control handle while apply is blocked"
+    );
+    assert_eq!(
+        queued_control_calls.load(Ordering::SeqCst),
+        0,
+        "ordered runtime-loop control still cannot drain until apply returns"
+    );
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+
+    allow_finish.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if queued_control_calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued control should still drain after apply returns");
+}
+
+#[tokio::test]
 async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_until_apply_finishes() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,

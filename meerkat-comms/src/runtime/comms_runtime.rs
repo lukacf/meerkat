@@ -648,6 +648,16 @@ impl CoreCommsRuntime for CommsRuntime {
                     core_status,
                     meerkat_core::ResponseStatus::Completed | meerkat_core::ResponseStatus::Failed
                 );
+                let effective_handling_mode = handling_mode.or_else(|| {
+                    is_terminal_reply
+                        .then(|| {
+                            self.inbound_request_handling_modes
+                                .lock()
+                                .get(&corr_id)
+                                .copied()
+                        })
+                        .flatten()
+                });
                 let envelope_id = self
                     .send_peer_command(
                         &to,
@@ -655,7 +665,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             in_reply_to: in_reply_to.0,
                             status,
                             result,
-                            handling_mode,
+                            handling_mode: effective_handling_mode,
                         },
                     )
                     .await?;
@@ -672,6 +682,9 @@ impl CoreCommsRuntime for CommsRuntime {
                     return Err(SendError::Validation(format!(
                         "DSL rejected PeerResponseReplied for corr_id {corr_id}: {err}"
                     )));
+                }
+                if is_terminal_reply {
+                    self.inbound_request_handling_modes.lock().remove(&corr_id);
                 }
 
                 Ok(SendReceipt::PeerResponseSent {
@@ -920,16 +933,39 @@ impl CoreCommsRuntime for CommsRuntime {
                             return None;
                         }
 
-                        // Extract handling_mode from Response envelopes before
-                        // consuming the kind in the content match.
+                        // Extract handling_mode before consuming the kind.
+                        // `send_response` may omit this field, so the sender
+                        // side defaults it from the original request mode.
                         let envelope_handling_mode = match &envelope.kind {
-                            MessageKind::Response {
+                            MessageKind::Message {
+                                handling_mode: Some(mode),
+                                ..
+                            }
+                            | MessageKind::Request {
+                                handling_mode: Some(mode),
+                                ..
+                            }
+                            | MessageKind::Response {
                                 handling_mode: Some(mode),
                                 ..
                             } => *mode,
-                            _ => meerkat_core::types::HandlingMode::Queue,
+                            MessageKind::Response {
+                                handling_mode: None,
+                                ..
+                            }
+                            | MessageKind::Message {
+                                handling_mode: None,
+                                ..
+                            }
+                            | MessageKind::Request {
+                                handling_mode: None,
+                                ..
+                            }
+                            | MessageKind::Lifecycle { .. }
+                            | MessageKind::Ack { .. } => meerkat_core::types::HandlingMode::Queue,
                         };
-
+                        let is_peer_request_envelope =
+                            matches!(&envelope.kind, MessageKind::Request { .. });
                         let content = match envelope.kind {
                             MessageKind::Message {
                                 body,
@@ -981,6 +1017,13 @@ impl CoreCommsRuntime for CommsRuntime {
                                 return None;
                             }
                         };
+
+                        if is_peer_request_envelope {
+                            self.inbound_request_handling_modes.lock().insert(
+                                meerkat_core::PeerCorrelationId::from_uuid(envelope.id),
+                                envelope_handling_mode,
+                            );
+                        }
 
                         Some(meerkat_core::ClassifiedInboxInteraction {
                             interaction: meerkat_core::InboxInteraction {
@@ -1240,6 +1283,12 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
+    /// Transport-owned projection of the handling mode carried by inbound
+    /// peer requests. `send_response` uses this only when the caller omits an
+    /// explicit response override, matching the tool contract that responses
+    /// default to the original request's delivery mode.
+    inbound_request_handling_modes:
+        Arc<Mutex<HashMap<meerkat_core::PeerCorrelationId, meerkat_core::types::HandlingMode>>>,
 }
 
 impl CommsRuntime {
@@ -1325,6 +1374,7 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -1440,6 +1490,7 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -1567,6 +1618,7 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
+            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -2252,6 +2304,9 @@ impl CommsRuntime {
     /// Callers that want the stream-lifecycle CAS (Reserved/Attached gate)
     /// should use [`mark_interaction_complete`].
     fn drop_peer_interaction_projection(&self, interaction_id: Uuid) {
+        self.inbound_request_handling_modes
+            .lock()
+            .remove(&meerkat_core::PeerCorrelationId::from_uuid(interaction_id));
         let removed_sender = self.subscriber_registry.lock().remove(&interaction_id);
         let removed_stream = self
             .interaction_stream_registry
@@ -3324,6 +3379,55 @@ mod tests {
                         && result["ok"] == true
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_envelopes_do_not_seed_peer_response_handling_mode_cache() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = test_runtime_config("lifecycle-no-response-cache", &tmp);
+        let runtime = CommsRuntime::new(config).await.unwrap();
+
+        let sender = Keypair::generate();
+        CoreCommsRuntime::add_trusted_peer(
+            &runtime,
+            trusted_descriptor("sender", sender.public_key(), "tcp://127.0.0.1:4200"),
+        )
+        .await
+        .unwrap();
+
+        let lifecycle_id = Uuid::new_v4();
+        let mut envelope = signed_envelope(
+            &sender,
+            runtime.public_key(),
+            MessageKind::Lifecycle {
+                kind: meerkat_core::comms::PeerLifecycleKind::PeerAdded,
+                params: serde_json::json!({"name": "sender"}),
+            },
+        );
+        envelope.id = lifecycle_id;
+        envelope.sign(&sender);
+
+        runtime
+            .router
+            .inbox_sender()
+            .send_classified(InboxItem::External { envelope })
+            .into_result()
+            .unwrap();
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
+        assert_eq!(interactions.len(), 1);
+        assert!(matches!(
+            &interactions[0].content,
+            meerkat_core::InteractionContent::Request { intent, .. }
+                if intent == meerkat_core::comms::PeerLifecycleKind::PeerAdded.as_str()
+        ));
+        assert!(
+            !runtime
+                .inbound_request_handling_modes
+                .lock()
+                .contains_key(&meerkat_core::PeerCorrelationId::from_uuid(lifecycle_id)),
+            "lifecycle projections are request-shaped but are not responseable peer requests"
+        );
     }
 
     #[tokio::test]

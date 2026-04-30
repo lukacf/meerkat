@@ -20,7 +20,7 @@ pub mod run_primitive;
 pub mod run_receipt;
 
 // Re-exports for convenience
-pub use core_executor::{CoreExecutor, CoreExecutorError};
+pub use core_executor::{CoreExecutor, CoreExecutorControl, CoreExecutorError};
 pub use identifiers::{InputId, RunId, WaitRequestId};
 pub use run_control::RunControlCommand;
 pub use run_event::RunEvent;

@@ -1845,16 +1845,19 @@ mod tests {
             InboxInteraction, InteractionContent, PeerInputCandidate, PeerInputClass,
         };
 
+        let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
         let from_comms = peer_input_candidate_to_runtime_input(
             &PeerInputCandidate {
-                class: PeerInputClass::PlainEvent,
-                auth: None,
-                from_peer_id: None,
                 lifecycle_peer: None,
-                source_peer_id: None,
                 response_terminality: None,
+                ingress: meerkat_core::PeerIngressFact::plain_event(
+                    interaction_id,
+                    "webhook",
+                    PeerInputClass::PlainEvent,
+                    meerkat_core::PeerIngressKind::PlainEvent,
+                ),
                 interaction: InboxInteraction {
-                    id: meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4()),
+                    id: interaction_id,
                     from_route: None,
                     from: "event:webhook".into(),
                     content: InteractionContent::Message {
@@ -1867,7 +1870,8 @@ mod tests {
                 },
             },
             &LogicalRuntimeId::new("test"),
-        );
+        )
+        .map_err(|err| err.to_string())?;
 
         let direct = Input::ExternalEvent(crate::input::ExternalEventInput {
             header: InputHeader {

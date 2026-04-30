@@ -233,6 +233,7 @@ test_suite(
         "//meerkat-runtime:ops_lifecycle_contract_test",
         "//meerkat-runtime:ops_lifecycle_persistence_test",
         "//meerkat-runtime:peer_handling_mode_contract_test",
+        "//meerkat-runtime:peer_ingress_fact_ratchet_test",
         "//meerkat-runtime:peer_interaction_dsl_test",
         "//meerkat-runtime:peer_projection_dsl_test",
         "//meerkat-runtime:peer_projection_producer_wiring_test",

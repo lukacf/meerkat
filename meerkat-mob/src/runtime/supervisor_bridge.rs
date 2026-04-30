@@ -7,7 +7,6 @@ use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerId, PeerRoute, SendReceipt, TrustedPeerDescriptor,
 };
 #[cfg(test)]
-use meerkat_core::interaction::classify_response_terminality;
 use meerkat_core::interaction::{InteractionContent, PeerInputCandidate, TerminalityClass};
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::HandlingMode;
@@ -341,13 +340,16 @@ mod tests {
         status: ResponseStatus,
         result: serde_json::Value,
     ) -> PeerInputCandidate {
+        let id = InteractionId(uuid::Uuid::new_v4());
+        let worker_peer_id = PeerId::from_uuid(
+            uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f5")
+                .expect("valid worker route id"),
+        );
+        let classification = PeerIngressMachinePolicy::default().classify_response(status);
         PeerInputCandidate {
             interaction: InboxInteraction {
-                id: InteractionId(uuid::Uuid::new_v4()),
-                from_route: Some(PeerId::from_uuid(
-                    uuid::Uuid::parse_str("018f6f79-7a82-7c4e-a552-a3b86f9630f5")
-                        .expect("valid worker route id"),
-                )),
+                id,
+                from_route: Some(worker_peer_id),
                 from: "worker-rt".to_string(),
                 content: InteractionContent::Response {
                     in_reply_to: InteractionId(request_envelope_id),
@@ -358,14 +360,22 @@ mod tests {
                 handling_mode: HandlingMode::Queue,
                 render_metadata: None,
             },
-            class: PeerIngressMachinePolicy::default()
-                .classify_response(status)
-                .class,
-            auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
-            from_peer_id: None,
+            ingress: meerkat_core::PeerIngressFact::peer(
+                id,
+                classification.class,
+                meerkat_core::PeerIngressKind::Response,
+                Some(meerkat_core::PeerIngressAuthDecision::Required),
+                meerkat_core::PeerIngressIdentity::new(
+                    worker_peer_id,
+                    "worker-rt",
+                    meerkat_core::PeerIngressConvention::Response {
+                        in_reply_to: InteractionId(request_envelope_id),
+                        status,
+                    },
+                ),
+            ),
             lifecycle_peer: None,
-            source_peer_id: None,
-            response_terminality: Some(classify_response_terminality(status)),
+            response_terminality: classification.response_terminality,
         }
     }
 

@@ -1541,12 +1541,25 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         ));
     }
 
-    if !bridge_source.contains("classified.class == PeerInputClass::PlainEvent") {
+    if !bridge_source.contains("classified.class() == PeerInputClass::PlainEvent") {
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
             "classified_interaction_to_runtime_input",
             "runtime comms bridge must derive ExternalEvent routing from PeerInputClass::PlainEvent".to_string(),
+            false,
+        ));
+    }
+
+    if contains_identifier_call(bridge_source, "interaction_to_peer_input")
+        || bridge_source.contains("pub fn interaction_to_peer_input")
+    {
+        findings.push(error_finding(
+            "RuntimeCommsBridgeProjectionAlignment",
+            bridge_path,
+            "classified_interaction_to_runtime_input",
+            "runtime comms bridge must not expose a raw interaction-only peer input adapter"
+                .to_string(),
             false,
         ));
     }
@@ -1566,7 +1579,7 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
-            "interaction_to_peer_input",
+            "peer_input_from_ingress_fact",
             "runtime comms bridge must project peer body from the rendered peer text helper"
                 .to_string(),
             false,
@@ -1588,7 +1601,7 @@ fn runtime_comms_bridge_projection_findings_for_sources(
         findings.push(error_finding(
             "RuntimeCommsBridgeProjectionAlignment",
             bridge_path,
-            "interaction_to_peer_input",
+            "peer_input_from_ingress_fact",
             "runtime comms bridge must project multimodal blocks through the peer block helper"
                 .to_string(),
             false,
@@ -1708,27 +1721,29 @@ mod tests {
     #[test]
     fn runtime_comms_bridge_projection_rule_accepts_current_shape() {
         let bridge = r#"
-            pub fn classified_interaction_to_runtime_input(
-                classified: &PeerInputCandidate,
-                runtime_id: &LogicalRuntimeId,
-            ) -> Input {
-                if classified.class == PeerInputClass::PlainEvent {
-                    let source_name = interaction
-                        .from
-                        .strip_prefix("event:")
-                        .unwrap_or(interaction.from.as_str());
-                    return Input::ExternalEvent(todo!());
-                }
+	            pub fn classified_interaction_to_runtime_input(
+	                classified: &PeerInputCandidate,
+	                runtime_id: &LogicalRuntimeId,
+	            ) -> Input {
+	                let interaction = &classified.interaction;
+	                if classified.class() == PeerInputClass::PlainEvent {
+	                    let source_name = classified
+	                        .ingress
+	                        .plain_event_source_name()
+	                        .unwrap_or("unknown");
+	                    return Input::ExternalEvent(todo!());
+	                }
 
-                interaction_to_peer_input(interaction, runtime_id)
-            }
+	                peer_input_from_ingress_fact(interaction, runtime_id, &classified.ingress)
+	            }
 
-            pub fn interaction_to_peer_input(
-                interaction: &InboxInteraction,
-                runtime_id: &LogicalRuntimeId,
-            ) -> Input {
-                Input::Peer(PeerInput {
-                    body: peer_rendered_body(interaction),
+	            fn peer_input_from_ingress_fact(
+	                interaction: &InboxInteraction,
+	                runtime_id: &LogicalRuntimeId,
+	                ingress: &PeerIngressFact,
+	            ) -> Input {
+	                Input::Peer(PeerInput {
+	                    body: peer_rendered_body(interaction),
                     blocks: peer_blocks(interaction),
                 })
             }
@@ -1816,12 +1831,12 @@ mod tests {
             }
         "#;
         let bridge = r"
-            pub fn classified_interaction_to_runtime_input(classified: &PeerInputCandidate) -> Input {
-                let interaction = &classified.interaction;
-                if classified.class == PeerInputClass::PlainEvent {
-                    let blocks = external_event_blocks(interaction);
-                    return Input::ExternalEvent(ExternalEventInput {
-                        payload: external_event_payload(interaction),
+	            pub fn classified_interaction_to_runtime_input(classified: &PeerInputCandidate) -> Input {
+	                let interaction = &classified.interaction;
+	                if classified.class() == PeerInputClass::PlainEvent {
+	                    let blocks = external_event_blocks(interaction);
+	                    return Input::ExternalEvent(ExternalEventInput {
+	                        payload: external_event_payload(interaction),
                         blocks,
                     });
                 }
@@ -1870,10 +1885,10 @@ mod tests {
             }
         "#;
         let bridge = r#"
-            pub fn classified_interaction_to_runtime_input(classified: &PeerInputCandidate) -> Input {
-                let interaction = &classified.interaction;
-                if classified.class == PeerInputClass::PlainEvent {
-                    return Input::ExternalEvent(ExternalEventInput {
+	            pub fn classified_interaction_to_runtime_input(classified: &PeerInputCandidate) -> Input {
+	                let interaction = &classified.interaction;
+	                if classified.class() == PeerInputClass::PlainEvent {
+	                    return Input::ExternalEvent(ExternalEventInput {
                         payload: serde_json::json!({ "body": "flattened" }),
                         blocks: None,
                     });

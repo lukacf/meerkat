@@ -9,7 +9,9 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
-use crate::comms::{PeerId, PeerLifecycleKind, SUPERVISOR_BRIDGE_INTENT, TrustedPeerDescriptor};
+use crate::comms::{
+    PeerId, PeerLifecycleKind, PeerName, PeerRoute, SUPERVISOR_BRIDGE_INTENT, TrustedPeerDescriptor,
+};
 use crate::types::{ContentBlock, HandlingMode, RenderMetadata};
 
 /// Unique identifier for an interaction.
@@ -355,6 +357,196 @@ impl PeerIngressAuthDecision {
     }
 }
 
+/// Typed peer convention admitted at the peer-ingress seam.
+///
+/// This is the core-side ingress convention, not a rendered prompt. Runtime
+/// prompt/schema projections derive from it after admission so `InboxInteraction::from`
+/// never has to carry both display and canonical identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerIngressConvention {
+    Message,
+    Request {
+        request_id: String,
+        intent: String,
+    },
+    Response {
+        in_reply_to: InteractionId,
+        status: ResponseStatus,
+    },
+    Ack {
+        in_reply_to: InteractionId,
+    },
+    Lifecycle {
+        kind: PeerLifecycleKind,
+        peer: String,
+    },
+    PlainEvent {
+        source_name: String,
+    },
+}
+
+/// Typed fact admitted at the peer-ingress seam.
+///
+/// The legacy `InboxInteraction::from` field remains a compatibility display
+/// label. Runtime routing, trust, bridge response resolution, and prompt/schema
+/// projection must consume the matching typed field on this fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressFact {
+    /// Interaction/correlation identifier stamped at ingress.
+    pub interaction_id: InteractionId,
+    /// Pre-computed ingress class.
+    pub class: PeerInputClass,
+    /// Coarse admitted kind.
+    pub kind: PeerIngressKind,
+    /// Canonical comms peer id. This is the runtime prompt/schema peer id.
+    pub canonical_peer_id: Option<PeerId>,
+    /// Human-facing display label for diagnostics and legacy rendered text.
+    pub display_name: Option<PeerName>,
+    /// Ed25519 signing public key / trust subject when ingress was signed.
+    pub signing_pubkey: Option<[u8; 32]>,
+    /// Resolved route/binding handle for replies to this sender.
+    pub route: Option<PeerRoute>,
+    /// Auth decision used by peer ingress admission.
+    pub auth: Option<PeerIngressAuthDecision>,
+    /// Typed peer convention admitted at ingress.
+    pub convention: PeerIngressConvention,
+}
+
+/// Sender identity admitted with a peer ingress fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressIdentity {
+    pub canonical_peer_id: PeerId,
+    pub display_label: String,
+    pub signing_pubkey: Option<[u8; 32]>,
+    pub convention: PeerIngressConvention,
+}
+
+impl PeerIngressIdentity {
+    pub fn new(
+        canonical_peer_id: PeerId,
+        display_label: impl Into<String>,
+        convention: PeerIngressConvention,
+    ) -> Self {
+        Self {
+            canonical_peer_id,
+            display_label: display_label.into(),
+            signing_pubkey: None,
+            convention,
+        }
+    }
+
+    pub fn with_signing_pubkey(mut self, signing_pubkey: [u8; 32]) -> Self {
+        self.signing_pubkey = Some(signing_pubkey);
+        self
+    }
+}
+
+impl PeerIngressFact {
+    pub fn peer(
+        interaction_id: InteractionId,
+        class: PeerInputClass,
+        kind: PeerIngressKind,
+        auth: Option<PeerIngressAuthDecision>,
+        identity: PeerIngressIdentity,
+    ) -> Self {
+        let PeerIngressIdentity {
+            canonical_peer_id,
+            display_label,
+            signing_pubkey,
+            convention,
+        } = identity;
+        let display_name = PeerName::new(display_label).ok();
+        let route = Some(match &display_name {
+            Some(name) => PeerRoute::with_display_name(canonical_peer_id, name.clone()),
+            None => PeerRoute::new(canonical_peer_id),
+        });
+        Self {
+            interaction_id,
+            class,
+            kind,
+            canonical_peer_id: Some(canonical_peer_id),
+            display_name,
+            signing_pubkey,
+            route,
+            auth,
+            convention,
+        }
+    }
+
+    pub fn plain_event(
+        interaction_id: InteractionId,
+        source_name: impl Into<String>,
+        class: PeerInputClass,
+        kind: PeerIngressKind,
+    ) -> Self {
+        let source_name = source_name.into();
+        Self {
+            interaction_id,
+            class,
+            kind,
+            canonical_peer_id: None,
+            display_name: None,
+            signing_pubkey: None,
+            route: None,
+            auth: None,
+            convention: PeerIngressConvention::PlainEvent { source_name },
+        }
+    }
+
+    /// Compatibility constructor for tests and legacy non-classified seams.
+    ///
+    /// Prefer constructing a full `peer(...)` fact with canonical peer id,
+    /// signing subject, and route when the ingress came from comms.
+    pub fn legacy_peer_label(
+        interaction_id: InteractionId,
+        label: impl Into<String>,
+        class: PeerInputClass,
+        kind: PeerIngressKind,
+        auth: Option<PeerIngressAuthDecision>,
+        convention: PeerIngressConvention,
+    ) -> Self {
+        let label = label.into();
+        let canonical_peer_id = PeerId::parse(&label).ok();
+        let display_name = PeerName::new(label).ok();
+        let route = canonical_peer_id.map(|peer_id| match &display_name {
+            Some(name) => PeerRoute::with_display_name(peer_id, name.clone()),
+            None => PeerRoute::new(peer_id),
+        });
+        Self {
+            interaction_id,
+            class,
+            kind,
+            canonical_peer_id,
+            display_name,
+            signing_pubkey: None,
+            route,
+            auth,
+            convention,
+        }
+    }
+
+    pub fn canonical_peer_id_string(&self) -> Option<String> {
+        self.canonical_peer_id.map(|peer_id| peer_id.as_str())
+    }
+
+    pub fn display_label(&self) -> Option<String> {
+        self.display_name.as_ref().map(PeerName::as_string)
+    }
+
+    pub fn diagnostic_label(&self) -> String {
+        self.display_label()
+            .or_else(|| self.canonical_peer_id_string())
+            .unwrap_or_else(|| "<unknown-peer-ingress>".to_string())
+    }
+
+    pub fn plain_event_source_name(&self) -> Option<&str> {
+        match &self.convention {
+            PeerIngressConvention::PlainEvent { source_name } => Some(source_name.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// Typed output of machine-owned peer ingress classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressClassification {
@@ -674,28 +866,40 @@ fn classify_lifecycle_intent(intent: &str) -> Option<PeerLifecycleKind> {
 pub struct PeerInputCandidate {
     /// The original interaction data.
     pub interaction: InboxInteraction,
-    /// Canonical sender identity captured at ingress.
-    ///
-    /// This is intentionally separate from [`InboxInteraction::from`], which
-    /// preserves the legacy display/source label used by downstream routing
-    /// and diagnostics. Prompt/schema projection for correlated requests must
-    /// use this canonical `PeerId` when present.
-    pub source_peer_id: Option<PeerId>,
-    /// Pre-computed classification from ingress.
-    pub class: PeerInputClass,
-    /// Auth decision that admitted this candidate when it came from peer
-    /// transport. Plain events and legacy producers may leave this unset.
-    pub auth: Option<PeerIngressAuthDecision>,
-    /// Canonical sender routing identity captured at peer ingress.
-    ///
-    /// `interaction.from` is a display projection. Bridge response routing and
-    /// other authority-sensitive paths must use this typed identity instead of
-    /// reinterpreting the display string.
-    pub from_peer_id: Option<PeerId>,
+    /// Typed admitted ingress fact. Consumers must use this for canonical peer
+    /// identity, display labels, trust subjects, route handles, and convention.
+    pub ingress: PeerIngressFact,
     /// For lifecycle events, the peer name that was added/retired.
     pub lifecycle_peer: Option<String>,
     /// For response events, the machine-owned progress/terminal classifier.
     pub response_terminality: Option<TerminalityClass>,
+}
+
+impl PeerInputCandidate {
+    pub fn new(
+        interaction: InboxInteraction,
+        ingress: PeerIngressFact,
+        lifecycle_peer: Option<String>,
+    ) -> Self {
+        Self {
+            interaction,
+            ingress,
+            lifecycle_peer,
+            response_terminality: None,
+        }
+    }
+
+    pub fn class(&self) -> PeerInputClass {
+        self.ingress.class
+    }
+
+    pub fn kind(&self) -> PeerIngressKind {
+        self.ingress.kind
+    }
+
+    pub fn auth(&self) -> Option<PeerIngressAuthDecision> {
+        self.ingress.auth
+    }
 }
 
 /// Back-compat alias for older runtime and diagnostic seams.
@@ -782,8 +986,14 @@ pub struct PeerIngressEntrySnapshot {
     pub kind: PeerIngressKind,
     /// Display-only sender label, if applicable. Not route/trust authority.
     pub from_peer_display: Option<PeerIngressDiagnosticDisplay>,
-    /// Canonical sender routing identity fixed at ingress time, if applicable.
-    pub from_peer_id: Option<PeerId>,
+    /// Canonical sender peer id fixed at ingress time, if applicable.
+    pub canonical_peer_id: Option<PeerId>,
+    /// Display peer name fixed at ingress time, if applicable.
+    pub display_name: Option<PeerName>,
+    /// Signing public key / trust subject fixed at ingress time, if applicable.
+    pub signing_pubkey: Option<[u8; 32]>,
+    /// Resolved reply route fixed at ingress time, if applicable.
+    pub route: Option<PeerRoute>,
     /// Display-only lifecycle peer label, if applicable. Not route/trust authority.
     pub lifecycle_peer_display: Option<PeerIngressDiagnosticDisplay>,
     /// Request envelope id or reply-to correlation when one exists.

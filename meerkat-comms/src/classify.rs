@@ -8,8 +8,9 @@ use crate::trust::TrustedPeers;
 use crate::types::{InboxItem, MessageKind};
 use meerkat_core::{
     InteractionId, PeerIngressAdmission, PeerIngressAuthDecision, PeerIngressEnvelopeFacts,
-    PeerIngressEnvelopeKind, PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts,
-    PeerInputClass, TerminalityClass, handles::PeerCommsHandle,
+    PeerIngressConvention, PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity,
+    PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts, PeerInputClass,
+    TerminalityClass, handles::PeerCommsHandle,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +28,7 @@ pub(crate) struct IngressClassificationContext {
     pub(crate) ingress_policy: Arc<PeerIngressMachinePolicy>,
     pub(crate) peer_comms_handle: PeerCommsHandleSlot,
     pub(crate) require_machine_authority: Arc<AtomicBool>,
+    pub(crate) inproc_namespace: Option<String>,
 }
 
 /// Result of classifying an inbox item.
@@ -55,10 +57,10 @@ pub(crate) struct PreparedIngressItem {
     pub(crate) auth: PeerIngressAuthDecision,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) trusted_sender: bool,
-    pub(crate) from_peer_id: Option<meerkat_core::comms::PeerId>,
     pub(crate) from_peer: Option<String>,
     pub(crate) lifecycle_peer: Option<String>,
     pub(crate) response_terminality: Option<TerminalityClass>,
+    pub(crate) ingress_fact: PeerIngressFact,
     pub(crate) text_projection: String,
     #[allow(dead_code)]
     pub(crate) content_shape: PeerContentShape,
@@ -141,6 +143,14 @@ impl IngressClassificationContext {
         }
     }
 
+    fn inproc_display_name_for(&self, pubkey: &crate::identity::PubKey) -> Option<String> {
+        let registry = InprocRegistry::global();
+        self.inproc_namespace
+            .as_deref()
+            .and_then(|namespace| registry.get_name_by_pubkey_in_namespace(namespace, pubkey))
+            .or_else(|| registry.get_name_by_pubkey(pubkey))
+    }
+
     /// Prepare an inbox item for classified ingress.
     ///
     /// Runtime-backed inboxes hand parsed transport facts to the
@@ -155,12 +165,12 @@ impl IngressClassificationContext {
                 let from_peer = trusted.get_peer(&envelope.from).map(|p| p.name.clone());
                 let trusted_sender = from_peer.is_some();
 
-                let from_name = from_peer.unwrap_or_else(|| {
-                    InprocRegistry::global()
-                        .get_name_by_pubkey(&envelope.from)
-                        .unwrap_or_else(|| envelope.from.to_pubkey_string())
-                });
                 let from_peer_id = envelope.from.to_peer_id();
+                let registry_name = self.inproc_display_name_for(&envelope.from);
+
+                let from_name = registry_name
+                    .or(from_peer)
+                    .unwrap_or_else(|| envelope.from.to_pubkey_string());
 
                 let facts = PeerIngressEnvelopeFacts {
                     item_id: envelope.id.to_string(),
@@ -200,6 +210,51 @@ impl IngressClassificationContext {
                 let admission = self.machine_classify_external_envelope(facts)?;
                 let request_id = parse_admission_interaction_id(admission.request_id.as_deref());
                 let classification = admission.classification;
+                let lifecycle_peer = admission.lifecycle_peer.clone();
+                let convention = match &envelope.kind {
+                    MessageKind::Message { .. } => PeerIngressConvention::Message,
+                    MessageKind::Request { intent, params, .. } => {
+                        if let Some(kind) = classification.lifecycle_kind {
+                            let peer = lifecycle_peer.clone().unwrap_or_else(|| {
+                                meerkat_core::peer_lifecycle_subject(params, from_name.as_str())
+                            });
+                            PeerIngressConvention::Lifecycle { kind, peer }
+                        } else {
+                            PeerIngressConvention::Request {
+                                request_id: admission
+                                    .request_id
+                                    .clone()
+                                    .unwrap_or_else(|| envelope.id.to_string()),
+                                intent: intent.clone(),
+                            }
+                        }
+                    }
+                    MessageKind::Lifecycle { kind, params } => {
+                        let peer = lifecycle_peer.clone().unwrap_or_else(|| {
+                            meerkat_core::peer_lifecycle_subject(params, from_name.as_str())
+                        });
+                        PeerIngressConvention::Lifecycle { kind: *kind, peer }
+                    }
+                    MessageKind::Response {
+                        in_reply_to,
+                        status,
+                        ..
+                    } => PeerIngressConvention::Response {
+                        in_reply_to: request_id.unwrap_or(InteractionId(*in_reply_to)),
+                        status: (*status).into(),
+                    },
+                    MessageKind::Ack { in_reply_to } => PeerIngressConvention::Ack {
+                        in_reply_to: request_id.unwrap_or(InteractionId(*in_reply_to)),
+                    },
+                };
+                let ingress_fact = PeerIngressFact::peer(
+                    InteractionId(envelope.id),
+                    classification.class,
+                    classification.kind,
+                    Some(classification.auth),
+                    PeerIngressIdentity::new(from_peer_id, from_name.clone(), convention)
+                        .with_signing_pubkey(envelope.from.0),
+                );
 
                 let content_shape = match &envelope.kind {
                     MessageKind::Message { body, blocks, .. } => {
@@ -217,11 +272,11 @@ impl IngressClassificationContext {
                     class: classification.class,
                     auth: classification.auth,
                     trusted_sender,
-                    from_peer_id: Some(from_peer_id),
                     from_peer: Some(from_name),
-                    lifecycle_peer: admission.lifecycle_peer,
+                    lifecycle_peer,
                     response_terminality: classification.response_terminality,
                     text_projection: admission.rendered_text,
+                    ingress_fact,
                     content_shape,
                     request_id,
                     item: InboxItem::External { envelope },
@@ -243,6 +298,12 @@ impl IngressClassificationContext {
                 let admission = self.machine_classify_plain_event(facts)?;
                 let classification = admission.classification;
                 let content_shape = content_shape_for_text_and_blocks(&body, blocks.as_deref());
+                let ingress_fact = PeerIngressFact::plain_event(
+                    meerkat_core::InteractionId(interaction_id),
+                    source.to_string(),
+                    classification.class,
+                    classification.kind,
+                );
                 Some(PreparedIngressItem {
                     raw_item_id: InteractionId(interaction_id),
                     kind: classification.kind,
@@ -250,10 +311,10 @@ impl IngressClassificationContext {
                     auth: classification.auth,
                     trusted_sender: true,
                     from_peer: None,
-                    from_peer_id: None,
                     lifecycle_peer: None,
                     response_terminality: classification.response_terminality,
                     text_projection: admission.rendered_text,
+                    ingress_fact,
                     content_shape,
                     request_id: None,
                     item: InboxItem::PlainEvent {
@@ -285,7 +346,7 @@ impl IngressClassificationContext {
                 class: prepared.class,
                 auth: prepared.auth,
                 from_peer: prepared.from_peer,
-                from_peer_id: prepared.from_peer_id.map(|peer_id| peer_id.to_string()),
+                from_peer_id: prepared.ingress_fact.canonical_peer_id_string(),
                 lifecycle_peer: prepared.lifecycle_peer,
                 response_terminality: prepared.response_terminality,
             })
@@ -433,7 +494,28 @@ mod tests {
         trusted_peers: TrustedPeers,
         silent_intents: Vec<&str>,
     ) -> IngressClassificationContext {
-        make_context_with_machine(require_peer_auth, trusted_peers, silent_intents, None)
+        make_context_with_machine_and_namespace(
+            require_peer_auth,
+            trusted_peers,
+            silent_intents,
+            None,
+            None,
+        )
+    }
+
+    fn make_context_with_namespace(
+        require_peer_auth: bool,
+        trusted_peers: TrustedPeers,
+        silent_intents: Vec<&str>,
+        inproc_namespace: Option<String>,
+    ) -> IngressClassificationContext {
+        make_context_with_machine_and_namespace(
+            require_peer_auth,
+            trusted_peers,
+            silent_intents,
+            None,
+            inproc_namespace,
+        )
     }
 
     fn make_context_with_machine(
@@ -441,6 +523,22 @@ mod tests {
         trusted_peers: TrustedPeers,
         silent_intents: Vec<&str>,
         peer_comms_handle: Option<Arc<dyn meerkat_core::handles::PeerCommsHandle>>,
+    ) -> IngressClassificationContext {
+        make_context_with_machine_and_namespace(
+            require_peer_auth,
+            trusted_peers,
+            silent_intents,
+            peer_comms_handle,
+            None,
+        )
+    }
+
+    fn make_context_with_machine_and_namespace(
+        require_peer_auth: bool,
+        trusted_peers: TrustedPeers,
+        silent_intents: Vec<&str>,
+        peer_comms_handle: Option<Arc<dyn meerkat_core::handles::PeerCommsHandle>>,
+        inproc_namespace: Option<String>,
     ) -> IngressClassificationContext {
         IngressClassificationContext {
             require_peer_auth,
@@ -450,6 +548,7 @@ mod tests {
             )),
             peer_comms_handle: Arc::new(parking_lot::RwLock::new(peer_comms_handle)),
             require_machine_authority: Arc::new(AtomicBool::new(false)),
+            inproc_namespace,
         }
     }
 
@@ -704,6 +803,48 @@ mod tests {
             Some(expected_peer_id.as_str())
         );
         assert!(result.lifecycle_peer.is_none());
+    }
+
+    #[test]
+    fn classify_message_prefers_inproc_source_label_for_prompt_display() {
+        let sender = make_keypair();
+        let sender_pubkey = sender.public_key();
+        let canonical_label = sender_pubkey.to_peer_id().to_string();
+        let source_label = format!("sender-source-{}", Uuid::new_v4().simple());
+        let namespace = format!("classify-{}", Uuid::new_v4().simple());
+        let trusted = make_trusted_peers(&canonical_label, &sender_pubkey);
+        let ctx = make_context_with_namespace(true, trusted, vec![], Some(namespace.clone()));
+        let (_, inbox_sender) = crate::Inbox::new();
+        InprocRegistry::global().register_with_meta_in_namespace(
+            &namespace,
+            source_label.clone(),
+            sender_pubkey,
+            inbox_sender,
+            crate::PeerMeta::default(),
+        );
+
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Message {
+                blocks: None,
+                body: "hello".to_string(),
+                handling_mode: None,
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let prepared = ctx.prepare(item).expect("should prepare");
+        assert!(prepared.trusted_sender);
+        assert_eq!(prepared.from_peer.as_deref(), Some(source_label.as_str()));
+        assert_eq!(
+            prepared.text_projection,
+            meerkat_core::format_peer_message_projection(&source_label, "hello")
+        );
+        assert_eq!(
+            prepared.ingress_fact.canonical_peer_id_string().as_deref(),
+            Some(canonical_label.as_str())
+        );
+
+        assert!(InprocRegistry::global().unregister_in_namespace(&namespace, &sender_pubkey));
     }
 
     #[test]

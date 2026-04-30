@@ -13,9 +13,10 @@
 
 use meerkat_core::comms::PeerId;
 use meerkat_core::interaction::{
-    InboxInteraction, InteractionContent, InteractionId, ResponseStatus,
+    InboxInteraction, InteractionContent, InteractionId, PeerIngressConvention, PeerIngressFact,
+    PeerIngressIdentity, PeerInputCandidate, PeerInputClass, ResponseStatus,
 };
-use meerkat_runtime::comms_bridge::interaction_to_peer_input;
+use meerkat_runtime::comms_bridge::peer_input_candidate_to_runtime_input;
 use meerkat_runtime::driver::ephemeral::{EphemeralRuntimeDriver, PostAdmissionSignal};
 use meerkat_runtime::identifiers::LogicalRuntimeId;
 use meerkat_runtime::input::{Input, InputDurability, PeerConvention};
@@ -125,6 +126,66 @@ fn rid() -> LogicalRuntimeId {
     LogicalRuntimeId::new("test-runtime")
 }
 
+fn test_peer_id() -> PeerId {
+    PeerId::parse("33333333-3333-4333-8333-333333333333").expect("canonical test peer id")
+}
+
+fn peer_kind_for_convention(convention: &PeerIngressConvention) -> meerkat_core::PeerIngressKind {
+    match convention {
+        PeerIngressConvention::Message => meerkat_core::PeerIngressKind::Message,
+        PeerIngressConvention::Request { .. } | PeerIngressConvention::Lifecycle { .. } => {
+            meerkat_core::PeerIngressKind::Request
+        }
+        PeerIngressConvention::Response { .. } => meerkat_core::PeerIngressKind::Response,
+        PeerIngressConvention::Ack { .. } => meerkat_core::PeerIngressKind::Ack,
+        PeerIngressConvention::PlainEvent { .. } => meerkat_core::PeerIngressKind::PlainEvent,
+    }
+}
+
+fn runtime_input_for_interaction(
+    interaction: &InboxInteraction,
+    runtime_id: &LogicalRuntimeId,
+) -> Input {
+    let id = interaction.id;
+    let (class, convention) = match &interaction.content {
+        InteractionContent::Message { .. } => (
+            PeerInputClass::ActionableMessage,
+            PeerIngressConvention::Message,
+        ),
+        InteractionContent::Request { intent, .. } => (
+            PeerInputClass::ActionableRequest,
+            PeerIngressConvention::Request {
+                request_id: id.to_string(),
+                intent: intent.clone(),
+            },
+        ),
+        InteractionContent::Response {
+            in_reply_to,
+            status,
+            ..
+        } => (
+            meerkat_core::PeerIngressMachinePolicy::default()
+                .classify_response(*status)
+                .class,
+            PeerIngressConvention::Response {
+                in_reply_to: *in_reply_to,
+                status: *status,
+            },
+        ),
+    };
+    let kind = peer_kind_for_convention(&convention);
+    let ingress = PeerIngressFact::peer(
+        id,
+        class,
+        kind,
+        Some(meerkat_core::PeerIngressAuthDecision::Required),
+        PeerIngressIdentity::new(test_peer_id(), interaction.from.clone(), convention),
+    );
+    let candidate = PeerInputCandidate::new(interaction.clone(), ingress, None);
+    peer_input_candidate_to_runtime_input(&candidate, runtime_id)
+        .expect("test interaction should project to runtime input")
+}
+
 // ---------------------------------------------------------------------------
 // §1: Completed response triggers continuation (wake) when idle
 // ---------------------------------------------------------------------------
@@ -133,7 +194,7 @@ fn rid() -> LogicalRuntimeId {
 async fn completed_response_idle_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Completed);
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // Verify bridge mapping
     if let Input::Peer(ref p) = input {
@@ -165,7 +226,7 @@ async fn completed_response_idle_wakes() {
 async fn completed_response_admission_stamps_context_and_run_apply_intent() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Completed);
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     let outcome = driver.accept_input(input).await.unwrap();
     let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = outcome else {
@@ -203,7 +264,7 @@ async fn completed_response_admission_stamps_context_and_run_apply_intent() {
 async fn accepted_response_no_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Accepted);
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // Verify bridge: Accepted → ResponseProgress
     if let Input::Peer(ref p) = input {
@@ -255,7 +316,7 @@ async fn accepted_response_no_wake() {
 async fn failed_response_idle_wakes() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Failed);
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // Verify bridge: Failed → ResponseTerminal
     if let Input::Peer(ref p) = input {
@@ -290,12 +351,12 @@ async fn response_with_passthrough_message_both_queued() {
 
     // Accept a completed response
     let resp = make_response("peer-1", ResponseStatus::Completed);
-    let input1 = interaction_to_peer_input(&resp, &rid());
+    let input1 = runtime_input_for_interaction(&resp, &rid());
     let outcome1 = driver.accept_input(input1).await.unwrap();
 
     // Accept a message
     let msg = make_message("peer-2", "hello");
-    let input2 = interaction_to_peer_input(&msg, &rid());
+    let input2 = runtime_input_for_interaction(&msg, &rid());
     let outcome2 = driver.accept_input(input2).await.unwrap();
 
     // Both should be queued
@@ -322,7 +383,7 @@ async fn response_after_completed_turn_wakes() {
 
     // Now idle — accept a terminal response
     let resp = make_response("peer-1", ResponseStatus::Completed);
-    let input = interaction_to_peer_input(&resp, &rid());
+    let input = runtime_input_for_interaction(&resp, &rid());
     let outcome = driver.accept_input(input).await.unwrap();
 
     assert!(outcome.is_accepted());
@@ -342,7 +403,7 @@ async fn peer_lifecycle_accepts_as_requests() {
 
     // Silent intents (mob.peer_added) are PeerInput with Request convention
     let req1 = make_request("peer-1", "mob.peer_added");
-    let input1 = interaction_to_peer_input(&req1, &rid());
+    let input1 = runtime_input_for_interaction(&req1, &rid());
 
     if let Input::Peer(ref p) = input1 {
         assert!(matches!(p.convention, Some(PeerConvention::Request { .. })));
@@ -369,8 +430,8 @@ async fn peer_lifecycle_net_out_both_accepted() {
     let added = make_request("peer-1", "mob.peer_added");
     let retired = make_request("peer-1", "mob.peer_retired");
 
-    let input1 = interaction_to_peer_input(&added, &rid());
-    let input2 = interaction_to_peer_input(&retired, &rid());
+    let input1 = runtime_input_for_interaction(&added, &rid());
+    let input2 = runtime_input_for_interaction(&retired, &rid());
 
     let o1 = driver.accept_input(input1).await.unwrap();
     let o2 = driver.accept_input(input2).await.unwrap();
@@ -388,7 +449,7 @@ async fn silent_intent_maps_to_request_with_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     let interaction = make_request("coordinator", "mob.peer_added");
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // Under v9, silent intents are PeerInput(Request). The runtime's policy
     // resolves request inputs through the same staged-run wake path; caller
@@ -410,7 +471,7 @@ async fn non_silent_intent_triggers_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     let interaction = make_request("coordinator", "custom.action");
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     let policy = DefaultPolicyTable::resolve(&input, true);
     assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::WakeIfIdle);
@@ -433,7 +494,7 @@ async fn message_triggers_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     let interaction = make_message("peer-1", "hello world");
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // peer_message + idle → StageRunStart + WakeIfIdle
     let policy = DefaultPolicyTable::resolve(&input, true);
@@ -459,7 +520,7 @@ async fn request_triggers_wake() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     let interaction = make_request("peer-1", "analyze");
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     let outcome = driver.accept_input(input).await.unwrap();
     assert!(outcome.is_accepted());
@@ -473,7 +534,7 @@ async fn request_triggers_wake() {
 #[tokio::test]
 async fn request_prompt_uses_rendered_text_projection() {
     let interaction = make_request("peer-1", "custom.action");
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     if let Input::Peer(peer) = input {
         assert_eq!(peer.body, interaction.rendered_text);
@@ -485,7 +546,7 @@ async fn request_prompt_uses_rendered_text_projection() {
 #[tokio::test]
 async fn response_prompt_uses_rendered_text_projection() {
     let interaction = make_response("peer-1", ResponseStatus::Completed);
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     if let Input::Peer(peer) = input {
         assert_eq!(peer.body, interaction.rendered_text);
@@ -497,7 +558,7 @@ async fn response_prompt_uses_rendered_text_projection() {
 #[tokio::test]
 async fn message_blocks_survive_bridge() {
     let interaction = make_message_with_blocks("peer-1", "look");
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     if let Input::Peer(peer) = input {
         assert!(peer.blocks.is_some());
@@ -532,7 +593,7 @@ async fn message_while_running_requests_cooperative_interrupt() {
     bind_running(&mut driver);
 
     let interaction = make_message("peer-1", "hello");
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // peer_message + running → StageRunStart + cooperative interrupt
     let policy = DefaultPolicyTable::resolve(&input, false);
@@ -566,7 +627,7 @@ async fn terminal_response_while_running_requests_idle_wake() {
     bind_running(&mut driver);
 
     let interaction = make_response("peer-1", ResponseStatus::Completed);
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // peer_response_terminal + running → StageRunStart + WakeIfIdle.
     // This is intentionally not an interrupt. The wake only guarantees the
@@ -594,7 +655,7 @@ async fn drain_terminal_response_produces_exactly_one_peer_input() {
 
     // Build a terminal response interaction and convert to runtime input.
     let interaction = make_response("peer-1", ResponseStatus::Completed);
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // The bridge must produce a Peer input, not a Continuation.
     assert!(
@@ -648,7 +709,7 @@ async fn terminal_response_with_steer_policy_while_running() {
         handling_mode: meerkat_core::types::HandlingMode::Steer,
         render_metadata: None,
     };
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // While running: explicit steer uses cooperative interrupt semantics at the
     // policy layer, and ingress still requests immediate processing via the
@@ -701,7 +762,7 @@ async fn terminal_response_with_steer_policy_while_idle() {
         handling_mode: meerkat_core::types::HandlingMode::Steer,
         render_metadata: None,
     };
-    let input = interaction_to_peer_input(&interaction, &rid());
+    let input = runtime_input_for_interaction(&interaction, &rid());
 
     // While idle: should get WakeIfIdle + Steer with the machine-owned
     // terminal apply intent preserved as StageRunStart.

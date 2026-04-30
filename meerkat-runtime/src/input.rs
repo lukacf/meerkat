@@ -60,7 +60,12 @@ pub enum InputOrigin {
     Operator,
     /// Peer agent (comms).
     Peer {
+        /// Canonical comms peer id used by machine/runtime policy and schema
+        /// projection.
         peer_id: String,
+        /// Optional display/source label admitted at peer ingress. This is
+        /// presentation metadata only; routing and trust must use typed ingress
+        /// facts before the runtime input seam or the canonical `peer_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_identity: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -538,16 +543,19 @@ pub struct OperationInput {
 pub(crate) fn peer_projection_from_peer_input(
     peer: &PeerInput,
 ) -> Option<PeerConversationProjection> {
-    let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
-        return None;
-    };
+    peer_projection_from_peer_input_with_id(peer, peer_canonical_id(peer)?.as_str())
+}
+
+fn peer_projection_from_peer_input_with_id(
+    peer: &PeerInput,
+    peer_id: &str,
+) -> Option<PeerConversationProjection> {
+    let peer_id = peer_id.to_string();
 
     match &peer.convention {
-        Some(PeerConvention::Message) => Some(PeerConversationProjection::Message {
-            peer_id: peer_id.clone(),
-        }),
+        Some(PeerConvention::Message) => Some(PeerConversationProjection::Message { peer_id }),
         Some(PeerConvention::Request { request_id, intent }) => {
-            let peer_id = match meerkat_core::comms::PeerId::parse(peer_id) {
+            let peer_id = match meerkat_core::comms::PeerId::parse(peer_id.as_str()) {
                 Ok(peer_id) => peer_id,
                 Err(error) => {
                     tracing::warn!(
@@ -560,7 +568,7 @@ pub(crate) fn peer_projection_from_peer_input(
             };
             Some(PeerConversationProjection::Request {
                 peer_id,
-                display_name: None,
+                display_name: peer_display_label(peer),
                 request_id: request_id.clone(),
                 intent: intent.clone(),
                 payload: peer.payload.clone(),
@@ -568,7 +576,7 @@ pub(crate) fn peer_projection_from_peer_input(
         }
         Some(PeerConvention::ResponseProgress { request_id, phase }) => {
             Some(PeerConversationProjection::ResponseProgress {
-                peer_id: peer_id.clone(),
+                peer_id,
                 request_id: request_id.clone(),
                 phase: *phase,
                 payload: peer.payload.clone(),
@@ -631,11 +639,46 @@ pub(crate) fn validate_peer_response_terminal_fact(
 
 /// Lift an [`Input`] to its core peer projection when it is a peer input with a
 /// peer-origin header.
+#[cfg(test)]
 pub(crate) fn peer_projection(input: &Input) -> Option<PeerConversationProjection> {
     let Input::Peer(peer) = input else {
         return None;
     };
     peer_projection_from_peer_input(peer)
+}
+
+fn peer_canonical_id(peer: &PeerInput) -> Option<String> {
+    let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
+        return None;
+    };
+    Some(peer_id.clone())
+}
+
+fn peer_display_id(peer: &PeerInput) -> Option<String> {
+    let InputOrigin::Peer { peer_id, .. } = &peer.header.source else {
+        return None;
+    };
+
+    peer_display_label(peer).or_else(|| Some(peer_id.clone()))
+}
+
+fn peer_display_label(peer: &PeerInput) -> Option<String> {
+    let InputOrigin::Peer {
+        display_identity, ..
+    } = &peer.header.source
+    else {
+        return None;
+    };
+
+    display_identity
+        .as_ref()
+        .map(|label| label.trim())
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn peer_display_projection_from_peer_input(peer: &PeerInput) -> Option<PeerConversationProjection> {
+    peer_projection_from_peer_input_with_id(peer, peer_display_id(peer)?.as_str())
 }
 
 /// Rendered prompt-text projection for a peer input.
@@ -654,7 +697,22 @@ pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
 
 /// Optional block prefix for peer message inputs.
 pub(crate) fn peer_block_prefix_text(peer: &PeerInput) -> Option<String> {
+    if matches!(peer.convention, Some(PeerConvention::Message))
+        && let Some(prefix) = rendered_message_prefix(&peer.body)
+    {
+        return Some(prefix);
+    }
+
     peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
+}
+
+fn rendered_message_prefix(body: &str) -> Option<String> {
+    let prefix = body.lines().next()?.trim();
+    if prefix.starts_with("[COMMS MESSAGE from ") && prefix.ends_with(']') {
+        Some(prefix.to_string())
+    } else {
+        None
+    }
 }
 
 pub(crate) fn input_prompt_text(input: &Input) -> String {
@@ -746,7 +804,10 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
 }
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
-    let projection = peer_projection(input)?;
+    let projection = match input {
+        Input::Peer(peer) => peer_display_projection_from_peer_input(peer)?,
+        _ => return None,
+    };
 
     Some(ConversationContextAppend {
         key: projection.context_key()?,
@@ -812,6 +873,95 @@ mod tests {
         assert_eq!(json["input_type"], "peer");
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::Peer(_)));
+    }
+
+    #[test]
+    fn peer_message_blocks_prefix_uses_rendered_display_label_not_canonical_origin() {
+        let mut header = make_header();
+        header.source = InputOrigin::Peer {
+            peer_id: "canonical-peer-id".into(),
+            display_identity: Some("display-agent".into()),
+            runtime_id: None,
+        };
+        let input = Input::Peer(PeerInput {
+            header,
+            convention: Some(PeerConvention::Message),
+            body: "[COMMS MESSAGE from display-agent]\ncaption\n[image: image/png]".into(),
+            payload: None,
+            blocks: Some(vec![
+                meerkat_core::types::ContentBlock::Text {
+                    text: "caption".into(),
+                },
+                meerkat_core::types::ContentBlock::Image {
+                    media_type: "image/png".into(),
+                    data: "abc".into(),
+                },
+            ]),
+            handling_mode: None,
+        });
+
+        let Input::Peer(peer) = &input else {
+            panic!("expected peer input");
+        };
+        assert_eq!(
+            peer_projection_from_peer_input(peer)
+                .and_then(|projection| projection.block_prefix_text())
+                .as_deref(),
+            Some("[COMMS MESSAGE from canonical-peer-id]")
+        );
+
+        let projection = runtime_input_projection(&input);
+        let append = projection.append.expect("conversation append");
+        let CoreRenderable::Blocks { blocks } = append.content else {
+            panic!("expected multimodal blocks");
+        };
+        assert_eq!(
+            blocks.first(),
+            Some(&meerkat_core::types::ContentBlock::Text {
+                text: "[COMMS MESSAGE from display-agent]".into()
+            })
+        );
+        assert!(!meerkat_core::types::text_content(&blocks).contains("canonical-peer-id"));
+    }
+
+    #[test]
+    fn peer_response_terminal_context_uses_display_label_without_changing_canonical_projection() {
+        let mut header = make_header();
+        header.source = InputOrigin::Peer {
+            peer_id: "canonical-peer-id".into(),
+            display_identity: Some("display-agent".into()),
+            runtime_id: None,
+        };
+        let input = Input::Peer(PeerInput {
+            header,
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: "req-123".into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            body: "legacy response body".into(),
+            payload: Some(serde_json::json!({"answer":"ok"})),
+            blocks: None,
+            handling_mode: None,
+        });
+
+        let Input::Peer(peer) = &input else {
+            panic!("expected peer input");
+        };
+        assert_eq!(
+            peer_projection_from_peer_input(peer)
+                .and_then(|projection| projection.context_key())
+                .as_deref(),
+            Some("peer_response_terminal:canonical-peer-id:req-123")
+        );
+
+        let projection = runtime_input_projection(&input);
+        let context = projection.context_append.expect("context append");
+        assert_eq!(context.key, "peer_response_terminal:display-agent:req-123");
+        let CoreRenderable::Text { text } = context.content else {
+            panic!("expected text context");
+        };
+        assert!(text.contains("from display-agent"));
+        assert!(!text.contains("from canonical-peer-id"));
     }
 
     #[test]

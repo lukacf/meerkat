@@ -2234,17 +2234,74 @@ mod tests {
         }
 
         async fn drain_peer_input_candidates(&self) -> Vec<PeerInputCandidate> {
+            let peer_id_by_name: HashMap<String, PeerId> = self
+                .trusted
+                .read()
+                .await
+                .values()
+                .map(|peer| (peer.name.as_string(), peer.peer_id))
+                .collect();
             self.drain_inbox_interactions()
                 .await
                 .into_iter()
-                .map(|interaction| PeerInputCandidate {
-                    interaction,
-                    class: PeerInputClass::ActionableRequest,
-                    auth: Some(meerkat_core::PeerIngressAuthDecision::Required),
-                    from_peer_id: None,
-                    lifecycle_peer: None,
-                    source_peer_id: None,
-                    response_terminality: None,
+                .map(|interaction| {
+                    let id = interaction.id;
+                    let (class, kind, convention, response_terminality) = match &interaction.content {
+                        InteractionContent::Message { .. } => (
+                            PeerInputClass::ActionableMessage,
+                            meerkat_core::PeerIngressKind::Message,
+                            meerkat_core::PeerIngressConvention::Message,
+                            None,
+                        ),
+                        InteractionContent::Request { intent, .. } => (
+                            PeerInputClass::ActionableRequest,
+                            meerkat_core::PeerIngressKind::Request,
+                            meerkat_core::PeerIngressConvention::Request {
+                                request_id: id.to_string(),
+                                intent: intent.clone(),
+                            },
+                            None,
+                        ),
+                        InteractionContent::Response {
+                            in_reply_to,
+                            status,
+                            ..
+                        } => {
+                            let classification =
+                                meerkat_core::PeerIngressMachinePolicy::default()
+                                    .classify_response(*status);
+                            (
+                                classification.class,
+                                meerkat_core::PeerIngressKind::Response,
+                                meerkat_core::PeerIngressConvention::Response {
+                                    in_reply_to: *in_reply_to,
+                                    status: *status,
+                                },
+                                classification.response_terminality,
+                            )
+                        }
+                    };
+                    let canonical_peer_id = peer_id_by_name
+                        .get(interaction.from.as_str())
+                        .copied()
+                        .unwrap_or_else(PeerId::new);
+                    let ingress = meerkat_core::PeerIngressFact::peer(
+                        id,
+                        class,
+                        kind,
+                        Some(meerkat_core::PeerIngressAuthDecision::Required),
+                        meerkat_core::PeerIngressIdentity::new(
+                            canonical_peer_id,
+                            interaction.from.clone(),
+                            convention,
+                        ),
+                    );
+                    PeerInputCandidate {
+                        interaction,
+                        ingress,
+                        lifecycle_peer: None,
+                        response_terminality,
+                    }
                 })
                 .collect()
         }

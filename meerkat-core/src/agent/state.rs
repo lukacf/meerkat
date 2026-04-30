@@ -3783,25 +3783,35 @@ mod tests {
             self.drain_messages()
                 .await
                 .into_iter()
-                .map(|text| crate::interaction::PeerInputCandidate {
-                    interaction: crate::interaction::InboxInteraction {
-                        id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),
-                        from_route: None,
-                        from: "unknown".into(),
-                        content: crate::interaction::InteractionContent::Message {
-                            body: text.clone(),
-                            blocks: None,
+                .map(|text| {
+                    let id = crate::interaction::InteractionId(uuid::Uuid::new_v4());
+                    crate::interaction::PeerInputCandidate {
+                        interaction: crate::interaction::InboxInteraction {
+                            id,
+                            from_route: None,
+                            from: "unknown".into(),
+                            content: crate::interaction::InteractionContent::Message {
+                                body: text.clone(),
+                                blocks: None,
+                            },
+                            rendered_text: text,
+                            handling_mode: crate::types::HandlingMode::Queue,
+                            render_metadata: None,
                         },
-                        rendered_text: text,
-                        handling_mode: crate::types::HandlingMode::Queue,
-                        render_metadata: None,
-                    },
-                    source_peer_id: None,
-                    class: crate::interaction::PeerInputClass::ActionableMessage,
-                    auth: Some(crate::interaction::PeerIngressAuthDecision::Required),
-                    from_peer_id: None,
-                    lifecycle_peer: None,
-                    response_terminality: None,
+                        ingress: crate::interaction::PeerIngressFact::peer(
+                            id,
+                            crate::interaction::PeerInputClass::ActionableMessage,
+                            crate::interaction::PeerIngressKind::Message,
+                            Some(crate::interaction::PeerIngressAuthDecision::Required),
+                            crate::interaction::PeerIngressIdentity::new(
+                                crate::comms::PeerId::new(),
+                                "unknown",
+                                crate::interaction::PeerIngressConvention::Message,
+                            ),
+                        ),
+                        lifecycle_peer: None,
+                        response_terminality: None,
+                    }
                 })
                 .collect()
         }

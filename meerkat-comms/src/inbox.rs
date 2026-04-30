@@ -21,8 +21,8 @@ use crate::types::{Envelope, InboxItem, MessageKind};
 use meerkat_core::{
     InteractionId, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
     PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot, PeerIngressEnvelopeFacts,
-    PeerIngressEnvelopeKind, PeerIngressKind, PeerIngressMachinePolicy, PeerIngressQueueSnapshot,
-    PeerInputClass, TerminalityClass,
+    PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressKind, PeerIngressMachinePolicy,
+    PeerIngressQueueSnapshot, PeerInputClass, TerminalityClass,
 };
 
 const DEFAULT_INBOX_CAPACITY: usize = 1024;
@@ -99,7 +99,7 @@ pub(crate) struct ClassifiedInboxEntry {
     pub(crate) auth: PeerIngressAuthDecision,
     pub(crate) kind: PeerIngressKind,
     pub(crate) from_peer: Option<String>,
-    pub(crate) from_peer_id: Option<meerkat_core::comms::PeerId>,
+    pub(crate) ingress_fact: PeerIngressFact,
     pub(crate) lifecycle_peer: Option<String>,
     pub(crate) request_id: Option<InteractionId>,
     pub(crate) admission_diagnostic: Option<PeerIngressAdmissionDiagnostic>,
@@ -562,7 +562,7 @@ impl InboxSender {
             auth: result.auth,
             kind,
             from_peer: result.from_peer,
-            from_peer_id: result.from_peer_id,
+            ingress_fact: result.ingress_fact,
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
             admission_diagnostic: decision.admission_diagnostic,
@@ -739,7 +739,7 @@ impl InboxSender {
             auth: result.auth,
             kind,
             from_peer: result.from_peer,
-            from_peer_id: result.from_peer_id,
+            ingress_fact: result.ingress_fact,
             lifecycle_peer: result.lifecycle_peer,
             request_id: result.request_id,
             admission_diagnostic: decision.admission_diagnostic,
@@ -846,7 +846,10 @@ fn snapshot_entry(entry: &ClassifiedInboxEntry) -> PeerIngressEntrySnapshot {
             .from_peer
             .as_ref()
             .map(|peer| PeerIngressDiagnosticDisplay::new(peer.clone())),
-        from_peer_id: entry.from_peer_id,
+        canonical_peer_id: entry.ingress_fact.canonical_peer_id,
+        display_name: entry.ingress_fact.display_name.clone(),
+        signing_pubkey: entry.ingress_fact.signing_pubkey,
+        route: entry.ingress_fact.route.clone(),
         lifecycle_peer_display: entry
             .lifecycle_peer
             .as_ref()
@@ -1140,6 +1143,7 @@ mod tests {
             ingress_policy: Arc::new(PeerIngressMachinePolicy::default()),
             peer_comms_handle: Arc::new(parking_lot::RwLock::new(peer_comms_handle)),
             require_machine_authority: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            inproc_namespace: None,
         })
     }
 

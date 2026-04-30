@@ -886,9 +886,10 @@ impl CoreCommsRuntime for CommsRuntime {
         Ok(classified_entries
             .into_iter()
             .filter_map(|entry| {
+                let ingress = entry.ingress_fact;
+                let lifecycle_peer = entry.lifecycle_peer;
                 let from_peer = entry.from_peer.unwrap_or_else(|| "unknown".to_string());
-                let source_peer_id = entry.from_peer_id;
-                let from_peer_id = entry.from_peer_id;
+                let from_peer_id = ingress.route.as_ref().map(|route| route.peer_id);
                 let rendered_text = entry.text_projection.clone();
 
                 match entry.item {
@@ -977,11 +978,8 @@ impl CoreCommsRuntime for CommsRuntime {
                                 handling_mode: envelope_handling_mode,
                                 render_metadata: None,
                             },
-                            source_peer_id,
-                            class: entry.class,
-                            auth: Some(entry.auth),
-                            from_peer_id,
-                            lifecycle_peer: entry.lifecycle_peer,
+                            ingress,
+                            lifecycle_peer,
                             response_terminality: entry.response_terminality,
                         })
                     }
@@ -1005,11 +1003,8 @@ impl CoreCommsRuntime for CommsRuntime {
                             handling_mode,
                             render_metadata,
                         },
-                        source_peer_id: None,
-                        class: entry.class,
-                        auth: None,
-                        from_peer_id: None,
-                        lifecycle_peer: entry.lifecycle_peer,
+                        ingress,
+                        lifecycle_peer,
                         response_terminality: entry.response_terminality,
                     }),
                 }
@@ -1285,6 +1280,7 @@ impl CommsRuntime {
             ingress_policy: ingress_policy.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
+            inproc_namespace: config.inproc_namespace.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
@@ -1375,6 +1371,7 @@ impl CommsRuntime {
             ingress_policy: ingress_policy.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
+            inproc_namespace: namespace.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
@@ -1510,6 +1507,7 @@ impl CommsRuntime {
             ingress_policy: ingress_policy.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
+            inproc_namespace: namespace.clone(),
         });
         let (inbox, inbox_sender) = crate::Inbox::new_classified(classification_context);
         let inbox_notify = inbox.notify();
@@ -3764,7 +3762,7 @@ mod tests {
             .expect("classified drain should succeed");
         assert_eq!(interactions.len(), 1);
         assert_eq!(
-            interactions[0].class,
+            interactions[0].class(),
             meerkat_core::PeerInputClass::PeerLifecycleAdded
         );
         assert_eq!(interactions[0].lifecycle_peer.as_deref(), Some("worker-1"));

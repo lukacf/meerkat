@@ -24,6 +24,26 @@ fn peer_input_candidate_struct_body(source: &str) -> &str {
     &source[..end]
 }
 
+fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source.find(signature).expect("function exists");
+    let source = &source[start..];
+    let body_start = source.find('{').expect("function has body");
+    let mut depth = 0usize;
+    for (index, byte) in source[body_start..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[body_start..=body_start + index];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("function body closes");
+}
+
 #[test]
 fn comms_drain_does_not_route_or_trust_on_inbox_interaction_from() {
     let source = read_runtime_source("src/comms_drain.rs");
@@ -48,6 +68,24 @@ fn comms_bridge_does_not_project_peer_id_from_inbox_interaction_from() {
             !source.contains(forbidden),
             "comms_bridge prompt/schema projection must consume PeerIngressFact: {forbidden}"
         );
+    }
+}
+
+#[test]
+fn comms_drain_bridge_authority_matchers_do_not_consume_display_labels() {
+    let source = read_runtime_source("src/comms_drain.rs");
+    let source = production_source(&source);
+    for signature in [
+        "fn sender_matches_bound_supervisor",
+        "fn sender_matches_bridge_peer",
+    ] {
+        let body = function_body(source, signature);
+        for forbidden in [".display_name", ".display_label()", "peer.name"] {
+            assert!(
+                !body.contains(forbidden),
+                "bridge authority matcher must use canonical peer id/signing subject, not display metadata: {signature} contains {forbidden}"
+            );
+        }
     }
 }
 

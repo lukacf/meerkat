@@ -19,9 +19,11 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::{CommsConfig, Keypair};
 use crate::{Router, TrustedPeers};
+use meerkat_contracts::CommsPeersResult;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, InputStreamMode, PeerDirectoryEntry, PeerId, PeerName, PeerRoute, SendError,
+    CommsCommand, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
+    PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerRoute, PeerSendability, SendError,
     SendReceipt,
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
@@ -454,52 +456,64 @@ fn is_transport_internal(message: &str) -> bool {
 }
 
 async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
-    if let Some(runtime) = &ctx.runtime {
-        let peer_list: Vec<Value> = runtime
-            .peers()
-            .await
-            .into_iter()
-            .map(|peer| {
-                json!({
-                    "name": peer.name.to_string(),
-                    "peer_id": peer.peer_id,
-                    "address": peer.address,
-                    "source": format!("{:?}", peer.source),
-                    "sendable_kinds": peer.sendable_kinds,
-                    "capabilities": peer.capabilities,
-                    "reachability": peer.reachability,
-                    "last_unreachable_reason": peer.last_unreachable_reason,
-                    "meta": peer.meta,
-                })
-            })
-            .collect();
-        return Ok(json!({ "peers": peer_list }));
-    }
+    let entries = if let Some(runtime) = &ctx.runtime {
+        runtime.peers().await
+    } else {
+        runtime_less_peer_directory(ctx)
+    };
 
+    serde_json::to_value(CommsPeersResult::from_entries(&entries))
+        .map_err(|err| format!("failed to serialize peer directory: {err}"))
+}
+
+fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read();
-    let peer_list: Vec<Value> = peers
+    let sendable_kinds = PeerSendability::directory_defaults();
+    peers
         .peers
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
-        .map(|p| {
-            let mut entry = json!({
-                "name": p.name,
-                "peer_id": p.pubkey.to_peer_id(),
-                "address": p.addr
-            });
-            if let Some(desc) = &p.meta.description {
-                entry["description"] = json!(desc);
-            }
-            if !p.meta.labels.is_empty() {
-                entry["labels"] = json!(p.meta.labels);
-            }
-            entry
+        .filter_map(|p| {
+            let peer_id = p.pubkey.to_peer_id();
+            let name = match PeerName::new(p.name.clone()) {
+                Ok(name) => name,
+                Err(err) => {
+                    tracing::warn!(
+                        peer_name = %p.name,
+                        peer_id = %peer_id,
+                        error = %err,
+                        "skipping trusted peer with invalid name in MCP peer directory"
+                    );
+                    return None;
+                }
+            };
+            let address = match PeerAddress::parse(&p.addr) {
+                Ok(address) => address,
+                Err(err) => {
+                    tracing::warn!(
+                        peer_name = %p.name,
+                        peer_id = %peer_id,
+                        address = %p.addr,
+                        error = %err,
+                        "skipping trusted peer with invalid address in MCP peer directory"
+                    );
+                    return None;
+                }
+            };
+            Some(PeerDirectoryEntry {
+                name,
+                peer_id,
+                address,
+                source: PeerDirectorySource::Trusted,
+                sendable_kinds: sendable_kinds.clone(),
+                capabilities: PeerCapabilitySet::default(),
+                reachability: PeerReachability::Unknown,
+                last_unreachable_reason: None,
+                meta: p.meta.clone(),
+            })
         })
-        .collect();
-    drop(peers);
-
-    Ok(json!({ "peers": peer_list }))
+        .collect()
 }
 
 #[cfg(test)]
@@ -507,6 +521,10 @@ async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
 mod tests {
     use super::*;
     use crate::{PubKey, TrustedPeer};
+    use meerkat_core::comms::{
+        PeerAddress, PeerCapabilitySet, PeerDirectorySource, PeerReachability, PeerSendability,
+        PeerTransport,
+    };
     use parking_lot::Mutex;
     use std::sync::LazyLock;
     use tokio::sync::Notify;
@@ -534,6 +552,7 @@ mod tests {
 
     struct RecordingRuntime {
         sent: Mutex<Vec<CommsCommand>>,
+        peers: Vec<PeerDirectoryEntry>,
         notify: Arc<Notify>,
     }
 
@@ -541,6 +560,15 @@ mod tests {
         fn new() -> Self {
             Self {
                 sent: Mutex::new(Vec::new()),
+                peers: Vec::new(),
+                notify: Arc::new(Notify::new()),
+            }
+        }
+
+        fn with_peers(peers: Vec<PeerDirectoryEntry>) -> Self {
+            Self {
+                sent: Mutex::new(Vec::new()),
+                peers,
                 notify: Arc::new(Notify::new()),
             }
         }
@@ -587,6 +615,10 @@ mod tests {
 
         fn inbox_notify(&self) -> Arc<Notify> {
             Arc::clone(&self.notify)
+        }
+
+        async fn peers(&self) -> Vec<PeerDirectoryEntry> {
+            self.peers.clone()
         }
     }
 
@@ -869,6 +901,69 @@ mod tests {
             peers.iter().all(|p| p["peer_id"].is_string()),
             "peers must expose canonical peer_id for routing",
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_peers_runtime_payload_uses_typed_directory_contract() {
+        let peer_id = PeerId::new();
+        let entry = PeerDirectoryEntry {
+            peer_id,
+            name: PeerName::new("runtime-peer").expect("valid peer name"),
+            address: PeerAddress::new(PeerTransport::Inproc, "runtime-peer"),
+            source: PeerDirectorySource::Inproc,
+            sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
+            capabilities: PeerCapabilitySet::default()
+                .with_extension("vendor.echo", json!({ "enabled": true })),
+            reachability: PeerReachability::Reachable,
+            last_unreachable_reason: None,
+            meta: crate::PeerMeta::default(),
+        };
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, _) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::with_peers(vec![entry]));
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime));
+
+        let value = handle_tools_call(&ctx, "peers", &json!({}))
+            .await
+            .expect("runtime-backed peers should serialize");
+        let peer = &value["peers"][0];
+
+        assert_eq!(peer["peer_id"], peer_id.to_string());
+        assert_eq!(peer["source"], "inproc");
+        assert_ne!(peer["source"], "Inproc");
+        assert_eq!(
+            peer["sendable_kinds"],
+            json!(["peer_message", "peer_request"])
+        );
+        assert_eq!(peer["capabilities"]["version"], 1);
+        assert_eq!(
+            peer["capabilities"]["extensions"]["vendor.echo"]["enabled"],
+            true
+        );
+        assert_eq!(peer["reachability"], "reachable");
+    }
+
+    #[tokio::test]
+    async fn test_handle_peers_runtime_less_payload_uses_typed_directory_defaults() {
+        let peer_keypair = Keypair::generate();
+        let (ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+
+        let value = handle_tools_call(&ctx, "peers", &json!({}))
+            .await
+            .expect("runtime-less peers should serialize");
+        let peer = &value["peers"][0];
+
+        assert_eq!(peer["peer_id"], peer_id.to_string());
+        assert_eq!(peer["source"], "trusted");
+        assert_eq!(
+            peer["sendable_kinds"],
+            json!(["peer_message", "peer_request", "peer_response"])
+        );
+        assert_eq!(peer["capabilities"]["version"], 1);
+        assert_eq!(peer["capabilities"]["extensions"], json!({}));
+        assert_eq!(peer["reachability"], "unknown");
+        assert_eq!(peer["last_unreachable_reason"], Value::Null);
+        assert!(peer["meta"].is_object());
     }
 
     #[tokio::test]

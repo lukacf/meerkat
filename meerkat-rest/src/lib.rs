@@ -793,9 +793,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
 
         apply_runtime_turn(&self.context, &self.session_id, run_id, &primitive, prompt)
             .await
-            .map_err(|err| CoreExecutorError::ApplyFailed {
-                reason: err.to_string(),
-            })
+            .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -805,9 +803,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
                 .session_service
                 .interrupt(&self.session_id)
                 .await
-                .map_err(|err| CoreExecutorError::ControlFailed {
-                    reason: err.to_string(),
-                }),
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string())),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .context
@@ -820,9 +816,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
                     .await;
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    }),
+                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
                 }
             }
             _ => Ok(()),

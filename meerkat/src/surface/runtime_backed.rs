@@ -217,8 +217,8 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                     primitive.contributing_input_ids().to_vec(),
                 )
                 .await
-                .map_err(|error| CoreExecutorError::ApplyFailed {
-                    reason: error.to_string(),
+                .map_err(|error| {
+                    CoreExecutorError::apply_failed_runtime_context(error.to_string())
                 });
         }
 
@@ -234,9 +234,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 contributing_input_ids,
             )
             .await
-            .map_err(|error| CoreExecutorError::ApplyFailed {
-                reason: error.to_string(),
-            })
+            .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -245,24 +243,18 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 .service
                 .interrupt(&self.session_id)
                 .await
-                .map_err(|error| CoreExecutorError::ControlFailed {
-                    reason: error.to_string(),
-                }),
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
             RunControlCommand::CancelAfterBoundary { .. } => self
                 .service
                 .cancel_after_boundary(&self.session_id)
                 .await
-                .map_err(|error| CoreExecutorError::ControlFailed {
-                    reason: error.to_string(),
-                }),
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self.service.discard_live_session(&self.session_id).await;
                 self.adapter.unregister_session(&self.session_id).await;
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(error) => Err(CoreExecutorError::ControlFailed {
-                        reason: error.to_string(),
-                    }),
+                    Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
                 }
             }
             _ => Ok(()),

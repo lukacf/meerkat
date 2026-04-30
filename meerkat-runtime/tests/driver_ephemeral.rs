@@ -411,7 +411,7 @@ async fn on_run_failed_rollbacks() {
                 wake_runtime: true,
                 notice_kind: "RunFailed",
             },
-            "LLM error".into(),
+            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("LLM error"),
             true,
         )
         .await
@@ -455,7 +455,7 @@ async fn on_run_failed_requests_wake_for_backlog() {
                 wake_runtime: true,
                 notice_kind: "RunFailed",
             },
-            "LLM error".into(),
+            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("LLM error"),
             true,
         )
         .await
@@ -585,7 +585,7 @@ async fn rollback_restores_queue_projection_order() {
                 wake_runtime: true,
                 notice_kind: "RunFailed",
             },
-            "rollback".into(),
+            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("rollback"),
             true,
         )
         .await

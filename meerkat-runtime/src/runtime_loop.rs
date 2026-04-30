@@ -6,7 +6,7 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
-use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+use meerkat_core::lifecycle::core_executor::{CoreApplyFailureCause, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::{
     PeerResponseTerminalApplyIntent, RunApplyBoundary, RunPrimitive, StagedRunInput,
 };
@@ -704,7 +704,7 @@ async fn process_queue(
                         let _ = crate::meerkat_machine::fail_runtime_loop_run(
                             driver,
                             run_id,
-                            conflict.to_string(),
+                            CoreApplyFailureCause::primitive_rejected(conflict.to_string()),
                         )
                         .await;
                         return false;
@@ -717,7 +717,7 @@ async fn process_queue(
                     let _ = crate::meerkat_machine::fail_runtime_loop_run(
                         driver,
                         run_id,
-                        error.to_string(),
+                        CoreApplyFailureCause::executor_internal(error.to_string()),
                     )
                     .await;
                     return false;
@@ -763,12 +763,13 @@ async fn process_queue(
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
+                        let failure = e.apply_failure_cause();
                         drop(d);
                         // RunFailed rolls back Staged → Queued and returns to Idle
                         if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
                             driver,
                             run_id,
-                            error_msg.clone(),
+                            failure.clone(),
                         )
                         .await
                         {

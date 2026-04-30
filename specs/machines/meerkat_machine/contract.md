@@ -25,6 +25,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `boundary_count`: `u64`
 - `cancel_after_boundary`: `Bool`
 - `terminal_outcome`: `Option<TurnTerminalOutcome>`
+- `last_runtime_apply_failure_cause`: `Option<RuntimeApplyFailureCause>`
+- `last_runtime_apply_failure_message`: `Option<String>`
 - `extraction_attempts`: `u64`
 - `max_extraction_retries`: `u64`
 - `llm_retry_attempt`: `u64`
@@ -229,7 +231,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
-- `RunFailed`(run_id: RunId, error: String)
+- `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
@@ -2494,7 +2496,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RunFailed`
 - From: `Running`
-- On: `RunFailed`(run_id, error)
+- On: `RunFailed`(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, error)
 - Guards:
   - `run_matches_binding`
 - To: `Running`

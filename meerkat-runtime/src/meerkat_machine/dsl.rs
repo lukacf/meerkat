@@ -1463,6 +1463,53 @@ impl From<TurnTerminalOutcome> for meerkat_core::turn_execution_authority::TurnT
     }
 }
 
+/// Typed classifier for failures surfaced by the runtime apply loop when a
+/// `CoreExecutor::apply` call fails and terminalizes the runtime turn.
+/// The companion `last_runtime_apply_failure_message` state field carries the
+/// human-readable projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeApplyFailureCause {
+    #[default]
+    Unknown,
+    PrimitiveRejected,
+    RuntimeContextApply,
+    RuntimeTurn,
+    ExecutorStopped,
+    ExecutorControlFailed,
+    ExecutorInternal,
+}
+
+impl From<meerkat_core::lifecycle::CoreApplyFailureCauseKind> for RuntimeApplyFailureCause {
+    fn from(kind: meerkat_core::lifecycle::CoreApplyFailureCauseKind) -> Self {
+        match kind {
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::PrimitiveRejected => {
+                Self::PrimitiveRejected
+            }
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::RuntimeContextApply => {
+                Self::RuntimeContextApply
+            }
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::RuntimeTurn => Self::RuntimeTurn,
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::ExecutorStopped => {
+                Self::ExecutorStopped
+            }
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::ExecutorControlFailed => {
+                Self::ExecutorControlFailed
+            }
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::ExecutorInternal => {
+                Self::ExecutorInternal
+            }
+            meerkat_core::lifecycle::CoreApplyFailureCauseKind::Unknown => Self::Unknown,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl From<&meerkat_core::lifecycle::CoreApplyFailureCause> for RuntimeApplyFailureCause {
+    fn from(cause: &meerkat_core::lifecycle::CoreApplyFailureCause) -> Self {
+        Self::from(cause.kind)
+    }
+}
+
 /// Typed pre-run phase marker. Closed set: `idle`, `attached`, `retired`.
 /// Replaces the former literal-string `pre_run_phase` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

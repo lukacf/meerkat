@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunId};
 
 use crate::accept::{AcceptOutcome, ResolvedAdmission};
 use crate::driver::ephemeral::{EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver};
@@ -397,12 +397,12 @@ impl DriverEntry {
         run_id: RunId,
         contributing_input_ids: Vec<InputId>,
         replay_plan: crate::driver::ephemeral::ReplayQueuedContributorsPlan,
-        error: String,
+        failure: CoreApplyFailureCause,
         recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => {
-                let _ = (error, recoverable);
+                let _ = (failure, recoverable);
                 d.machine_realize_run_failed(&run_id, &contributing_input_ids, &replay_plan)
             }
             DriverEntry::Persistent(d) => {
@@ -410,7 +410,7 @@ impl DriverEntry {
                     &run_id,
                     &contributing_input_ids,
                     &replay_plan,
-                    &error,
+                    &failure,
                     recoverable,
                 )
                 .await
@@ -789,7 +789,7 @@ fn machine_apply_turn_run_completed(
 fn machine_apply_turn_run_failed(
     driver: &mut DriverEntry,
     run_id: &RunId,
-    error: String,
+    failure: &CoreApplyFailureCause,
 ) -> Result<(), RuntimeDriverError> {
     let authority = driver.shared_dsl_authority();
     let mut auth = authority
@@ -805,7 +805,11 @@ fn machine_apply_turn_run_failed(
         &mut *auth,
         crate::meerkat_machine::dsl::MeerkatMachineInput::RunFailed {
             run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-            error,
+            runtime_apply_failure_cause: Some(
+                crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from(failure),
+            ),
+            runtime_apply_failure_message: Some(failure.message().to_owned()),
+            error: failure.message().to_owned(),
         },
     )
     .map(|_| ())
@@ -1838,7 +1842,7 @@ pub(crate) async fn commit_runtime_loop_run(
 pub(crate) async fn fail_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,
-    error: String,
+    failure: CoreApplyFailureCause,
 ) -> Result<(), RuntimeLoopRunFailError> {
     let mut driver = driver.lock().await;
     let next_phase =
@@ -1847,7 +1851,7 @@ pub(crate) async fn fail_runtime_loop_run(
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
-    machine_apply_turn_run_failed(&mut driver, &failed_run_id, error.clone())
+    machine_apply_turn_run_failed(&mut driver, &failed_run_id, &failure)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
     let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
     machine_apply_run_return_projection(
@@ -1866,7 +1870,7 @@ pub(crate) async fn fail_runtime_loop_run(
             failed_run_id.clone(),
             staged_input_ids,
             replay_plan,
-            error,
+            failure,
             true,
         )
         .await

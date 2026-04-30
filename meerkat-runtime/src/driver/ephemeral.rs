@@ -2013,7 +2013,7 @@ impl EphemeralRuntimeDriver {
         run_id: RunId,
         contributing_input_ids: Vec<InputId>,
         replay_plan: ReplayQueuedContributorsPlan,
-        _error: String,
+        _failure: meerkat_core::lifecycle::CoreApplyFailureCause,
         _recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
         self.machine_realize_run_failed(&run_id, &contributing_input_ids, &replay_plan)

@@ -509,6 +509,77 @@ fn make_prompt(text: &str) -> Input {
     })
 }
 
+#[tokio::test]
+async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
+    use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
+
+    struct TypedFailingExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for TypedFailingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::ApplyFailed {
+                cause: CoreApplyFailureCause::runtime_context_apply(
+                    "context append failed before turn start",
+                ),
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(TypedFailingExecutor))
+        .await;
+
+    adapter
+        .accept_input(&session_id, make_prompt("typed apply failure"))
+        .await
+        .expect("input should be accepted");
+
+    let (cause, message) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let observed = {
+                let sessions = adapter.sessions.read().await;
+                let entry = sessions.get(&session_id).expect("session should exist");
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                authority
+                    .state
+                    .last_runtime_apply_failure_cause
+                    .map(|cause| {
+                        (
+                            cause,
+                            authority.state.last_runtime_apply_failure_message.clone(),
+                        )
+                    })
+            };
+            if let Some(observed) = observed {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime loop should terminalize the typed apply failure");
+
+    assert_eq!(cause, mm_dsl::RuntimeApplyFailureCause::RuntimeContextApply);
+    assert_eq!(
+        message.as_deref(),
+        Some("context append failed before turn start")
+    );
+}
+
 fn make_progress_input(label: &str) -> Input {
     Input::Peer(crate::input::PeerInput {
         header: crate::input::InputHeader {

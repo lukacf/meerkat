@@ -806,6 +806,22 @@ pub enum TurnTerminalOutcome {
     StructuredOutputValidationFailed,
 }
 
+/// Typed classifier for failures surfaced by the runtime apply loop when a
+/// `CoreExecutor::apply` call fails and terminalizes the runtime turn.
+/// The companion `last_runtime_apply_failure_message` state field carries the
+/// human-readable projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeApplyFailureCause {
+    #[default]
+    Unknown,
+    PrimitiveRejected,
+    RuntimeContextApply,
+    RuntimeTurn,
+    ExecutorStopped,
+    ExecutorControlFailed,
+    ExecutorInternal,
+}
+
 /// Typed pre-run phase marker. Closed set: `idle`, `attached`, `retired`.
 /// Replaces the former literal-string `pre_run_phase` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -1302,6 +1318,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             boundary_count: u64,
             cancel_after_boundary: bool,
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
+            last_runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
+            last_runtime_apply_failure_message: Option<String>,
             extraction_attempts: u64,
             max_extraction_retries: u64,
             llm_retry_attempt: u64,
@@ -1635,6 +1653,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             boundary_count = 0,
             cancel_after_boundary = false,
             terminal_outcome = None,
+            last_runtime_apply_failure_cause = None,
+            last_runtime_apply_failure_message = None,
             extraction_attempts = 0,
             max_extraction_retries = 0,
             llm_retry_attempt = 0,
@@ -1919,7 +1939,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             TimeBudgetExceeded,
             ForceCancelNoRun,
             RunCompleted { run_id: RunId },
-            RunFailed { run_id: RunId, error: String },
+            RunFailed {
+                run_id: RunId,
+                runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
+                runtime_apply_failure_message: Option<String>,
+                error: String,
+            },
             RunCancelled { run_id: RunId },
             // Input lifecycle inputs
             RecoverInputLifecycle {
@@ -4972,6 +4997,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
@@ -5007,6 +5034,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
@@ -5041,6 +5070,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
@@ -5077,6 +5108,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5112,6 +5145,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5146,6 +5181,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5182,6 +5219,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5217,6 +5256,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5251,6 +5292,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5653,12 +5696,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition RunFailed {
-            on input RunFailed { run_id, error }
+            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
+                self.last_runtime_apply_failure_cause = runtime_apply_failure_cause;
+                self.last_runtime_apply_failure_message = runtime_apply_failure_message;
             }
             to Running
         }

@@ -84,7 +84,7 @@ impl CoreExecutorControl for SessionRuntimeControlHandle {
                 self.runtime
                     .interrupt(&self.session_id)
                     .await
-                    .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message })
+                    .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
             }
             _ => Ok(()),
         }
@@ -106,9 +106,7 @@ impl CoreExecutorControl for MobRpcRuntimeControlHandle {
                 self.session_service
                     .interrupt(&self.session_id)
                     .await
-                    .map_err(|err| CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    })
+                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
             }
             _ => Ok(()),
         }
@@ -160,9 +158,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
-            return Err(CoreExecutorError::ApplyFailed {
-                reason: reason.to_string(),
-            });
+            return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                reason.to_string(),
+            ));
         }
 
         // Context-only staged primitives may land directly as runtime
@@ -181,9 +179,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     staged.contributing_input_ids.clone(),
                 )
                 .await
-                .map_err(|err| CoreExecutorError::ApplyFailed {
-                    reason: err.to_string(),
-                });
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
         let prompt = primitive.extract_content_input();
 
@@ -226,9 +222,9 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
         match result {
             Ok(output) => Ok(output),
-            Err(rpc_err) => Err(CoreExecutorError::ApplyFailed {
-                reason: rpc_err.message,
-            }),
+            Err(rpc_err) => Err(CoreExecutorError::apply_failed_runtime_turn(
+                rpc_err.message,
+            )),
         }
     }
 
@@ -238,7 +234,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                 self.runtime
                     .interrupt(&self.session_id)
                     .await
-                    .map_err(|e| CoreExecutorError::ControlFailed { reason: e.message })
+                    .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
             }
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self.runtime.discard_live_session(&self.session_id).await;
@@ -248,9 +244,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     .await;
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    }),
+                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
                 }
             }
             _ => Ok(()),
@@ -274,9 +268,9 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
-            return Err(CoreExecutorError::ApplyFailed {
-                reason: reason.to_string(),
-            });
+            return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                reason.to_string(),
+            ));
         }
 
         if primitive.is_context_only_apply_without_turn() {
@@ -292,9 +286,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                     staged.contributing_input_ids.clone(),
                 )
                 .await
-                .map_err(|err| CoreExecutorError::ApplyFailed {
-                    reason: err.to_string(),
-                });
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
 
         if primitive.is_peer_response_terminal_context_and_run() {
@@ -307,9 +299,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                     pending_system_context_appends_from_primitive(&staged.context_appends),
                 )
                 .await
-                .map_err(|err| CoreExecutorError::ApplyFailed {
-                    reason: err.to_string(),
-                })?;
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
         }
 
         let prompt = primitive.extract_content_input();
@@ -349,9 +339,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             .await;
 
         let _ = forwarder.await;
-        result.map_err(|err| CoreExecutorError::ApplyFailed {
-            reason: err.to_string(),
-        })
+        result.map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -360,9 +348,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 self.session_service
                     .interrupt(&self.session_id)
                     .await
-                    .map_err(|e| CoreExecutorError::ControlFailed {
-                        reason: e.to_string(),
-                    })
+                    .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))
             }
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
@@ -374,9 +360,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 }
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    }),
+                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
                 }
             }
             _ => Ok(()),

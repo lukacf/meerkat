@@ -1149,18 +1149,14 @@ impl CoreExecutor for TargetCoreExecutor {
         self.service
             .apply_runtime_turn(&self.session_id, run_id, req, boundary, input_ids)
             .await
-            .map_err(|e| CoreExecutorError::ApplyFailed {
-                reason: e.to_string(),
-            })
+            .map_err(|e| CoreExecutorError::apply_failed_runtime_turn(e.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
             RunControlCommand::CancelCurrentRun { .. } => {
                 self.service.interrupt(&self.session_id).await.map_err(|e| {
-                    CoreExecutorError::ControlFailed {
-                        reason: e.to_string(),
-                    }
+                    CoreExecutorError::control_failed_runtime(e.to_string())
                 })
             }
             RunControlCommand::StopRuntimeExecutor { .. } => {
@@ -1173,9 +1169,7 @@ impl CoreExecutor for TargetCoreExecutor {
                 runtime_adapter_unregister_noop();
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    }),
+                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
                 }
             }
             _ => Ok(()),

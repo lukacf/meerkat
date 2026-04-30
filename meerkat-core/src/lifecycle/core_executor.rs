@@ -12,17 +12,130 @@ use crate::types::RunResult;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// Closed classifier for failures observed while applying a run primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoreApplyFailureCauseKind {
+    PrimitiveRejected,
+    RuntimeContextApply,
+    RuntimeTurn,
+    ExecutorStopped,
+    ExecutorControlFailed,
+    ExecutorInternal,
+    Unknown,
+}
+
+/// Typed apply-failure cause plus its human-readable display projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreApplyFailureCause {
+    pub kind: CoreApplyFailureCauseKind,
+    pub message: String,
+}
+
+impl CoreApplyFailureCause {
+    pub fn new(kind: CoreApplyFailureCauseKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn primitive_rejected(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::PrimitiveRejected, message)
+    }
+
+    pub fn runtime_context_apply(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::RuntimeContextApply, message)
+    }
+
+    pub fn runtime_turn(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::RuntimeTurn, message)
+    }
+
+    pub fn executor_stopped() -> Self {
+        Self::new(
+            CoreApplyFailureCauseKind::ExecutorStopped,
+            "executor is stopped",
+        )
+    }
+
+    pub fn executor_control_failed(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::ExecutorControlFailed, message)
+    }
+
+    pub fn executor_internal(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::ExecutorInternal, message)
+    }
+
+    pub fn unknown(message: impl Into<String>) -> Self {
+        Self::new(CoreApplyFailureCauseKind::Unknown, message)
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for CoreApplyFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Closed classifier for failures observed while applying control commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoreControlFailureCauseKind {
+    RuntimeControl,
+    ExecutorInternal,
+    Unknown,
+}
+
+/// Typed control-failure cause plus its human-readable display projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreControlFailureCause {
+    pub kind: CoreControlFailureCauseKind,
+    pub message: String,
+}
+
+impl CoreControlFailureCause {
+    pub fn new(kind: CoreControlFailureCauseKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub fn runtime_control(message: impl Into<String>) -> Self {
+        Self::new(CoreControlFailureCauseKind::RuntimeControl, message)
+    }
+
+    pub fn executor_internal(message: impl Into<String>) -> Self {
+        Self::new(CoreControlFailureCauseKind::ExecutorInternal, message)
+    }
+
+    pub fn unknown(message: impl Into<String>) -> Self {
+        Self::new(CoreControlFailureCauseKind::Unknown, message)
+    }
+}
+
+impl std::fmt::Display for CoreControlFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Errors from CoreExecutor operations.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum CoreExecutorError {
     /// The primitive could not be applied (conversation mutation failed).
-    #[error("Apply failed: {reason}")]
-    ApplyFailed { reason: String },
+    #[error("Apply failed: {cause}")]
+    ApplyFailed { cause: CoreApplyFailureCause },
 
     /// The control command could not be executed.
-    #[error("Control failed: {reason}")]
-    ControlFailed { reason: String },
+    #[error("Control failed: {cause}")]
+    ControlFailed { cause: CoreControlFailureCause },
 
     /// The executor is in a terminal state and cannot accept more work.
     #[error("Executor is stopped")]
@@ -31,6 +144,47 @@ pub enum CoreExecutorError {
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+impl CoreExecutorError {
+    pub fn apply_failed(cause: CoreApplyFailureCause) -> Self {
+        Self::ApplyFailed { cause }
+    }
+
+    pub fn apply_failed_primitive_rejected(message: impl Into<String>) -> Self {
+        Self::apply_failed(CoreApplyFailureCause::primitive_rejected(message))
+    }
+
+    pub fn apply_failed_runtime_context(message: impl Into<String>) -> Self {
+        Self::apply_failed(CoreApplyFailureCause::runtime_context_apply(message))
+    }
+
+    pub fn apply_failed_runtime_turn(message: impl Into<String>) -> Self {
+        Self::apply_failed(CoreApplyFailureCause::runtime_turn(message))
+    }
+
+    pub fn apply_failed_unknown(message: impl Into<String>) -> Self {
+        Self::apply_failed(CoreApplyFailureCause::unknown(message))
+    }
+
+    pub fn control_failed(cause: CoreControlFailureCause) -> Self {
+        Self::ControlFailed { cause }
+    }
+
+    pub fn control_failed_runtime(message: impl Into<String>) -> Self {
+        Self::control_failed(CoreControlFailureCause::runtime_control(message))
+    }
+
+    pub fn apply_failure_cause(&self) -> CoreApplyFailureCause {
+        match self {
+            Self::ApplyFailed { cause } => cause.clone(),
+            Self::ControlFailed { cause } => {
+                CoreApplyFailureCause::executor_control_failed(cause.message.clone())
+            }
+            Self::Stopped => CoreApplyFailureCause::executor_stopped(),
+            Self::Internal(message) => CoreApplyFailureCause::executor_internal(message.clone()),
+        }
+    }
 }
 
 /// Successful result of applying a run primitive.
@@ -160,12 +314,12 @@ mod tests {
     #[test]
     fn core_executor_error_display() {
         let err = CoreExecutorError::ApplyFailed {
-            reason: "bad input".into(),
+            cause: CoreApplyFailureCause::runtime_turn("bad input"),
         };
         assert_eq!(err.to_string(), "Apply failed: bad input");
 
         let err = CoreExecutorError::ControlFailed {
-            reason: "not running".into(),
+            cause: CoreControlFailureCause::runtime_control("not running"),
         };
         assert_eq!(err.to_string(), "Control failed: not running");
 
@@ -174,5 +328,20 @@ mod tests {
 
         let err = CoreExecutorError::Internal("oops".into());
         assert_eq!(err.to_string(), "Internal error: oops");
+    }
+
+    #[test]
+    fn apply_failed_carries_typed_cause() {
+        let err = CoreExecutorError::ApplyFailed {
+            cause: CoreApplyFailureCause::runtime_context_apply("context write failed"),
+        };
+
+        match err {
+            CoreExecutorError::ApplyFailed { cause } => {
+                assert_eq!(cause.kind, CoreApplyFailureCauseKind::RuntimeContextApply);
+                assert_eq!(cause.message(), "context write failed");
+            }
+            other => panic!("expected typed apply failure, got {other:?}"),
+        }
     }
 }

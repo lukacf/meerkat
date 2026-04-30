@@ -1188,9 +1188,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
             _run_id: RunId,
             _primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Err(CoreExecutorError::ApplyFailed {
-                reason: "LLM error".into(),
-            })
+            Err(CoreExecutorError::apply_failed_runtime_turn("LLM error"))
         }
 
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -1258,9 +1256,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
             _primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(CoreExecutorError::ApplyFailed {
-                reason: "always fails".into(),
-            })
+            Err(CoreExecutorError::apply_failed_runtime_turn("always fails"))
         }
 
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -1353,9 +1349,9 @@ async fn failed_executor_continues_processing_backlog() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
             if call == 0 {
-                return Err(CoreExecutorError::ApplyFailed {
-                    reason: "first run fails".into(),
-                });
+                return Err(CoreExecutorError::apply_failed_runtime_turn(
+                    "first run fails",
+                ));
             }
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceipt {

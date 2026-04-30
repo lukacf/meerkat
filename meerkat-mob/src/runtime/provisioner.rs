@@ -686,9 +686,7 @@ impl CoreExecutorControl for MobSessionRuntimeControlHandle {
                 self.session_service
                     .interrupt(&self.bridge_session_id)
                     .await
-                    .map_err(|err| CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    })
+                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
             }
             _ => Ok(()),
         }
@@ -744,9 +742,9 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
-            return Err(CoreExecutorError::ApplyFailed {
-                reason: reason.to_string(),
-            });
+            return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                reason.to_string(),
+            ));
         }
 
         // Context-only staged primitives may land directly as runtime
@@ -766,9 +764,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     staged.contributing_input_ids.clone(),
                 )
                 .await
-                .map_err(|err| CoreExecutorError::ApplyFailed {
-                    reason: err.to_string(),
-                });
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
 
         if primitive.is_peer_response_terminal_context_and_run() {
@@ -781,9 +777,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     pending_system_context_appends_for_runtime_executor(&staged.context_appends),
                 )
                 .await
-                .map_err(|err| CoreExecutorError::ApplyFailed {
-                    reason: err.to_string(),
-                })?;
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
         }
 
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
@@ -823,9 +817,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 contributing_input_ids,
             )
             .await
-            .map_err(|err| CoreExecutorError::ApplyFailed {
-                reason: err.to_string(),
-            })
+            .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -834,9 +826,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 self.session_service
                     .interrupt(&self.bridge_session_id)
                     .await
-                    .map_err(|err| CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    })
+                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
             }
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 tracing::debug!(
@@ -868,9 +858,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 }
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    }),
+                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
                 }
             }
             _ => Ok(()),

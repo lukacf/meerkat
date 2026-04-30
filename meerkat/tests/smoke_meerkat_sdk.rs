@@ -1702,9 +1702,7 @@ mod scenario_22_runtime_host_comms {
                 .service
                 .start_turn(&self.session_id, turn_req)
                 .await
-                .map_err(|e| CoreExecutorError::ApplyFailed {
-                    reason: e.to_string(),
-                })?;
+                .map_err(|e| CoreExecutorError::apply_failed_runtime_turn(e.to_string()))?;
 
             // Increment AFTER LLM call completes — proves the full round-trip
             self.turn_count.fetch_add(1, Ordering::Relaxed);

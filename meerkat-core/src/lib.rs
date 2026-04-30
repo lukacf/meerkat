@@ -199,7 +199,8 @@ pub use interaction::{
     format_peer_response_projection, peer_lifecycle_subject, render_peer_ingress_admitted_text,
 };
 pub use lifecycle::{
-    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,
+    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
+    CoreApplyFailureCauseKind, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
     CoreExecutorError, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
     RunControlCommand, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };

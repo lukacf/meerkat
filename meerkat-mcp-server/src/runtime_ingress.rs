@@ -582,9 +582,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             &primitive,
         ))
         .await
-        .map_err(|error| CoreExecutorError::ApplyFailed {
-            reason: error.to_string(),
-        })
+        .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -594,9 +592,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
                 .service
                 .interrupt(&self.session_id)
                 .await
-                .map_err(|error| CoreExecutorError::ControlFailed {
-                    reason: error.to_string(),
-                }),
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .context
@@ -606,9 +602,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
                 self.context.clear_session(&self.session_id).await;
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(error) => Err(CoreExecutorError::ControlFailed {
-                        reason: error.to_string(),
-                    }),
+                    Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
                 }
             }
             _ => Ok(()),

@@ -18490,8 +18490,8 @@ async fn test_retire_interrupts_autonomous_host_loop() {
         .retire(AgentIdentity::from("w-1"))
         .await
         .expect("retire worker");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that retire succeeds (above).
     assert!(
         handle
@@ -18535,8 +18535,8 @@ async fn test_stop_resume_host_loop_lifecycle_is_mode_aware() {
     );
 
     handle.stop().await.expect("stop");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that stop succeeds (above) and the
     // mob transitions to Stopped.
     assert_eq!(
@@ -18590,8 +18590,8 @@ async fn test_destroy_interrupts_autonomous_host_loops_before_archive() {
     );
 
     handle.destroy().await.expect("destroy");
-    // With the runtime adapter path, interrupt goes through
-    // adapter.interrupt_current_run(), not session_service.interrupt().
+    // With the runtime adapter path, interrupt goes through the runtime-owned
+    // hard-cancel path, not direct session_service.interrupt().
     // The behavioral guarantee is that destroy succeeds (above) and
     // transitions to Destroyed.
     assert_eq!(

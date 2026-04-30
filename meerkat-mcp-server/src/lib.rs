@@ -1870,13 +1870,29 @@ async fn handle_meerkat_interrupt(
         .hard_cancel_current_run(&session_id, "MCP session interrupt")
         .await
     {
-        Ok(()) | Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => {}
+        Ok(()) => {}
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state })
+            if interrupt_not_ready_is_noop(state) => {}
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
+            return Err(format!(
+                "Failed to interrupt session: runtime is not interruptible while {state}"
+            ));
+        }
         Err(e) => return Err(format!("Failed to interrupt session: {e}")),
     }
     Ok(wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "interrupted": true
     })))
+}
+
+fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Idle
+            | meerkat_runtime::RuntimeState::Attached
+            | meerkat_runtime::RuntimeState::Destroyed
+    )
 }
 
 async fn handle_meerkat_sessions(
@@ -4457,6 +4473,25 @@ mod tests {
         .expect("archive call should succeed");
         let archived_payload = unwrap_payload(archived);
         assert_eq!(archived_payload["archived"], true);
+    }
+
+    #[test]
+    fn test_mcp_interrupt_not_ready_noop_rejects_terminal_runtime_states() {
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Idle
+        ));
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Attached
+        ));
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Destroyed
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Retired
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Stopped
+        ));
     }
 
     #[tokio::test]

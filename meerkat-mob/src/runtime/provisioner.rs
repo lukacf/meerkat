@@ -15,9 +15,9 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::event_injector::SubscribableInjector;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
-    CoreExecutorInterruptHandle,
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle,
 };
+use meerkat_core::lifecycle::core_executor::{CoreExecutorError, CoreExecutorInterruptHandle};
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 #[cfg(feature = "runtime-adapter")]
@@ -746,16 +746,14 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
     }
 }
 
-#[cfg(feature = "runtime-adapter")]
-struct MobSessionRuntimeInterruptHandle {
+struct MobSessionServiceInterruptHandle {
     session_service: Arc<dyn MobSessionService>,
     bridge_session_id: SessionId,
 }
 
-#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl CoreExecutorInterruptHandle for MobSessionRuntimeInterruptHandle {
+impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
         self.session_service
             .interrupt(&self.bridge_session_id)
@@ -812,7 +810,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     }
 
     fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
-        Some(Arc::new(MobSessionRuntimeInterruptHandle {
+        Some(Arc::new(MobSessionServiceInterruptHandle {
             session_service: Arc::clone(&self.session_service),
             bridge_session_id: self.bridge_session_id.clone(),
         }))
@@ -1196,7 +1194,13 @@ impl MobProvisioner for SessionBackend {
                 "runtime-backed interrupt requested for unregistered runtime session '{session_id}'"
             )));
         }
-        self.session_service.interrupt(&session_id).await?;
+        MobSessionServiceInterruptHandle {
+            session_service: Arc::clone(&self.session_service),
+            bridge_session_id: session_id,
+        }
+        .hard_cancel_current_run("mob session interrupt".to_string())
+        .await
+        .map_err(|error| MobError::Internal(format!("mob session interrupt failed: {error}")))?;
         Ok(())
     }
 

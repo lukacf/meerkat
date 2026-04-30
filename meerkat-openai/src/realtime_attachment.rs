@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 
 use meerkat_runtime::{
     Input, MeerkatMachine, PromptInput, RealtimeAttachmentSignalAuthority,
-    RealtimeAttachmentStatus, RuntimeDriverError, SessionServiceRuntimeExt,
+    RealtimeAttachmentStatus, RuntimeDriverError, RuntimeState, SessionServiceRuntimeExt,
 };
 
 enum OpenAiLiveTaskState {
@@ -225,6 +225,13 @@ async fn run_openai_live_event_loop(
     }
 }
 
+fn realtime_interrupt_not_ready_is_noop(state: RuntimeState) -> bool {
+    matches!(
+        state,
+        RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Destroyed
+    )
+}
+
 async fn handle_openai_live_event(
     runtime: &Arc<MeerkatMachine>,
     tool_dispatch_host: &dyn RealtimeAttachmentToolDispatchHost,
@@ -243,8 +250,16 @@ async fn handle_openai_live_event(
             Ok(())
         }
         OpenAiLiveServerEvent::InputAudioBufferSpeechStarted { .. } => {
-            match runtime.interrupt_current_run(session_id).await {
-                Ok(()) | Err(RuntimeDriverError::NotReady { .. }) => Ok(()),
+            match runtime
+                .hard_cancel_current_run(session_id, "OpenAI realtime speech started")
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(RuntimeDriverError::NotReady { state })
+                    if realtime_interrupt_not_ready_is_noop(state) =>
+                {
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }
         }
@@ -321,13 +336,16 @@ mod tests {
     use serde_json::json;
     use tokio::sync::{Mutex, Notify};
 
-    use super::{OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost};
+    use super::{
+        OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost,
+        realtime_interrupt_not_ready_is_noop,
+    };
     use meerkat_llm_core::LlmError;
     use meerkat_runtime::{
         HydratedSessionLlmState, Input, MeerkatMachine, PromptInput, RealtimeAttachmentStatus,
-        ResolvedSessionLlmReconfigure, RuntimeDriverError, SessionLlmCapabilitySurface,
-        SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
-        SessionServiceRuntimeExt,
+        ResolvedSessionLlmReconfigure, RuntimeDriverError, RuntimeState,
+        SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
+        SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
     };
 
     struct NoopExecutor;
@@ -725,6 +743,17 @@ mod tests {
             apply_finished,
             allow_finish,
         )
+    }
+
+    #[test]
+    fn realtime_interrupt_not_ready_noop_rejects_terminal_runtime_states() {
+        assert!(realtime_interrupt_not_ready_is_noop(RuntimeState::Idle));
+        assert!(realtime_interrupt_not_ready_is_noop(RuntimeState::Attached));
+        assert!(realtime_interrupt_not_ready_is_noop(
+            RuntimeState::Destroyed
+        ));
+        assert!(!realtime_interrupt_not_ready_is_noop(RuntimeState::Retired));
+        assert!(!realtime_interrupt_not_ready_is_noop(RuntimeState::Stopped));
     }
 
     #[tokio::test]

@@ -107,6 +107,20 @@ EOF
   rm -rf "$tmpdir"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/comms_drain.rs" <<'EOF'
+async fn bad(machine: Machine, session_id: SessionId) {
+    let _ = machine.hard_cancel_current_run(&session_id, "bad").await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: comms-drain hard-cancel fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-rest/src"
   cat >"$tmpdir/meerkat-rest/src/lib.rs" <<'EOF'
 async fn public_interrupt(service: Service, session_id: SessionId) {
@@ -221,6 +235,11 @@ while IFS= read -r peer_file; do
 done < <(cd "$root" && rg --files 2>/dev/null | rg '(^|/)peer_admission[^/]*\.rs$|(^|/)peer_admission/' || true)
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
+if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
+  comms_drain_matches="$(rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|\.interrupt_current_run\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs" 2>/dev/null || true)"
+  report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
+fi
+
 if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
   strip_authorized_interrupt_body() {
     awk '
@@ -267,7 +286,10 @@ for surface_file in \
   "$root/meerkat-rpc/src/handlers/session.rs" \
   "$root/meerkat-rpc/src/handlers/turn.rs" \
   "$root/meerkat-rpc/src/realtime_ws.rs" \
-  "$root/meerkat-cli/src/main.rs"
+  "$root/meerkat-cli/src/main.rs" \
+  "$root/meerkat-openai/src/realtime_attachment.rs" \
+  "$root/meerkat-mob/src/runtime/local_bridge.rs" \
+  "$root/meerkat-mob/src/runtime/provisioner.rs"
 do
   if [[ -f "$surface_file" ]]; then
     found="$(strip_core_executor_interrupt_impls "$surface_file" \
@@ -278,6 +300,14 @@ do
   fi
 done
 report_matches "public surface interrupt paths must route through MeerkatMachine::hard_cancel_current_run" "$public_interrupt_bypasses"
+
+direct_interrupt_current_run="$(run_rg '\.interrupt_current_run\(' \
+  --glob '!meerkat-runtime/src/meerkat_machine/session_management.rs' \
+  --glob '!meerkat-runtime/src/meerkat_machine_tests.rs' \
+  --glob '!meerkat-runtime/tests/**' \
+  --glob '!**/tests/**' \
+  --glob '!**/*tests.rs')"
+report_matches "direct interrupt_current_run callsites are forbidden outside runtime tests" "$direct_interrupt_current_run"
 
 report_matches "direct RuntimeEffect constructor helpers are forbidden" \
   "$(run_rg 'RuntimeEffect::(cancel_after_boundary|stop_runtime_executor)\b')"

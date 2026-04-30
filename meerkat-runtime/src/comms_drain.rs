@@ -1527,7 +1527,7 @@ async fn try_handle_supervisor_bridge_command(
                 send_bridge_failure(comms_runtime, candidate, cause, reason).await;
                 return true;
             }
-            match adapter.interrupt_current_run(session_id).await {
+            match adapter.cancel_after_boundary(session_id).await {
                 Ok(()) => {
                     send_bridge_response(
                         comms_runtime,

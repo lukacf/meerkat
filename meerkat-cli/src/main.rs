@@ -7941,7 +7941,7 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
             .hard_cancel_current_run(&session_id, "CLI session interrupt")
             .await
         {
-            Ok(()) | Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => {
+            Ok(()) => {
                 println!("Interrupted session: {session_id}");
                 println!(
                     "Session Ref: {}",
@@ -7949,9 +7949,31 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 );
                 Ok(())
             }
+            Err(meerkat_runtime::RuntimeDriverError::NotReady { state })
+                if interrupt_not_ready_is_noop(state) =>
+            {
+                println!("Interrupted session: {session_id}");
+                println!(
+                    "Session Ref: {}",
+                    format_session_ref(&scope.locator.realm, &session_id)
+                );
+                Ok(())
+            }
+            Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(anyhow::anyhow!(
+                "Failed to interrupt session: runtime is not interruptible while {state}"
+            )),
             Err(e) => Err(anyhow::anyhow!("Failed to interrupt session: {e}")),
         }
     }
+}
+
+fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Idle
+            | meerkat_runtime::RuntimeState::Attached
+            | meerkat_runtime::RuntimeState::Destroyed
+    )
 }
 
 #[cfg(all(feature = "comms", test))]
@@ -10093,6 +10115,25 @@ mod tests {
         let preload_skills: Vec<meerkat_core::skills::SkillKey> = Vec::new();
 
         assert_eq!(materialized_preload_skills(&preload_skills), None);
+    }
+
+    #[test]
+    fn interrupt_not_ready_noop_rejects_terminal_runtime_states() {
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Idle
+        ));
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Attached
+        ));
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Destroyed
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Retired
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Stopped
+        ));
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {

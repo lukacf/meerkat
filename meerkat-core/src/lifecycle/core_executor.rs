@@ -255,6 +255,17 @@ impl CoreApplyOutput {
 
 /// Cloneable live endpoint for asking an executor to stop at the next
 /// cooperative turn boundary.
+///
+/// ```compile_fail
+/// use meerkat_core::lifecycle::CoreExecutorBoundaryHandle;
+///
+/// async fn boundary_handles_cannot_hard_cancel(handle: &dyn CoreExecutorBoundaryHandle) {
+///     handle
+///         .hard_cancel_current_run("wrong authority".to_string())
+///         .await
+///         .unwrap();
+/// }
+/// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutorBoundaryHandle: Send + Sync {

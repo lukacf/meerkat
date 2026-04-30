@@ -227,7 +227,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
 
     async fn interrupt_member(&self) -> Result<BridgeAck, MobError> {
         self.machine
-            .interrupt_current_run(&self.session_id)
+            .hard_cancel_current_run(&self.session_id, "mob local bridge interrupt member")
             .await
             .map_err(|error| {
                 MobError::Internal(format!("local interrupt_member failed: {error}"))

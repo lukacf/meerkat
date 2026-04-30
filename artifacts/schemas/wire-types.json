@@ -5121,6 +5121,17 @@
     "title": "MobWireResult",
     "type": "object"
   },
+  "PeerResponseTerminalStatusWire": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Terminal status for dedicated correlated peer-response ingress.",
+    "enum": [
+      "completed",
+      "failed",
+      "cancelled"
+    ],
+    "title": "PeerResponseTerminalStatusWire",
+    "type": "string"
+  },
   "RealtimeAudioChunk": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "An opaque realtime audio chunk with MIME + format metadata.\n\nBoth sender and receiver MUST stamp `sample_rate_hz` and `channels` so the\ntransport layer can validate against the provider session's negotiated\nformat instead of silently producing garbled audio when an ESP32 or browser\nclient ships the wrong rate.",
@@ -12013,6 +12024,225 @@
     ],
     "title": "ScheduleOccurrencesResult",
     "type": "object"
+  },
+  "SessionExternalEventEnvelope": {
+    "$defs": {
+      "PeerCorrelationId": {
+        "description": "Canonical correlation identifier for the peer request/response lifecycle.\n\nOn the sender side, `PeerCorrelationId` is both the outbound request\nenvelope id and the reservation key for any stream subscription. On the\nreceiver side, every response envelope carries it as `in_reply_to`. The\nsender routes a reply back to its originating request by matching on this\nid — no local id-translation map.\n\nWrapping it in a newtype prevents raw-`Uuid` confusion at every site that\nfires a DSL input, inserts into the subscriber registry, or closes out an\ninbound request.",
+        "type": "string"
+      },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "PeerResponseTerminalStatusWire": {
+        "description": "Terminal status for dedicated correlated peer-response ingress.",
+        "enum": [
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "WireContentBlock": {
+        "description": "Wire-safe content block (no `source_path` — internal only).",
+        "oneOf": [
+          {
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "blob_id": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "blob",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "blob_id"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "image",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type"
+            ],
+            "type": "object"
+          },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "data": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "const": "inline",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source",
+                  "data"
+                ],
+                "type": "object"
+              }
+            ],
+            "properties": {
+              "duration_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "media_type": {
+                "type": "string"
+              },
+              "type": {
+                "const": "video",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "media_type",
+              "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward-compatibility for unknown block types.",
+            "properties": {
+              "type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed event envelope for the generic `session/external_event` and\n`/sessions/{id}/external-events` surfaces.\n\nNot `PartialEq`: the `GenericJson.payload` and\n`PeerResponseTerminal.result` bodies ride as `Box<RawValue>` — opaque\ncaller-supplied JSON that never gets pattern-matched at this layer.\nAllow-listed per `dogma-blind-spots` §7.",
+    "oneOf": [
+      {
+        "description": "Generic external JSON event admitted as `Input::ExternalEvent`.",
+        "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/WireContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "generic_json",
+            "type": "string"
+          },
+          "payload": true
+        },
+        "required": [
+          "kind",
+          "event_type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Reserved typed semantic. Callers must use the dedicated\n`session/peer_response_terminal` / `/peer-response-terminal` surface\ninstead of routing terminal peer responses through the generic event\ningress.",
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PeerName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "const": "peer_response_terminal",
+            "type": "string"
+          },
+          "peer_id": {
+            "$ref": "#/$defs/PeerId"
+          },
+          "request_id": {
+            "$ref": "#/$defs/PeerCorrelationId"
+          },
+          "result": true,
+          "status": {
+            "$ref": "#/$defs/PeerResponseTerminalStatusWire"
+          }
+        },
+        "required": [
+          "kind",
+          "peer_id",
+          "request_id",
+          "status",
+          "result"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "SessionExternalEventEnvelope"
   },
   "SessionStreamCloseResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

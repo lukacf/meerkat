@@ -7349,6 +7349,68 @@
     "title": "ScheduleOccurrencesParams",
     "type": "object"
   },
+  "SessionPeerResponseTerminalParams": {
+    "$defs": {
+      "PeerCorrelationId": {
+        "description": "Canonical correlation identifier for the peer request/response lifecycle.\n\nOn the sender side, `PeerCorrelationId` is both the outbound request\nenvelope id and the reservation key for any stream subscription. On the\nreceiver side, every response envelope carries it as `in_reply_to`. The\nsender routes a reply back to its originating request by matching on this\nid — no local id-translation map.\n\nWrapping it in a newtype prevents raw-`Uuid` confusion at every site that\nfires a DSL input, inserts into the subscriber registry, or closes out an\ninbound request.",
+        "type": "string"
+      },
+      "PeerId": {
+        "description": "Canonical runtime identity for a peer.\n\n`PeerId` is the routing key: the router and trust store key by `PeerId`,\nnever by `PeerName`. Two peers may legitimately share a display `PeerName`\n(per the Wave-B V5 dogma note), but their `PeerId`s never collide — the\nunderlying UUID is globally unique.\n\nConstructed freshly (`PeerId::new`) for a peer minted locally, parsed\nfrom a hyphenated UUID (`PeerId::parse`) when we've been given an identity\nover the wire, or derived from a 32-byte Ed25519 public key when a transport\nstill authenticates by raw signing key.",
+        "type": "string"
+      },
+      "PeerName": {
+        "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
+        "type": "string"
+      },
+      "PeerResponseTerminalStatusWire": {
+        "description": "Terminal status for dedicated correlated peer-response ingress.",
+        "enum": [
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Dedicated request payload for `session/peer_response_terminal`.\n\nNot `PartialEq`: `result` is opaque peer-returned bytes carried as\n`Box<RawValue>` (pass-through fidelity — the peer is the typed\nauthority over its own payload shape). Allow-listed per\n`dogma-blind-spots` §7 alongside tool-call args.",
+    "properties": {
+      "display_name": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PeerName"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "peer_id": {
+        "$ref": "#/$defs/PeerId"
+      },
+      "request_id": {
+        "$ref": "#/$defs/PeerCorrelationId"
+      },
+      "result": true,
+      "session_id": {
+        "type": "string"
+      },
+      "status": {
+        "$ref": "#/$defs/PeerResponseTerminalStatusWire"
+      }
+    },
+    "required": [
+      "session_id",
+      "peer_id",
+      "request_id",
+      "status",
+      "result"
+    ],
+    "title": "SessionPeerResponseTerminalParams",
+    "type": "object"
+  },
   "SessionStreamCloseParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,

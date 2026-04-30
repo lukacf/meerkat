@@ -6,7 +6,9 @@
 use meerkat_core::handles::{
     DslTransitionError, ExternalToolSurfaceEffect, ExternalToolSurfaceHandle,
 };
-use meerkat_core::tool_scope::ExternalToolSurfaceDeltaOperation;
+use meerkat_core::tool_scope::{
+    ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceFailureCause,
+};
 
 #[derive(Debug, Clone)]
 pub struct SurfaceCompletionObligation {
@@ -55,12 +57,12 @@ pub fn submit_surface_mark_pending_succeeded(
 pub fn submit_surface_mark_pending_failed(
     handle: &(impl ExternalToolSurfaceHandle + ?Sized),
     obligation: SurfaceCompletionObligation,
-    reason: impl Into<String>,
+    cause: ExternalToolSurfaceFailureCause,
 ) -> Result<(), DslTransitionError> {
     handle.mark_pending_failed(
         obligation.surface_id,
         obligation.pending_task_sequence,
         obligation.staged_intent_sequence,
-        reason.into(),
+        cause,
     )
 }

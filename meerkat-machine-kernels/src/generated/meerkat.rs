@@ -1152,6 +1152,40 @@ impl std::fmt::Display for ExternalToolSurfaceDeltaPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ExternalToolSurfaceFailureCause {
+    #[default]
+    PendingFailed,
+    SurfaceDraining,
+    SurfaceUnavailable,
+}
+impl ExternalToolSurfaceFailureCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PendingFailed => "PendingFailed",
+            Self::SurfaceDraining => "SurfaceDraining",
+            Self::SurfaceUnavailable => "SurfaceUnavailable",
+        }
+    }
+}
+impl std::fmt::Display for ExternalToolSurfaceFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum InputAbandonReason {
     #[default]
     Retired,
@@ -3076,7 +3110,7 @@ pub mod inputs {
         pub surface_id: String,
         pub pending_task_sequence: u64,
         pub staged_intent_sequence: u64,
-        pub reason: String,
+        pub cause: ExternalToolSurfaceFailureCause,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceCallStarted {
@@ -4174,6 +4208,7 @@ pub mod effects {
         pub surface_id: String,
         pub operation: ExternalToolSurfaceDeltaOperation,
         pub phase: ExternalToolSurfaceDeltaPhase,
+        pub cause: Option<ExternalToolSurfaceFailureCause>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CloseSurfaceConnection {
@@ -4182,7 +4217,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RejectSurfaceCall {
         pub surface_id: String,
-        pub reason: String,
+        pub cause: ExternalToolSurfaceFailureCause,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishSupervisorTrustEdge {

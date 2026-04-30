@@ -275,7 +275,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceStageReload`(surface_id: String, now_ms: u64)
 - `SurfaceApplyBoundary`(surface_id: String, now_ms: u64, staged_intent_sequence: u64, applied_at_turn: u64)
 - `SurfaceMarkPendingSucceeded`(surface_id: String, pending_task_sequence: u64, staged_intent_sequence: u64)
-- `SurfaceMarkPendingFailed`(surface_id: String, pending_task_sequence: u64, staged_intent_sequence: u64, reason: String)
+- `SurfaceMarkPendingFailed`(surface_id: String, pending_task_sequence: u64, staged_intent_sequence: u64, cause: ExternalToolSurfaceFailureCause)
 - `SurfaceCallStarted`(surface_id: String)
 - `SurfaceCallFinished`(surface_id: String)
 - `SurfaceFinalizeRemovalClean`(surface_id: String)
@@ -416,9 +416,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SpawnDrainTask`
 - `ScheduleSurfaceCompletion`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, pending_task_sequence: u64, staged_intent_sequence: u64, applied_at_turn: u64)
 - `RefreshVisibleSurfaceSet`(snapshot_epoch: u64)
-- `EmitExternalToolDelta`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, phase: ExternalToolSurfaceDeltaPhase)
+- `EmitExternalToolDelta`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, phase: ExternalToolSurfaceDeltaPhase, cause: Option<ExternalToolSurfaceFailureCause>)
 - `CloseSurfaceConnection`(surface_id: String)
-- `RejectSurfaceCall`(surface_id: String, reason: String)
+- `RejectSurfaceCall`(surface_id: String, cause: ExternalToolSurfaceFailureCause)
 - `PublishSupervisorTrustEdge`(peer_id: String, name: String, address: String, signing_public_key: Option<String>, epoch: u64)
 - `RevokeSupervisorTrustEdge`(peer_id: String, epoch: u64)
 - `RealtimeIntentProjected`(present: Bool)
@@ -2698,7 +2698,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SurfaceMarkPendingFailedAttached`
 - From: `Attached`
-- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, reason)
+- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, cause)
 - Guards:
   - `pending_sequence_matches`
   - `pending_lineage_matches`
@@ -2707,7 +2707,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SurfaceMarkPendingFailedRunning`
 - From: `Running`
-- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, reason)
+- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, cause)
 - Guards:
   - `pending_sequence_matches`
   - `pending_lineage_matches`

@@ -204,6 +204,7 @@ pub fn spawn_comms_drain(
                             // not synthesize semantic cleanup.
                             let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
                             let peer_interaction_handle = comms_runtime.peer_interaction_handle();
+                            let dsl_installed = peer_interaction_handle.is_some();
                             if let (Some(handle), Some(disposition)) =
                                 (peer_interaction_handle.as_ref(), terminal_status)
                             {
@@ -247,6 +248,8 @@ pub fn spawn_comms_drain(
                                             subscriber,
                                             handle,
                                         );
+                                    } else if !dsl_installed {
+                                        comms_runtime.mark_interaction_complete(&interaction_id);
                                     }
                                 }
                                 Err(err) => {
@@ -254,6 +257,9 @@ pub fn spawn_comms_drain(
                                         error = %err,
                                         "comms_drain: failed to inject terminal response"
                                     );
+                                    if !dsl_installed {
+                                        comms_runtime.mark_interaction_complete(&interaction_id);
+                                    }
                                 }
                             }
                         } else {

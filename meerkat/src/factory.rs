@@ -750,8 +750,6 @@ struct SelfHostedClientSpec {
     mode: OpenAiCompatibleMode,
     remote_model: String,
     base_url: String,
-    bearer_token: Option<String>,
-    bearer_token_env: Option<String>,
     supports_temperature: bool,
     supports_thinking: bool,
     supports_reasoning: bool,
@@ -1987,8 +1985,6 @@ impl AgentFactory {
             mode,
             remote_model: self_hosted.remote_model.clone(),
             base_url: self_hosted.base_url.clone(),
-            bearer_token: self_hosted.bearer_token.clone(),
-            bearer_token_env: self_hosted.bearer_token_env.clone(),
             supports_temperature: entry.profile.supports_temperature,
             supports_thinking: entry.profile.supports_thinking,
             supports_reasoning: entry.profile.supports_reasoning,
@@ -2112,6 +2108,13 @@ impl AgentFactory {
             ));
         }
 
+        if Self::self_hosted_server_has_legacy_bearer_material(config, &spec.server_id) {
+            return Err(FactoryError::ClientCreationFailed(format!(
+                "self-hosted server '{}' defines legacy bearer credentials but no connection/auth binding was configured; move credentials into a realm auth profile and select it with connection_ref or a realm default binding",
+                spec.server_id
+            )));
+        }
+
         Self::legacy_self_hosted_connection(spec).map(|(realm, connection_ref)| {
             // Legacy `[self_hosted]` compatibility is a transient migration
             // binding. Do not persist it as `SessionMetadata.connection_ref`;
@@ -2170,6 +2173,17 @@ impl AgentFactory {
     }
 
     #[cfg(feature = "openai")]
+    fn self_hosted_server_has_legacy_bearer_material(config: &Config, server_id: &str) -> bool {
+        config
+            .self_hosted
+            .servers
+            .get(server_id)
+            .is_some_and(|server| {
+                server.bearer_token.is_some() || server.bearer_token_env.is_some()
+            })
+    }
+
+    #[cfg(feature = "openai")]
     fn legacy_self_hosted_connection(
         spec: &SelfHostedClientSpec,
     ) -> Result<(RealmConnectionSet, ConnectionRef), FactoryError> {
@@ -2180,23 +2194,6 @@ impl AgentFactory {
         })?;
         let binding_id = Self::legacy_self_hosted_binding_id(&spec.server_id)?;
         let binding_key = binding_id.as_str().to_string();
-
-        let (auth_method, source) = match (&spec.bearer_token, &spec.bearer_token_env) {
-            (Some(secret), _) => (
-                "static_bearer".to_string(),
-                CredentialSourceSpec::InlineSecret {
-                    secret: secret.clone(),
-                },
-            ),
-            (None, Some(env)) => (
-                "static_bearer".to_string(),
-                CredentialSourceSpec::Env {
-                    env: env.clone(),
-                    fallback: Vec::new(),
-                },
-            ),
-            (None, None) => ("none".to_string(), CredentialSourceSpec::PlatformDefault),
-        };
 
         let backend = meerkat_core::BackendProfile {
             id: spec.server_id.clone(),
@@ -2214,8 +2211,8 @@ impl AgentFactory {
         let auth = meerkat_core::AuthProfile {
             id: format!("{}_auth", spec.server_id),
             provider: Provider::SelfHosted,
-            auth_method,
-            source,
+            auth_method: "none".to_string(),
+            source: CredentialSourceSpec::PlatformDefault,
             constraints: Default::default(),
             metadata_defaults: Default::default(),
         };
@@ -4556,13 +4553,10 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_absent_connection_ref_routes_legacy_env_credentials_through_runtime() {
+    async fn self_hosted_absent_connection_ref_with_legacy_env_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
-        factory.token_store = Some(Arc::new(
-            meerkat_providers::auth_store::EphemeralTokenStore::new(),
-        ));
 
         let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
             transport: SelfHostedTransport::OpenAiCompatible,
@@ -4575,47 +4569,61 @@ mod tests {
         build.provider = Some(Provider::SelfHosted);
         build.override_builtins = ToolCategoryOverride::Disable;
 
-        let agent = factory.build_agent(build, &config).await.unwrap();
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("legacy bearer env without a connection binding must fail closed"),
+            Err(err) => err,
+        };
 
-        let calls = calls.lock().unwrap();
-        assert_eq!(
-            calls.len(),
-            1,
-            "self-hosted must resolve through ProviderRuntimeRegistry"
-        );
-        let call = &calls[0];
-        assert_eq!(call.connection_ref.realm.as_str(), "self_hosted_legacy");
-        assert_eq!(call.connection_ref.binding.as_str(), "local");
-        assert_eq!(
-            call.backend_base_url.as_deref(),
-            Some("http://127.0.0.1:11434/v1")
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "missing connection_ref/binding must not synthesize legacy bearer env auth"
         );
         assert!(
-            matches!(
-                &call.auth_source,
-                CredentialSourceSpec::Env { env, fallback }
-                    if env == "LOCAL_SELF_HOSTED_TOKEN" && fallback.is_empty()
-            ),
-            "legacy bearer_token_env must become an auth-profile Env source"
-        );
-        assert!(
-            call.token_store_present,
-            "factory token store must be visible to the self-hosted runtime resolver"
-        );
-        assert!(
-            agent
-                .session()
-                .session_metadata()
-                .unwrap()
-                .connection_ref
-                .is_none(),
-            "transient legacy compatibility binding must not be persisted as durable identity"
+            err.to_string().contains("self-hosted")
+                && err.to_string().contains("connection/auth binding")
+                && err.to_string().contains("legacy bearer credentials"),
+            "unexpected error: {err}"
         );
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_literal_token_takes_precedence_before_runtime_resolution() {
+    async fn self_hosted_absent_connection_ref_with_legacy_bearer_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let calls = install_recording_self_hosted_runtime(&mut factory);
+
+        let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434/v1".to_string(),
+            api_style: SelfHostedApiStyle::ChatCompletions,
+            bearer_token: Some("legacy-token".to_string()),
+            bearer_token_env: None,
+        });
+        let mut build = AgentBuildConfig::new("gemma-4-e2b");
+        build.provider = Some(Provider::SelfHosted);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("legacy bearer material without a connection binding must fail closed"),
+            Err(err) => err,
+        };
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "missing connection_ref/binding must not synthesize legacy bearer auth"
+        );
+        assert!(
+            err.to_string().contains("self-hosted")
+                && err.to_string().contains("connection")
+                && err.to_string().contains("legacy"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn self_hosted_absent_connection_ref_with_literal_and_env_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -4631,21 +4639,18 @@ mod tests {
         build.provider = Some(Provider::SelfHosted);
         build.override_builtins = ToolCategoryOverride::Disable;
 
-        factory.build_agent(build, &config).await.unwrap();
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("legacy bearer material without a connection binding must fail closed"),
+            Err(err) => err,
+        };
 
-        let calls = calls.lock().unwrap();
-        assert_eq!(
-            calls.len(),
-            1,
-            "self-hosted literal token must still use runtime resolution"
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "missing connection_ref/binding must not synthesize literal bearer auth"
         );
         assert!(
-            matches!(
-                &calls[0].auth_source,
-                CredentialSourceSpec::InlineSecret { secret }
-                    if secret == "literal-legacy-token"
-            ),
-            "legacy literal bearer_token must preserve precedence over bearer_token_env"
+            err.to_string().contains("legacy bearer credentials"),
+            "unexpected error: {err}"
         );
     }
 
@@ -4662,7 +4667,7 @@ mod tests {
                 transport: SelfHostedTransport::OpenAiCompatible,
                 base_url: "http://localhost:11434".to_string(),
                 api_style: SelfHostedApiStyle::ChatCompletions,
-                bearer_token: Some("literal-legacy-token".to_string()),
+                bearer_token: None,
                 bearer_token_env: None,
             },
         );
@@ -4676,6 +4681,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].connection_ref.realm.as_str(), "self_hosted_legacy");
         assert_ne!(calls[0].connection_ref.binding.as_str(), "localhost:11434");
+        assert!(
+            matches!(calls[0].auth_source, CredentialSourceSpec::PlatformDefault),
+            "authless legacy compatibility must not synthesize bearer auth"
+        );
         assert!(
             calls[0]
                 .connection_ref
@@ -4705,7 +4714,7 @@ mod tests {
             transport: SelfHostedTransport::OpenAiCompatible,
             base_url: "http://127.0.0.1:11434".to_string(),
             api_style: SelfHostedApiStyle::ChatCompletions,
-            bearer_token: Some("literal-legacy-token".to_string()),
+            bearer_token: None,
             bearer_token_env: None,
         });
 
@@ -4906,7 +4915,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_missing_configured_env_fails_closed() {
+    async fn self_hosted_legacy_env_without_connection_binding_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
@@ -4926,9 +4935,9 @@ mod tests {
         };
 
         assert!(
-            err.to_string().contains("MissingSecret")
-                || err.to_string().contains("missing secret")
-                || err.to_string().contains("Missing secret"),
+            err.to_string().contains("self-hosted")
+                && err.to_string().contains("connection/auth binding")
+                && err.to_string().contains("legacy bearer credentials"),
             "unexpected error: {err}"
         );
     }

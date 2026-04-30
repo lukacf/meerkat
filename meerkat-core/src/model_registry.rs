@@ -14,8 +14,6 @@ pub struct SelfHostedServerRef {
     pub transport: SelfHostedTransport,
     pub api_style: SelfHostedApiStyle,
     pub base_url: String,
-    pub bearer_token: Option<String>,
-    pub bearer_token_env: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,8 +176,6 @@ fn append_self_hosted(
             transport: server.transport,
             api_style: server.api_style,
             base_url: normalize_base_url(&server.base_url),
-            bearer_token: server.bearer_token.clone(),
-            bearer_token_env: server.bearer_token_env.clone(),
         };
         let profile = ModelProfile {
             provider: Provider::SelfHosted.as_str().to_string(),

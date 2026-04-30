@@ -196,6 +196,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/surface/request_execution.rs",
     ],
     srcs = [
         "tests/agent_builder_policy_canary.rs",

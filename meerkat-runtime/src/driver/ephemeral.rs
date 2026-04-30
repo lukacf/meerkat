@@ -810,6 +810,9 @@ impl EphemeralRuntimeDriver {
         self.handling_mode.insert(work_id.clone(), handling_mode);
         self.runtime_semantics
             .insert(work_id.clone(), runtime_semantics);
+        if let Some(state) = self.ledger.get_mut(work_id) {
+            state.runtime_semantics = Some(runtime_semantics);
+        }
         self.primitive_projection
             .insert(work_id.clone(), primitive_projection);
         if is_prompt {
@@ -1281,7 +1284,10 @@ impl EphemeralRuntimeDriver {
     /// ledger-side shell with the DSL-owned seed (phase / run association /
     /// boundary sequence). Used by persistence callsites and test helpers.
     pub fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
-        let state = self.ledger.get(input_id)?.clone();
+        let mut state = self.ledger.get(input_id)?.clone();
+        if state.runtime_semantics.is_none() {
+            state.runtime_semantics = self.admitted_runtime_semantics(input_id);
+        }
         let phase = self
             .input_phase(input_id)
             .unwrap_or(InputLifecycleState::Accepted);
@@ -1300,6 +1306,10 @@ impl EphemeralRuntimeDriver {
         self.ledger
             .iter()
             .map(|(input_id, state)| {
+                let mut state = state.clone();
+                if state.runtime_semantics.is_none() {
+                    state.runtime_semantics = self.admitted_runtime_semantics(input_id);
+                }
                 let phase = self
                     .input_phase(input_id)
                     .unwrap_or(InputLifecycleState::Accepted);
@@ -1310,10 +1320,7 @@ impl EphemeralRuntimeDriver {
                     terminal_outcome: self.input_terminal_outcome(input_id),
                     attempt_count: self.input_attempt_count(input_id),
                 };
-                StoredInputState {
-                    state: state.clone(),
-                    seed,
-                }
+                StoredInputState { state, seed }
             })
             .collect()
     }

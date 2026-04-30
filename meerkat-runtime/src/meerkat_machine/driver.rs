@@ -1370,6 +1370,7 @@ pub(crate) fn machine_build_recovered_ingress_entry(
     state: &InputState,
 ) -> Option<RecoveredIngressEntry> {
     let persisted_input = state.persisted_input.as_ref()?;
+    let runtime_semantics = state.runtime_semantics?;
     let handling_mode = state
         .policy
         .as_ref()
@@ -1380,9 +1381,6 @@ pub(crate) fn machine_build_recovered_ingress_entry(
         Some(policy) => policy.decision.clone(),
         None => crate::policy_table::DefaultPolicyTable::resolve(persisted_input, true),
     };
-    let recovered_kind = persisted_input.kind();
-    let runtime_semantics =
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, recovered_kind);
     let primitive_projection = crate::input::runtime_input_projection(persisted_input);
 
     Some(RecoveredIngressEntry {
@@ -1393,6 +1391,25 @@ pub(crate) fn machine_build_recovered_ingress_entry(
         is_prompt: matches!(persisted_input, crate::input::Input::Prompt(_)),
         policy,
     })
+}
+
+fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
+    if state.persisted_input.is_none() {
+        return format!(
+            "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
+            state.input_id
+        );
+    }
+    if state.runtime_semantics.is_none() {
+        return format!(
+            "store corruption: recovered input '{}' missing runtime execution semantics stamp; cannot recover without runtime-stamped execution kind",
+            state.input_id
+        );
+    }
+    format!(
+        "store corruption: recovered input '{}' is missing required admitted-input metadata",
+        state.input_id
+    )
 }
 
 pub(crate) fn machine_realize_recovered_runtime_state(
@@ -1501,10 +1518,9 @@ pub(crate) fn machine_recover_ephemeral_driver(
         Vec::with_capacity(normalized.len());
     for (input_id, bundle) in normalized {
         let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
-            return Err(RuntimeDriverError::Internal(format!(
-                "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
-                bundle.state.input_id
-            )));
+            return Err(RuntimeDriverError::Internal(
+                missing_recovered_ingress_entry_reason(&bundle.state),
+            ));
         };
         recovered_entries.push((input_id, entry, bundle.state, bundle.seed));
     }
@@ -1561,10 +1577,9 @@ pub(crate) async fn machine_recover_persistent_driver(
 
         if driver.input_state(&bundle.state.input_id).is_none() {
             let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
-                    bundle.state.input_id
-                )));
+                return Err(RuntimeDriverError::Internal(
+                    missing_recovered_ingress_entry_reason(&bundle.state),
+                ));
             };
 
             let inserted = driver.ledger_mut().recover(bundle.state.clone());
@@ -1790,7 +1805,7 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 resume_id.clone(),
-                ContentShape(resume_input.kind_id().to_string()),
+                ContentShape::from_kind(resume_input.kind()),
                 meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary:
@@ -1813,7 +1828,7 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 prompt_id.clone(),
-                ContentShape(prompt_input.kind_id().to_string()),
+                ContentShape::from_kind(prompt_input.kind()),
                 meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
@@ -2166,7 +2181,7 @@ async fn fail_runtime_loop_run_inner(
 }
 
 #[cfg(test)]
-mod tests {
+mod recovery_tests {
     use super::*;
     use crate::policy::{
         ApplyMode, ConsumePoint, DrainPolicy, QueueMode, RoutingDisposition, WakeMode,
@@ -2197,6 +2212,60 @@ mod tests {
         assert!(
             machine_build_recovered_ingress_entry(&state).is_none(),
             "recovery must not synthesize an unknown admitted-input content shape"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_requires_runtime_semantics_stamp() {
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
+        state.persisted_input = Some(input);
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::policy_table::DEFAULT_POLICY_VERSION,
+            decision: policy(ApplyMode::StageRunStart),
+        });
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must not derive execution kind from payload/policy when the durable runtime semantics stamp is missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_recovery_rejects_state_without_runtime_semantics_stamp() {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("missing-runtime-semantics-stamp");
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let input_id = input.id().clone();
+        let mut state = crate::input_state::InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input);
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::policy_table::DEFAULT_POLICY_VERSION,
+            decision: policy(ApplyMode::StageRunStart),
+        });
+        let mut seed = InputStateSeed::new_accepted();
+        seed.phase = InputLifecycleState::Queued;
+        let bundle = crate::input_state::StoredInputState { state, seed };
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        store
+            .persist_input_state(&runtime_id, &bundle)
+            .await
+            .expect("persist corrupt recovered input state");
+
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
+        let err = machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+            .await
+            .expect_err("unstamped recovered input must not recover through local classification");
+
+        assert!(
+            err.to_string()
+                .contains("missing runtime execution semantics stamp"),
+            "unexpected recovery error: {err}"
+        );
+        assert!(
+            driver.input_state(&input_id).is_none(),
+            "failed recovery must not leave a ledger-only input row"
         );
     }
 

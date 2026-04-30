@@ -11,6 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationContextAppend, PeerResponseTerminalApplyIntent,
     RunApplyBoundary,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{InputKind, KindId};
 use crate::policy::{ApplyMode, PolicyDecision};
@@ -72,7 +73,7 @@ pub struct RequestId(pub String);
 /// or handling-mode hints to decide how a dequeued input runs. Admission has
 /// already resolved the typed policy/kind tuple; this record is the canonical
 /// carrier from that decision point to `RunPrimitive` construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeInputSemantics {
     pub boundary: RunApplyBoundary,
     pub execution_kind: RuntimeExecutionKind,

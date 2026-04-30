@@ -3383,20 +3383,18 @@ async fn interrupt_session(
             "session_id": session_id.to_string(),
             "interrupted": true
         }))),
-        Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => {
-            match state.session_service.read(&session_id).await {
-                Ok(_) => Ok(Json(json!({
-                    "session_id": session_id.to_string(),
-                    "interrupted": true
-                }))),
-                Err(SessionError::NotFound { .. }) => {
-                    Err(ApiError::NotFound(format!("Session not found: {id}")))
-                }
-                Err(e) => Err(ApiError::Internal(format!(
-                    "Failed to interrupt session: {e}"
-                ))),
-            }
-        }
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached,
+        }) => Ok(Json(json!({
+            "session_id": session_id.to_string(),
+            "interrupted": true
+        }))),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        }) => Err(ApiError::NotFound(format!("Session not found: {id}"))),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(ApiError::Conflict(
+            format!("Session is not interruptible while runtime is {state}"),
+        )),
         Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
             Err(ApiError::NotFound(format!("Session not found: {id}")))
         }

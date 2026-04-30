@@ -507,6 +507,7 @@ mod tests {
         let snapshot = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some((now + chrono::Duration::hours(1)).timestamp() as u64),
+            generation: 1,
         };
 
         let status = project_published_auth_status(now, None, &snapshot);

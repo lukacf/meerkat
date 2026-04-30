@@ -20,7 +20,6 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
-use meerkat_core::AgentBuilder as CoreAgentBuilder;
 use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1280,9 +1279,12 @@ mod scenario_09_session_service {
 #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
 mod scenario_10_memory {
     use super::*;
+    use meerkat_core::AgentBuilder as CoreAgentBuilder;
     use meerkat_core::CompactionConfig;
     use meerkat_memory::SimpleMemoryStore;
     use meerkat_session::DefaultCompactor;
+
+    struct TestFactoryAuthority;
 
     #[tokio::test]
     #[ignore = "lane:e2e-smoke"]
@@ -1357,9 +1359,8 @@ mod scenario_10_memory {
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
-        let factory_authority = AgentFactory::new(".rkat/sessions");
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            &factory_authority,
+            &TestFactoryAuthority,
             builder,
             llm_adapter,
             memory_tools,

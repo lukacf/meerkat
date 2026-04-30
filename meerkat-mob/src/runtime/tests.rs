@@ -71,8 +71,6 @@ use uuid::Uuid;
 
 struct TestFactoryAuthority;
 
-impl meerkat_core::agent::AgentFactoryPolicyAuthority for TestFactoryAuthority {}
-
 fn default_supervisor_authority_record() -> SupervisorAuthorityRecord {
     SupervisorAuthorityRecord::generate(
         super::bridge_protocol::supervisor_bridge_default_protocol_version(),

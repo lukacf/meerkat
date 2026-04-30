@@ -20,8 +20,6 @@ use tokio::sync::{Mutex, mpsc};
 
 struct TestFactoryAuthority;
 
-impl meerkat_core::agent::AgentFactoryPolicyAuthority for TestFactoryAuthority {}
-
 #[derive(Clone, Copy)]
 enum ClientMode {
     TextOnly,

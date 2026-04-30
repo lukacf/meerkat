@@ -706,7 +706,7 @@ async fn public_agentbuilder_rejects_standalone_core_injections_loudly() {
 }
 
 #[tokio::test]
-async fn core_agentbuilder_factory_policy_rejects_missing_metadata() {
+async fn public_agentfactory_value_is_not_core_policy_authority() {
     let factory = AgentFactory::new(".rkat/sessions");
     let llm_client = Arc::new(MockLlmClient {
         calls: Arc::new(AtomicUsize::new(1)),
@@ -734,8 +734,8 @@ async fn core_agentbuilder_factory_policy_rejects_missing_metadata() {
     .await;
 
     match result {
-        Err(AgentBuildPolicyError::MissingSession) => {}
-        Err(error) => panic!("expected missing session policy error, got {error}"),
-        Ok(_) => panic!("core factory-policy build must reject missing factory metadata"),
+        Err(AgentBuildPolicyError::InvalidFactoryAuthority) => {}
+        Err(error) => panic!("expected invalid authority policy error, got {error}"),
+        Ok(_) => panic!("public AgentFactory must not be usable as the core authority value"),
     }
 }

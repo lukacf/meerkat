@@ -1000,9 +1000,21 @@ impl meerkat_core::service::VisibleToolSnapshotProvider for DeferredSnapshotProv
     }
 }
 
+#[derive(Clone)]
+struct AgentFactoryPolicyAuthority {
+    _private: (),
+}
+
+impl AgentFactoryPolicyAuthority {
+    fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// Factory for creating agents with standard configuration.
 #[derive(Clone)]
 pub struct AgentFactory {
+    factory_policy_authority: AgentFactoryPolicyAuthority,
     pub store_path: PathBuf,
     /// Runtime root for realm-scoped artifacts (comms identity/trust, hook layers,
     /// skill caches). When unset, falls back to project_root or store_path.
@@ -1073,8 +1085,6 @@ pub struct AgentFactory {
     pub image_generation_machine:
         Option<Arc<dyn meerkat_tools::builtin::image_generation::ImageGenerationMachine>>,
 }
-
-impl meerkat_core::agent::AgentFactoryPolicyAuthority for AgentFactory {}
 
 impl std::fmt::Debug for AgentFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1322,6 +1332,7 @@ impl AgentFactory {
     /// Filesystem-dependent methods are not available.
     pub fn minimal() -> Self {
         Self {
+            factory_policy_authority: AgentFactoryPolicyAuthority::new(),
             store_path: PathBuf::new(),
             runtime_root: None,
             project_root: None,
@@ -1364,6 +1375,7 @@ impl AgentFactory {
             .and_then(meerkat_providers::auth_store::TokenStoreBackend::open)
             .ok();
         Self {
+            factory_policy_authority: AgentFactoryPolicyAuthority::new(),
             store_path: store_path.into(),
             runtime_root: None,
             project_root: None,
@@ -3875,7 +3887,7 @@ impl AgentFactory {
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            self,
+            &self.factory_policy_authority,
             builder,
             llm_adapter,
             tools,
@@ -3904,6 +3916,7 @@ impl AgentFactory {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     #[cfg(feature = "skills")]
     use meerkat_core::skills::{
         SkillDocument, SkillKey, SkillKeyRemap, SkillName, SkillRuntime, SourceIdentityLineage,
@@ -3915,6 +3928,63 @@ mod tests {
         RealmConfigSection, SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig,
         SelfHostedTransport,
     };
+
+    struct NeverLlmClient;
+
+    #[async_trait]
+    impl LlmClient for NeverLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<meerkat_client::LlmEvent, meerkat_client::LlmError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    struct TestSessionStore;
+
+    #[async_trait]
+    impl SessionStore for TestSessionStore {
+        async fn save(&self, _session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            Ok(())
+        }
+
+        async fn load(
+            &self,
+            _id: &meerkat_core::SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete(
+            &self,
+            _id: &meerkat_core::SessionId,
+        ) -> Result<(), meerkat_store::SessionStoreError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn registry_backed_defaults_resolver_respects_provider_identity() {
@@ -3937,6 +4007,44 @@ mod tests {
             ),
             None,
             "provider-aware default lookup must not reuse OpenAI defaults for Anthropic"
+        );
+    }
+
+    #[tokio::test]
+    async fn core_agentbuilder_factory_policy_rejects_missing_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let llm_adapter = Arc::new(
+            factory
+                .build_llm_adapter(Arc::new(NeverLlmClient), "mock-model")
+                .await,
+        );
+        let tools = Arc::new(EmptyToolDispatcher);
+        let store_adapter = Arc::new(
+            factory
+                .build_store_adapter(Arc::new(TestSessionStore))
+                .await,
+        );
+
+        let builder = AgentBuilder::new()
+            .model("mock-model")
+            .max_tokens_per_turn(64)
+            .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
+        let result = meerkat_core::agent::build_agent_after_factory_policy(
+            &factory.factory_policy_authority,
+            builder,
+            llm_adapter,
+            tools,
+            store_adapter,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(meerkat_core::AgentBuildPolicyError::MissingSession)
+            ),
+            "core factory-policy build must reject missing factory metadata"
         );
     }
 

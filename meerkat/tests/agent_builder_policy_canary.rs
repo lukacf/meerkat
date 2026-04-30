@@ -78,7 +78,7 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("pub async fn build_agent_after_factory_policy")
-            && builder.contains("AgentFactoryPolicyAuthority")
+            && builder.contains("validate_factory_policy_authority::<A>()?")
             && builder.contains("validate_factory_policy()?"),
         "canonical factory construction must cross into core through a \
          validating factory-authority seam"
@@ -111,6 +111,36 @@ fn core_factory_authority_token_is_not_reexported() {
         !facade_lib.contains("CoreAgentBuilder") && !facade_lib.contains("StandaloneAgentBuilder"),
         "meerkat facade must not publicly re-export the core builder as a \
          standalone construction shortcut"
+    );
+}
+
+#[test]
+fn core_factory_authority_is_not_publicly_forgeable() {
+    let builder = repo_file("meerkat-core/src/agent/builder.rs");
+    let agent_mod = repo_file("meerkat-core/src/agent.rs");
+    let factory = repo_file("meerkat/src/factory.rs");
+
+    assert!(
+        !builder.contains("pub trait AgentFactoryPolicyAuthority"),
+        "core factory authority must not be a public trait; downstream crates \
+         can implement public traits and mint authority unless the seam is \
+         tied to a non-forgeable factory-owned value"
+    );
+    assert!(
+        !builder
+            .contains("__agent_factory_policy_authority(&self) -> factory_policy_private::Seal {"),
+        "factory authority must not provide a default seal method; default \
+         trait methods make authority forgeable by empty downstream impls"
+    );
+    assert!(
+        !agent_mod.contains("AgentFactoryPolicyAuthority"),
+        "meerkat_core::agent must not re-export a public factory-authority \
+         trait that downstream crates can implement"
+    );
+    assert!(
+        !factory.contains("impl meerkat_core::agent::AgentFactoryPolicyAuthority for AgentFactory"),
+        "AgentFactory should own a non-forgeable authority value rather than \
+         implementing a public core authority trait"
     );
 }
 
@@ -230,14 +260,18 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
     );
     assert!(
         factory.contains("build_agent_after_factory_policy(")
+            && factory.contains("factory_policy_authority: AgentFactoryPolicyAuthority")
+            && factory.contains("&self.factory_policy_authority")
             && !factory.contains(".build_after_factory_policy("),
         "AgentFactory must enter meerkat_core through the explicit \
-         factory-authority seam rather than a public AgentBuilder method"
+         factory-authority seam using its private authority value rather than \
+         a public AgentBuilder method"
     );
     assert!(
-        factory.contains("impl meerkat_core::agent::AgentFactoryPolicyAuthority for AgentFactory"),
-        "AgentFactory must be the production authority type for the core \
-         factory-policy seam"
+        factory.contains("struct AgentFactoryPolicyAuthority")
+            && !factory.contains("pub struct AgentFactoryPolicyAuthority"),
+        "AgentFactory must own a private production authority type for the \
+         core factory-policy seam"
     );
     assert!(
         !comms_agent.contains("pub struct CommsAgentBuilder"),

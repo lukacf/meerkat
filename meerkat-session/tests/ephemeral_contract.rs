@@ -35,8 +35,6 @@ use tokio::sync::mpsc;
 
 struct TestFactoryAuthority;
 
-impl meerkat_core::agent::AgentFactoryPolicyAuthority for TestFactoryAuthority {}
-
 fn agent_builder_with_ephemeral_turn_state() -> AgentBuilder {
     let mut session = Session::new();
     session

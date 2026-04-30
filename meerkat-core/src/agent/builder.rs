@@ -69,6 +69,8 @@ pub struct AgentBuilder {
 /// required before crossing into core agent construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentBuildPolicyError {
+    #[error("factory policy build requires canonical AgentFactory authority")]
+    InvalidFactoryAuthority,
     #[error("factory policy build requires an explicit session")]
     MissingSession,
     #[error("factory policy build requires session metadata")]
@@ -79,22 +81,34 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
 }
 
-mod factory_policy_private {
-    pub struct Seal;
-}
+const CANONICAL_AGENT_FACTORY_POLICY_AUTHORITY_TYPE: &str =
+    "meerkat::factory::AgentFactoryPolicyAuthority";
 
-/// Marker for the canonical facade factory crossing into core construction.
-///
-/// This keeps factory-policy build authority out of the public `AgentBuilder`
-/// method surface. Repository production code should implement and use this
-/// only from `meerkat::AgentFactory`; tests that need a low-level policy-shaped
-/// core builder must make that authority explicit.
-#[doc(hidden)]
-pub trait AgentFactoryPolicyAuthority: Send + Sync {
-    #[doc(hidden)]
-    fn __agent_factory_policy_authority(&self) -> factory_policy_private::Seal {
-        factory_policy_private::Seal
+// The production authority is a private facade type. Core cannot name that
+// type directly without introducing a dependency cycle, so the seam validates
+// the concrete authority type name instead of accepting a public trait impl.
+#[cfg(debug_assertions)]
+// Integration tests compile as downstream crates, so they use fixed
+// debug-only authority names instead of a public forgeable trait.
+const TEST_AGENT_FACTORY_POLICY_AUTHORITY_TYPES: &[&str] = &[
+    "hooks_behavior::TestFactoryAuthority",
+    "ephemeral_contract::TestFactoryAuthority",
+    "meerkat_mob::runtime::tests::TestFactoryAuthority",
+    "smoke_meerkat_sdk::scenario_10_memory::TestFactoryAuthority",
+];
+
+fn validate_factory_policy_authority<A: ?Sized>() -> Result<(), AgentBuildPolicyError> {
+    let authority_type = std::any::type_name::<A>();
+    if authority_type == CANONICAL_AGENT_FACTORY_POLICY_AUTHORITY_TYPE {
+        return Ok(());
     }
+
+    #[cfg(debug_assertions)]
+    if TEST_AGENT_FACTORY_POLICY_AUTHORITY_TYPES.contains(&authority_type) {
+        return Ok(());
+    }
+
+    Err(AgentBuildPolicyError::InvalidFactoryAuthority)
 }
 
 /// Build an agent after the canonical factory has composed policy metadata.
@@ -104,7 +118,7 @@ pub trait AgentFactoryPolicyAuthority: Send + Sync {
 /// build-state metadata, and a runtime turn-state handle to the builder.
 #[doc(hidden)]
 pub async fn build_agent_after_factory_policy<C, T, S, A>(
-    authority: &A,
+    _authority: &A,
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
@@ -114,9 +128,9 @@ where
     C: AgentLlmClient + ?Sized,
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
-    A: AgentFactoryPolicyAuthority + ?Sized,
+    A: ?Sized,
 {
-    let _seal = authority.__agent_factory_policy_authority();
+    validate_factory_policy_authority::<A>()?;
     builder.validate_factory_policy()?;
     Ok(builder.build_inner(client, tools, store).await)
 }

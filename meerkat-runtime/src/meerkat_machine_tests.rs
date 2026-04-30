@@ -60,6 +60,32 @@ fn runtime_id_for_session(session_id: &SessionId) -> LogicalRuntimeId {
     MeerkatMachine::logical_runtime_id(session_id)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn oauth_flow_authority_is_owned_by_meerkat_machine() {
+    let machine = MeerkatMachine::ephemeral();
+    let redirect_uri = "http://127.0.0.1/callback";
+
+    let state = machine
+        .oauth_flow_authority()
+        .start(
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("runtime authority admits OAuth state");
+    let flow = machine
+        .oauth_flow_authority()
+        .consume(
+            &state,
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            redirect_uri,
+        )
+        .expect("runtime authority consumes OAuth state admitted through another view");
+
+    assert_eq!(flow.pkce_verifier, "verifier");
+}
+
 #[derive(Default)]
 struct RecordingMeerkatSignalSurface {
     log: tokio::sync::Mutex<

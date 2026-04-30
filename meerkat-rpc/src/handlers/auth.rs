@@ -309,6 +309,22 @@ async fn save_tokens_and_publish_lifecycle(
     .await
 }
 
+async fn save_tokens_and_consume_device_flow(
+    id: Option<RpcId>,
+    store: &Arc<dyn TokenStore>,
+    runtime: &SessionRuntime,
+    connection_ref: &ConnectionRef,
+    tokens: &PersistedTokens,
+    poll_lease: OAuthDevicePollLease,
+) -> Option<RpcResponse> {
+    if let Err(resp) =
+        save_tokens_and_publish_lifecycle(id.clone(), store, runtime, connection_ref, tokens).await
+    {
+        return Some(resp);
+    }
+    consume_terminal_device_flow(id, poll_lease)
+}
+
 async fn publish_saved_tokens_and_restore_on_lifecycle_failure(
     id: Option<RpcId>,
     store: &dyn TokenStore,
@@ -997,9 +1013,6 @@ pub async fn handle_auth_login_device_complete(
             Some(resp) => resp,
         },
         DevicePollOutcome::Ready(result) => {
-            if let Some(resp) = consume_terminal_device_flow(id.clone(), poll_lease) {
-                return resp;
-            }
             let store = match require_token_store(runtime, id.clone()) {
                 Ok(s) => s,
                 Err(r) => return r,
@@ -1022,12 +1035,13 @@ pub async fn handle_auth_login_device_complete(
                 account_id: None,
                 metadata: serde_json::Value::Null,
             };
-            if let Err(resp) = save_tokens_and_publish_lifecycle(
+            if let Some(resp) = save_tokens_and_consume_device_flow(
                 id.clone(),
                 &store,
                 runtime,
                 &connection_ref,
                 &tokens,
+                poll_lease,
             )
             .await
             {
@@ -1597,7 +1611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_start_records_flow_on_session_runtime_authority() {
+    async fn login_start_records_flow_on_runtime_authority() {
         let runtime = test_runtime();
         let unrelated_runtime = test_runtime();
         let redirect_uri = "http://127.0.0.1:0/callback";
@@ -1633,7 +1647,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_completion_poll_drop_releases_session_runtime_authority() {
+    async fn login_start_records_flow_on_runtime_adapter_authority() {
+        let runtime = test_runtime();
+        let redirect_uri = "http://127.0.0.1:0/callback";
+        let params = raw_params(serde_json::json!({
+            "provider": "openai",
+            "redirect_uri": redirect_uri
+        }));
+
+        let resp =
+            handle_auth_login_start(Some(RpcId::Num(1)), Some(params.as_ref()), &runtime).await;
+
+        assert!(resp.error.is_none(), "login start error: {:?}", resp.error);
+        let result: serde_json::Value =
+            serde_json::from_str(resp.result.as_ref().expect("result").get()).unwrap();
+        let state = result["state"].as_str().expect("state");
+        let flow = runtime
+            .runtime_adapter()
+            .oauth_flow_authority()
+            .consume(
+                state,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            )
+            .expect("runtime AuthMachine authority owns the RPC login flow");
+        assert!(!flow.pkce_verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_completion_poll_drop_releases_runtime_authority() {
         let runtime = test_runtime();
         runtime
             .oauth_flow_authority()
@@ -1671,7 +1713,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_completion_poll_abort_releases_session_runtime_authority() {
+    async fn device_completion_poll_abort_releases_runtime_authority() {
         let runtime = test_runtime();
         runtime
             .oauth_flow_authority()
@@ -1914,6 +1956,59 @@ mod tests {
         );
         let stored = store.load(&key).await.unwrap().unwrap();
         assert_eq!(stored.primary_secret.as_deref(), Some("sk-old"));
+    }
+
+    #[tokio::test]
+    async fn ready_device_commit_failure_keeps_flow_retryable() {
+        let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
+        runtime
+            .runtime_adapter()
+            .set_auth_lease_handle(Arc::new(RejectingAuthLeaseHandle));
+        let store = runtime.token_store().expect("test token store");
+        let connection_ref = ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let authority = runtime.oauth_flow_authority();
+        authority
+            .admit_device_code(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code".to_string(),
+                std::time::Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+        let poll_lease = authority
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("device poll lease begins");
+
+        let resp = save_tokens_and_consume_device_flow(
+            Some(RpcId::Num(1)),
+            &store,
+            &runtime,
+            &connection_ref,
+            &PersistedTokens::api_key("sk-new"),
+            poll_lease,
+        )
+        .await
+        .expect("commit failure returns an RPC response");
+
+        let error = resp.error.expect("commit should fail");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(
+            error
+                .message
+                .contains("AuthMachine lifecycle acquire failed")
+        );
+        authority
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("failed ready commit keeps device flow retryable");
     }
 
     #[tokio::test]

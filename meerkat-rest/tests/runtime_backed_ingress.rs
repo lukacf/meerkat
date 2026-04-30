@@ -152,7 +152,6 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         )),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
         auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
-        oauth_flows: Arc::new(meerkat_providers::oauth_flow::OAuthFlowRegistry::default()),
         provider_registry,
         #[cfg(feature = "mob")]
         mob_state,

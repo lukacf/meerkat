@@ -32,6 +32,7 @@ meerkat-store = { workspace = true, optional = true }
 sha2 = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+meerkat-auth-core = { workspace = true, features = ["oauth"] }
 tokio = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

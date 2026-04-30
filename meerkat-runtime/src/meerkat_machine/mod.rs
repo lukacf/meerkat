@@ -578,6 +578,10 @@ pub struct MeerkatMachine {
     /// AuthMachine lifecycle authority shared by runtime-backed auth
     /// resolution/refresh paths and public auth-status surfaces.
     auth_lease: StdRwLock<Arc<dyn meerkat_core::handles::AuthLeaseHandle>>,
+    /// OAuth login-flow lifecycle authority shared by public auth surfaces
+    /// that operate through this runtime adapter.
+    #[cfg(not(target_arch = "wasm32"))]
+    oauth_flows: StdRwLock<Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>>,
     /// Canonical owner of "this session id is currently active" — replaces
     /// the deleted process-global `SESSION_IDENTITY_CLAIMS` static in the
     /// comms shell (dogma #2). Comms runtimes acquire a typed
@@ -611,6 +615,10 @@ impl MeerkatMachine {
             blob_store: None,
             llm_reconfigure_host: StdRwLock::new(None),
             auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
+            #[cfg(not(target_arch = "wasm32"))]
+            oauth_flows: StdRwLock::new(Arc::new(
+                meerkat_auth_core::oauth_flow::OAuthFlowRegistry::default(),
+            )),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -625,6 +633,10 @@ impl MeerkatMachine {
             blob_store: Some(blob_store),
             llm_reconfigure_host: StdRwLock::new(None),
             auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
+            #[cfg(not(target_arch = "wasm32"))]
+            oauth_flows: StdRwLock::new(Arc::new(
+                meerkat_auth_core::oauth_flow::OAuthFlowRegistry::default(),
+            )),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -643,6 +655,10 @@ impl MeerkatMachine {
             blob_store: Some(Arc::new(UnavailableBlobStore)),
             llm_reconfigure_host: StdRwLock::new(None),
             auth_lease: StdRwLock::new(Arc::new(crate::handles::RuntimeAuthLeaseHandle::new())),
+            #[cfg(not(target_arch = "wasm32"))]
+            oauth_flows: StdRwLock::new(Arc::new(
+                meerkat_auth_core::oauth_flow::OAuthFlowRegistry::default(),
+            )),
             session_claims: Arc::new(crate::handles::RuntimeSessionClaimRegistry::new()),
             composition_signal_dispatcher: StdRwLock::new(None),
         }
@@ -669,6 +685,20 @@ impl MeerkatMachine {
             .auth_lease
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+    }
+
+    /// Shared OAuth login-flow authority used by all auth surfaces that are
+    /// backed by this runtime adapter.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn oauth_flow_authority(
+        &self,
+    ) -> Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority> {
+        Arc::clone(
+            &self
+                .oauth_flows
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// The canonical session-identity claim handle owned by this

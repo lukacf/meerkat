@@ -238,6 +238,17 @@ async fn save_tokens_and_publish_lifecycle(
     Ok(())
 }
 
+async fn save_tokens_and_consume_device_flow(
+    token_store: &dyn TokenStore,
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    connection_ref: &ConnectionRef,
+    tokens: &PersistedTokens,
+    poll_lease: OAuthDevicePollLease,
+) -> Result<(), (StatusCode, String)> {
+    save_tokens_and_publish_lifecycle(token_store, auth_lease, connection_ref, tokens).await?;
+    consume_terminal_device_flow(poll_lease)
+}
+
 async fn restore_tokens_after_lifecycle_failure(
     token_store: &dyn TokenStore,
     key: &TokenKey,
@@ -635,7 +646,7 @@ pub async fn start_login(
     };
     let pkce = PkcePair::generate_s256();
     let verifier = pkce.verifier.secret().to_string();
-    let state_token = match state.oauth_flows.start(
+    let state_token = match state.oauth_flow_authority().start(
         resolved.identity,
         body.redirect_uri.clone(),
         verifier,
@@ -739,10 +750,11 @@ pub async fn complete_login(
             .into_response();
     }
 
-    let flow = match state
-        .oauth_flows
-        .consume(&body.state, resolved.identity, &body.redirect_uri)
-    {
+    let flow = match state.oauth_flow_authority().consume(
+        &body.state,
+        resolved.identity,
+        &body.redirect_uri,
+    ) {
         Ok(flow) => flow,
         Err(OAuthFlowError::Missing) => {
             return (
@@ -881,7 +893,7 @@ pub async fn start_device_login(
     let http = reqwest::Client::new();
     match request_device_code(&http, &resolved.endpoints).await {
         Ok(resp) => {
-            if let Err(err) = state.oauth_flows.admit_device_code(
+            if let Err(err) = state.oauth_flow_authority().admit_device_code(
                 resolved.identity,
                 resp.device_code.clone(),
                 std::time::Duration::from_secs(resp.expires_in),
@@ -1008,7 +1020,7 @@ pub async fn complete_device_login(
             .into_response();
     }
     let poll_lease = match state
-        .oauth_flows
+        .oauth_flow_authority()
         .begin_device_code_poll(&body.device_code, resolved.identity)
     {
         Ok(lease) => lease,
@@ -1079,9 +1091,6 @@ pub async fn complete_device_login(
             }
         },
         DevicePollOutcome::Ready(result) => {
-            if let Err((status, message)) = consume_terminal_device_flow(poll_lease) {
-                return (status, Json(serde_json::json!({ "error": message }))).into_response();
-            }
             let expires_at = result
                 .expires_in_secs
                 .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
@@ -1100,11 +1109,12 @@ pub async fn complete_device_login(
                 account_id: None,
                 metadata: serde_json::Value::Null,
             };
-            if let Err((status, msg)) = save_tokens_and_publish_lifecycle(
+            if let Err((status, msg)) = save_tokens_and_consume_device_flow(
                 state.token_store.as_ref(),
                 state.auth_lease.as_ref(),
                 &connection_ref,
                 &tokens,
+                poll_lease,
             )
             .await
             {
@@ -1474,7 +1484,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rest_login_start_records_flow_on_app_state_authority() {
+    async fn rest_login_start_is_isolated_between_runtime_authorities() {
         let temp = tempfile::tempdir().unwrap();
         let unrelated_temp = tempfile::tempdir().unwrap();
         let state = AppState::load_from(temp.path().to_path_buf())
@@ -1500,7 +1510,7 @@ mod tests {
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let state_token = result["state"].as_str().expect("state");
         assert!(matches!(
-            unrelated_state.oauth_flows.consume(
+            unrelated_state.oauth_flow_authority().consume(
                 state_token,
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
@@ -1508,24 +1518,58 @@ mod tests {
             Err(OAuthFlowError::Missing)
         ));
         let flow = state
-            .oauth_flows
+            .oauth_flow_authority()
             .consume(
                 state_token,
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
                 redirect_uri,
             )
-            .expect("starting app state owns the flow");
+            .expect("starting runtime owns the flow");
         assert!(!flow.pkce_verifier.is_empty());
     }
 
     #[tokio::test]
-    async fn rest_device_completion_poll_drop_releases_app_state_authority() {
+    async fn rest_login_start_records_flow_on_runtime_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let redirect_uri = "http://127.0.0.1:0/callback";
+
+        let response = start_login(
+            State(state.clone()),
+            Json(LoginStartBody {
+                provider: "openai".to_string(),
+                redirect_uri: redirect_uri.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let state_token = result["state"].as_str().expect("state");
+        let flow = state
+            .runtime_adapter
+            .oauth_flow_authority()
+            .consume(
+                state_token,
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                redirect_uri,
+            )
+            .expect("runtime AuthMachine authority owns the REST login flow");
+        assert!(!flow.pkce_verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rest_device_completion_poll_drop_releases_runtime_authority() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
         state
-            .oauth_flows
+            .oauth_flow_authority()
             .admit_device_code(
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
@@ -1534,14 +1578,14 @@ mod tests {
             .expect("device code admitted");
 
         let poll = state
-            .oauth_flows
+            .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
             .expect("device completion poll begins");
         assert!(matches!(
-            state.oauth_flows.begin_device_code_poll(
+            state.oauth_flow_authority().begin_device_code_poll(
                 "device-code",
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
@@ -1551,22 +1595,22 @@ mod tests {
         drop(poll);
 
         state
-            .oauth_flows
+            .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
-            .expect("dropped REST completion poll releases app-state authority");
+            .expect("dropped REST completion poll releases runtime authority");
     }
 
     #[tokio::test]
-    async fn rest_device_completion_poll_abort_releases_app_state_authority() {
+    async fn rest_device_completion_poll_abort_releases_runtime_authority() {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
         state
-            .oauth_flows
+            .oauth_flow_authority()
             .admit_device_code(
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
@@ -1574,7 +1618,7 @@ mod tests {
             )
             .expect("device code admitted");
 
-        let authority = Arc::clone(&state.oauth_flows);
+        let authority = state.oauth_flow_authority();
         let (begun_tx, begun_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             let _poll = authority
@@ -1588,7 +1632,7 @@ mod tests {
         });
         begun_rx.await.expect("poll lease was acquired");
         assert!(matches!(
-            state.oauth_flows.begin_device_code_poll(
+            state.oauth_flow_authority().begin_device_code_poll(
                 "device-code",
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             ),
@@ -1599,12 +1643,12 @@ mod tests {
         let _ = task.await;
 
         state
-            .oauth_flows
+            .oauth_flow_authority()
             .begin_device_code_poll(
                 "device-code",
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             )
-            .expect("aborted REST completion poll releases app-state authority");
+            .expect("aborted REST completion poll releases runtime authority");
     }
 
     #[tokio::test]
@@ -1652,6 +1696,53 @@ mod tests {
         assert!(err.1.contains("AuthMachine lifecycle acquire failed"));
         let stored = store.load(&key).await.unwrap().unwrap();
         assert_eq!(stored.primary_secret.as_deref(), Some("sk-old"));
+    }
+
+    #[tokio::test]
+    async fn rest_ready_device_commit_failure_keeps_flow_retryable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let auth_lease: Arc<dyn AuthLeaseHandle> = Arc::new(RejectingAuthLeaseHandle);
+        state
+            .runtime_adapter
+            .set_auth_lease_handle(Arc::clone(&auth_lease));
+        state.auth_lease = auth_lease;
+        state.token_store = Arc::new(EphemeralTokenStore::new());
+        let authority = state.oauth_flow_authority();
+        authority
+            .admit_device_code(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code".to_string(),
+                std::time::Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+        let poll_lease = authority
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("device poll lease begins");
+
+        let err = save_tokens_and_consume_device_flow(
+            state.token_store.as_ref(),
+            state.auth_lease.as_ref(),
+            &managed_connection_ref(),
+            &api_key_tokens(),
+            poll_lease,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.1.contains("AuthMachine lifecycle acquire failed"));
+        authority
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("failed ready commit keeps device flow retryable");
     }
 
     #[tokio::test]

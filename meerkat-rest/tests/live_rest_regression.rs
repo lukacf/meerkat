@@ -128,7 +128,6 @@ fn build_app_state(client: Arc<dyn LlmClient>) -> (AppState, axum::Router) {
         mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
         auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
-        oauth_flows: Arc::new(meerkat_providers::oauth_flow::OAuthFlowRegistry::default()),
         provider_registry,
     };
 

@@ -704,10 +704,6 @@ pub struct SessionRuntime {
     backend: Option<String>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
     runtime_adapter: Arc<MeerkatMachine>,
-    /// Runtime-owned OAuth login flow authority. REST/RPC handlers must use
-    /// this scoped seam rather than process-global state so login lifecycle
-    /// admission/consume follows the runtime AuthMachine authority boundary.
-    oauth_flows: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority>,
     /// Notification sink for event forwarding to the RPC transport.
     /// Wrapped in `RwLock` so it can be updated when a new TCP client
     /// connects (each connection has its own transport sink).
@@ -971,8 +967,6 @@ impl SessionRuntime {
         let config_runtime = Arc::new(StdRwLock::new(None));
         let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
             Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
-        let oauth_flows: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> =
-            Arc::new(meerkat_providers::oauth_flow::OAuthFlowRegistry::default());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -1008,7 +1002,6 @@ impl SessionRuntime {
             backend: None,
             config_runtime,
             runtime_adapter,
-            oauth_flows,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
@@ -1051,8 +1044,6 @@ impl SessionRuntime {
         let config_runtime = Arc::new(StdRwLock::new(None));
         let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
             Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
-        let oauth_flows: Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> =
-            Arc::new(meerkat_providers::oauth_flow::OAuthFlowRegistry::default());
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
@@ -1088,7 +1079,6 @@ impl SessionRuntime {
             backend: None,
             config_runtime,
             runtime_adapter,
-            oauth_flows,
             notification_sink: StdRwLock::new(notification_sink),
             skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
                 generation: 0,
@@ -1197,7 +1187,7 @@ impl SessionRuntime {
     pub fn oauth_flow_authority(
         &self,
     ) -> Arc<dyn meerkat_providers::oauth_flow::OAuthFlowAuthority> {
-        Arc::clone(&self.oauth_flows)
+        self.runtime_adapter.oauth_flow_authority()
     }
 
     /// Override the shared default LLM client used by this runtime.

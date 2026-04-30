@@ -1156,7 +1156,8 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use meerkat_core::handles::{
-        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
+        AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition,
+        DslTransitionError, LeaseKey,
     };
     use meerkat_providers::auth_store::EphemeralTokenStore;
     use meerkat_runtime::RuntimeAuthLeaseHandle;
@@ -1194,7 +1195,7 @@ mod tests {
             &self,
             _lease_key: &LeaseKey,
             _expires_at: u64,
-        ) -> Result<(), DslTransitionError> {
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
             Err(DslTransitionError::guard_rejected(
                 "acquire_lease",
                 "test rejection",
@@ -1214,8 +1215,8 @@ mod tests {
             _lease_key: &LeaseKey,
             _new_expires_at: u64,
             _now: u64,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn refresh_failed(
@@ -1250,8 +1251,8 @@ mod tests {
             &self,
             _lease_key: &LeaseKey,
             _expires_at: u64,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -1267,8 +1268,8 @@ mod tests {
             _lease_key: &LeaseKey,
             _new_expires_at: u64,
             _now: u64,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn refresh_failed(

@@ -26,7 +26,8 @@ use tokio::time::{Duration as TokioDuration, sleep, timeout};
 
 use meerkat_auth_core::authorizers::{AzureAdAuthorizer, AzureClientCredentials};
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    LeaseKey,
 };
 use meerkat_core::{BindingId, HttpAuthorizationRequest, HttpAuthorizer, ProfileId, RealmId};
 
@@ -168,18 +169,19 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         &self,
         lease_key: &LeaseKey,
         expires_at: u64,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         self.maybe_fail("acquire_lease")?;
         self.events
             .lock()
             .unwrap()
             .push(LeaseEvent::Acquire(lease_key.clone(), expires_at));
+        let generation = self.next_generation();
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(expires_at),
-            generation: self.next_generation(),
+            generation,
         };
-        Ok(())
+        Ok(AuthLeaseTransition { generation })
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -211,7 +213,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         lease_key: &LeaseKey,
         new_expires_at: u64,
         _now: u64,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         self.maybe_fail("complete_refresh")?;
         self.events
             .lock()
@@ -220,12 +222,13 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
                 lease_key.clone(),
                 new_expires_at,
             ));
+        let generation = self.next_generation();
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(new_expires_at),
-            generation: self.next_generation(),
+            generation,
         };
-        Ok(())
+        Ok(AuthLeaseTransition { generation })
     }
 
     fn refresh_failed(

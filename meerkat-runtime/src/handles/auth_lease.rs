@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    LeaseKey,
 };
 
 use crate::auth_machine::dsl as auth_dsl;
@@ -107,7 +108,7 @@ impl RuntimeAuthLeaseHandle {
         input: auth_dsl::AuthMachineInput,
         context: &'static str,
         create_if_missing: bool,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<u64, DslTransitionError> {
         let action = Self::audit_action_for(&input);
         let mut guard = self
             .machines
@@ -142,8 +143,9 @@ impl RuntimeAuthLeaseHandle {
         };
         let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
         *generation = generation.saturating_add(1);
+        let accepted_generation = *generation;
         emit_audit(lease_key, action, from_phase, to_phase);
-        Ok(())
+        Ok(accepted_generation)
     }
 
     fn audit_action_for(input: &auth_dsl::AuthMachineInput) -> &'static str {
@@ -184,7 +186,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         &self,
         lease_key: &LeaseKey,
         expires_at: u64,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let expires_at_ts = if expires_at == u64::MAX {
             None
         } else {
@@ -196,6 +198,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::acquire_lease",
             true,
         )
+        .map(|generation| AuthLeaseTransition { generation })
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -205,6 +208,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::mark_expiring",
             false,
         )
+        .map(|_| ())
     }
 
     fn begin_refresh(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -214,6 +218,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::begin_refresh",
             false,
         )
+        .map(|_| ())
     }
 
     fn complete_refresh(
@@ -221,7 +226,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         lease_key: &LeaseKey,
         new_expires_at: u64,
         now: u64,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let new_expires_at = if new_expires_at == u64::MAX {
             None
         } else {
@@ -236,6 +241,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::complete_refresh",
             false,
         )
+        .map(|generation| AuthLeaseTransition { generation })
     }
 
     fn refresh_failed(
@@ -249,6 +255,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::RefreshFailedTransient
         };
         self.apply(lease_key, input, "AuthLeaseHandle::refresh_failed", false)
+            .map(|_| ())
     }
 
     fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -258,6 +265,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::mark_reauth_required",
             false,
         )
+        .map(|_| ())
     }
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {

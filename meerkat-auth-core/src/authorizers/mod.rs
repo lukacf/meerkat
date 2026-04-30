@@ -165,21 +165,17 @@ impl LeaseFreshnessObserver {
         now: DateTime<Utc>,
     ) -> Result<u64, AuthError> {
         let expires_at = epoch_secs(expires_at);
-        match lifecycle {
-            LeaseRefreshLifecycle::InitialAcquire => {
-                self.handle
-                    .acquire_lease(&self.lease_key, expires_at)
-                    .map_err(|err| self.observer_error(authorizer_label, "acquire_lease", err))?;
-            }
-            LeaseRefreshLifecycle::Refresh => {
-                self.handle
-                    .complete_refresh(&self.lease_key, expires_at, epoch_secs(now))
-                    .map_err(|err| {
-                        self.observer_error(authorizer_label, "complete_refresh", err)
-                    })?;
-            }
-        }
-        Ok(self.handle.snapshot(&self.lease_key).generation)
+        let transition = match lifecycle {
+            LeaseRefreshLifecycle::InitialAcquire => self
+                .handle
+                .acquire_lease(&self.lease_key, expires_at)
+                .map_err(|err| self.observer_error(authorizer_label, "acquire_lease", err))?,
+            LeaseRefreshLifecycle::Refresh => self
+                .handle
+                .complete_refresh(&self.lease_key, expires_at, epoch_secs(now))
+                .map_err(|err| self.observer_error(authorizer_label, "complete_refresh", err))?,
+        };
+        Ok(transition.generation)
     }
 
     pub(crate) fn refresh_failed(
@@ -290,6 +286,156 @@ fn body_mentions_any(body: &str, needles: &[&str]) -> bool {
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 fn epoch_secs(ts: DateTime<Utc>) -> u64 {
     ts.timestamp().max(0) as u64
+}
+
+#[cfg(test)]
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+mod tests {
+    use super::*;
+    use meerkat_core::connection::{BindingId, RealmId};
+    use meerkat_core::handles::{AuthLeaseSnapshot, AuthLeaseTransition};
+    use std::sync::Mutex;
+
+    struct SnapshotRaceAuthLeaseHandle {
+        snapshot: Mutex<AuthLeaseSnapshot>,
+        generation: Mutex<u64>,
+        accepted_generations: Mutex<Vec<u64>>,
+    }
+
+    impl Default for SnapshotRaceAuthLeaseHandle {
+        fn default() -> Self {
+            Self {
+                snapshot: Mutex::new(AuthLeaseSnapshot {
+                    phase: None,
+                    expires_at: None,
+                    generation: 0,
+                }),
+                generation: Mutex::new(0),
+                accepted_generations: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SnapshotRaceAuthLeaseHandle {
+        fn accept_valid_transition(
+            &self,
+            expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            let accepted_generation = {
+                let mut generation = self.generation.lock().unwrap();
+                *generation += 1;
+                *generation
+            };
+            self.accepted_generations
+                .lock()
+                .unwrap()
+                .push(accepted_generation);
+            *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: Some(expires_at),
+                generation: accepted_generation + 1,
+            };
+            Ok(AuthLeaseTransition {
+                generation: accepted_generation,
+            })
+        }
+
+        fn accepted_generations(&self) -> Vec<u64> {
+            self.accepted_generations.lock().unwrap().clone()
+        }
+    }
+
+    impl AuthLeaseHandle for SnapshotRaceAuthLeaseHandle {
+        fn acquire_lease(
+            &self,
+            _lease_key: &LeaseKey,
+            expires_at: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            self.accept_valid_transition(expires_at)
+        }
+
+        fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn complete_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+            new_expires_at: u64,
+            _now: u64,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            self.accept_valid_transition(new_expires_at)
+        }
+
+        fn refresh_failed(
+            &self,
+            _lease_key: &LeaseKey,
+            _permanent: bool,
+        ) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            Ok(())
+        }
+
+        fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+            self.snapshot.lock().unwrap().clone()
+        }
+    }
+
+    fn lease_key() -> LeaseKey {
+        LeaseKey::new(
+            RealmId::parse("dev").unwrap(),
+            BindingId::parse("cloud").unwrap(),
+            None,
+        )
+    }
+
+    #[test]
+    fn initial_acquire_returns_generation_from_accepted_transition() {
+        let handle = Arc::new(SnapshotRaceAuthLeaseHandle::default());
+        let lease_key = lease_key();
+        let observer = LeaseFreshnessObserver::new(handle.clone(), lease_key);
+        let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
+
+        let generation = observer
+            .complete_refresh(
+                "race-test",
+                LeaseRefreshLifecycle::InitialAcquire,
+                expires_at,
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(handle.accepted_generations(), vec![1]);
+        assert_eq!(generation, 1);
+    }
+
+    #[test]
+    fn refresh_returns_generation_from_accepted_transition() {
+        let handle = Arc::new(SnapshotRaceAuthLeaseHandle::default());
+        let lease_key = lease_key();
+        let observer = LeaseFreshnessObserver::new(handle.clone(), lease_key);
+        let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
+        let now = DateTime::<Utc>::from_timestamp(1_799_999_000, 0).unwrap();
+
+        let generation = observer
+            .complete_refresh("race-test", LeaseRefreshLifecycle::Refresh, expires_at, now)
+            .unwrap();
+
+        assert_eq!(handle.accepted_generations(), vec![1]);
+        assert_eq!(generation, 1);
+    }
 }
 
 #[cfg(feature = "aws-sigv4")]

@@ -167,8 +167,8 @@ def _wire_params(value: Any) -> dict[str, Any]:
     return converted if isinstance(converted, dict) else dict(converted)
 
 
-def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
-    """Convert a list of SkillRef to the wire format for JSON-RPC."""
+def _skill_keys_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
+    """Convert SkillKey-compatible refs to the plain SkillKey wire shape."""
     if refs is None:
         return None
     return [
@@ -178,6 +178,23 @@ def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | N
         }
         for r in refs
     ]
+
+
+def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
+    """Convert SkillRef values to the tagged create-session wire shape."""
+    if refs is None:
+        return None
+    wire_refs = []
+    for ref in refs:
+        normalized = _normalize_skill_ref(ref)
+        wire_refs.append(
+            {
+                "kind": "structured",
+                "source_uuid": normalized.source_uuid,
+                "skill_name": normalized.skill_name,
+            }
+        )
+    return wire_refs
 
 
 def _turn_keep_alive_override(keep_alive: bool | None) -> dict[str, Any] | None:
@@ -285,7 +302,7 @@ def _runtime_turn_metadata(
     clear_connection_ref: bool | None = None,
 ) -> dict[str, Any] | None:
     metadata: dict[str, Any] = {}
-    wire_refs = _skill_refs_to_wire(skill_refs)
+    wire_refs = _skill_keys_to_wire(skill_refs)
     if wire_refs is not None:
         metadata["skill_references"] = wire_refs
     if flow_tool_overlay is not None:
@@ -2705,7 +2722,7 @@ class MeerkatClient:
         if provider_params is not None:
             params["provider_params"] = provider_params
         if preload_skills is not None:
-            params["preload_skills"] = _skill_refs_to_wire(preload_skills)
+            params["preload_skills"] = _skill_keys_to_wire(preload_skills)
         wire_refs = _skill_refs_to_wire(skill_refs)
         if wire_refs is not None:
             params["skill_refs"] = wire_refs

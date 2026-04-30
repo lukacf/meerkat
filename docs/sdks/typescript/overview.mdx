@@ -309,10 +309,6 @@ async turn(
     keepAlive?: boolean;
     model?: string;
     provider?: string;
-    maxTokens?: number;
-    systemPrompt?: string;
-    outputSchema?: Record<string, unknown>;
-    structuredOutputRetries?: number;
     providerParams?: Record<string, unknown>;
   },
 ): Promise<RunResult>
@@ -337,10 +333,6 @@ stream(
     keepAlive?: boolean;
     model?: string;
     provider?: string;
-    maxTokens?: number;
-    systemPrompt?: string;
-    outputSchema?: Record<string, unknown>;
-    structuredOutputRetries?: number;
     providerParams?: Record<string, unknown>;
   },
 ): EventStream

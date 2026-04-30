@@ -163,10 +163,13 @@ export interface ConnectOptions {
   userConfigRoot?: string;
 }
 
+type SkillKeyWire = { source_uuid: string; skill_name: string };
+type SkillRefWire = SkillKeyWire & { kind: "structured" };
+
 /**
- * Normalize a structured SkillRef to the wire format { source_uuid, skill_name }.
+ * Normalize a structured SkillRef to the plain SkillKey wire format.
  */
-function normalizeSkillRef(ref: SkillRef): { source_uuid: string; skill_name: string } {
+function normalizeSkillRef(ref: SkillRef): SkillKeyWire {
   if (
     ref === null ||
     typeof ref !== "object" ||
@@ -178,9 +181,14 @@ function normalizeSkillRef(ref: SkillRef): { source_uuid: string; skill_name: st
   return { source_uuid: ref.sourceUuid, skill_name: ref.skillName };
 }
 
-function skillRefsToWire(refs: SkillRef[] | undefined): Array<{ source_uuid: string; skill_name: string }> | undefined {
+function skillKeysToWire(refs: SkillRef[] | undefined): SkillKeyWire[] | undefined {
   if (!refs) return undefined;
   return refs.map(normalizeSkillRef);
+}
+
+function skillRefsToWire(refs: SkillRef[] | undefined): SkillRefWire[] | undefined {
+  if (!refs) return undefined;
+  return refs.map((ref) => ({ kind: "structured", ...normalizeSkillRef(ref) }));
 }
 
 function setIfDefined<T extends object, K extends keyof T>(
@@ -300,7 +308,7 @@ function runtimeTurnMetadataPayload(
 ): RuntimeTurnMetadataPayload | undefined {
   if (!options) return undefined;
   const metadata: RuntimeTurnMetadataPayload = {};
-  const wireRefs = skillRefsToWire(options.skillRefs);
+  const wireRefs = skillKeysToWire(options.skillRefs);
   if (wireRefs) {
     metadata.skill_references = wireRefs;
   }
@@ -3070,7 +3078,7 @@ export class MeerkatClient {
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.providerParams != null) params.provider_params = options.providerParams;
     if (options.preloadSkills != null) {
-      params.preload_skills = skillRefsToWire(options.preloadSkills);
+      params.preload_skills = skillKeysToWire(options.preloadSkills);
     }
     const wireRefs = skillRefsToWire(options.skillRefs);
     if (wireRefs) params.skill_refs = wireRefs;

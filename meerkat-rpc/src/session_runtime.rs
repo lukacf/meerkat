@@ -2538,6 +2538,7 @@ impl SessionRuntime {
             updated_at_secs,
         )) = pending_session
         {
+            let rollback_build_config = build_config.clone();
             let mut runtime_prompt: ContentInput = prompt.clone();
             let saved_deferred_prompt = deferred_prompt.clone();
             if let Some(deferred) = deferred_prompt {
@@ -2548,7 +2549,7 @@ impl SessionRuntime {
                 if metadata.provider.is_some() && metadata.model.is_none() {
                     self.restore_pending_from_promoting(
                         session_id,
-                        build_config,
+                        rollback_build_config.clone(),
                         effective_llm_identity.clone(),
                         labels,
                         saved_deferred_prompt,
@@ -2569,7 +2570,7 @@ impl SessionRuntime {
                             Err(err) => {
                                 self.restore_pending_from_promoting(
                                     session_id,
-                                    build_config,
+                                    rollback_build_config.clone(),
                                     effective_llm_identity.clone(),
                                     labels,
                                     saved_deferred_prompt,
@@ -2588,7 +2589,7 @@ impl SessionRuntime {
                         Err(err) => {
                             self.restore_pending_from_promoting(
                                 session_id,
-                                build_config,
+                                rollback_build_config.clone(),
                                 effective_llm_identity.clone(),
                                 labels,
                                 saved_deferred_prompt,
@@ -2609,7 +2610,7 @@ impl SessionRuntime {
             if let Err(err) = Self::validate_keep_alive_has_comms_name(&build_config) {
                 self.restore_pending_from_promoting(
                     session_id,
-                    build_config,
+                    rollback_build_config.clone(),
                     effective_llm_identity.clone(),
                     labels,
                     saved_deferred_prompt,
@@ -2690,25 +2691,9 @@ impl SessionRuntime {
                     }
                 }
                 Err(err) => {
-                    if let Some((_starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                    {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        session
-                            .set_system_context_state(current_system_context_state)
-                            .map_err(|serialize_err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!(
-                                    "failed to serialize system-context state: {serialize_err}"
-                                ),
-                                data: None,
-                            })?;
-                    }
                     self.restore_pending_from_promoting(
                         session_id,
-                        build_config,
+                        rollback_build_config,
                         effective_llm_identity.clone(),
                         labels,
                         saved_deferred_prompt,
@@ -3007,6 +2992,7 @@ impl SessionRuntime {
             updated_at_secs,
         )) = pending_session
         {
+            let rollback_build_config = build_config.clone();
             // Prepend the deferred create-time prompt to the turn prompt.
             // Keep copies for rollback paths that re-stage the pending session.
             let saved_deferred_prompt = deferred_prompt.clone();
@@ -3020,7 +3006,7 @@ impl SessionRuntime {
                 if metadata.provider.is_some() && metadata.model.is_none() {
                     self.restore_pending_from_promoting(
                         session_id,
-                        build_config,
+                        rollback_build_config.clone(),
                         effective_llm_identity.clone(),
                         labels,
                         saved_deferred_prompt,
@@ -3041,7 +3027,7 @@ impl SessionRuntime {
                             Err(err) => {
                                 self.restore_pending_from_promoting(
                                     session_id,
-                                    build_config,
+                                    rollback_build_config.clone(),
                                     effective_llm_identity.clone(),
                                     labels,
                                     saved_deferred_prompt,
@@ -3060,7 +3046,7 @@ impl SessionRuntime {
                         Err(err) => {
                             self.restore_pending_from_promoting(
                                 session_id,
-                                build_config,
+                                rollback_build_config.clone(),
                                 effective_llm_identity.clone(),
                                 labels,
                                 saved_deferred_prompt,
@@ -3080,7 +3066,7 @@ impl SessionRuntime {
             if let Err(err) = Self::validate_keep_alive_has_comms_name(&build_config) {
                 self.restore_pending_from_promoting(
                     session_id,
-                    build_config,
+                    rollback_build_config.clone(),
                     effective_llm_identity.clone(),
                     labels,
                     saved_deferred_prompt,
@@ -3167,33 +3153,16 @@ impl SessionRuntime {
                     return result.map_err(session_error_to_rpc);
                 }
                 Err(err) => {
-                    if let Some((_starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                    {
-                        let session = build_config
-                            .resume_session
-                            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-                        session
-                            .set_system_context_state(current_system_context_state)
-                            .map_err(|serialize_err| RpcError {
-                                code: error::INTERNAL_ERROR,
-                                message: format!(
-                                    "failed to serialize system-context state: {serialize_err}"
-                                ),
-                                data: None,
-                            })?;
-                        self.staged_sessions
-                            .abandon_promotion(
-                                session_id.clone(),
-                                build_config,
-                                effective_llm_identity.clone(),
-                                labels,
-                                saved_deferred_prompt.clone(),
-                                saved_created_at_secs,
-                                saved_updated_at_secs,
-                            )
-                            .await;
-                    }
+                    self.restore_pending_from_promoting(
+                        session_id,
+                        rollback_build_config,
+                        effective_llm_identity.clone(),
+                        labels,
+                        saved_deferred_prompt,
+                        saved_created_at_secs,
+                        saved_updated_at_secs,
+                    )
+                    .await;
                     return Err(session_error_to_rpc(err));
                 }
             }
@@ -7633,6 +7602,55 @@ mod tests {
             .start_turn(&session_id, "after rejection".into(), event_tx, None)
             .await
             .expect("staged session should remain promotable after rejected metadata");
+    }
+
+    #[tokio::test]
+    async fn turn_start_on_pending_session_rolls_back_rejected_metadata_mutations() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        let mut turn_metadata = keep_alive_metadata(true);
+        turn_metadata.model = Some(ModelId::new("claude-opus-4-6"));
+        let err = runtime
+            .start_turn(&session_id, "Hello".into(), event_tx, Some(turn_metadata))
+            .await
+            .expect_err("missing comms_name should reject keep_alive");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message.contains("keep_alive requires"),
+            "unexpected error message: {}",
+            err.message
+        );
+
+        let slot = runtime
+            .staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("pending session should remain staged")
+            .expect("pending session should be restored");
+        assert_eq!(slot.build_config.model, "claude-sonnet-4-5");
+        assert!(
+            !slot.build_config.keep_alive,
+            "rejected keep_alive override must not persist in the staged build config"
+        );
+
+        runtime
+            .restore_pending_from_promoting(
+                &session_id,
+                *slot.build_config,
+                slot.effective_llm_identity,
+                slot.labels,
+                slot.deferred_prompt,
+                slot.created_at_secs,
+                slot.updated_at_secs,
+            )
+            .await;
     }
 
     #[tokio::test]

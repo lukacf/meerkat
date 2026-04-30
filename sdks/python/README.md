@@ -49,7 +49,7 @@ asyncio.run(main())
 - structured output: `output_schema`, `structured_output_retries`
 - runtime/tool toggles: `enable_builtins`, `enable_shell`, `enable_memory`, `enable_mob`
 - comms/runtime metadata: `keep_alive`, `comms_name`, `peer_meta`, `budget_limits`
-- skills: `preload_skills`, `skill_refs`, `skill_references`
+- skills: `preload_skills`, `skill_refs`
 - session metadata: `labels`
 - additional session config: `additional_instructions`, `app_context`, `shell_env`, `external_tools`
 
@@ -74,10 +74,9 @@ Both use integer unix timestamps for `created_at` and `updated_at`.
 
 `Session.turn(...)` and `Session.stream(...)` expose SDK convenience options that are resolved into the runtime `turn_metadata` carrier:
 
-- `skill_refs`, `skill_references`, `flow_tool_overlay`
+- `skill_refs`, `flow_tool_overlay`
 - `additional_instructions`
-- `keep_alive`, `model`, `provider`, `max_tokens`, `system_prompt`
-- `output_schema`, `structured_output_retries`, `provider_params`
+- `keep_alive`, `model`, `provider`, `provider_params`
 
 `DeferredSession.start_turn(...)` supports the same override set.
 

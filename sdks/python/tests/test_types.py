@@ -127,6 +127,26 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
     }
 
 
+def test_runtime_turn_metadata_skill_refs_use_plain_skill_keys():
+    metadata = _runtime_turn_metadata(
+        skill_refs=[
+            SkillKey(
+                source_uuid="00000000-0000-4000-8000-000000000001",
+                skill_name="read",
+            )
+        ]
+    )
+
+    assert metadata == {
+        "skill_references": [
+            {
+                "source_uuid": "00000000-0000-4000-8000-000000000001",
+                "skill_name": "read",
+            }
+        ]
+    }
+
+
 def test_contract_version():
     """Contract version should be semver."""
     parts = CONTRACT_VERSION.split(".")
@@ -772,6 +792,52 @@ async def test_create_session_returns_runtime_backed_session_wrapper() -> None:
     assert session.text == "ready"
     assert session.last_result.session_id == "sess-1"
     assert seen == [("session/create", {"prompt": "Summarise the runtime path"})]
+
+
+@pytest.mark.asyncio
+async def test_create_session_skill_refs_use_tagged_wire_refs() -> None:
+    client = MeerkatClient()
+    seen: list[tuple[str, dict[str, object]]] = []
+    key = SkillKey(
+        source_uuid="00000000-0000-4000-8000-000000000001",
+        skill_name="read",
+    )
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        seen.append((method, params))
+        return {
+            "session_id": "sess-skills",
+            "text": "ready",
+            "turns": 1,
+            "tool_calls": 0,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.create_session("Use skills", preload_skills=[key], skill_refs=[key])
+
+    assert seen == [
+        (
+            "session/create",
+            {
+                "prompt": "Use skills",
+                "preload_skills": [
+                    {
+                        "source_uuid": "00000000-0000-4000-8000-000000000001",
+                        "skill_name": "read",
+                    }
+                ],
+                "skill_refs": [
+                    {
+                        "kind": "structured",
+                        "source_uuid": "00000000-0000-4000-8000-000000000001",
+                        "skill_name": "read",
+                    }
+                ],
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

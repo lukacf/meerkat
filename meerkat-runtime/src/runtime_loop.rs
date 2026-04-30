@@ -14,7 +14,7 @@ use meerkat_core::lifecycle::{InputId, RunId};
 
 #[cfg(test)]
 use crate::input::input_prompt_text;
-use crate::input::{Input, runtime_input_projection};
+use crate::input::{Input, runtime_input_projection_for_machine_batch};
 use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
@@ -229,7 +229,7 @@ pub(crate) fn try_inputs_to_primitive_with_boundary(
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let projections = inputs
         .iter()
-        .map(|(_, input)| runtime_input_projection(input))
+        .map(|(_, input)| runtime_input_projection_for_machine_batch(input))
         .collect::<Vec<_>>();
     let peer_response_terminal_apply_intent =
         fallback_batch_peer_response_terminal_apply_intent(inputs, boundary);
@@ -669,7 +669,7 @@ async fn process_queue(
                     &staged_ids,
                 );
             let projections =
-                crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_ids);
+                crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_inputs);
             let primitive = try_projected_inputs_to_primitive_with_boundary(
                 &staged_inputs,
                 &projections,
@@ -990,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn input_to_prompt_peer_response_terminal_is_runtime_owned_from_typed_payload() {
+    fn machine_batch_projection_peer_response_terminal_is_runtime_owned_from_typed_payload() {
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
@@ -1019,14 +1019,21 @@ mod tests {
             handling_mode: None,
         });
 
+        let projection = runtime_input_projection_for_machine_batch(&input);
+        let context = projection
+            .context_append
+            .expect("terminal peer response should project in machine batch");
+        let CoreRenderable::Text { text } = context.content else {
+            panic!("expected terminal context text");
+        };
         assert_eq!(
-            input_to_prompt(&input),
+            text,
             "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}."
         );
     }
 
     #[test]
-    fn input_to_prompt_peer_response_terminal_omits_payload_key_extraction() {
+    fn machine_batch_projection_peer_response_terminal_omits_payload_key_extraction() {
         // Regression: runtime must not reach into the peer response payload
         // to extract ad-hoc fields (request_intent, token, etc.) and bake
         // them into prompt text. The canonical projection is the typed
@@ -1060,7 +1067,13 @@ mod tests {
             handling_mode: None,
         });
 
-        let rendered = input_to_prompt(&input);
+        let projection = runtime_input_projection_for_machine_batch(&input);
+        let context = projection
+            .context_append
+            .expect("terminal peer response should project in machine batch");
+        let CoreRenderable::Text { text: rendered } = context.content else {
+            panic!("expected terminal context text");
+        };
         assert!(
             !rendered.contains("Authoritative result fields:"),
             "runtime must not emit scenario-specific authoritative-field hints: {rendered}"

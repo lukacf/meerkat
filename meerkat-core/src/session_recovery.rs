@@ -337,6 +337,7 @@ pub fn build_recovered_session(
         runtime_build_mode: context
             .runtime_build_mode
             .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
+        initial_turn_metadata: None,
     };
     build.apply_persisted_mob_operator_access(
         overrides

@@ -288,6 +288,11 @@ pub struct SessionBuildOptions {
     /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings.
     ///   Suitable for WASM, tests, embedded, and standalone surfaces.
     pub runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode,
+    /// Runtime-stamped metadata for an eager first turn.
+    ///
+    /// Session services only forward this carrier. They must not infer an
+    /// execution kind from runtime build mode.
+    pub initial_turn_metadata: Option<RuntimeTurnMetadata>,
     /// Runtime-injected mob operator authority context.
     ///
     /// This is the only source of mob operator tool authority. Tool visibility
@@ -666,6 +671,7 @@ impl Default for SessionBuildOptions {
             resume_override_mask: ResumeOverrideMask::default(),
             mob_tools: None,
             runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral,
+            initial_turn_metadata: None,
             mob_tool_authority_context: None,
         }
     }
@@ -711,6 +717,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())
             .field("runtime_build_mode", &self.runtime_build_mode)
+            .field(
+                "initial_turn_metadata",
+                &self.initial_turn_metadata.is_some(),
+            )
             .field(
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),

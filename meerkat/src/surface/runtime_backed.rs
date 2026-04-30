@@ -79,6 +79,12 @@ where
     let mut build = request.build.unwrap_or_default();
     build.resume_session = Some(session);
     build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
+    if request.initial_turn == meerkat_core::service::InitialTurnPolicy::RunImmediately
+        && build.initial_turn_metadata.is_none()
+    {
+        build.initial_turn_metadata =
+            Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None));
+    }
     request.build = Some(build);
 
     let result = match service.create_session(request).await {
@@ -589,6 +595,66 @@ mod tests {
             .await
             .expect("discard live session");
         adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn materialize_session_stamps_eager_initial_turn_execution_kind() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+
+        let mut request = make_request(SessionBuildOptions::default());
+        request.initial_turn = meerkat_core::service::InitialTurnPolicy::RunImmediately;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            request,
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("runtime-backed eager create should receive stamped metadata");
+
+        assert_eq!(result.text, "ok");
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn direct_runtime_owned_eager_create_rejects_missing_execution_kind_stamp() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let bindings = adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare runtime bindings");
+
+        let mut request = make_request(SessionBuildOptions {
+            resume_session: Some(session),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            ..Default::default()
+        });
+        request.initial_turn = meerkat_core::service::InitialTurnPolicy::RunImmediately;
+        request.prompt = "needs runtime stamp".to_string().into();
+
+        let error = service
+            .create_session(request)
+            .await
+            .expect_err("runtime-backed eager create must require stamped execution kind");
+
+        assert!(
+            error.to_string().contains("runtime_execution_kind not set"),
+            "unexpected error: {error}"
+        );
+        adapter.unregister_session(&session_id).await;
     }
 
     #[test]

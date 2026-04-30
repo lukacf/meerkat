@@ -2700,6 +2700,7 @@ async fn handle_meerkat_run(
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
         override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(enable_shell_override),
         override_memory: ToolCategoryOverride::from_override(input.enable_memory),
@@ -2989,6 +2990,7 @@ async fn handle_meerkat_resume(
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
+        initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
         override_builtins: ToolCategoryOverride::from_override(enable_builtins_override),
         override_shell: ToolCategoryOverride::from_override(enable_shell_override),
         override_memory: ToolCategoryOverride::from_override(input.enable_memory),
@@ -3086,7 +3088,7 @@ async fn handle_meerkat_resume(
 
             skill_references: skill_references.clone(),
             flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
-            turn_metadata: None,
+            turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
         };
         match state.service.start_turn(&session_id, turn_req).await {
             Ok(run_result) => Ok(run_result),

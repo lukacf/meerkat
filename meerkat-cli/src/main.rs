@@ -5817,6 +5817,7 @@ async fn run_agent(
             },
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            initial_turn_metadata: None,
             resume_override_mask: Default::default(),
             call_timeout_override: Default::default(),
             blob_store_override: None,
@@ -13742,6 +13743,9 @@ capabilities = ["definitely_missing_capability"]
             build: Some(SessionBuildOptions {
                 resume_session: Some(session),
                 runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+                initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+                    None,
+                )),
                 llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
                     llm_override,
                 )),

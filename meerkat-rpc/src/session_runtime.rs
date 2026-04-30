@@ -842,6 +842,20 @@ impl SessionRuntime {
         (!metadata.is_empty()).then_some(metadata)
     }
 
+    fn runtime_stamped_prompt_turn_metadata_from_overrides(
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+    ) -> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        meerkat_runtime::runtime_stamped_prompt_turn_metadata(Self::turn_metadata_from_overrides(
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions,
+            overrides,
+        ))
+    }
+
     pub(crate) fn turn_overrides_from_metadata(
         metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     ) -> Option<crate::handlers::turn::TurnOverrides> {
@@ -3111,6 +3125,13 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
+            build.initial_turn_metadata =
+                Some(Self::runtime_stamped_prompt_turn_metadata_from_overrides(
+                    skill_references.clone(),
+                    flow_tool_overlay.clone(),
+                    additional_instructions.clone(),
+                    overrides.as_ref(),
+                ));
 
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
@@ -3217,12 +3238,12 @@ impl SessionRuntime {
                 .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
                 .unwrap_or(false),
         };
-        let turn_metadata = Self::turn_metadata_from_overrides(
+        let turn_metadata = Some(Self::runtime_stamped_prompt_turn_metadata_from_overrides(
             skill_references.clone(),
             flow_tool_overlay.clone(),
             additional_instructions.clone(),
             overrides.as_ref(),
-        );
+        ));
 
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
@@ -4692,6 +4713,34 @@ mod tests {
                 )),
                 Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(dsl)),
             ),
+        );
+    }
+
+    #[test]
+    fn turn_metadata_from_overrides_does_not_stamp_execution_kind() {
+        let metadata = SessionRuntime::turn_metadata_from_overrides(
+            None,
+            None,
+            Some(vec!["runtime note".to_string()]),
+            None,
+        )
+        .expect("additional instructions should produce metadata");
+
+        assert_eq!(metadata.execution_kind, None);
+    }
+
+    #[test]
+    fn runtime_prompt_metadata_helper_stamps_execution_kind() {
+        let metadata = SessionRuntime::runtime_stamped_prompt_turn_metadata_from_overrides(
+            None,
+            None,
+            Some(vec!["runtime note".to_string()]),
+            None,
+        );
+
+        assert_eq!(
+            metadata.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
         );
     }
 

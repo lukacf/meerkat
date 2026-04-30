@@ -2892,6 +2892,7 @@ async fn create_session_inner(
         blob_store_override: None,
         mob_tools: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        initial_turn_metadata: None,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -3650,6 +3651,7 @@ async fn continue_session_inner(
             blob_store_override: None,
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            initial_turn_metadata: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let create_req = SvcCreateSessionRequest {

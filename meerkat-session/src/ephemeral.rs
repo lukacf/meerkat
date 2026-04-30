@@ -1645,13 +1645,11 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             })?;
         }
 
-        let initial_execution_kind = req.build.as_ref().and_then(|build| {
-            matches!(
-                build.runtime_build_mode,
-                meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(_)
-            )
-            .then_some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
-        });
+        let initial_execution_kind = req
+            .build
+            .as_ref()
+            .and_then(|build| build.initial_turn_metadata.as_ref())
+            .and_then(|metadata| metadata.execution_kind);
 
         // Run the first turn
         let (result_tx, result_rx) = oneshot::channel();

@@ -624,6 +624,7 @@ impl AgentBuildConfig {
             call_timeout_override: self.call_timeout_override.clone(),
             resume_override_mask: self.resume_override_mask,
             runtime_build_mode: self.runtime_build_mode.clone(),
+            initial_turn_metadata: None,
         }
     }
 }

@@ -39,8 +39,6 @@ use meerkat::{
 };
 use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::lifecycle::RunId;
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
@@ -1158,27 +1156,24 @@ impl CoreExecutor for TargetCoreExecutor {
             .map_err(|e| CoreExecutorError::apply_failed_runtime_turn(e.to_string()))
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } => {
-                self.service.interrupt(&self.session_id).await.map_err(|e| {
-                    CoreExecutorError::control_failed_runtime(e.to_string())
-                })
-            }
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = discard_live_session_with_mob_cleanup(
-                    &self.service,
-                    &self.mob_state,
-                    &self.session_id,
-                )
-                .await;
-                runtime_adapter_unregister_noop();
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
-                }
-            }
-            _ => Ok(()),
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        let discard_result = discard_live_session_with_mob_cleanup(
+            &self.service,
+            &self.mob_state,
+            &self.session_id,
+        )
+        .await;
+        runtime_adapter_unregister_noop();
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
         }
     }
 }

@@ -23,7 +23,6 @@ use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
@@ -239,8 +238,9 @@ struct RuntimeSessionEntry {
 /// drift into partially-populated shell state.
 struct RuntimeLoopAttachment {
     wake_tx: mpsc::Sender<()>,
-    control_tx: mpsc::Sender<RunControlCommand>,
-    control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
+    effect_tx: mpsc::Sender<crate::effect::RuntimeEffect>,
+    boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
+    interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -276,7 +276,7 @@ impl RuntimeSessionEntry {
     fn attachment_is_live(&self) -> bool {
         match &self.phase {
             RegistrationPhase::Active(attachment) => {
-                !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed()
+                !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed()
             }
             RegistrationPhase::Queuing | RegistrationPhase::Attaching => false,
         }
@@ -300,14 +300,16 @@ impl RuntimeSessionEntry {
     fn attach_runtime_loop(
         &mut self,
         wake_tx: mpsc::Sender<()>,
-        control_tx: mpsc::Sender<RunControlCommand>,
-        control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
+        effect_tx: mpsc::Sender<crate::effect::RuntimeEffect>,
+        boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
+        interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
         self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
             wake_tx,
-            control_tx,
-            control_handle,
+            effect_tx,
+            boundary_handle,
+            interrupt_handle,
             _loop_handle: loop_handle,
         });
     }
@@ -325,7 +327,7 @@ impl RuntimeSessionEntry {
     fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
         match &self.phase {
             RegistrationPhase::Active(attachment)
-                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 Some(attachment.wake_tx.clone())
             }
@@ -333,23 +335,38 @@ impl RuntimeSessionEntry {
         }
     }
 
-    fn control_sender(&self) -> Option<mpsc::Sender<RunControlCommand>> {
+    fn effect_sender(&self) -> Option<mpsc::Sender<crate::effect::RuntimeEffect>> {
         match &self.phase {
             RegistrationPhase::Active(attachment)
-                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
-                Some(attachment.control_tx.clone())
+                Some(attachment.effect_tx.clone())
             }
             _ => None,
         }
     }
 
-    fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+    fn boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
         match &self.phase {
             RegistrationPhase::Active(attachment)
-                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
-                attachment.control_handle.clone()
+                attachment.boundary_handle.clone()
+            }
+            _ => None,
+        }
+    }
+
+    fn interrupt_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
+        match &self.phase {
+            RegistrationPhase::Active(attachment)
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
+            {
+                attachment.interrupt_handle.clone()
             }
             _ => None,
         }
@@ -357,6 +374,31 @@ impl RuntimeSessionEntry {
 }
 
 impl MeerkatMachine {
+    pub(crate) async fn interrupt_handle_for(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>, RuntimeDriverError>
+    {
+        let handle = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            entry.interrupt_handle()
+        };
+
+        let Some(handle) = handle else {
+            let state = self
+                .existing_session_runtime_state(session_id)
+                .await
+                .unwrap_or(RuntimeState::Destroyed);
+            return Err(RuntimeDriverError::NotReady { state });
+        };
+        Ok(handle)
+    }
+
     /// Acquire the per-session mutation gate.
     ///
     /// Returns an `Arc<Mutex<()>>` that the caller must `.lock().await` and

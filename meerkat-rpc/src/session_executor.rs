@@ -11,9 +11,9 @@ use meerkat_core::EventEnvelope;
 use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorControl, CoreExecutorError,
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
 };
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::SessionError;
 use meerkat_core::types::SessionId;
@@ -71,61 +71,71 @@ impl SessionRuntimeExecutor {
     }
 }
 
-struct SessionRuntimeControlHandle {
+struct SessionRuntimeBoundaryHandle {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,
 }
 
 #[async_trait::async_trait]
-impl CoreExecutorControl for SessionRuntimeControlHandle {
-    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        if command.should_interrupt_current_run() {
-            return self
-                .runtime
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message));
-        }
-        if matches!(command, RunControlCommand::InterruptYielding) {
-            return self
-                .runtime
-                .interrupt_yielding(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message));
-        }
-        Ok(())
+impl CoreExecutorBoundaryHandle for SessionRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .interrupt_yielding(&self.session_id)
+            .await
+            .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
+    }
+}
+
+struct SessionRuntimeInterruptHandle {
+    runtime: Arc<SessionRuntime>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorInterruptHandle for SessionRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .interrupt(&self.session_id)
+            .await
+            .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
     }
 }
 
 #[cfg(feature = "mob")]
-struct MobRpcRuntimeControlHandle {
+struct MobRpcRuntimeBoundaryHandle {
     session_service: Arc<dyn MobSessionService>,
     session_id: SessionId,
 }
 
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
-impl CoreExecutorControl for MobRpcRuntimeControlHandle {
-    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        if command.should_interrupt_current_run() {
-            return self
-                .session_service
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
-        }
-        if matches!(command, RunControlCommand::InterruptYielding) {
-            return self
-                .session_service
-                .cancel_after_boundary(&self.session_id)
-                .await
-                .or_else(|err| match err {
-                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
-                    err => Err(err),
-                })
-                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
-        }
-        Ok(())
+impl CoreExecutorBoundaryHandle for MobRpcRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+}
+
+#[cfg(feature = "mob")]
+struct MobRpcRuntimeInterruptHandle {
+    session_service: Arc<dyn MobSessionService>,
+    session_id: SessionId,
+}
+
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl CoreExecutorInterruptHandle for MobRpcRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .interrupt(&self.session_id)
+            .await
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 }
 
@@ -161,8 +171,15 @@ fn pending_system_context_appends_from_primitive(
 
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
-    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
-        Some(Arc::new(SessionRuntimeControlHandle {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(SessionRuntimeBoundaryHandle {
+            runtime: Arc::clone(&self.runtime),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(SessionRuntimeInterruptHandle {
             runtime: Arc::clone(&self.runtime),
             session_id: self.session_id.clone(),
         }))
@@ -245,30 +262,22 @@ impl CoreExecutor for SessionRuntimeExecutor {
         }
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            command if command.should_interrupt_current_run() => self
-                .runtime
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message)),
-            RunControlCommand::InterruptYielding => self
-                .runtime
-                .interrupt_yielding(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message)),
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = self.runtime.discard_live_session(&self.session_id).await;
-                self.runtime
-                    .runtime_adapter()
-                    .unregister_session(&self.session_id)
-                    .await;
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
-                }
-            }
-            _ => Ok(()),
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .interrupt_yielding(&self.session_id)
+            .await
+            .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        let discard_result = self.runtime.discard_live_session(&self.session_id).await;
+        self.runtime
+            .runtime_adapter()
+            .unregister_session(&self.session_id)
+            .await;
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
         }
     }
 }
@@ -276,8 +285,15 @@ impl CoreExecutor for SessionRuntimeExecutor {
 #[cfg(feature = "mob")]
 #[async_trait::async_trait]
 impl CoreExecutor for MobRpcRuntimeExecutor {
-    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
-        Some(Arc::new(MobRpcRuntimeControlHandle {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(MobRpcRuntimeBoundaryHandle {
+            session_service: Arc::clone(&self.session_service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(MobRpcRuntimeInterruptHandle {
             session_service: Arc::clone(&self.session_service),
             session_id: self.session_id.clone(),
         }))
@@ -360,36 +376,28 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         result.map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            command if command.should_interrupt_current_run() => self
-                .session_service
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string())),
-            RunControlCommand::InterruptYielding => self
-                .session_service
-                .cancel_after_boundary(&self.session_id)
-                .await
-                .or_else(|err| match err {
-                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
-                    err => Err(err),
-                })
-                .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string())),
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = self
-                    .session_service
-                    .discard_live_session(&self.session_id)
-                    .await;
-                if let Some(adapter) = self.session_service.runtime_adapter() {
-                    adapter.unregister_session(&self.session_id).await;
-                }
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
-                }
-            }
-            _ => Ok(()),
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        let discard_result = self
+            .session_service
+            .discard_live_session(&self.session_id)
+            .await;
+        if let Some(adapter) = self.session_service.runtime_adapter() {
+            adapter.unregister_session(&self.session_id).await;
+        }
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
         }
     }
 }

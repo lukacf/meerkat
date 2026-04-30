@@ -4925,8 +4925,75 @@ fn cli_terminal_pre_turn_context_appends(
         .collect()
 }
 
+struct CliRuntimeBoundaryHandle {
+    service: Arc<dyn meerkat_core::service::SessionService>,
+    session_id: meerkat_core::types::SessionId,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(
+        &self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                meerkat::SessionError::NotRunning { .. }
+                | meerkat::SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                    err.to_string(),
+                )
+            })
+    }
+}
+
+struct CliRuntimeInterruptHandle {
+    service: Arc<dyn meerkat_core::service::SessionService>,
+    session_id: meerkat_core::types::SessionId,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for CliRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(
+        &self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .interrupt(&self.session_id)
+            .await
+            .map_err(|err| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                    err.to_string(),
+                )
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
+    fn boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(CliRuntimeBoundaryHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
+        Some(Arc::new(CliRuntimeInterruptHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -5012,32 +5079,33 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         )
     }
 
-    async fn control(
+    async fn cancel_after_boundary(
         &mut self,
-        cmd: meerkat_core::lifecycle::run_control::RunControlCommand,
+        _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
-        match cmd {
-            meerkat_core::lifecycle::run_control::RunControlCommand::CancelCurrentRun {
-                ..
-            } => {
-                let _ = self.service.interrupt(&self.session_id).await;
-                Ok(())
-            }
-            meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
-                ..
-            } => {
-                // Discard live session state via concrete type (not on SessionService trait).
-                #[cfg(feature = "session-store")]
-                if let Some(ref persistent) = self.persistent_service {
-                    let _ = persistent.discard_live_session(&self.session_id).await;
-                }
-                self.runtime_adapter
-                    .unregister_session(&self.session_id)
-                    .await;
-                Ok(())
-            }
-            _ => Ok(()),
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .map_err(|err| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                    err.to_string(),
+                )
+            })
+    }
+
+    async fn stop_runtime_executor(
+        &mut self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        // Discard live session state via concrete type (not on SessionService trait).
+        #[cfg(feature = "session-store")]
+        if let Some(ref persistent) = self.persistent_service {
+            let _ = persistent.discard_live_session(&self.session_id).await;
         }
+        self.runtime_adapter
+            .unregister_session(&self.session_id)
+            .await;
+        Ok(())
     }
 }
 

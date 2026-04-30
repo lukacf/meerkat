@@ -17,7 +17,6 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::interaction::{
     InteractionContent, PeerIngressFact, PeerInputCandidate, PeerInputClass,
 };
-use meerkat_core::lifecycle::RunControlCommand;
 use meerkat_core::types::SessionId;
 
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -92,12 +91,7 @@ pub fn spawn_comms_drain(
                 if comms_runtime.dismiss_received() {
                     tracing::info!("comms_drain: DISMISS received, stopping");
                     let _ = adapter
-                        .stop_runtime_executor(
-                            &session_id,
-                            RunControlCommand::StopRuntimeExecutor {
-                                reason: "peer DISMISS".to_string(),
-                            },
-                        )
+                        .stop_runtime_executor(&session_id, "peer DISMISS")
                         .await;
                     adapter
                         .notify_comms_drain_exited(&session_id, DrainExitReason::Dismissed)

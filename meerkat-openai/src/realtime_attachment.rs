@@ -312,9 +312,8 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::core_executor::{
-        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+        CoreApplyOutput, CoreExecutor, CoreExecutorError, CoreExecutorInterruptHandle,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::types::{SessionId, ToolCall, ToolResult};
@@ -353,7 +352,17 @@ mod tests {
             ))
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -386,7 +395,17 @@ mod tests {
             ))
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -615,8 +634,29 @@ mod tests {
             allow_finish: Arc<Notify>,
         }
 
+        struct BlockingExecutorInterruptHandle {
+            cancel_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl CoreExecutorInterruptHandle for BlockingExecutorInterruptHandle {
+            async fn hard_cancel_current_run(
+                &self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
         #[async_trait]
         impl CoreExecutor for BlockingExecutor {
+            fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+                Some(Arc::new(BlockingExecutorInterruptHandle {
+                    cancel_calls: Arc::clone(&self.cancel_calls),
+                }))
+            }
+
             async fn apply(
                 &mut self,
                 run_id: RunId,
@@ -640,13 +680,17 @@ mod tests {
                 })
             }
 
-            async fn control(
+            async fn cancel_after_boundary(
                 &mut self,
-                command: RunControlCommand,
+                _reason: String,
             ) -> Result<(), CoreExecutorError> {
-                if matches!(command, RunControlCommand::CancelCurrentRun { .. }) {
-                    self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-                }
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
                 Ok(())
             }
         }

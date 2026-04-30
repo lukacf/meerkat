@@ -2,7 +2,7 @@
 //! Phase 0 external-boundary contract tests for runtime control-plane seams.
 //!
 //! These exercise the live `MeerkatMachine` surface and its out-of-band
-//! control channel rather than only in-crate helpers.
+//! effect channel rather than only in-crate helpers.
 
 use std::sync::{
     Arc,
@@ -14,7 +14,6 @@ use chrono::Utc;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreApplyTerminal, CoreExecutor, CoreExecutorError,
 };
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -75,11 +74,11 @@ fn control_plane_contract_async_stop_terminalization_has_one_call_site() {
     let source = fs::read_to_string(crate_root.join("src/control_plane.rs"))
         .expect("control_plane.rs should be readable");
     let start = source
-        .find("pub(crate) async fn apply_executor_control")
-        .expect("apply_executor_control should exist");
+        .find("pub(crate) async fn apply_executor_effect")
+        .expect("apply_executor_effect should exist");
     let end = source[start..]
-        .find("/// Drain any ready executor control commands")
-        .expect("drain_ready_executor_controls should follow apply_executor_control");
+        .find("/// Drain any ready executor effects")
+        .expect("drain_ready_executor_effects should follow apply_executor_effect");
     let apply_body = &source[start..start + end];
 
     let split_terminalizers = [
@@ -95,12 +94,12 @@ fn control_plane_contract_async_stop_terminalization_has_one_call_site() {
     assert!(
         offenders.is_empty(),
         "async stop terminalization must be a single canonical call from \
-         apply_executor_control; found split terminalizers: {offenders:?}"
+         apply_executor_effect; found split terminalizers: {offenders:?}"
     );
     assert_eq!(
         apply_body.matches("terminalize_async_stop(").count(),
         1,
-        "apply_executor_control should call terminalize_async_stop exactly once"
+        "apply_executor_effect should call terminalize_async_stop exactly once"
     );
 }
 
@@ -132,10 +131,12 @@ impl CoreExecutor for RecordingExecutor {
         })
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-            self.stop_calls.fetch_add(1, Ordering::SeqCst);
-        }
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.stop_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -243,12 +244,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
     );
 
     adapter
-        .stop_runtime_executor(
-            &sid,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "shutdown contract".into(),
-            },
-        )
+        .stop_runtime_executor(&sid, "shutdown contract")
         .await
         .unwrap();
 
@@ -307,12 +303,7 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
     let handle = handle.expect("accepted input should expose a wait handle");
 
     adapter
-        .stop_runtime_executor(
-            &sid,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "persistent stopped state".into(),
-            },
-        )
+        .stop_runtime_executor(&sid, "persistent stopped state")
         .await
         .unwrap();
 

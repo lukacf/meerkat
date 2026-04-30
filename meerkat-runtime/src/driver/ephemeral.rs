@@ -1196,7 +1196,9 @@ impl EphemeralRuntimeDriver {
         &mut self,
     ) -> Result<(), RuntimeDriverError> {
         self.dsl_apply(
-            mm_dsl::MeerkatMachineInput::StopRuntimeExecutor,
+            mm_dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                reason: "runtime executor stopped".to_string(),
+            },
             "StopRuntimeExecutor",
         )
     }

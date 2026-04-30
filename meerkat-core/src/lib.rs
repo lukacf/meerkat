@@ -201,8 +201,8 @@ pub use interaction::{
 pub use lifecycle::{
     ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
     CoreApplyFailureCauseKind, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
-    CoreExecutorError, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
-    RunControlCommand, RunEvent, RunId, RunPrimitive, StagedRunInput,
+    CoreExecutorBoundaryHandle, CoreExecutorError, CoreExecutorInterruptHandle, CoreRenderable,
+    InputId, RunApplyBoundary, RunBoundaryReceipt, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
 pub use mcp_config::{McpConfig, McpConfigError, McpScope, McpServerConfig, McpServerWithScope};
 pub use model_defaults::ModelOperationalDefaultsResolver;

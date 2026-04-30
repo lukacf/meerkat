@@ -50,6 +50,7 @@ pub mod composition;
 pub(crate) mod control_plane;
 pub mod driver;
 pub mod durability;
+pub(crate) mod effect;
 #[doc(hidden)]
 pub mod generated;
 pub mod handles;
@@ -77,6 +78,7 @@ pub mod service_ext;
 pub mod silent_intent;
 pub mod store;
 pub mod traits;
+pub(crate) mod user_interrupt;
 
 use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata as RuntimeStampedTurnMetadata;
 

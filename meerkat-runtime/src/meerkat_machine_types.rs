@@ -21,7 +21,6 @@ use meerkat_core::image_generation::{
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{ModelId, RunPrimitive};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::lifecycle::{RunBoundaryReceipt, RunId as LifecycleRunId};
@@ -361,7 +360,7 @@ pub(crate) enum MeerkatMachineCommand {
     },
     StopRuntimeExecutor {
         session_id: SessionId,
-        command: RunControlCommand,
+        reason: String,
     },
     ContainsSession {
         session_id: SessionId,

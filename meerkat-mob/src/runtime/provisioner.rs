@@ -15,10 +15,9 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::event_injector::SubscribableInjector;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorControl, CoreExecutorError,
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
 };
-#[cfg(feature = "runtime-adapter")]
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 #[cfg(feature = "runtime-adapter")]
@@ -726,7 +725,7 @@ impl MobSessionRuntimeExecutor {
 }
 
 #[cfg(feature = "runtime-adapter")]
-struct MobSessionRuntimeControlHandle {
+struct MobSessionRuntimeBoundaryHandle {
     session_service: Arc<dyn MobSessionService>,
     bridge_session_id: SessionId,
 }
@@ -734,27 +733,34 @@ struct MobSessionRuntimeControlHandle {
 #[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl CoreExecutorControl for MobSessionRuntimeControlHandle {
-    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        if command.should_interrupt_current_run() {
-            return self
-                .session_service
-                .interrupt(&self.bridge_session_id)
-                .await
-                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
-        }
-        if matches!(command, RunControlCommand::InterruptYielding) {
-            return self
-                .session_service
-                .cancel_after_boundary(&self.bridge_session_id)
-                .await
-                .or_else(|err| match err {
-                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
-                    err => Err(err),
-                })
-                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
-        }
-        Ok(())
+impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .cancel_after_boundary(&self.bridge_session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+struct MobSessionRuntimeInterruptHandle {
+    session_service: Arc<dyn MobSessionService>,
+    bridge_session_id: SessionId,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl CoreExecutorInterruptHandle for MobSessionRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .interrupt(&self.bridge_session_id)
+            .await
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 }
 
@@ -794,8 +800,15 @@ fn pending_system_context_appends_for_runtime_executor(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
-    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
-        Some(Arc::new(MobSessionRuntimeControlHandle {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(MobSessionRuntimeBoundaryHandle {
+            session_service: Arc::clone(&self.session_service),
+            bridge_session_id: self.bridge_session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(MobSessionRuntimeInterruptHandle {
             session_service: Arc::clone(&self.session_service),
             bridge_session_id: self.bridge_session_id.clone(),
         }))
@@ -881,56 +894,48 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            command if command.should_interrupt_current_run() => self
-                .session_service
-                .interrupt(&self.bridge_session_id)
-                .await
-                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string())),
-            RunControlCommand::InterruptYielding => self
-                .session_service
-                .cancel_after_boundary(&self.bridge_session_id)
-                .await
-                .or_else(|err| match err {
-                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
-                    err => Err(err),
-                })
-                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string())),
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                tracing::debug!(
-                    bridge_session_id = %self.bridge_session_id,
-                    "mob runtime executor received StopRuntimeExecutor; discarding live session"
-                );
-                let discard_result = self
-                    .session_service
-                    .discard_live_session(&self.bridge_session_id)
-                    .await;
-                self.runtime_adapter
-                    .unregister_session(&self.bridge_session_id)
-                    .await;
-                let removed = {
-                    let mut runtime_sessions = self.runtime_sessions.write().await;
-                    let should_remove = runtime_sessions
-                        .get(&self.bridge_session_id)
-                        .is_some_and(|state| Arc::ptr_eq(state, &self.state));
-                    if should_remove {
-                        runtime_sessions.remove(&self.bridge_session_id)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(state) = removed {
-                    state.clear_queued_turns().await;
-                } else {
-                    self.state.clear_queued_turns().await;
-                }
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
-                }
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .cancel_after_boundary(&self.bridge_session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        tracing::debug!(
+            bridge_session_id = %self.bridge_session_id,
+            "mob runtime executor received stop; discarding live session"
+        );
+        let discard_result = self
+            .session_service
+            .discard_live_session(&self.bridge_session_id)
+            .await;
+        self.runtime_adapter
+            .unregister_session(&self.bridge_session_id)
+            .await;
+        let removed = {
+            let mut runtime_sessions = self.runtime_sessions.write().await;
+            let should_remove = runtime_sessions
+                .get(&self.bridge_session_id)
+                .is_some_and(|state| Arc::ptr_eq(state, &self.state));
+            if should_remove {
+                runtime_sessions.remove(&self.bridge_session_id)
+            } else {
+                None
             }
-            _ => Ok(()),
+        };
+        if let Some(state) = removed {
+            state.clear_queued_turns().await;
+        } else {
+            self.state.clear_queued_turns().await;
+        }
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
         }
     }
 }

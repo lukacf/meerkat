@@ -344,9 +344,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
     driver: crate::meerkat_machine::SharedDriver,
     mut executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     mut wake_rx: tokio::sync::mpsc::Receiver<()>,
-    mut control_rx: tokio::sync::mpsc::Receiver<
-        meerkat_core::lifecycle::run_control::RunControlCommand,
-    >,
+    mut effect_rx: tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<crate::meerkat_machine::SharedCompletionRegistry>,
     completion_feed: Option<std::sync::Arc<dyn meerkat_core::completion_feed::CompletionFeed>>,
     epoch_cursor_state: Option<std::sync::Arc<meerkat_core::EpochCursorState>>,
@@ -398,14 +396,14 @@ pub(crate) fn spawn_runtime_loop_with_completions(
 
             tokio::select! {
                 biased;
-                maybe_command = control_rx.recv() => {
-                    match maybe_command {
-                        Some(command) => {
-                            if crate::control_plane::apply_executor_control(
+                maybe_effect = effect_rx.recv() => {
+                    match maybe_effect {
+                        Some(effect) => {
+                            if crate::control_plane::apply_executor_effect(
                                 &driver,
                                 completions.as_ref(),
                                 &mut *executor,
-                                command,
+                                effect,
                             )
                             .await
                             {
@@ -421,7 +419,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             if process_queue(
                                 &driver,
                                 &mut *executor,
-                                &mut control_rx,
+                                &mut effect_rx,
                                 completions.as_ref(),
                             )
                             .await
@@ -442,7 +440,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 && process_queue(
                                     &driver,
                                     &mut *executor,
-                                    &mut control_rx,
+                                    &mut effect_rx,
                                     completions.as_ref(),
                                 )
                                 .await
@@ -494,7 +492,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                 if process_queue(
                                     &driver,
                                     &mut *executor,
-                                    &mut control_rx,
+                                    &mut effect_rx,
                                     completions.as_ref(),
                                 )
                                 .await
@@ -592,17 +590,15 @@ async fn maybe_inject_feed_wake(
 async fn process_queue(
     driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
-    control_rx: &mut tokio::sync::mpsc::Receiver<
-        meerkat_core::lifecycle::run_control::RunControlCommand,
-    >,
+    effect_rx: &mut tokio::sync::mpsc::Receiver<crate::effect::RuntimeEffect>,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
 ) -> bool {
     loop {
-        if crate::control_plane::drain_ready_executor_controls(
+        if crate::control_plane::drain_ready_executor_effects(
             driver,
             completions,
             executor,
-            control_rx,
+            effect_rx,
         )
         .await
         {
@@ -750,9 +746,9 @@ async fn process_queue(
                         {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
                             let _ = executor
-                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
-                                    reason: format!("runtime loop commit failed for run {run_id}: {err}"),
-                                })
+                                .stop_runtime_executor(format!(
+                                    "runtime loop commit failed for run {run_id}: {err}"
+                                ))
                                 .await;
                             return true;
                         }
@@ -777,9 +773,9 @@ async fn process_queue(
                         {
                             tracing::error!(error = %err, "failed to record run-failed event");
                             let _ = executor
-                                .control(meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
-                                    reason: format!("runtime failure snapshot failed: {err}"),
-                                })
+                                .stop_runtime_executor(format!(
+                                    "runtime failure snapshot failed: {err}"
+                                ))
                                 .await;
                             // Resolve waiter before breaking so callers don't hang.
                             if let Some(completions) = completions.as_ref() {

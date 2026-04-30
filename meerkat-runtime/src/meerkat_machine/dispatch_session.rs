@@ -306,34 +306,10 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let previous_dsl_state = match self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::CancelAfterBoundary,
-                        "CancelAfterBoundary",
-                    )
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(_) => {
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(RuntimeDriverError::NotReady { state });
-                    }
-                };
-                if let Err(err) = self.cancel_after_boundary_inner(&session_id).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
-                }
+                self.cancel_after_boundary_inner(&session_id).await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
-            MeerkatMachineCommand::StopRuntimeExecutor {
-                session_id,
-                command,
-            } => {
+            MeerkatMachineCommand::StopRuntimeExecutor { session_id, reason } => {
                 // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
                 if matches!(
                     self.existing_session_runtime_state(&session_id).await,
@@ -348,19 +324,8 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let previous_dsl_state = self
-                    .stage_session_dsl_input(
-                        &session_id,
-                        crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor,
-                        "StopRuntimeExecutor",
-                    )
-                    .await
-                    .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
-                if let Err(err) = self.stop_runtime_executor_inner(&session_id, command).await {
-                    self.restore_session_dsl_state(&session_id, previous_dsl_state)
-                        .await;
-                    return Err(err);
-                }
+                self.stop_runtime_executor_inner(&session_id, reason)
+                    .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             MeerkatMachineCommand::ContainsSession { session_id } => {

@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use meerkat::surface::configure_peer_ingress;
 use meerkat::{
     CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService, RunResult, Session,
+    SessionServiceControlExt,
     surface::{
         SurfaceRuntimeMaterializeError, SurfaceSessionRecoveryContext,
         SurfaceSessionRecoveryOverrides, build_recovered_session, materialize_session,
@@ -11,8 +12,10 @@ use meerkat::{
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::AgentError;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
+};
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
 };
@@ -427,6 +430,42 @@ struct McpSessionRuntimeExecutor {
     state: Arc<McpRuntimeSessionState>,
 }
 
+struct McpSessionRuntimeBoundaryHandle {
+    context: McpRuntimeIngressContext,
+    session_id: SessionId,
+}
+
+#[async_trait]
+impl CoreExecutorBoundaryHandle for McpSessionRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.context
+            .service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
+struct McpSessionRuntimeInterruptHandle {
+    context: McpRuntimeIngressContext,
+    session_id: SessionId,
+}
+
+#[async_trait]
+impl CoreExecutorInterruptHandle for McpSessionRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.context
+            .service
+            .interrupt(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
 impl McpSessionRuntimeExecutor {
     fn new(
         context: McpRuntimeIngressContext,
@@ -585,6 +624,20 @@ async fn apply_runtime_turn(
 
 #[async_trait]
 impl CoreExecutor for McpSessionRuntimeExecutor {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(McpSessionRuntimeBoundaryHandle {
+            context: self.context.clone(),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(McpSessionRuntimeInterruptHandle {
+            context: self.context.clone(),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -601,27 +654,28 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
         .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } => self
-                .context
-                .service
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = self
-                    .context
-                    .service
-                    .discard_live_session(&self.session_id)
-                    .await;
-                self.context.clear_session(&self.session_id).await;
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
-                }
-            }
-            _ => Ok(()),
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.context
+            .service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        let discard_result = self
+            .context
+            .service
+            .discard_live_session(&self.session_id)
+            .await;
+        self.context.clear_session(&self.session_id).await;
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
     }
 }

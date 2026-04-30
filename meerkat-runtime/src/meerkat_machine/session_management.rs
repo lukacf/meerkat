@@ -105,7 +105,9 @@ impl MeerkatMachine {
             RuntimeState::Retired => Some(super::dsl::MeerkatMachineInput::Retire {
                 session_id: super::dsl::SessionId::from_domain(session_id),
             }),
-            RuntimeState::Stopped => Some(super::dsl::MeerkatMachineInput::StopRuntimeExecutor),
+            RuntimeState::Stopped => Some(super::dsl::MeerkatMachineInput::StopRuntimeExecutor {
+                reason: "recovered stopped runtime".to_string(),
+            }),
             RuntimeState::Destroyed => Some(super::dsl::MeerkatMachineInput::Destroy {
                 session_id: super::dsl::SessionId::from_domain(session_id),
             }),
@@ -457,9 +459,10 @@ impl MeerkatMachine {
         // Get the completion feed from the registry for feed-based idle wake.
         let completion_feed = ops_lifecycle.completion_feed_handle();
 
-        let control_handle = executor.control_handle();
+        let boundary_handle = executor.boundary_handle();
+        let interrupt_handle = executor.interrupt_handle();
         let (wake_tx, wake_rx) = mpsc::channel(16);
-        let (control_tx, control_rx) = mpsc::channel(16);
+        let (effect_tx, effect_rx) = mpsc::channel(16);
         let entry_cursor_state = {
             let sessions = self.sessions.read().await;
             sessions
@@ -471,7 +474,7 @@ impl MeerkatMachine {
                 driver.clone(),
                 executor,
                 wake_rx,
-                control_rx,
+                effect_rx,
                 Some(completions.clone()),
                 Some(completion_feed),
                 entry_cursor_state,
@@ -500,8 +503,9 @@ impl MeerkatMachine {
                             Some(loop_handle) => {
                                 entry.attach_runtime_loop(
                                     wake_tx.clone(),
-                                    control_tx,
-                                    control_handle,
+                                    effect_tx,
+                                    boundary_handle,
+                                    interrupt_handle,
                                     loop_handle,
                                 );
                                 (true, false)

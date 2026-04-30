@@ -261,7 +261,7 @@ The distinction is deliberate: once the binding is gone, deterministic recovery 
 
 ### Eager cancel-after-boundary
 
-Step 2 of the flow drives any in-flight turn through `cancel_after_boundary_inner`, which delivers `RunControlCommand::Cancel` to the agent loop. This is idempotent and gated on control-channel presence — calling it on an idle session is a no-op. It ensures the turn reaches a safe boundary before the guard on `MarkLiveTopologyDetached` allows the binding to drop.
+Step 2 of the flow drives any in-flight turn through `cancel_after_boundary_inner`, which sends the runtime loop a boundary-cancel effect and uses the live boundary handle when the executor exposes one. This is idempotent and gated on runtime attachment presence — calling it on an idle session is a no-op. It ensures the turn reaches a safe boundary before the guard on `MarkLiveTopologyDetached` allows the binding to drop.
 
 ## End-to-end example
 

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
+};
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
 };
@@ -138,6 +140,40 @@ pub struct PersistentRuntimeExecutor {
     session_id: SessionId,
 }
 
+struct PersistentRuntimeBoundaryHandle {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorBoundaryHandle for PersistentRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|error| match error {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                error => Err(error),
+            })
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
+struct PersistentRuntimeInterruptHandle {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorInterruptHandle for PersistentRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.service
+            .interrupt(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
 impl PersistentRuntimeExecutor {
     pub fn new(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
@@ -207,6 +243,20 @@ fn start_turn_request_from_primitive(
 
 #[async_trait::async_trait]
 impl CoreExecutor for PersistentRuntimeExecutor {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(PersistentRuntimeBoundaryHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(PersistentRuntimeInterruptHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -252,27 +302,19 @@ impl CoreExecutor for PersistentRuntimeExecutor {
             .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } => self
-                .service
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
-            RunControlCommand::CancelAfterBoundary { .. } => self
-                .service
-                .cancel_after_boundary(&self.session_id)
-                .await
-                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = self.service.discard_live_session(&self.session_id).await;
-                self.adapter.unregister_session(&self.session_id).await;
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
-                }
-            }
-            _ => Ok(()),
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        let discard_result = self.service.discard_live_session(&self.session_id).await;
+        self.adapter.unregister_session(&self.session_id).await;
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
         }
     }
 }
@@ -726,9 +768,7 @@ mod tests {
             result.session_id.clone(),
         );
         executor
-            .control(RunControlCommand::StopRuntimeExecutor {
-                reason: "test stop".to_string(),
-            })
+            .stop_runtime_executor("test stop".to_string())
             .await
             .expect("stop runtime executor");
 
@@ -764,15 +804,15 @@ mod tests {
         .await
         .expect("materialize session");
 
-        let mut executor = PersistentRuntimeExecutor::new(
+        let executor = PersistentRuntimeExecutor::new(
             Arc::clone(&service),
             Arc::clone(&adapter),
             result.session_id.clone(),
         );
         executor
-            .control(RunControlCommand::CancelCurrentRun {
-                reason: "test cancel".to_string(),
-            })
+            .interrupt_handle()
+            .expect("interrupt handle")
+            .hard_cancel_current_run("test cancel".to_string())
             .await
             .expect_err("cancel without an active run must surface the interrupt error");
 
@@ -807,9 +847,7 @@ mod tests {
             result.session_id.clone(),
         );
         executor
-            .control(RunControlCommand::CancelAfterBoundary {
-                reason: "test boundary cancel".to_string(),
-            })
+            .cancel_after_boundary("test boundary cancel".to_string())
             .await
             .expect_err(
                 "boundary cancel without an active run must surface the session running-state error",

@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -76,7 +75,11 @@ impl CoreExecutor for ResultExecutor {
         ))
     }
 
-    async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }
@@ -111,7 +114,11 @@ impl CoreExecutor for RecordingBatchExecutor {
         ))
     }
 
-    async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }

@@ -1279,10 +1279,25 @@ mod scenario_09_session_service {
 #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
 mod scenario_10_memory {
     use super::*;
+    use std::any::TypeId;
+
     use meerkat_core::AgentBuilder as CoreAgentBuilder;
     use meerkat_core::CompactionConfig;
     use meerkat_memory::SimpleMemoryStore;
     use meerkat_session::DefaultCompactor;
+
+    struct TestFactoryAuthority;
+
+    fn test_factory_authority_type_id() -> TypeId {
+        TypeId::of::<TestFactoryAuthority>()
+    }
+
+    inventory::submit! {
+        meerkat_core::agent::AgentFactoryPolicyAuthorityRegistration::test_harness(
+            "smoke_meerkat_sdk::scenario_10_memory::TestFactoryAuthority",
+            test_factory_authority_type_id,
+        )
+    }
 
     #[tokio::test]
     #[ignore = "lane:e2e-smoke"]
@@ -1357,7 +1372,12 @@ mod scenario_10_memory {
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
+        let authority = meerkat_core::agent::AgentFactoryPolicyAuthority::from_registered_source(
+            &TestFactoryAuthority,
+        )
+        .expect("memory smoke factory policy authority");
         let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
+            &authority,
             builder,
             llm_adapter,
             memory_tools,

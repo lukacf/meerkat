@@ -4,6 +4,7 @@
     clippy::unwrap_used
 )]
 
+use std::any::TypeId;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -17,6 +18,19 @@ use meerkat_core::{
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::{Mutex, mpsc};
+
+struct TestFactoryAuthority;
+
+fn test_factory_authority_type_id() -> TypeId {
+    TypeId::of::<TestFactoryAuthority>()
+}
+
+inventory::submit! {
+    meerkat_core::agent::AgentFactoryPolicyAuthorityRegistration::test_harness(
+        "hooks_behavior::TestFactoryAuthority",
+        test_factory_authority_type_id,
+    )
+}
 
 #[derive(Clone, Copy)]
 enum ClientMode {
@@ -299,7 +313,11 @@ async fn build_agent(
         ))
         .with_hook_engine(Arc::new(hooks));
 
-    meerkat_core::agent::build_agent_after_factory_policy(builder, client, tools, store)
+    let authority = meerkat_core::agent::AgentFactoryPolicyAuthority::from_registered_source(
+        &TestFactoryAuthority,
+    )
+    .expect("hook behavior factory policy authority");
+    meerkat_core::agent::build_agent_after_factory_policy(&authority, builder, client, tools, store)
         .await
         .expect("factory policy test builder")
 }

@@ -77,14 +77,21 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          public builder impl"
     );
     assert!(
-        builder.contains("pub fn build_agent_after_factory_policy")
-            && builder.contains("#[track_caller]")
-            && builder.contains(
-                "let caller_validation = validate_factory_policy_caller(Location::caller());"
-            )
+        builder.contains("pub struct AgentFactoryPolicyAuthority")
+            && builder.contains("pub fn from_registered_source<A: 'static>")
+            && builder.contains("let authority_validation = authority.validate();")
+            && builder.contains("authority_validation?")
             && builder.contains("validate_factory_policy()?"),
         "canonical factory construction must cross into core through a \
-         validating factory-policy seam that rejects non-factory callers"
+         validating factory-policy seam requiring a typed factory authority"
+    );
+    assert!(
+        !builder.contains("Location::caller")
+            && !builder.contains("is_allowed_factory_policy_callsite")
+            && !builder.contains("validate_factory_policy_caller"),
+        "core factory authority must not trust source file path suffixes; \
+         downstream crates can spoof callsites by placing code under matching \
+         paths"
     );
     assert!(
         !builder.contains("pub struct AgentFactoryBuildToken")
@@ -139,10 +146,13 @@ fn core_factory_authority_is_not_publicly_forgeable() {
          tied to a non-forgeable factory-owned value"
     );
     assert!(
-        !builder.contains("pub fn agent_factory_policy_authority"),
-        "core factory authority must not expose a safe public minting helper; \
-         downstream callers can otherwise mint the opaque authority and call \
-         the factory-policy seam after synthesizing public metadata"
+        !builder.contains("pub fn agent_factory_policy_authority")
+            && !builder.contains("pub const fn new_unchecked")
+            && !builder.contains("pub fn new_unchecked"),
+        "core factory authority must not expose a safe public minting helper \
+         or unchecked constructor; downstream callers can otherwise mint the \
+         opaque authority and call the factory-policy seam after synthesizing \
+         public metadata"
     );
     assert!(
         !builder
@@ -151,11 +161,9 @@ fn core_factory_authority_is_not_publicly_forgeable() {
          trait methods make authority forgeable by empty downstream impls"
     );
     assert!(
-        !agent_mod.contains("AgentFactoryPolicyAuthority")
-            && !agent_mod.contains("agent_factory_policy_authority"),
-        "meerkat_core::agent must not re-export a public factory-authority \
-         type, trait, or safe minting helper that downstream crates can name, \
-         implement, or call"
+        !agent_mod.contains("agent_factory_policy_authority"),
+        "meerkat_core::agent must not re-export a safe public factory-authority \
+         minting helper that downstream crates can call"
     );
     assert!(
         !factory.contains("impl meerkat_core::agent::AgentFactoryPolicyAuthority for AgentFactory"),

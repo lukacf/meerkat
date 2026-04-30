@@ -713,9 +713,9 @@ fn public_agentfactory_value_is_not_core_policy_authority() {
     let builder = std::fs::read_to_string(&builder).expect("read core AgentBuilder implementation");
 
     assert!(
-        builder.contains(
-            "let caller_validation = validate_factory_policy_caller(Location::caller());"
-        ) && !builder.contains("_authority: &A")
+        builder.contains("pub struct AgentFactoryPolicyAuthority")
+            && builder.contains("pub fn from_registered_source<A: 'static>")
+            && !builder.contains("Location::caller")
             && !builder.contains("pub fn agent_factory_policy_authority"),
         "core factory-policy build must require the concrete opaque core \
          authority boundary; a public AgentFactory value or safe public helper \
@@ -723,26 +723,18 @@ fn public_agentfactory_value_is_not_core_policy_authority() {
     );
 }
 
-#[tokio::test]
-async fn core_factory_policy_seam_rejects_non_factory_callsite() {
-    let result = meerkat_core::agent::build_agent_after_factory_policy(
-        meerkat_core::AgentBuilder::new(),
-        Arc::new(ImageAgentLlmClient),
-        Arc::new(RecordingDispatcher {
-            called: Arc::new(AtomicBool::new(false)),
-        }),
-        Arc::new(meerkat_store::StoreAdapter::new(Arc::new(
-            TestSessionStore::new(),
-        ))),
-    )
-    .await;
+#[test]
+fn core_factory_policy_authority_rejects_public_source_value() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let factory = AgentFactory::new(temp.path().join("sessions"));
+    let result = meerkat_core::agent::AgentFactoryPolicyAuthority::from_registered_source(&factory);
 
     assert!(
         matches!(
             result,
             Err(meerkat_core::AgentBuildPolicyError::InvalidFactoryAuthority)
         ),
-        "a safe downstream callsite must not reach metadata validation by \
-         fabricating public AgentBuilder inputs"
+        "a safe downstream caller must not mint core factory authority from \
+         the public AgentFactory value"
     );
 }

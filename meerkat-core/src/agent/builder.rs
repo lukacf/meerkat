@@ -18,7 +18,7 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
-use std::{future::Future, panic::Location, sync::Arc};
+use std::{any::TypeId, future::Future, sync::Arc};
 use tokio::sync::mpsc;
 
 use super::{
@@ -81,22 +81,110 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
 }
 
-fn is_allowed_factory_policy_callsite(file: &str) -> bool {
-    let normalized = file.replace('\\', "/");
-    normalized.ends_with("meerkat/src/factory.rs")
-        || (cfg!(debug_assertions)
-            && (normalized.ends_with("meerkat-core/tests/hooks_behavior.rs")
-                || normalized.ends_with("meerkat-session/tests/ephemeral_contract.rs")
-                || normalized.ends_with("meerkat-mob/src/runtime/tests.rs")
-                || normalized.ends_with("meerkat/tests/smoke_meerkat_sdk.rs")))
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFactoryPolicyAuthorityRegistrationKind {
+    CanonicalFactory,
+    TestHarness,
 }
 
-fn validate_factory_policy_caller(caller: &Location<'_>) -> Result<(), AgentBuildPolicyError> {
-    if is_allowed_factory_policy_callsite(caller.file()) {
-        Ok(())
-    } else {
-        Err(AgentBuildPolicyError::InvalidFactoryAuthority)
+/// Registration for a private type that can mint core factory-policy authority.
+///
+/// The canonical facade registers a private source type. Core validates the
+/// source by `TypeId` rather than by caller file paths or stringified Rust type
+/// paths, so downstream code cannot spoof the canonical authority by copying a
+/// source path or module/type name.
+#[doc(hidden)]
+pub struct AgentFactoryPolicyAuthorityRegistration {
+    kind: AgentFactoryPolicyAuthorityRegistrationKind,
+    type_id: fn() -> TypeId,
+}
+
+inventory::collect!(AgentFactoryPolicyAuthorityRegistration);
+
+impl AgentFactoryPolicyAuthorityRegistration {
+    #[doc(hidden)]
+    pub const fn canonical_factory(_label: &'static str, type_id: fn() -> TypeId) -> Self {
+        Self {
+            kind: AgentFactoryPolicyAuthorityRegistrationKind::CanonicalFactory,
+            type_id,
+        }
     }
+
+    #[doc(hidden)]
+    pub const fn test_harness(_label: &'static str, type_id: fn() -> TypeId) -> Self {
+        Self {
+            kind: AgentFactoryPolicyAuthorityRegistrationKind::TestHarness,
+            type_id,
+        }
+    }
+}
+
+mod factory_policy_private {
+    #[derive(Debug)]
+    pub struct Seal {
+        _private: (),
+    }
+
+    impl Seal {
+        pub(super) fn new() -> Self {
+            Self { _private: () }
+        }
+    }
+}
+
+/// Opaque authority required to cross from facade factory policy into core
+/// agent construction.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct AgentFactoryPolicyAuthority {
+    source_type_id: TypeId,
+    _seal: factory_policy_private::Seal,
+}
+
+impl AgentFactoryPolicyAuthority {
+    #[doc(hidden)]
+    pub fn from_registered_source<A: 'static>(_source: &A) -> Result<Self, AgentBuildPolicyError> {
+        let source_type_id = TypeId::of::<A>();
+        validate_factory_policy_authority_type_id(source_type_id)?;
+        Ok(Self {
+            source_type_id,
+            _seal: factory_policy_private::Seal::new(),
+        })
+    }
+
+    fn validate(&self) -> Result<(), AgentBuildPolicyError> {
+        validate_factory_policy_authority_type_id(self.source_type_id)
+    }
+}
+
+fn validate_factory_policy_authority_type_id(
+    source_type_id: TypeId,
+) -> Result<(), AgentBuildPolicyError> {
+    let mut canonical_count = 0usize;
+    let mut matched_kind = None;
+
+    for registration in inventory::iter::<AgentFactoryPolicyAuthorityRegistration> {
+        if registration.kind == AgentFactoryPolicyAuthorityRegistrationKind::CanonicalFactory {
+            canonical_count += 1;
+        }
+        if (registration.type_id)() == source_type_id {
+            matched_kind = Some(registration.kind);
+        }
+    }
+
+    if matched_kind == Some(AgentFactoryPolicyAuthorityRegistrationKind::CanonicalFactory)
+        && canonical_count == 1
+    {
+        return Ok(());
+    }
+
+    #[cfg(debug_assertions)]
+    if matched_kind == Some(AgentFactoryPolicyAuthorityRegistrationKind::TestHarness) {
+        return Ok(());
+    }
+
+    Err(AgentBuildPolicyError::InvalidFactoryAuthority)
 }
 
 /// Build an agent after the canonical factory has composed policy metadata.
@@ -105,8 +193,8 @@ fn validate_factory_policy_caller(caller: &Location<'_>) -> Result<(), AgentBuil
 /// surrounding factory has attached durable session metadata, durable
 /// build-state metadata, and a runtime turn-state handle to the builder.
 #[doc(hidden)]
-#[track_caller]
 pub fn build_agent_after_factory_policy<C, T, S>(
+    authority: &AgentFactoryPolicyAuthority,
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
@@ -117,9 +205,9 @@ where
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
-    let caller_validation = validate_factory_policy_caller(Location::caller());
+    let authority_validation = authority.validate();
     async move {
-        caller_validation?;
+        authority_validation?;
         builder.validate_factory_policy()?;
         Ok(builder.build_inner(client, tools, store).await)
     }

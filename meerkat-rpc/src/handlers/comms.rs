@@ -163,7 +163,10 @@ pub async fn handle_peers(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::comms::CommsCommandRequest;
+    use meerkat_core::comms::{
+        CommsCommandRequest, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
+        PeerDirectorySource, PeerId, PeerName, PeerReachability, PeerSendability, PeerTransport,
+    };
 
     #[test]
     fn deserialize_input_command() {
@@ -248,6 +251,44 @@ mod tests {
         assert_eq!(
             payload["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
+        );
+    }
+
+    #[test]
+    fn rpc_peer_directory_response_uses_typed_core_wire_contract() {
+        let result = CommsPeersResult::from_entries(&[sample_peer_directory_entry()]);
+        let value = serde_json::to_value(result).unwrap();
+
+        assert_peer_directory_wire(&value);
+    }
+
+    fn sample_peer_directory_entry() -> PeerDirectoryEntry {
+        PeerDirectoryEntry {
+            peer_id: PeerId::new(),
+            name: PeerName::new("agent").unwrap(),
+            address: PeerAddress::new(PeerTransport::Inproc, "agent"),
+            source: PeerDirectorySource::Inproc,
+            sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
+            capabilities: PeerCapabilitySet::default()
+                .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
+            reachability: PeerReachability::Reachable,
+            last_unreachable_reason: None,
+            meta: meerkat_core::PeerMeta::default(),
+        }
+    }
+
+    fn assert_peer_directory_wire(result: &serde_json::Value) {
+        let peer = &result["peers"][0];
+
+        assert_eq!(peer["source"], "inproc");
+        assert_eq!(
+            peer["sendable_kinds"],
+            serde_json::json!(["peer_message", "peer_request"])
+        );
+        assert_eq!(peer["capabilities"]["version"], 1);
+        assert_eq!(
+            peer["capabilities"]["extensions"]["vendor.echo"]["enabled"],
+            true
         );
     }
 }

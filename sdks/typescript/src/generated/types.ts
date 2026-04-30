@@ -746,20 +746,30 @@ export interface CommsPeersParams {
   session_id: string;
 }
 
-export interface CommsPeerEntry {
-  address: Record<string, unknown>;
-  capabilities: unknown;
-  last_unreachable_reason?: CommsPeerUnreachableReason;
+export interface PeerAddress {
+  endpoint: string;
+  transport: PeerTransport;
+}
+
+export interface PeerCapabilitySet {
+  extensions?: Record<string, unknown>;
+  version?: number;
+}
+
+export interface PeerDirectoryEntry {
+  address: PeerAddress;
+  capabilities: PeerCapabilitySet;
+  last_unreachable_reason?: PeerReachabilityReason;
   meta: Record<string, unknown>;
-  name: string;
-  peer_id: string;
-  reachability: CommsPeerReachability;
-  sendable_kinds: string[];
-  source: CommsPeerSource;
+  name: PeerName;
+  peer_id: PeerId;
+  reachability: PeerReachability;
+  sendable_kinds: PeerSendability[];
+  source: PeerDirectorySource;
 }
 
 export interface CommsPeersResult {
-  peers: CommsPeerEntry[];
+  peers: PeerDirectoryEntry[];
 }
 
 export interface SessionStreamOpenParams {
@@ -1370,14 +1380,14 @@ export interface CommsCommandPeerMessage {
   body: string;
   handling_mode?: "queue" | "steer";
   kind: "peer_message";
-  to: string;
+  to: PeerId;
 }
 
 export interface CommsCommandPeerLifecycle {
   kind: "peer_lifecycle";
   lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
   params?: unknown;
-  to: string;
+  to: PeerId;
 }
 
 export interface CommsCommandPeerRequest {
@@ -1386,7 +1396,7 @@ export interface CommsCommandPeerRequest {
   kind: "peer_request";
   params?: unknown;
   stream?: "none" | "reserve_interaction";
-  to: string;
+  to: PeerId;
 }
 
 export interface CommsCommandPeerResponse {
@@ -1395,7 +1405,7 @@ export interface CommsCommandPeerResponse {
   kind: "peer_response";
   result?: unknown;
   status: "accepted" | "completed" | "failed";
-  to: string;
+  to: PeerId;
 }
 
 export type CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse;
@@ -1417,7 +1427,7 @@ export interface CommsSendParamsPeerMessage {
   handling_mode?: "queue" | "steer";
   kind: "peer_message";
   session_id: string;
-  to: string;
+  to: PeerId;
 }
 
 export interface CommsSendParamsPeerLifecycle {
@@ -1425,7 +1435,7 @@ export interface CommsSendParamsPeerLifecycle {
   lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
   params?: unknown;
   session_id: string;
-  to: string;
+  to: PeerId;
 }
 
 export interface CommsSendParamsPeerRequest {
@@ -1435,7 +1445,7 @@ export interface CommsSendParamsPeerRequest {
   params?: unknown;
   session_id: string;
   stream?: "none" | "reserve_interaction";
-  to: string;
+  to: PeerId;
 }
 
 export interface CommsSendParamsPeerResponse {
@@ -1445,7 +1455,7 @@ export interface CommsSendParamsPeerResponse {
   result?: unknown;
   session_id: string;
   status: "accepted" | "completed" | "failed";
-  to: string;
+  to: PeerId;
 }
 
 export type CommsSendParams = CommsSendParamsInput | CommsSendParamsPeerMessage | CommsSendParamsPeerLifecycle | CommsSendParamsPeerRequest | CommsSendParamsPeerResponse;
@@ -1483,11 +1493,19 @@ export interface CommsSendResultPeerResponseSent {
 
 export type CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent;
 
-export type CommsPeerSource = "Trusted" | "Inproc" | "TrustedAndInproc" | "Unknown";
+export type PeerId = string;
 
-export type CommsPeerReachability = "unknown" | "reachable" | "unreachable";
+export type PeerName = string;
 
-export type CommsPeerUnreachableReason = "offline_or_no_ack" | "transport_error" | "admission_dropped" | "unknown";
+export type PeerTransport = "inproc" | "uds" | "tcp";
+
+export type PeerDirectorySource = "trusted" | "inproc" | "trusted_and_inproc" | "unknown";
+
+export type PeerSendability = "peer_message" | "peer_request" | "peer_response";
+
+export type PeerReachability = "unknown" | "reachable" | "unreachable";
+
+export type PeerReachabilityReason = "offline_or_no_ack" | "transport_error" | "admission_dropped";
 
 export interface WireRenderMetadata {
   class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";

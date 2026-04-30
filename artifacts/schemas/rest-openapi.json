@@ -690,87 +690,6 @@
         "title": "CommsParams",
         "type": "object"
       },
-      "CommsPeerEntry": {
-        "description": "One peer entry in the `comms/peers` response.",
-        "properties": {
-          "address": {
-            "$ref": "#/components/schemas/PeerAddress"
-          },
-          "capabilities": true,
-          "last_unreachable_reason": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/CommsPeerUnreachableReason"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "meta": {
-            "$ref": "#/components/schemas/PeerMeta"
-          },
-          "name": {
-            "$ref": "#/components/schemas/PeerName"
-          },
-          "peer_id": {
-            "$ref": "#/components/schemas/PeerId"
-          },
-          "reachability": {
-            "$ref": "#/components/schemas/CommsPeerReachability"
-          },
-          "sendable_kinds": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "source": {
-            "$ref": "#/components/schemas/CommsPeerSource"
-          }
-        },
-        "required": [
-          "name",
-          "peer_id",
-          "address",
-          "source",
-          "sendable_kinds",
-          "capabilities",
-          "reachability",
-          "meta"
-        ],
-        "title": "CommsPeerEntry",
-        "type": "object"
-      },
-      "CommsPeerReachability": {
-        "description": "Stable public reachability labels for `comms/peers` entries.",
-        "enum": [
-          "unknown",
-          "reachable",
-          "unreachable"
-        ],
-        "type": "string"
-      },
-      "CommsPeerSource": {
-        "description": "Stable public source labels for `comms/peers` entries.",
-        "enum": [
-          "Trusted",
-          "Inproc",
-          "TrustedAndInproc",
-          "Unknown"
-        ],
-        "type": "string"
-      },
-      "CommsPeerUnreachableReason": {
-        "description": "Stable public unreachable-reason labels for `comms/peers` entries.",
-        "enum": [
-          "offline_or_no_ack",
-          "transport_error",
-          "admission_dropped",
-          "unknown"
-        ],
-        "type": "string"
-      },
       "CommsPeersParams": {
         "additionalProperties": false,
         "description": "Request payload for `comms/peers`.",
@@ -790,7 +709,7 @@
         "properties": {
           "peers": {
             "items": {
-              "$ref": "#/components/schemas/CommsPeerEntry"
+              "$ref": "#/components/schemas/PeerDirectoryEntry"
             },
             "type": "array"
           }
@@ -6500,8 +6419,106 @@
         ],
         "type": "object"
       },
+      "PeerCapabilitySet": {
+        "description": "Typed peer capability envelope for peer-directory output.\n\nExtensions are intentionally opaque display/integration metadata. Core\nrouting, admission, and policy decisions must use typed fields such as\n[`PeerDirectoryEntry::sendable_kinds`] instead of consulting this bag.",
+        "properties": {
+          "extensions": {
+            "additionalProperties": true,
+            "default": {},
+            "type": "object"
+          },
+          "version": {
+            "default": 1,
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "PeerCorrelationId": {
         "description": "Canonical correlation identifier for the peer request/response lifecycle.\n\nOn the sender side, `PeerCorrelationId` is both the outbound request\nenvelope id and the reservation key for any stream subscription. On the\nreceiver side, every response envelope carries it as `in_reply_to`. The\nsender routes a reply back to its originating request by matching on this\nid — no local id-translation map.\n\nWrapping it in a newtype prevents raw-`Uuid` confusion at every site that\nfires a DSL input, inserts into the subscriber registry, or closes out an\ninbound request.",
+        "type": "string"
+      },
+      "PeerDirectoryEntry": {
+        "properties": {
+          "address": {
+            "$ref": "#/components/schemas/PeerAddress",
+            "description": "Typed transport atom + endpoint. Replaces the prior free-form\n`address: String` so the transport cannot be invented by string\nconcatenation at a call site."
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/PeerCapabilitySet"
+          },
+          "last_unreachable_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeerReachabilityReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PeerMeta",
+            "description": "Supplementary discovery metadata (description, labels)."
+          },
+          "name": {
+            "$ref": "#/components/schemas/PeerName",
+            "description": "Display-only slug. Multiple entries may share a name; none share a\n`peer_id`."
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/PeerId",
+            "description": "Canonical runtime identity — the routing key."
+          },
+          "reachability": {
+            "$ref": "#/components/schemas/PeerReachability"
+          },
+          "sendable_kinds": {
+            "items": {
+              "$ref": "#/components/schemas/PeerSendability"
+            },
+            "type": "array"
+          },
+          "source": {
+            "$ref": "#/components/schemas/PeerDirectorySource"
+          }
+        },
+        "required": [
+          "peer_id",
+          "name",
+          "address",
+          "source",
+          "sendable_kinds",
+          "capabilities",
+          "reachability",
+          "meta"
+        ],
+        "type": "object"
+      },
+      "PeerDirectoryListing": {
+        "properties": {
+          "peers": {
+            "items": {
+              "$ref": "#/components/schemas/PeerDirectoryEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "peers"
+        ],
+        "title": "PeerDirectoryListing",
+        "type": "object"
+      },
+      "PeerDirectorySource": {
+        "enum": [
+          "trusted",
+          "inproc",
+          "trusted_and_inproc",
+          "unknown"
+        ],
         "type": "string"
       },
       "PeerId": {
@@ -6541,6 +6558,30 @@
         "description": "Display-only slug for a peer.\n\n`PeerName` is **not** a routing key after Wave-B V5: the router resolves\nsends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`\nis retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can\nrender a recognisable handle next to the opaque id.",
         "type": "string"
       },
+      "PeerReachability": {
+        "enum": [
+          "unknown",
+          "reachable",
+          "unreachable"
+        ],
+        "type": "string"
+      },
+      "PeerReachabilityReason": {
+        "oneOf": [
+          {
+            "enum": [
+              "offline_or_no_ack",
+              "transport_error"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "admission_dropped",
+            "description": "The peer admitted the transport but rejected our envelope at its\ningress policy gate (untrusted sender, full inbox, etc.). The peer\nis still reachable at the transport level; policy denied us.",
+            "type": "string"
+          }
+        ]
+      },
       "PeerResponseTerminalStatusWire": {
         "description": "Terminal status for dedicated correlated peer-response ingress.",
         "enum": [
@@ -6549,6 +6590,14 @@
           "cancelled"
         ],
         "title": "PeerResponseTerminalStatusWire",
+        "type": "string"
+      },
+      "PeerSendability": {
+        "enum": [
+          "peer_message",
+          "peer_request",
+          "peer_response"
+        ],
         "type": "string"
       },
       "PeerTransport": {
@@ -15490,7 +15539,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/CommsPeersResult"
                 }
               }
             },

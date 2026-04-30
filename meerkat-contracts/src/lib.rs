@@ -1,4 +1,4 @@
-#![recursion_limit = "512"]
+#![recursion_limit = "1024"]
 
 //! Meerkat contracts — canonical wire types, capability model, and error contracts.
 //!
@@ -82,9 +82,6 @@ pub use wire::{
     CommsCommandRequest,
     CommsParams,
     CommsPeerEntry,
-    CommsPeerReachability,
-    CommsPeerSource,
-    CommsPeerUnreachableReason,
     CommsPeersParams,
     CommsPeersResult,
     CommsSendParams,
@@ -205,7 +202,17 @@ pub use wire::{
     MobWireParams,
     MobWireResult,
     ModelsCatalogResponse,
+    PeerAddress,
+    PeerCapabilitySet,
+    PeerDirectoryEntry,
+    PeerDirectoryListing,
+    PeerDirectorySource,
+    PeerId,
+    PeerReachability,
+    PeerReachabilityReason,
     PeerResponseTerminalStatusWire,
+    PeerSendability,
+    PeerTransport,
     PrincipalId,
     PrincipalKind,
     PrincipalRef,

@@ -21,8 +21,9 @@ use indexmap::IndexMap;
 use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName, PeerReachability,
-    PeerReachabilityReason, PeerRoute, SendError, SendReceipt, TrustedPeerDescriptor,
+    CommsCommand, PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
+    PeerReachability, PeerReachabilityReason, PeerRoute, PeerSendability, SendError, SendReceipt,
+    TrustedPeerDescriptor,
 };
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
@@ -416,12 +417,8 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     peer_id,
                     address: peer.address.clone(),
                     source: PeerDirectorySource::Trusted,
-                    sendable_kinds: vec![
-                        "peer_message".to_string(),
-                        "peer_request".to_string(),
-                        "peer_response".to_string(),
-                    ],
-                    capabilities: serde_json::json!({}),
+                    sendable_kinds: PeerSendability::directory_defaults(),
+                    capabilities: PeerCapabilitySet::default(),
                     reachability,
                     last_unreachable_reason,
                     meta: meerkat_core::PeerMeta::default(),

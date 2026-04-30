@@ -1007,23 +1007,45 @@ class CommsPeersParams:
 
 
 @dataclass
-class CommsPeerEntry:
-    """One peer entry in the `comms/peers` response."""
-    address: dict[str, Any]
-    capabilities: Any
+class PeerAddress:
+    """Typed peer address: transport atom plus endpoint string.
+
+The `endpoint` is transport-specific (path for `Uds`, `host:port` for
+`Tcp`, agent name for `Inproc`) but is carried as a validated `String`
+so the transport atom can be branched on without re-parsing."""
+    endpoint: str
+    transport: PeerTransport
+
+
+@dataclass
+class PeerCapabilitySet:
+    """Typed peer capability envelope for peer-directory output.
+
+Extensions are intentionally opaque display/integration metadata. Core
+routing, admission, and policy decisions must use typed fields such as
+[`PeerDirectoryEntry::sendable_kinds`] instead of consulting this bag."""
+    extensions: Optional[dict[str, Any]] = None
+    version: Optional[int] = None
+
+
+@dataclass
+class PeerDirectoryEntry:
+    """Wire payload for PeerDirectoryEntry."""
+    address: PeerAddress
+    capabilities: PeerCapabilitySet
     meta: dict[str, Any]
-    name: str
-    peer_id: str
-    reachability: CommsPeerReachability
-    sendable_kinds: list[str]
-    source: CommsPeerSource
-    last_unreachable_reason: Optional[CommsPeerUnreachableReason] = None
+    name: PeerName
+    peer_id: PeerId
+    reachability: PeerReachability
+    sendable_kinds: list[PeerSendability]
+    source: PeerDirectorySource
+    last_unreachable_reason: Optional[PeerReachabilityReason] = None
 
 
 @dataclass
 class CommsPeersResult:
     """Response payload for `comms/peers`."""
-    peers: list[CommsPeerEntry]
+    peers: list[PeerDirectoryEntry]
 
 
 @dataclass
@@ -2426,13 +2448,13 @@ class CommsCommandPeerMessage(TypedDict, total=False):
     body: Required[str]
     handling_mode: NotRequired[Literal['queue', 'steer']]
     kind: Required[Literal['peer_message']]
-    to: Required[str]
+    to: Required[PeerId]
 
 class CommsCommandPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
     lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
     params: NotRequired[Any]
-    to: Required[str]
+    to: Required[PeerId]
 
 class CommsCommandPeerRequest(TypedDict, total=False):
     handling_mode: NotRequired[Literal['queue', 'steer']]
@@ -2440,7 +2462,7 @@ class CommsCommandPeerRequest(TypedDict, total=False):
     kind: Required[Literal['peer_request']]
     params: NotRequired[Any]
     stream: NotRequired[Literal['none', 'reserve_interaction']]
-    to: Required[str]
+    to: Required[PeerId]
 
 class CommsCommandPeerResponse(TypedDict, total=False):
     handling_mode: NotRequired[Literal['queue', 'steer']]
@@ -2448,7 +2470,7 @@ class CommsCommandPeerResponse(TypedDict, total=False):
     kind: Required[Literal['peer_response']]
     result: NotRequired[Any]
     status: Required[Literal['accepted', 'completed', 'failed']]
-    to: Required[str]
+    to: Required[PeerId]
 
 CommsCommandRequest = CommsCommandInput | CommsCommandPeerMessage | CommsCommandPeerLifecycle | CommsCommandPeerRequest | CommsCommandPeerResponse
 
@@ -2469,14 +2491,14 @@ class CommsSendParamsPeerMessage(TypedDict, total=False):
     handling_mode: NotRequired[Literal['queue', 'steer']]
     kind: Required[Literal['peer_message']]
     session_id: Required[str]
-    to: Required[str]
+    to: Required[PeerId]
 
 class CommsSendParamsPeerLifecycle(TypedDict, total=False):
     kind: Required[Literal['peer_lifecycle']]
     lifecycle_kind: Required[Literal['mob.peer_added', 'mob.peer_retired', 'mob.peer_unwired']]
     params: NotRequired[Any]
     session_id: Required[str]
-    to: Required[str]
+    to: Required[PeerId]
 
 class CommsSendParamsPeerRequest(TypedDict, total=False):
     handling_mode: NotRequired[Literal['queue', 'steer']]
@@ -2485,7 +2507,7 @@ class CommsSendParamsPeerRequest(TypedDict, total=False):
     params: NotRequired[Any]
     session_id: Required[str]
     stream: NotRequired[Literal['none', 'reserve_interaction']]
-    to: Required[str]
+    to: Required[PeerId]
 
 class CommsSendParamsPeerResponse(TypedDict, total=False):
     handling_mode: NotRequired[Literal['queue', 'steer']]
@@ -2494,7 +2516,7 @@ class CommsSendParamsPeerResponse(TypedDict, total=False):
     result: NotRequired[Any]
     session_id: Required[str]
     status: Required[Literal['accepted', 'completed', 'failed']]
-    to: Required[str]
+    to: Required[PeerId]
 
 CommsSendParams = CommsSendParamsInput | CommsSendParamsPeerMessage | CommsSendParamsPeerLifecycle | CommsSendParamsPeerRequest | CommsSendParamsPeerResponse
 
@@ -2527,14 +2549,45 @@ class CommsSendResultPeerResponseSent(TypedDict, total=False):
 
 CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent | CommsSendResultPeerLifecycleSent | CommsSendResultPeerRequestSent | CommsSendResultPeerResponseSent
 
-# Stable public source labels for `comms/peers` entries.
-CommsPeerSource = Literal['Trusted', 'Inproc', 'TrustedAndInproc', 'Unknown']
+# Canonical runtime identity for a peer.
+#
+# `PeerId` is the routing key: the router and trust store key by `PeerId`,
+# never by `PeerName`. Two peers may legitimately share a display `PeerName`
+# (per the Wave-B V5 dogma note), but their `PeerId`s never collide — the
+# underlying UUID is globally unique.
+#
+# Constructed freshly (`PeerId::new`) for a peer minted locally, parsed
+# from a hyphenated UUID (`PeerId::parse`) when we've been given an identity
+# over the wire, or derived from a 32-byte Ed25519 public key when a transport
+# still authenticates by raw signing key.
+PeerId = str
 
-# Stable public reachability labels for `comms/peers` entries.
-CommsPeerReachability = Literal['unknown', 'reachable', 'unreachable']
+# Display-only slug for a peer.
+#
+# `PeerName` is **not** a routing key after Wave-B V5: the router resolves
+# sends by [`PeerId`], and trust stores are keyed by [`PeerId`]. `PeerName`
+# is retained so human-facing surfaces (CLI, REST `comms.peers`, logs) can
+# render a recognisable handle next to the opaque id.
+PeerName = str
 
-# Stable public unreachable-reason labels for `comms/peers` entries.
-CommsPeerUnreachableReason = Literal['offline_or_no_ack', 'transport_error', 'admission_dropped', 'unknown']
+# Typed transport atom for a peer address.
+#
+# Replaces the old free-form `address: String` on `PeerDirectoryEntry` so
+# callers cannot accidentally invent new transports by string concatenation
+# at a call site.
+PeerTransport = Literal['inproc', 'uds', 'tcp']
+
+# Comms/session-stream RPC contract for PeerDirectorySource.
+PeerDirectorySource = Literal['trusted', 'inproc', 'trusted_and_inproc', 'unknown']
+
+# Comms/session-stream RPC contract for PeerSendability.
+PeerSendability = Literal['peer_message', 'peer_request', 'peer_response']
+
+# Comms/session-stream RPC contract for PeerReachability.
+PeerReachability = Literal['unknown', 'reachable', 'unreachable']
+
+# Comms/session-stream RPC contract for PeerReachabilityReason.
+PeerReachabilityReason = Literal['offline_or_no_ack', 'transport_error'] | Literal['admission_dropped']
 
 # Response payload for `runtime/session_submission`.
 InputStateResult = Optional[WireInputState]

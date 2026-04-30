@@ -94,7 +94,9 @@ MOB_RPC_CONTRACT_TYPES = [
 
 COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES = [
     "CommsPeersParams",
-    "CommsPeerEntry",
+    "PeerAddress",
+    "PeerCapabilitySet",
+    "PeerDirectoryEntry",
     "CommsPeersResult",
     "SessionStreamOpenParams",
     "SessionStreamOpenResult",
@@ -105,9 +107,13 @@ COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES = [
 COMMS_SESSION_STREAM_RPC_CONTRACT_ALIAS_TYPES = [
     "CommsSendParams",
     "CommsSendResult",
-    "CommsPeerSource",
-    "CommsPeerReachability",
-    "CommsPeerUnreachableReason",
+    "PeerId",
+    "PeerName",
+    "PeerTransport",
+    "PeerDirectorySource",
+    "PeerSendability",
+    "PeerReachability",
+    "PeerReachabilityReason",
 ]
 
 MOB_RPC_CONTRACT_ALIAS_TYPES = [

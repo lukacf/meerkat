@@ -189,10 +189,17 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "SkillInspectResponse": schema_for!(crate::wire::SkillInspectResponse),
         "CommsCommandRequest": schema_for!(crate::wire::CommsCommandRequest),
         "CommsSendResult": schema_for!(crate::wire::CommsSendResult),
-        "CommsPeerSource": schema_for!(crate::wire::CommsPeerSource),
-        "CommsPeerReachability": schema_for!(crate::wire::CommsPeerReachability),
-        "CommsPeerUnreachableReason": schema_for!(crate::wire::CommsPeerUnreachableReason),
-        "CommsPeerEntry": schema_for!(crate::wire::CommsPeerEntry),
+        "PeerId": schema_for!(crate::wire::PeerId),
+        "PeerName": schema_for!(crate::wire::WireCommsPeerName),
+        "PeerTransport": schema_for!(crate::wire::PeerTransport),
+        "PeerAddress": schema_for!(crate::wire::PeerAddress),
+        "PeerDirectorySource": schema_for!(crate::wire::PeerDirectorySource),
+        "PeerSendability": schema_for!(crate::wire::PeerSendability),
+        "PeerCapabilitySet": schema_for!(crate::wire::PeerCapabilitySet),
+        "PeerReachability": schema_for!(crate::wire::PeerReachability),
+        "PeerReachabilityReason": schema_for!(crate::wire::PeerReachabilityReason),
+        "PeerDirectoryEntry": schema_for!(crate::wire::PeerDirectoryEntry),
+        "PeerDirectoryListing": schema_for!(crate::wire::PeerDirectoryListing),
         "CommsPeersResult": schema_for!(crate::wire::CommsPeersResult),
         "SessionStreamOpenResult": schema_for!(crate::wire::SessionStreamOpenResult),
         "SessionStreamCloseResult": schema_for!(crate::wire::SessionStreamCloseResult),
@@ -903,6 +910,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             ("/comms/send", "post") => {
                 RestOperationContract::with_json_request("RestCommsSendRequest", "JsonValue")
             }
+            ("/comms/peers", "get") => RestOperationContract::json("CommsPeersResult"),
             ("/config", "get") => RestOperationContract::json("ConfigEnvelope"),
             ("/config", "put") => {
                 RestOperationContract::with_json_request("RestSetConfigRequest", "ConfigEnvelope")

@@ -2492,23 +2492,14 @@ async fn handle_meerkat_comms_peers(
         .comms_runtime(&session_id)
         .await
         .ok_or_else(|| format!("Session not found or comms not enabled: {session_id}"))?;
-    let peers = comms.peers().await;
-    let payload = json!({
-        "peers": peers.iter().map(|p| {
-            json!({
-                "name": p.name.to_string(),
-                "peer_id": p.peer_id,
-                "address": p.address,
-                "source": format!("{:?}", p.source),
-                "sendable_kinds": p.sendable_kinds,
-                "capabilities": p.capabilities,
-                "reachability": p.reachability,
-                "last_unreachable_reason": p.last_unreachable_reason,
-                "meta": p.meta,
-            })
-        }).collect::<Vec<_>>()
-    });
-    Ok(wrap_tool_payload(payload))
+    Ok(comms_peers_tool_payload(comms.peers().await))
+}
+
+#[cfg(feature = "comms")]
+fn comms_peers_tool_payload(peers: Vec<meerkat_core::comms::PeerDirectoryEntry>) -> Value {
+    wrap_tool_payload(json!(meerkat_contracts::CommsPeersResult::from_entries(
+        &peers
+    )))
 }
 
 #[cfg(feature = "comms")]
@@ -3418,6 +3409,53 @@ mod tests {
         assert_eq!(
             payload["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
+    fn test_comms_peers_tool_payload_uses_typed_core_wire_contract() {
+        let wrapped = comms_peers_tool_payload(vec![sample_peer_directory_entry()]);
+        let payload = unwrap_payload(wrapped);
+
+        assert_peer_directory_wire(&payload);
+    }
+
+    #[cfg(feature = "comms")]
+    fn sample_peer_directory_entry() -> meerkat_core::comms::PeerDirectoryEntry {
+        meerkat_core::comms::PeerDirectoryEntry {
+            peer_id: meerkat_core::comms::PeerId::new(),
+            name: meerkat_core::comms::PeerName::new("agent").unwrap(),
+            address: meerkat_core::comms::PeerAddress::new(
+                meerkat_core::comms::PeerTransport::Inproc,
+                "agent",
+            ),
+            source: meerkat_core::comms::PeerDirectorySource::Inproc,
+            sendable_kinds: vec![
+                meerkat_core::comms::PeerSendability::PeerMessage,
+                meerkat_core::comms::PeerSendability::PeerRequest,
+            ],
+            capabilities: meerkat_core::comms::PeerCapabilitySet::default()
+                .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
+            reachability: meerkat_core::comms::PeerReachability::Reachable,
+            last_unreachable_reason: None,
+            meta: meerkat_core::PeerMeta::default(),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    fn assert_peer_directory_wire(result: &Value) {
+        let peer = &result["peers"][0];
+
+        assert_eq!(peer["source"], "inproc");
+        assert_eq!(
+            peer["sendable_kinds"],
+            serde_json::json!(["peer_message", "peer_request"])
+        );
+        assert_eq!(peer["capabilities"]["version"], 1);
+        assert_eq!(
+            peer["capabilities"]["extensions"]["vendor.echo"]["enabled"],
+            true
         );
     }
 

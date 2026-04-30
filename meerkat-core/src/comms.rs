@@ -9,6 +9,7 @@ use crate::interaction::{InteractionId, ResponseStatus};
 use crate::types::{ContentBlock, HandlingMode};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use uuid::Uuid;
 
@@ -778,7 +779,9 @@ pub enum SendReceipt {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PeerDirectorySource {
     Trusted,
     Inproc,
@@ -786,6 +789,92 @@ pub enum PeerDirectorySource {
     Unknown,
 }
 
+impl PeerDirectorySource {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Inproc => "inproc",
+            Self::TrustedAndInproc => "trusted_and_inproc",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for PeerDirectorySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerSendability {
+    PeerMessage,
+    PeerRequest,
+    PeerResponse,
+}
+
+impl PeerSendability {
+    pub const DIRECTORY_DEFAULTS: [Self; 3] =
+        [Self::PeerMessage, Self::PeerRequest, Self::PeerResponse];
+
+    pub fn directory_defaults() -> Vec<Self> {
+        Self::DIRECTORY_DEFAULTS.to_vec()
+    }
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::PeerMessage => "peer_message",
+            Self::PeerRequest => "peer_request",
+            Self::PeerResponse => "peer_response",
+        }
+    }
+}
+
+impl std::fmt::Display for PeerSendability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Typed peer capability envelope for peer-directory output.
+///
+/// Extensions are intentionally opaque display/integration metadata. Core
+/// routing, admission, and policy decisions must use typed fields such as
+/// [`PeerDirectoryEntry::sendable_kinds`] instead of consulting this bag.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerCapabilitySet {
+    #[serde(default = "PeerCapabilitySet::default_version")]
+    pub version: u16,
+    #[serde(default)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl PeerCapabilitySet {
+    pub const CURRENT_VERSION: u16 = 1;
+
+    const fn default_version() -> u16 {
+        Self::CURRENT_VERSION
+    }
+
+    pub fn with_extension(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.extensions.insert(key.into(), value);
+        self
+    }
+}
+
+impl Default for PeerCapabilitySet {
+    fn default() -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            extensions: BTreeMap::new(),
+        }
+    }
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerReachability {
@@ -794,6 +883,7 @@ pub enum PeerReachability {
     Unreachable,
 }
 
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -806,7 +896,8 @@ pub enum PeerReachabilityReason {
     AdmissionDropped,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerDirectoryEntry {
     /// Canonical runtime identity — the routing key.
     pub peer_id: PeerId,
@@ -818,12 +909,30 @@ pub struct PeerDirectoryEntry {
     /// concatenation at a call site.
     pub address: PeerAddress,
     pub source: PeerDirectorySource,
-    pub sendable_kinds: Vec<String>,
-    pub capabilities: serde_json::Value,
+    pub sendable_kinds: Vec<PeerSendability>,
+    pub capabilities: PeerCapabilitySet,
     pub reachability: PeerReachability,
     pub last_unreachable_reason: Option<PeerReachabilityReason>,
     /// Supplementary discovery metadata (description, labels).
     pub meta: crate::PeerMeta,
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerDirectoryListing {
+    pub peers: Vec<PeerDirectoryEntry>,
+}
+
+impl PeerDirectoryListing {
+    pub fn new(peers: Vec<PeerDirectoryEntry>) -> Self {
+        Self { peers }
+    }
+}
+
+impl From<Vec<PeerDirectoryEntry>> for PeerDirectoryListing {
+    fn from(peers: Vec<PeerDirectoryEntry>) -> Self {
+        Self::new(peers)
+    }
 }
 
 /// Scope for streaming event output.
@@ -931,7 +1040,6 @@ pub enum SendAndStreamError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     #[test]
     fn peer_name_validation() {
@@ -947,8 +1055,8 @@ mod tests {
             name: PeerName::new("agent")?,
             address: PeerAddress::new(PeerTransport::Inproc, "agent"),
             source: PeerDirectorySource::Inproc,
-            sendable_kinds: vec!["peer_message".to_string()],
-            capabilities: Value::Object(serde_json::Map::default()),
+            sendable_kinds: vec![PeerSendability::PeerMessage],
+            capabilities: PeerCapabilitySet::default(),
             reachability: PeerReachability::Unknown,
             last_unreachable_reason: None,
             meta: crate::PeerMeta::default(),
@@ -957,6 +1065,39 @@ mod tests {
         assert_eq!(entry.address.transport(), PeerTransport::Inproc);
         assert_eq!(entry.address.endpoint(), "agent");
         assert_eq!(entry.source, PeerDirectorySource::Inproc);
+        Ok(())
+    }
+
+    #[test]
+    fn peer_directory_listing_serializes_typed_source_sendability_and_capabilities()
+    -> Result<(), String> {
+        let entry = PeerDirectoryEntry {
+            peer_id: PeerId::new(),
+            name: PeerName::new("agent")?,
+            address: PeerAddress::new(PeerTransport::Inproc, "agent"),
+            source: PeerDirectorySource::Inproc,
+            sendable_kinds: vec![PeerSendability::PeerMessage, PeerSendability::PeerRequest],
+            capabilities: PeerCapabilitySet::default()
+                .with_extension("vendor.echo", serde_json::json!({ "enabled": true })),
+            reachability: PeerReachability::Reachable,
+            last_unreachable_reason: None,
+            meta: crate::PeerMeta::default(),
+        };
+
+        let value = serde_json::to_value(PeerDirectoryListing::new(vec![entry]))
+            .map_err(|err| err.to_string())?;
+        let peer = &value["peers"][0];
+
+        assert_eq!(peer["source"], "inproc");
+        assert_eq!(
+            peer["sendable_kinds"],
+            serde_json::json!(["peer_message", "peer_request"])
+        );
+        assert_eq!(peer["capabilities"]["version"], 1);
+        assert_eq!(
+            peer["capabilities"]["extensions"]["vendor.echo"]["enabled"],
+            true
+        );
         Ok(())
     }
 

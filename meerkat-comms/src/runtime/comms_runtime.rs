@@ -18,9 +18,9 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerReachabilityReason, PeerRoute, SendAndStreamError,
-    SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
+    PeerDirectorySource, PeerId, PeerName, PeerReachabilityReason, PeerRoute, PeerSendability,
+    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1718,11 +1718,11 @@ impl CommsRuntime {
         })
     }
 
-    fn peer_request_response_sendable_kinds(&self) -> Vec<String> {
-        let mut kinds = vec!["peer_message".to_string()];
+    fn peer_request_response_sendable_kinds(&self) -> Vec<PeerSendability> {
+        let mut kinds = vec![PeerSendability::PeerMessage];
         if self.peer_interaction_handle().is_some() {
-            kinds.push("peer_request".to_string());
-            kinds.push("peer_response".to_string());
+            kinds.push(PeerSendability::PeerRequest);
+            kinds.push(PeerSendability::PeerResponse);
         }
         kinds
     }
@@ -1993,7 +1993,7 @@ impl CommsRuntime {
                 address: peer.address,
                 source: peer.source,
                 sendable_kinds: sendable_kinds.clone(),
-                capabilities: serde_json::json!({}),
+                capabilities: PeerCapabilitySet::default(),
                 reachability: snapshot.reachability,
                 last_unreachable_reason: snapshot.last_unreachable_reason,
                 meta: peer.meta,
@@ -2740,7 +2740,8 @@ mod tests {
         BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, SendError,
         comms::{
             InputSource, InputStreamMode, PeerDirectorySource, PeerId, PeerName, PeerReachability,
-            PeerReachabilityReason, PeerRoute, StreamError, StreamScope, TrustedPeerDescriptor,
+            PeerReachabilityReason, PeerRoute, PeerSendability, StreamError, StreamScope,
+            TrustedPeerDescriptor,
         },
         interaction::InteractionId,
         types::{ContentBlock, ImageData, SessionId},
@@ -3667,7 +3668,7 @@ mod tests {
             .find(|entry| entry.name.as_str() == peer_name)
             .expect("trusted peer should be listed");
 
-        assert_eq!(entry.sendable_kinds, vec!["peer_message".to_string()]);
+        assert_eq!(entry.sendable_kinds, vec![PeerSendability::PeerMessage]);
     }
 
     #[tokio::test]
@@ -3699,9 +3700,9 @@ mod tests {
         assert_eq!(
             entry.sendable_kinds,
             vec![
-                "peer_message".to_string(),
-                "peer_request".to_string(),
-                "peer_response".to_string(),
+                PeerSendability::PeerMessage,
+                PeerSendability::PeerRequest,
+                PeerSendability::PeerResponse,
             ]
         );
     }
@@ -5140,7 +5141,7 @@ mod tests {
             peer.source
         );
         assert_eq!(peer.address.to_string(), format!("inproc://{peer_name}"));
-        assert_eq!(peer.sendable_kinds, vec!["peer_message".to_string()]);
+        assert_eq!(peer.sendable_kinds, vec![PeerSendability::PeerMessage]);
         assert_eq!(peer.reachability, PeerReachability::Unknown);
         assert_eq!(peer.last_unreachable_reason, None);
     }
@@ -5553,28 +5554,27 @@ mod tests {
 
         for entry in peers {
             for kind in &entry.sendable_kinds {
-                let cmd = match kind.as_str() {
-                    "peer_message" => CommsCommand::PeerMessage {
+                let cmd = match kind {
+                    PeerSendability::PeerMessage => CommsCommand::PeerMessage {
                         blocks: None,
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         body: "truthfulness test".to_string(),
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                     },
-                    "peer_request" => CommsCommand::PeerRequest {
+                    PeerSendability::PeerRequest => CommsCommand::PeerRequest {
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         intent: "test".to_string(),
                         params: serde_json::json!({}),
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         stream: InputStreamMode::None,
                     },
-                    "peer_response" => CommsCommand::PeerResponse {
+                    PeerSendability::PeerResponse => CommsCommand::PeerResponse {
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
                         status: meerkat_core::ResponseStatus::Completed,
                         result: serde_json::json!({}),
                         handling_mode: None,
                     },
-                    _ => continue,
                 };
                 let result = CoreCommsRuntime::send(&runtime, cmd).await;
                 assert!(

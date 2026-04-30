@@ -8,8 +8,10 @@
 //! `{ "session_id": "...", "kind": "<variant>", ... }`.
 
 pub use meerkat_core::comms::{
-    CommsCommandError, CommsCommandRequest, InputSource, InputStreamMode, PeerAddress, PeerId,
-    PeerLifecycleKind, PeerName,
+    CommsCommandError, CommsCommandRequest, InputSource, InputStreamMode, PeerAddress,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
+    PeerLifecycleKind, PeerName, PeerReachability, PeerReachabilityReason, PeerSendability,
+    PeerTransport,
 };
 pub use meerkat_core::interaction::ResponseStatus;
 pub use meerkat_core::types::HandlingMode;
@@ -249,112 +251,27 @@ impl From<meerkat_core::comms::SendReceipt> for CommsSendResult {
     }
 }
 
-/// Stable public source labels for `comms/peers` entries.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum CommsPeerSource {
-    Trusted,
-    Inproc,
-    TrustedAndInproc,
-    Unknown,
-}
-
-impl From<&meerkat_core::comms::PeerDirectorySource> for CommsPeerSource {
-    fn from(source: &meerkat_core::comms::PeerDirectorySource) -> Self {
-        match source {
-            meerkat_core::comms::PeerDirectorySource::Trusted => Self::Trusted,
-            meerkat_core::comms::PeerDirectorySource::Inproc => Self::Inproc,
-            meerkat_core::comms::PeerDirectorySource::TrustedAndInproc => Self::TrustedAndInproc,
-            meerkat_core::comms::PeerDirectorySource::Unknown => Self::Unknown,
-        }
-    }
-}
-
-/// Stable public reachability labels for `comms/peers` entries.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum CommsPeerReachability {
-    Unknown,
-    Reachable,
-    Unreachable,
-}
-
-impl From<meerkat_core::comms::PeerReachability> for CommsPeerReachability {
-    fn from(reachability: meerkat_core::comms::PeerReachability) -> Self {
-        match reachability {
-            meerkat_core::comms::PeerReachability::Unknown => Self::Unknown,
-            meerkat_core::comms::PeerReachability::Reachable => Self::Reachable,
-            meerkat_core::comms::PeerReachability::Unreachable => Self::Unreachable,
-        }
-    }
-}
-
-/// Stable public unreachable-reason labels for `comms/peers` entries.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum CommsPeerUnreachableReason {
-    OfflineOrNoAck,
-    TransportError,
-    AdmissionDropped,
-    Unknown,
-}
-
-impl From<meerkat_core::comms::PeerReachabilityReason> for CommsPeerUnreachableReason {
-    fn from(reason: meerkat_core::comms::PeerReachabilityReason) -> Self {
-        match reason {
-            meerkat_core::comms::PeerReachabilityReason::OfflineOrNoAck => Self::OfflineOrNoAck,
-            meerkat_core::comms::PeerReachabilityReason::TransportError => Self::TransportError,
-            meerkat_core::comms::PeerReachabilityReason::AdmissionDropped => Self::AdmissionDropped,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-/// One peer entry in the `comms/peers` response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct CommsPeerEntry {
-    pub name: PeerName,
-    pub peer_id: PeerId,
-    pub address: PeerAddress,
-    pub source: CommsPeerSource,
-    pub sendable_kinds: Vec<String>,
-    pub capabilities: serde_json::Value,
-    pub reachability: CommsPeerReachability,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_unreachable_reason: Option<CommsPeerUnreachableReason>,
-    pub meta: meerkat_core::PeerMeta,
-}
-
-impl From<&meerkat_core::comms::PeerDirectoryEntry> for CommsPeerEntry {
-    fn from(entry: &meerkat_core::comms::PeerDirectoryEntry) -> Self {
-        Self {
-            name: entry.name.clone(),
-            peer_id: entry.peer_id,
-            address: entry.address.clone(),
-            source: CommsPeerSource::from(&entry.source),
-            sendable_kinds: entry.sendable_kinds.clone(),
-            capabilities: entry.capabilities.clone(),
-            reachability: CommsPeerReachability::from(entry.reachability),
-            last_unreachable_reason: entry.last_unreachable_reason.map(Into::into),
-            meta: entry.meta.clone(),
-        }
-    }
-}
+pub type CommsPeerEntry = PeerDirectoryEntry;
 
 /// Response payload for `comms/peers`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CommsPeersResult {
-    pub peers: Vec<CommsPeerEntry>,
+    pub peers: Vec<PeerDirectoryEntry>,
 }
 
 impl CommsPeersResult {
     pub fn from_entries(entries: &[meerkat_core::comms::PeerDirectoryEntry]) -> Self {
         Self {
-            peers: entries.iter().map(CommsPeerEntry::from).collect(),
+            peers: entries.to_vec(),
+        }
+    }
+}
+
+impl From<PeerDirectoryListing> for CommsPeersResult {
+    fn from(listing: PeerDirectoryListing) -> Self {
+        Self {
+            peers: listing.peers,
         }
     }
 }

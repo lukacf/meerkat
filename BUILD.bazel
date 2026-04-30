@@ -157,6 +157,7 @@ test_suite(
         "//meerkat-contracts:realtime_deadline_and_jitter_test",
         "//meerkat-contracts:realtime_tool_timeout_test",
         "//meerkat-contracts:regression_wire_types_test",
+        "//meerkat-contracts:runtime_turn_metadata_wire_override_test",
         "//meerkat-contracts:session_accept_input_typed_round_trip_test",
         "//meerkat-contracts:skill_ref_wire_no_legacy_test",
         "//meerkat-core:connection_ref_no_string_form_test",

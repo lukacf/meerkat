@@ -489,6 +489,56 @@ rust_test(
 )
 
 rust_test(
+    name = "runtime_turn_metadata_wire_override_test",
+    aliases = aliases(
+        package_name = "meerkat-contracts",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "runtime_turn_metadata_wire_override",
+    crate_root = "tests/runtime_turn_metadata_wire_override.rs",
+    crate_features = [
+        "schema",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/runtime_turn_metadata_wire_override.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "runtime_turn_metadata_wire_override",
+        "CARGO_MANIFEST_DIR": "./meerkat-contracts",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-contracts",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-schedule:meerkat_schedule",
+    ] + all_crate_deps(
+        package_name = "meerkat-contracts",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "session_accept_input_typed_round_trip_test",
     aliases = aliases(
         package_name = "meerkat-contracts",
@@ -599,6 +649,7 @@ test_suite(
         ":realtime_deadline_and_jitter_test",
         ":realtime_tool_timeout_test",
         ":regression_wire_types_test",
+        ":runtime_turn_metadata_wire_override_test",
         ":session_accept_input_typed_round_trip_test",
         ":skill_ref_wire_no_legacy_test",
     ],

@@ -43,6 +43,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -91,6 +92,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -150,6 +152,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -198,6 +201,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -252,6 +256,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -326,6 +331,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -405,6 +411,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -484,6 +491,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -559,6 +567,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -634,6 +643,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -709,6 +719,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -784,6 +795,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -847,6 +859,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -889,6 +902,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -937,6 +951,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -988,6 +1003,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1033,6 +1049,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1084,6 +1101,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1134,6 +1152,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1178,6 +1197,7 @@ rust_binary(
     compile_data = [
         "Cargo.toml",
         "src/realtime_ws.rs",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],

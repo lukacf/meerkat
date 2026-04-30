@@ -78,6 +78,7 @@ pub struct StagedSessionInfo {
 /// promotion path or restore the slot via `abandon_promotion`.
 pub struct PromotingSlot {
     pub build_config: Box<AgentBuildConfig>,
+    pub effective_llm_identity: SessionLlmIdentity,
     pub labels: Option<BTreeMap<String, String>>,
     pub deferred_prompt: Option<ContentInput>,
     pub created_at_secs: u64,
@@ -225,6 +226,7 @@ impl StagedSessionRegistry {
         };
         Ok(Some(PromotingSlot {
             build_config,
+            effective_llm_identity: slot.effective_llm_identity.clone(),
             labels: slot.labels.clone(),
             deferred_prompt: slot.deferred_prompt.clone(),
             created_at_secs: slot.created_at_secs,

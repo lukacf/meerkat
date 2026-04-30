@@ -2455,6 +2455,7 @@ impl SessionRuntime {
             Ok(slot) => slot.map(|s| {
                 (
                     *s.build_config,
+                    s.effective_llm_identity,
                     s.labels,
                     s.deferred_prompt,
                     s.created_at_secs,
@@ -2488,7 +2489,7 @@ impl SessionRuntime {
             .or_else(|| {
                 pending_session
                     .as_ref()
-                    .map(|(build_config, _, _, _, _)| build_config.keep_alive)
+                    .map(|(build_config, _, _, _, _, _)| build_config.keep_alive)
             })
             .or(persisted_keep_alive)
             .unwrap_or(false);
@@ -2528,8 +2529,14 @@ impl SessionRuntime {
             }
         }
 
-        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
-            pending_session
+        if let Some((
+            mut build_config,
+            effective_llm_identity,
+            labels,
+            deferred_prompt,
+            created_at_secs,
+            updated_at_secs,
+        )) = pending_session
         {
             let mut runtime_prompt: ContentInput = prompt.clone();
             let saved_deferred_prompt = deferred_prompt.clone();
@@ -2542,6 +2549,7 @@ impl SessionRuntime {
                     self.restore_pending_from_promoting(
                         session_id,
                         build_config,
+                        effective_llm_identity.clone(),
                         labels,
                         saved_deferred_prompt,
                         created_at_secs,
@@ -2562,6 +2570,7 @@ impl SessionRuntime {
                                 self.restore_pending_from_promoting(
                                     session_id,
                                     build_config,
+                                    effective_llm_identity.clone(),
                                     labels,
                                     saved_deferred_prompt,
                                     created_at_secs,
@@ -2580,6 +2589,7 @@ impl SessionRuntime {
                             self.restore_pending_from_promoting(
                                 session_id,
                                 build_config,
+                                effective_llm_identity.clone(),
                                 labels,
                                 saved_deferred_prompt,
                                 created_at_secs,
@@ -2600,6 +2610,7 @@ impl SessionRuntime {
                 self.restore_pending_from_promoting(
                     session_id,
                     build_config,
+                    effective_llm_identity.clone(),
                     labels,
                     saved_deferred_prompt,
                     created_at_secs,
@@ -2698,6 +2709,7 @@ impl SessionRuntime {
                     self.restore_pending_from_promoting(
                         session_id,
                         build_config,
+                        effective_llm_identity.clone(),
                         labels,
                         saved_deferred_prompt,
                         created_at_secs,
@@ -2963,6 +2975,7 @@ impl SessionRuntime {
             Ok(slot) => slot.map(|s| {
                 (
                     *s.build_config,
+                    s.effective_llm_identity,
                     s.labels,
                     s.deferred_prompt,
                     s.created_at_secs,
@@ -2985,8 +2998,14 @@ impl SessionRuntime {
             }
         };
 
-        if let Some((mut build_config, labels, deferred_prompt, created_at_secs, updated_at_secs)) =
-            pending_session
+        if let Some((
+            mut build_config,
+            effective_llm_identity,
+            labels,
+            deferred_prompt,
+            created_at_secs,
+            updated_at_secs,
+        )) = pending_session
         {
             // Prepend the deferred create-time prompt to the turn prompt.
             // Keep copies for rollback paths that re-stage the pending session.
@@ -3002,6 +3021,7 @@ impl SessionRuntime {
                     self.restore_pending_from_promoting(
                         session_id,
                         build_config,
+                        effective_llm_identity.clone(),
                         labels,
                         saved_deferred_prompt,
                         saved_created_at_secs,
@@ -3022,6 +3042,7 @@ impl SessionRuntime {
                                 self.restore_pending_from_promoting(
                                     session_id,
                                     build_config,
+                                    effective_llm_identity.clone(),
                                     labels,
                                     saved_deferred_prompt,
                                     saved_created_at_secs,
@@ -3040,6 +3061,7 @@ impl SessionRuntime {
                             self.restore_pending_from_promoting(
                                 session_id,
                                 build_config,
+                                effective_llm_identity.clone(),
                                 labels,
                                 saved_deferred_prompt,
                                 saved_created_at_secs,
@@ -3059,6 +3081,7 @@ impl SessionRuntime {
                 self.restore_pending_from_promoting(
                     session_id,
                     build_config,
+                    effective_llm_identity.clone(),
                     labels,
                     saved_deferred_prompt,
                     saved_created_at_secs,
@@ -3159,13 +3182,11 @@ impl SessionRuntime {
                                 ),
                                 data: None,
                             })?;
-                        let effective_llm_identity =
-                            self.llm_identity_from_pending_build(&build_config).await?;
                         self.staged_sessions
                             .abandon_promotion(
                                 session_id.clone(),
                                 build_config,
-                                effective_llm_identity,
+                                effective_llm_identity.clone(),
                                 labels,
                                 saved_deferred_prompt.clone(),
                                 saved_created_at_secs,
@@ -3267,19 +3288,31 @@ impl SessionRuntime {
     /// Restore a pending session from `Promoting` state back to `Staged` after
     /// an override validation failure. Prevents the session from being stuck in
     /// the promoting state when the turn is aborted before `create_session`.
+    #[allow(clippy::too_many_arguments)]
     async fn restore_pending_from_promoting(
         &self,
         session_id: &SessionId,
         mut build_config: AgentBuildConfig,
+        effective_llm_identity: SessionLlmIdentity,
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
         created_at_secs: u64,
         updated_at_secs: u64,
     ) {
-        let Ok(effective_llm_identity) = self.llm_identity_from_pending_build(&build_config).await
-        else {
-            return;
-        };
+        if let Some((_starting_system_context_state, current_system_context_state)) =
+            self.take_promoting_system_context_state(session_id).await
+        {
+            let session = build_config
+                .resume_session
+                .get_or_insert_with(|| Session::with_id(session_id.clone()));
+            if let Err(err) = session.set_system_context_state(current_system_context_state) {
+                tracing::error!(
+                    session_id = %session_id,
+                    error = %err,
+                    "failed to preserve promoting system-context state during pending rollback"
+                );
+            }
+        }
         build_config.self_hosted_server_id = effective_llm_identity.self_hosted_server_id.clone();
         self.staged_sessions
             .abandon_promotion(
@@ -7600,6 +7633,150 @@ mod tests {
             .start_turn(&session_id, "after rejection".into(), event_tx, None)
             .await
             .expect("staged session should remain promotable after rejected metadata");
+    }
+
+    #[tokio::test]
+    async fn pending_restore_does_not_recompute_unresolvable_build_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let session_id = SessionId::new();
+        let mut build_config = AgentBuildConfig::new("gpt-5.4");
+        build_config.provider = Some(meerkat_core::Provider::Anthropic);
+        build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+        build_config.resume_session = Some(Session::with_id(session_id.clone()));
+        let effective_llm_identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: None,
+        };
+        let now = now_unix_secs();
+        runtime
+            .staged_sessions
+            .stage(
+                session_id.clone(),
+                StagedSlot {
+                    effective_llm_identity,
+                    phase: StagedPhase::Staged {
+                        build_config: Box::new(build_config),
+                    },
+                    labels: None,
+                    deferred_prompt: None,
+                    created_at_secs: now,
+                    updated_at_secs: now,
+                },
+            )
+            .await
+            .expect("stage invalid build fixture");
+
+        let slot = runtime
+            .staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("begin promotion")
+            .expect("promoting slot");
+        assert!(
+            runtime
+                .llm_identity_from_pending_build(&slot.build_config)
+                .await
+                .is_err(),
+            "fixture must reproduce the identity recomputation failure"
+        );
+
+        runtime
+            .restore_pending_from_promoting(
+                &session_id,
+                *slot.build_config,
+                slot.effective_llm_identity,
+                slot.labels,
+                slot.deferred_prompt,
+                slot.created_at_secs,
+                slot.updated_at_secs,
+            )
+            .await;
+
+        let info = runtime
+            .staged_sessions
+            .info(&session_id)
+            .await
+            .expect("pending session should be restored");
+        assert!(
+            !info.is_promoting,
+            "rollback must not leave the slot stuck in Promoting"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_restore_preserves_promoting_system_context_appends() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let session_id = SessionId::new();
+        let mut build_config = mock_build_config();
+        build_config.resume_session = Some(Session::with_id(session_id.clone()));
+        let effective_llm_identity = runtime
+            .llm_identity_from_pending_build(&build_config)
+            .await
+            .expect("valid pending identity");
+        let now = now_unix_secs();
+        runtime
+            .staged_sessions
+            .stage(
+                session_id.clone(),
+                StagedSlot {
+                    effective_llm_identity,
+                    phase: StagedPhase::Staged {
+                        build_config: Box::new(build_config),
+                    },
+                    labels: None,
+                    deferred_prompt: None,
+                    created_at_secs: now,
+                    updated_at_secs: now,
+                },
+            )
+            .await
+            .expect("stage valid build fixture");
+
+        let slot = runtime
+            .staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("begin promotion")
+            .expect("promoting slot");
+        let append_req = AppendSystemContextRequest {
+            text: "Preserve this while rolling back.".to_string(),
+            source: Some("test".to_string()),
+            idempotency_key: Some("ctx-during-rollback".to_string()),
+        };
+        let append = runtime
+            .append_system_context(&session_id, append_req.clone())
+            .await
+            .expect("append during promotion");
+        assert_eq!(
+            append.status,
+            meerkat_core::AppendSystemContextStatus::Staged
+        );
+
+        runtime
+            .restore_pending_from_promoting(
+                &session_id,
+                *slot.build_config,
+                slot.effective_llm_identity,
+                slot.labels,
+                slot.deferred_prompt,
+                slot.created_at_secs,
+                slot.updated_at_secs,
+            )
+            .await;
+
+        let duplicate = runtime
+            .append_system_context(&session_id, append_req)
+            .await
+            .expect("append should remain staged after rollback");
+        assert_eq!(
+            duplicate.status,
+            meerkat_core::AppendSystemContextStatus::Duplicate
+        );
     }
 
     /// turn/start on a materialized session allows model override (hot-swap).

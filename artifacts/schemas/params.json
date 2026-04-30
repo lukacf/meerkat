@@ -8273,6 +8273,7 @@
         "type": "string"
       },
       "WireRuntimeTurnMetadata": {
+        "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].\n\nThe per-turn seam between control plane and core is fully typed —\n`serde_json::Value` does not appear here.",
         "properties": {
           "additional_instructions": {

@@ -72,7 +72,7 @@ Both use integer unix timestamps for `created_at` and `updated_at`.
 
 ### Turns and streaming
 
-`Session.turn(...)` and `Session.stream(...)` now expose full turn overrides:
+`Session.turn(...)` and `Session.stream(...)` expose SDK convenience options that are resolved into the runtime `turn_metadata` carrier:
 
 - `skill_refs`, `skill_references`, `flow_tool_overlay`
 - `additional_instructions`

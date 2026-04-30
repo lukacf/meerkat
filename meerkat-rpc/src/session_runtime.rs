@@ -2437,7 +2437,6 @@ impl SessionRuntime {
 
         let turn_metadata = primitive.turn_metadata();
         let service_turn_metadata = turn_metadata.cloned();
-        let skill_references = turn_metadata.and_then(|meta| meta.skill_references.clone());
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata);
 
         #[cfg(feature = "comms")]
@@ -2556,12 +2555,40 @@ impl SessionRuntime {
                     });
                 }
                 if Self::turn_metadata_reconfigures_llm(metadata) {
-                    let resolved_identity = self
-                        .resolve_target_llm_identity(
-                            &self.llm_identity_from_pending_build(&build_config).await?,
-                            metadata,
-                        )
-                        .await?;
+                    let current_identity =
+                        match self.llm_identity_from_pending_build(&build_config).await {
+                            Ok(identity) => identity,
+                            Err(err) => {
+                                self.restore_pending_from_promoting(
+                                    session_id,
+                                    build_config,
+                                    labels,
+                                    saved_deferred_prompt,
+                                    created_at_secs,
+                                    updated_at_secs,
+                                )
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                    let resolved_identity = match self
+                        .resolve_target_llm_identity(&current_identity, metadata)
+                        .await
+                    {
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            self.restore_pending_from_promoting(
+                                session_id,
+                                build_config,
+                                labels,
+                                saved_deferred_prompt,
+                                created_at_secs,
+                                updated_at_secs,
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                    };
                     Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 }
                 if let Some(keep_alive) = keep_alive_override {
@@ -2614,7 +2641,7 @@ impl SessionRuntime {
                     max_tokens: build_config.max_tokens,
                     event_tx: None,
 
-                    skill_references: skill_references.clone(),
+                    skill_references: None,
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
@@ -2623,22 +2650,6 @@ impl SessionRuntime {
                 .await
             {
                 Ok(_) => {
-                    if let Some((starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
-                        && let Err(err) = self
-                            .replay_promoted_system_context(
-                                session_id,
-                                &starting_system_context_state,
-                                &current_system_context_state,
-                            )
-                            .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %err.message,
-                            "failed to replay promoted system-context state after runtime materialization"
-                        );
-                    }
                     #[cfg(feature = "comms")]
                     {
                         // W2-G: never reconfigure a mob-owned drain during
@@ -2718,6 +2729,22 @@ impl SessionRuntime {
                     primitive.contributing_input_ids().to_vec(),
                 )
                 .await;
+            if let Some((starting_system_context_state, current_system_context_state)) =
+                self.take_promoting_system_context_state(session_id).await
+                && let Err(err) = self
+                    .replay_promoted_system_context(
+                        session_id,
+                        &starting_system_context_state,
+                        &current_system_context_state,
+                    )
+                    .await
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %err.message,
+                    "failed to replay promoted system-context state after runtime materialization"
+                );
+            }
             self.bridge_pending_session_event_streams(session_id).await;
             let output = output.map_err(session_error_to_rpc)?;
             return Ok(output);
@@ -2915,8 +2942,6 @@ impl SessionRuntime {
         let mut turn_prompt = prompt;
         let turn_metadata_ref = turn_metadata.as_ref();
         let service_turn_metadata = turn_metadata.clone();
-        let skill_references =
-            turn_metadata_ref.and_then(|metadata| metadata.skill_references.clone());
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata_ref);
         #[cfg(feature = "mcp")]
         {
@@ -2990,12 +3015,40 @@ impl SessionRuntime {
                     });
                 }
                 if Self::turn_metadata_reconfigures_llm(metadata) {
-                    let resolved_identity = self
-                        .resolve_target_llm_identity(
-                            &self.llm_identity_from_pending_build(&build_config).await?,
-                            metadata,
-                        )
-                        .await?;
+                    let current_identity =
+                        match self.llm_identity_from_pending_build(&build_config).await {
+                            Ok(identity) => identity,
+                            Err(err) => {
+                                self.restore_pending_from_promoting(
+                                    session_id,
+                                    build_config,
+                                    labels,
+                                    saved_deferred_prompt,
+                                    saved_created_at_secs,
+                                    saved_updated_at_secs,
+                                )
+                                .await;
+                                return Err(err);
+                            }
+                        };
+                    let resolved_identity = match self
+                        .resolve_target_llm_identity(&current_identity, metadata)
+                        .await
+                    {
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            self.restore_pending_from_promoting(
+                                session_id,
+                                build_config,
+                                labels,
+                                saved_deferred_prompt,
+                                saved_created_at_secs,
+                                saved_updated_at_secs,
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                    };
                     Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 }
                 if let Some(keep_alive) = keep_alive_override {
@@ -3041,23 +3094,36 @@ impl SessionRuntime {
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
                 .await;
+            let first_turn_prompt = turn_prompt.clone();
             let req = CreateSessionRequest {
                 model: build_config.model.clone(),
-                prompt: turn_prompt,
+                prompt: turn_prompt.clone(),
                 render_metadata: None,
                 system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
-                event_tx: Some(event_tx),
+                event_tx: None,
 
-                skill_references: skill_references.clone(),
-                initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
                 labels: labels.clone(),
             };
 
             match self.service.create_session(req).await {
-                Ok(result) => {
+                Ok(_) => {
+                    let result = self
+                        .service
+                        .start_turn(
+                            session_id,
+                            StartTurnRequest {
+                                prompt: first_turn_prompt,
+                                system_prompt: None,
+                                event_tx: Some(event_tx),
+                                turn_metadata: service_turn_metadata.clone(),
+                            },
+                        )
+                        .await;
                     if let Some((starting_system_context_state, current_system_context_state)) =
                         self.take_promoting_system_context_state(session_id).await
                         && let Err(err) = self
@@ -3071,11 +3137,11 @@ impl SessionRuntime {
                         tracing::warn!(
                             session_id = %session_id,
                             error = %err.message,
-                            "failed to replay promoted system-context state after create_session; preserving completed turn result"
+                            "failed to replay promoted system-context state after create_session; continuing first turn"
                         );
                     }
                     self.bridge_pending_session_event_streams(session_id).await;
-                    return Ok(result);
+                    return result.map_err(session_error_to_rpc);
                 }
                 Err(err) => {
                     if let Some((_starting_system_context_state, current_system_context_state)) =
@@ -7498,6 +7564,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn turn_start_on_pending_session_restores_after_provider_model_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .unwrap();
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
+            provider: Some(meerkat_core::Provider::Anthropic),
+            ..Default::default()
+        };
+        let err = runtime
+            .start_turn(&session_id, "Hello".into(), event_tx, Some(turn_metadata))
+            .await
+            .expect_err("provider/model mismatch should be rejected on pending sessions");
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message.contains("gpt-5.4") && err.message.contains("anthropic"),
+            "unexpected error message: {}",
+            err.message
+        );
+        assert!(
+            runtime.pending_session_exists(&session_id).await,
+            "metadata validation failure must restore the pending session"
+        );
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(&session_id, "after rejection".into(), event_tx, None)
+            .await
+            .expect("staged session should remain promotable after rejected metadata");
+    }
+
     /// turn/start on a materialized session allows model override (hot-swap).
     #[tokio::test]
     async fn turn_start_on_materialized_session_allows_model_override() {
@@ -8877,6 +8981,8 @@ mod tests {
         let shadow_type = concat!("struct ", "Turn", "Overrides");
         let shadow_projection = concat!("turn_", "overrides", "_from_", "metadata");
         let split_start_signature = concat!("flow_", "tool_", "overlay: Option<");
+        let eager_pending_start = concat!("InitialTurnPolicy::", "RunImmediately");
+        let split_skill_projection = concat!("skill_references: skill_", "references");
 
         assert!(
             !source.contains(shadow_type),
@@ -8889,6 +8995,14 @@ mod tests {
         assert!(
             !source.contains(split_start_signature),
             "SessionRuntime::start_turn must not accept split flow overlay outside RuntimeTurnMetadata"
+        );
+        assert!(
+            !source.contains(eager_pending_start),
+            "pending SessionRuntime::start_turn must materialize deferred, then start with full RuntimeTurnMetadata"
+        );
+        assert!(
+            !source.contains(split_skill_projection),
+            "pending runtime materialization must not peel skill_references out of RuntimeTurnMetadata"
         );
     }
 

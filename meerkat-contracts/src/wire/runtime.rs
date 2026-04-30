@@ -1243,6 +1243,7 @@ where
 /// `serde_json::Value` does not appear here.
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handling_mode: Option<crate::wire::mob::WireHandlingMode>,

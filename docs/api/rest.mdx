@@ -475,44 +475,12 @@ Continue an existing session.
   Follow-up prompt.
 </ParamField>
 
-<ParamField body="system_prompt" type="string | null" default="null">
-  Override the system prompt.
-</ParamField>
-
-<ParamField body="model" type="string | null" default="from session">
-  Model override for this turn. On materialized sessions this hot-swaps the LLM client for the remainder of the session.
-</ParamField>
-
-<ParamField body="provider" type="string | null" default="from session">
-  Provider override for this turn. Typically inferred from `model`. Used with `model` for mid-session provider switching.
-</ParamField>
-
-<ParamField body="max_tokens" type="u32 | null" default="from session">
-  Max tokens override for this turn.
-</ParamField>
-
-<ParamField body="output_schema" type="OutputSchema | null" default="null">
-  Structured output schema for this turn.
-</ParamField>
-
-<ParamField body="structured_output_retries" type="u32 | null" default="null">
-  Max retries for structured output validation. Omit / `null` to inherit the persisted session value on continue.
-</ParamField>
-
 <ParamField body="verbose" type="bool" default="false">
   Enable verbose event logging.
 </ParamField>
 
-<ParamField body="keep_alive" type="bool | null" default="null">
-  Keep-alive override for this turn. `null` = inherit persisted session intent, `true` = enable, `false` = disable.
-</ParamField>
-
-<ParamField body="comms_name" type="string | null" default="from session">
-  Agent name for comms.
-</ParamField>
-
-<ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
-  Run-scoped hook overrides.
+<ParamField body="turn_metadata" type="RuntimeTurnMetadata | null" default="null">
+  Canonical per-turn metadata carrier. Put turn-scoped model/provider/provider_params, skill_references, flow_tool_overlay, additional_instructions, keep_alive, and render metadata inside this object; split top-level turn fields are rejected.
 </ParamField>
 
 #### Response fields

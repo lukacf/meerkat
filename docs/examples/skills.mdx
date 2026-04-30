@@ -391,7 +391,7 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
 
 ## Per-turn skill injection
 
-Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only. On the CLI, `--skill` remains the preload-style runtime-local path; the typed per-turn surface is `skill_refs`.
+Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only. On the CLI, `--skill` remains the preload-style runtime-local path; raw RPC and REST carry per-turn skills inside `turn_metadata.skill_references`, while SDKs expose `skill_refs` convenience options.
 
 <Tabs>
   <Tab title="CLI">
@@ -408,13 +408,14 @@ Inject skills into a specific turn on an existing session. The skill content is 
       "params": {
         "session_id": "019467d9-7e3a-7000-8000-000000000000",
         "prompt": "Now format the output",
-        "skill_refs": [
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }
     }
     ```
@@ -425,13 +426,14 @@ Inject skills into a specific turn on an existing session. The skill content is 
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Now format the output",
-        "skill_refs": [
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }'
     ```
   </Tab>

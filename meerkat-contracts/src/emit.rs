@@ -1521,6 +1521,24 @@ mod tests {
             Some(&serde_json::Value::Bool(false)),
             "mob/turn_start params must fail closed instead of accepting arbitrary flattened overrides"
         );
+        let turn_metadata = turn_start
+            .pointer("/$defs/WireRuntimeTurnMetadata")
+            .expect("mob/turn_start schema must define WireRuntimeTurnMetadata");
+        assert_eq!(
+            turn_metadata.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "WireRuntimeTurnMetadata schema must reject stale nested split fields"
+        );
+        let turn_metadata_properties = turn_metadata
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("WireRuntimeTurnMetadata schema must expose properties");
+        for split_field in ["clear_provider_params", "clear_connection_ref"] {
+            assert!(
+                !turn_metadata_properties.contains_key(split_field),
+                "WireRuntimeTurnMetadata must not expose legacy nested split field {split_field}"
+            );
+        }
 
         fs::remove_dir_all(&output_dir).unwrap();
     }
@@ -1811,6 +1829,24 @@ mod tests {
             Some(&serde_json::Value::Bool(false)),
             "REST continue schema must reject split or unknown top-level turn metadata fields"
         );
+        let turn_metadata = rest
+            .pointer("/components/schemas/WireRuntimeTurnMetadata")
+            .expect("WireRuntimeTurnMetadata component must be emitted");
+        assert_eq!(
+            turn_metadata.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "WireRuntimeTurnMetadata component must reject stale nested split fields"
+        );
+        let turn_metadata_properties = turn_metadata
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("WireRuntimeTurnMetadata component must expose properties");
+        for split_field in ["clear_provider_params", "clear_connection_ref"] {
+            assert!(
+                !turn_metadata_properties.contains_key(split_field),
+                "WireRuntimeTurnMetadata component must not expose legacy nested split field {split_field}"
+            );
+        }
         for split_field in [
             "skill_refs",
             "flow_tool_overlay",

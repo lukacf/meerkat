@@ -902,6 +902,14 @@ impl MeerkatMachine {
                         }
                     }
                     Ok(None) => {}
+                    Err(err) if recovered.is_some() => {
+                        tracing::warn!(
+                            %session_id,
+                            %candidate,
+                            error = %err,
+                            "ignoring legacy ops lifecycle fallback error because canonical snapshot was already recovered"
+                        );
+                    }
                     Err(err) => {
                         tracing::warn!(
                             %session_id,

@@ -392,6 +392,8 @@ fn terminal_persistence_channel_closed_fails_terminal_transition() {
 struct FailingOpsLifecycleStore {
     inner: meerkat_runtime::InMemoryRuntimeStore,
     persist_calls: AtomicUsize,
+    fail_persist_ops: bool,
+    fail_ops_load_for: Option<LogicalRuntimeId>,
 }
 
 impl FailingOpsLifecycleStore {
@@ -399,6 +401,17 @@ impl FailingOpsLifecycleStore {
         Self {
             inner: meerkat_runtime::InMemoryRuntimeStore::new(),
             persist_calls: AtomicUsize::new(0),
+            fail_persist_ops: true,
+            fail_ops_load_for: None,
+        }
+    }
+
+    fn fail_ops_load_for(runtime_id: LogicalRuntimeId) -> Self {
+        Self {
+            inner: meerkat_runtime::InMemoryRuntimeStore::new(),
+            persist_calls: AtomicUsize::new(0),
+            fail_persist_ops: false,
+            fail_ops_load_for: Some(runtime_id),
         }
     }
 
@@ -538,19 +551,27 @@ impl RuntimeStore for FailingOpsLifecycleStore {
 
     async fn persist_ops_lifecycle(
         &self,
-        _runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        _snapshot: &PersistedOpsSnapshot,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        snapshot: &PersistedOpsSnapshot,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
-        self.persist_calls.fetch_add(1, Ordering::SeqCst);
-        Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
-            "synthetic ops lifecycle persist failure".to_string(),
-        ))
+        if self.fail_persist_ops {
+            self.persist_calls.fetch_add(1, Ordering::SeqCst);
+            return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                "synthetic ops lifecycle persist failure".to_string(),
+            ));
+        }
+        self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
     }
 
     async fn load_ops_lifecycle(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
     ) -> Result<Option<PersistedOpsSnapshot>, meerkat_runtime::RuntimeStoreError> {
+        if self.fail_ops_load_for.as_ref() == Some(runtime_id) {
+            return Err(meerkat_runtime::RuntimeStoreError::ReadFailed(
+                "synthetic legacy ops lifecycle load failure".to_string(),
+            ));
+        }
         self.inner.load_ops_lifecycle(runtime_id).await
     }
 }
@@ -758,6 +779,48 @@ async fn cold_persistent_adapter_prefers_more_advanced_legacy_ops_alias_snapshot
     assert_eq!(
         bindings.epoch_id, legacy_epoch,
         "register_session must not hide a more advanced legacy ops lifecycle alias snapshot"
+    );
+    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let batch = feed.list_since(0);
+    assert_eq!(batch.entries.len(), 1);
+    assert_eq!(batch.entries[0].operation_id, op_id);
+}
+
+#[tokio::test]
+async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_when_legacy_alias_load_fails() {
+    let session_id = SessionId::new();
+    let canonical_runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let legacy_runtime_id = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
+    let store = Arc::new(FailingOpsLifecycleStore::fail_ops_load_for(
+        legacy_runtime_id,
+    ));
+
+    let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
+    let cursor_state = Arc::new(EpochCursorState::new());
+    let canonical_epoch = RuntimeEpochId::new();
+    let spec = bg_spec("canonical-recovery-survives-legacy-error");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+    registry
+        .complete_operation(&op_id, op_result(&op_id))
+        .unwrap();
+    let snapshot = registry.capture_persistence_snapshot(canonical_epoch.clone(), &cursor_state);
+    store
+        .inner
+        .persist_ops_lifecycle(&canonical_runtime_id, &snapshot)
+        .await
+        .unwrap();
+
+    let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>
+    );
+    adapter.register_session(session_id.clone()).await;
+
+    let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
+    assert_eq!(
+        bindings.epoch_id, canonical_epoch,
+        "legacy ops alias load failure must not rotate away from a valid canonical snapshot"
     );
     let feed = bindings.ops_lifecycle.completion_feed().unwrap();
     let batch = feed.list_since(0);

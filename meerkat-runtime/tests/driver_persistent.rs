@@ -35,6 +35,7 @@ struct FailPersistInputStore {
     fail_persist_input_state: AtomicBool,
     fail_atomic_apply: AtomicBool,
     fail_atomic_lifecycle_commit: AtomicBool,
+    fail_load_input_states_for: Option<LogicalRuntimeId>,
 }
 
 impl FailPersistInputStore {
@@ -44,6 +45,7 @@ impl FailPersistInputStore {
             fail_persist_input_state: AtomicBool::new(true),
             fail_atomic_apply: AtomicBool::new(false),
             fail_atomic_lifecycle_commit: AtomicBool::new(false),
+            fail_load_input_states_for: None,
         }
     }
 
@@ -53,6 +55,7 @@ impl FailPersistInputStore {
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(true),
             fail_atomic_lifecycle_commit: AtomicBool::new(false),
+            fail_load_input_states_for: None,
         }
     }
 
@@ -62,6 +65,20 @@ impl FailPersistInputStore {
             fail_persist_input_state: AtomicBool::new(false),
             fail_atomic_apply: AtomicBool::new(false),
             fail_atomic_lifecycle_commit: AtomicBool::new(true),
+            fail_load_input_states_for: None,
+        }
+    }
+
+    fn fail_load_input_states_for(
+        inner: Arc<InMemoryRuntimeStore>,
+        runtime_id: LogicalRuntimeId,
+    ) -> Self {
+        Self {
+            inner,
+            fail_persist_input_state: AtomicBool::new(false),
+            fail_atomic_apply: AtomicBool::new(false),
+            fail_atomic_lifecycle_commit: AtomicBool::new(false),
+            fail_load_input_states_for: Some(runtime_id),
         }
     }
 }
@@ -127,6 +144,11 @@ impl RuntimeStore for FailPersistInputStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Vec<StoredInputState>, RuntimeStoreError> {
+        if self.fail_load_input_states_for.as_ref() == Some(runtime_id) {
+            return Err(RuntimeStoreError::ReadFailed(
+                "synthetic legacy input-state load failure".into(),
+            ));
+        }
         self.inner.load_input_states(runtime_id).await
     }
 
@@ -1144,5 +1166,39 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
     assert!(
         driver.dequeue_next().is_none(),
         "canonical committed input must not be replayed because the newer duplicate row came from the legacy alias"
+    );
+}
+
+#[tokio::test]
+async fn recover_ignores_legacy_input_state_load_error_after_canonical_states() {
+    let inner = Arc::new(InMemoryRuntimeStore::new());
+    let session_id = SessionId::new();
+    let canonical_rid = LogicalRuntimeId::for_session(&session_id);
+    let legacy_rid = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
+    let input = make_prompt("canonical survives unreadable legacy alias");
+    let input_id = input.id().clone();
+
+    let mut state = InputState::new_accepted(input_id.clone());
+    state.persisted_input = Some(input);
+    state.durability = Some(InputDurability::Durable);
+    inner
+        .persist_input_state(&canonical_rid, &stored_accepted(state))
+        .await
+        .unwrap();
+
+    let store = Arc::new(FailPersistInputStore::fail_load_input_states_for(
+        inner, legacy_rid,
+    ));
+    let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
+
+    let report = driver
+        .recover()
+        .await
+        .expect("legacy input-state read failure must not poison canonical recovery");
+
+    assert_eq!(report.inputs_recovered, 1);
+    assert!(
+        driver.input_state(&input_id).is_some(),
+        "canonical input state should recover even when legacy alias load fails"
     );
 }

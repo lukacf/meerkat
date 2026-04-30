@@ -449,16 +449,29 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(Vec::new());
         };
         let mut stored_states: Vec<StoredInputState> = Vec::new();
-        for runtime_id in Self::runtime_id_candidates_for_session(id) {
-            let candidate_states =
-                runtime_store
-                    .load_input_states(&runtime_id)
-                    .await
-                    .map_err(|err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!("failed to load runtime input states: {err}"),
-                        ))
-                    })?;
+        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
+            .into_iter()
+            .enumerate()
+        {
+            let candidate_states = match runtime_store.load_input_states(&runtime_id).await {
+                Ok(states) => states,
+                Err(err) if candidate_index > 0 && !stored_states.is_empty() => {
+                    tracing::warn!(
+                        session_id = %id,
+                        runtime_id = %runtime_id,
+                        error = %err,
+                        "ignoring legacy runtime input-state fallback error because canonical input states were already loaded"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "failed to load runtime input states: {err}"
+                        )),
+                    ));
+                }
+            };
             for state in candidate_states {
                 let input_id = state.state.input_id.clone();
                 if let Some(existing) = stored_states
@@ -2425,6 +2438,7 @@ mod tests {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
         session_snapshot_overrides: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
+        input_state_load_errors: Mutex<HashSet<LogicalRuntimeId>>,
         boundary_commits: Mutex<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>>,
     }
 
@@ -2434,6 +2448,7 @@ mod tests {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
                 session_snapshot_overrides: Mutex::new(HashMap::new()),
+                input_state_load_errors: Mutex::new(HashSet::new()),
                 boundary_commits: Mutex::new(Vec::new()),
             }
         }
@@ -2471,6 +2486,10 @@ mod tests {
                 .lock()
                 .await
                 .insert(runtime_id, snapshot);
+        }
+
+        async fn fail_input_state_load_for(&self, runtime_id: LogicalRuntimeId) {
+            self.input_state_load_errors.lock().await.insert(runtime_id);
         }
     }
 
@@ -2536,6 +2555,16 @@ mod tests {
             &self,
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Vec<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            if self
+                .input_state_load_errors
+                .lock()
+                .await
+                .contains(runtime_id)
+            {
+                return Err(meerkat_runtime::store::RuntimeStoreError::ReadFailed(
+                    "synthetic legacy input-state load failure".to_string(),
+                ));
+            }
             self.inner.load_input_states(runtime_id).await
         }
 
@@ -5117,6 +5146,49 @@ mod tests {
             canonical_session.messages().len(),
             "canonical runtime authority must win over corrupt legacy fallback data"
         );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_input_updates_ignore_legacy_alias_load_error_after_canonical_states() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        let input_id = InputId::new();
+        let canonical_runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        let mut input_state = meerkat_runtime::InputState::new_accepted(input_id.clone());
+        input_state.durability = Some(meerkat_runtime::InputDurability::Durable);
+        let stored = StoredInputState {
+            state: input_state,
+            seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
+        };
+        runtime_store
+            .persist_input_state(&canonical_runtime_id, &stored)
+            .await
+            .expect("test should seed canonical input state");
+        runtime_store
+            .fail_input_state_load_for(LogicalRuntimeId::legacy_session_uuid_alias(&id))
+            .await;
+
+        let run_id = RunId::new();
+        let updates = service
+            .runtime_input_updates(&id, &run_id, 7, std::slice::from_ref(&input_id))
+            .await
+            .expect("legacy input-state load failure must not poison canonical updates");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].state.input_id, input_id);
+        assert_eq!(updates[0].seed.phase, InputLifecycleState::Consumed);
+        assert_eq!(updates[0].seed.last_run_id, Some(run_id));
+        assert_eq!(updates[0].seed.last_boundary_sequence, Some(7));
     }
 
     #[tokio::test]

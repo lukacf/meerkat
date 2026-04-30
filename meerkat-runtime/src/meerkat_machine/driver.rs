@@ -1163,7 +1163,12 @@ async fn load_input_states_for_storage_aliases(
         .into_iter()
         .enumerate()
     {
-        for state in store.load_input_states(&candidate).await? {
+        let states = match store.load_input_states(&candidate).await {
+            Ok(states) => states,
+            Err(_err) if candidate_index > 0 && !merged.is_empty() => continue,
+            Err(err) => return Err(err),
+        };
+        for state in states {
             let input_id = state.state.input_id.clone();
             if let Some((existing_index, existing_runtime_id, existing_state)) = merged
                 .iter_mut()

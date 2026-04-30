@@ -2680,6 +2680,7 @@ dependencies = [
 name = "meerkat-machine-codegen"
 version = "0.6.0"
 dependencies = [
+ "meerkat-core",
  "meerkat-machine-schema",
  "meerkat-mob",
  "meerkat-runtime",

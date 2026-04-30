@@ -45,6 +45,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
@@ -90,6 +91,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-mob:meerkat_mob",
         "//meerkat-runtime:meerkat_runtime",
@@ -139,6 +141,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-mob:meerkat_mob",
@@ -189,6 +192,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-mob:meerkat_mob",
@@ -244,6 +248,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-mob:meerkat_mob",
@@ -296,6 +301,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-mob:meerkat_mob",
@@ -350,6 +356,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-mob:meerkat_mob",
@@ -404,6 +411,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-core:meerkat_core",
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-mob:meerkat_mob",

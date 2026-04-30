@@ -289,6 +289,38 @@ fn generated_meerkat_operation_kind_uses_string_enum_binding() {
 }
 
 #[test]
+fn generated_meerkat_kernel_content_shape_routes_wire_labels_through_core() {
+    use meerkat_core::turn_execution_authority::ContentShape;
+
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+    for (variant, core_shape) in [
+        ("Conversation", ContentShape::Conversation),
+        (
+            "ConversationAndContext",
+            ContentShape::ConversationAndContext,
+        ),
+        ("Context", ContentShape::Context),
+        ("Empty", ContentShape::Empty),
+        ("ImmediateAppend", ContentShape::ImmediateAppend),
+        ("ImmediateContext", ContentShape::ImmediateContext),
+    ] {
+        let rename = format!("    #[serde(rename = \"{}\")]", core_shape.as_str());
+        assert!(
+            rendered.contains(&rename),
+            "generated ContentShape::{variant} must serialize as the core wire label:\n{rendered}"
+        );
+
+        let match_arm = format!(
+            "Self::{variant} => meerkat_core::turn_execution_authority::ContentShape::{variant}.as_str(),"
+        );
+        assert!(
+            rendered.contains(&match_arm),
+            "generated ContentShape::{variant} as_str must route through the core contract:\n{rendered}"
+        );
+    }
+}
+
+#[test]
 fn generated_meerkat_closed_dsl_domains_use_string_enum_bindings() {
     let rendered = render_machine_kernel_module(&meerkat_machine());
 

@@ -403,6 +403,14 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
                 if index == 0 {
                     pushln!(&mut out, "    #[default]");
                 }
+                let wire_label = known_enum_variant_wire_label(&enum_name, variant);
+                if wire_label != variant.as_str() {
+                    pushln!(
+                        &mut out,
+                        "    #[serde(rename = {})]",
+                        tla_string(wire_label)
+                    );
+                }
                 pushln!(&mut out, "    {},", rust_ident(variant));
             }
             pushln!(&mut out, "}}");
@@ -410,11 +418,12 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
             pushln!(&mut out, "    pub fn as_str(&self) -> &'static str {{");
             pushln!(&mut out, "        match self {{");
             for variant in &variants {
+                let wire_expr = known_enum_variant_wire_expr(&enum_name, variant);
                 pushln!(
                     &mut out,
-                    "            Self::{} => \"{}\",",
+                    "            Self::{} => {},",
                     rust_ident(variant),
-                    variant
+                    wire_expr
                 );
             }
             pushln!(&mut out, "        }}");
@@ -1929,6 +1938,64 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
         .map(str::to_string)
         .collect(),
     )
+}
+
+#[cfg(not(test))]
+fn known_enum_variant_wire_label(enum_name: &str, variant: &str) -> String {
+    if enum_name == "ContentShape"
+        && let Some(shape) = known_enum_content_shape(variant)
+    {
+        return shape.as_str().to_owned();
+    }
+
+    variant.to_owned()
+}
+
+#[cfg(not(test))]
+fn known_enum_variant_wire_expr(enum_name: &str, variant: &str) -> String {
+    if enum_name == "ContentShape"
+        && let Some(shape) = known_enum_content_shape(variant)
+    {
+        return format!(
+            "meerkat_core::turn_execution_authority::ContentShape::{}.as_str()",
+            shape_variant_ident(shape)
+        );
+    }
+
+    tla_string(variant)
+}
+
+#[cfg(not(test))]
+fn known_enum_content_shape(
+    variant: &str,
+) -> Option<meerkat_core::turn_execution_authority::ContentShape> {
+    use meerkat_core::turn_execution_authority::ContentShape;
+
+    Some(match variant {
+        "Conversation" => ContentShape::Conversation,
+        "ConversationAndContext" => ContentShape::ConversationAndContext,
+        "Context" => ContentShape::Context,
+        "Empty" => ContentShape::Empty,
+        "ImmediateAppend" => ContentShape::ImmediateAppend,
+        "ImmediateContext" => ContentShape::ImmediateContext,
+        _ => return None,
+    })
+}
+
+#[cfg(not(test))]
+fn shape_variant_ident(
+    shape: meerkat_core::turn_execution_authority::ContentShape,
+) -> &'static str {
+    use meerkat_core::turn_execution_authority::ContentShape;
+
+    match shape {
+        ContentShape::Conversation => "Conversation",
+        ContentShape::ConversationAndContext => "ConversationAndContext",
+        ContentShape::Context => "Context",
+        ContentShape::Empty => "Empty",
+        ContentShape::ImmediateAppend => "ImmediateAppend",
+        ContentShape::ImmediateContext => "ImmediateContext",
+    }
 }
 
 #[cfg(not(test))]

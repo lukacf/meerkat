@@ -109,6 +109,58 @@ rust_test(
 )
 
 rust_test(
+    name = "content_shape_wire_contract_test",
+    aliases = aliases(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "content_shape_wire_contract",
+    crate_root = "tests/content_shape_wire_contract.rs",
+    crate_features = [
+        "test-oracle",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+    ],
+    srcs = [
+        "tests/content_shape_wire_contract.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "content_shape_wire_contract",
+        "CARGO_MANIFEST_DIR": "./meerkat-machine-kernels",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-core:meerkat_core",
+        "//meerkat-machine-kernels:meerkat_machine_kernels",
+        "//meerkat-machine-schema:meerkat_machine_schema",
+    ] + all_crate_deps(
+        package_name = "meerkat-machine-kernels",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "kernel_typed_round_trip_test",
     aliases = aliases(
         package_name = "meerkat-machine-kernels",
@@ -163,6 +215,7 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
+        ":content_shape_wire_contract_test",
         ":kernel_typed_round_trip_test",
         ":meerkat_machine_kernels_unit_test",
     ],

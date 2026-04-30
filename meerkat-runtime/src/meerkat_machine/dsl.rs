@@ -1421,12 +1421,21 @@ pub enum ContentShape {
 impl ContentShape {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Conversation => "conversation",
-            Self::ConversationAndContext => "conversation+context",
-            Self::Context => "context",
-            Self::Empty => "empty",
-            Self::ImmediateAppend => "immediate_append",
-            Self::ImmediateContext => "immediate_context",
+            Self::Conversation => {
+                meerkat_core::turn_execution_authority::ContentShape::Conversation.as_str()
+            }
+            Self::ConversationAndContext => {
+                meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext
+                    .as_str()
+            }
+            Self::Context => meerkat_core::turn_execution_authority::ContentShape::Context.as_str(),
+            Self::Empty => meerkat_core::turn_execution_authority::ContentShape::Empty.as_str(),
+            Self::ImmediateAppend => {
+                meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend.as_str()
+            }
+            Self::ImmediateContext => {
+                meerkat_core::turn_execution_authority::ContentShape::ImmediateContext.as_str()
+            }
         }
     }
 }

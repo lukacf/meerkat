@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+meerkat-core = { workspace = true }
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }
 
 [dev-dependencies]

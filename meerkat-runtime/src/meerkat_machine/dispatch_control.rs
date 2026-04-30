@@ -450,16 +450,38 @@ impl MeerkatMachine {
                     .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
-                let report = match machine_destroy(&mut drv).await {
-                    Ok(report) => report,
+                let prepared_destroy = match machine_prepare_destroy(&mut drv) {
+                    Ok(prepared) => prepared,
                     Err(err) => return Err(RuntimeControlPlaneError::Internal(err.to_string())),
                 };
+                let staged_dsl = Self::stage_dsl_transition_on_authority(
+                    &drv.shared_dsl_authority(),
+                    destroy_input,
+                    "Destroy",
+                );
+                let staged_dsl = match staged_dsl {
+                    Ok(staged) => staged,
+                    Err(reason) => {
+                        drv.rollback_prepared_destroy_lifecycle(prepared_destroy.lifecycle);
+                        drv.sync_control_projection_from_dsl_authority();
+                        return Err(RuntimeControlPlaneError::Internal(reason));
+                    }
+                };
+                drv.sync_control_projection_from_dsl_authority();
+                let report = prepared_destroy.report;
+                match machine_commit_prepared_destroy(&mut drv, prepared_destroy.lifecycle).await {
+                    Ok(()) => {}
+                    Err(err) => {
+                        drv.sync_control_projection_from_dsl_authority();
+                        return Err(RuntimeControlPlaneError::Internal(err.to_string()));
+                    }
+                }
                 drop(drv);
 
                 let apply_result = self
-                    .apply_session_dsl_input_preserving_committed_state(
+                    .commit_session_dsl_transition_preserving_committed_state(
                         &session_id,
-                        destroy_input,
+                        staged_dsl,
                         "Destroy",
                     )
                     .await;

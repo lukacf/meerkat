@@ -19,7 +19,9 @@ use crate::runtime_state::RuntimeState;
 use crate::store::RuntimeStore;
 use crate::traits::{DestroyReport, RecoveryReport, RuntimeDriver, RuntimeDriverError};
 
-use super::ephemeral::{EphemeralRuntimeDriver, SharedIngressDslAuthority};
+use super::ephemeral::{
+    EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver, SharedIngressDslAuthority,
+};
 
 /// Persistent runtime driver — durable InputState via RuntimeStore.
 pub struct PersistentRuntimeDriver {
@@ -472,23 +474,43 @@ impl PersistentRuntimeDriver {
     }
 
     pub async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+        let (checkpoint, report) = self.prepare_destroy_lifecycle();
+        self.inner
+            .force_runtime_authority(RuntimeState::Destroyed, None, None);
+        self.commit_prepared_destroy_lifecycle(checkpoint).await?;
+        Ok(report)
+    }
+
+    pub(crate) fn prepare_destroy_lifecycle(
+        &mut self,
+    ) -> (EphemeralDriverRollbackSnapshot, DestroyReport) {
         let checkpoint = self.inner.rollback_snapshot();
         let abandoned = self.inner.destroy_cleanup();
-        // Persist the intent-carrying terminal phase (`Destroyed`),
-        // not the pre-destroy shell phase from
-        // `runtime_state_for_persistence()`. `e5c5ecaf3` removed the
-        // shell `set_control_projection(Destroyed, ...)` write (the DSL
-        // Destroy input is the canonical phase-update path now), so
-        // `runtime_state_for_persistence()` still reads the pre-destroy
-        // shell phase at this point. Without the explicit `Destroyed`
-        // here, the store records the wrong phase and cold restarts
-        // (`cold_reregister_preserves_destroyed_runtime_state`) resurrect
-        // the session as non-Destroyed.
-        self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Destroyed, "destroy")
-            .await?;
-        Ok(DestroyReport {
-            inputs_abandoned: abandoned,
-        })
+        (
+            checkpoint,
+            DestroyReport {
+                inputs_abandoned: abandoned,
+            },
+        )
+    }
+
+    pub(crate) async fn commit_prepared_destroy_lifecycle(
+        &mut self,
+        checkpoint: EphemeralDriverRollbackSnapshot,
+    ) -> Result<(), RuntimeDriverError> {
+        self.commit_lifecycle_with_rollback(
+            checkpoint,
+            self.runtime_state_for_persistence(),
+            "destroy",
+        )
+        .await
+    }
+
+    pub(crate) fn rollback_prepared_destroy_lifecycle(
+        &mut self,
+        checkpoint: EphemeralDriverRollbackSnapshot,
+    ) {
+        self.inner.restore_rollback_snapshot(checkpoint);
     }
 
     /// Low-level destroy realization shim for external contract tests.

@@ -2595,6 +2595,199 @@ async fn persistent_destroy_synchronizes_driver_control_projection_shadow() {
 }
 
 #[tokio::test]
+async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
+    struct BlockingDestroyCommitStore {
+        inner: Arc<crate::store::InMemoryRuntimeStore>,
+        destroy_commit_started: Notify,
+        release_destroy_commit: Notify,
+    }
+
+    impl BlockingDestroyCommitStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(crate::store::InMemoryRuntimeStore::new()),
+                destroy_commit_started: Notify::new(),
+                release_destroy_commit: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStore for BlockingDestroyCommitStore {
+        async fn commit_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: crate::store::SessionDelta,
+            run_id: RunId,
+            boundary: RunApplyBoundary,
+            contributing_input_ids: Vec<InputId>,
+            input_updates: Vec<crate::input_state::StoredInputState>,
+        ) -> Result<RunBoundaryReceipt, crate::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_boundary(
+                    runtime_id,
+                    session_delta,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    input_updates,
+                )
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<crate::store::SessionDelta>,
+            receipt: RunBoundaryReceipt,
+            input_updates: Vec<crate::input_state::StoredInputState>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<Option<RunBoundaryReceipt>, crate::store::RuntimeStoreError> {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &crate::input_state::StoredInputState,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
+        {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn persist_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: RuntimeState,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.persist_runtime_state(runtime_id, state).await
+        }
+
+        async fn load_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeState>, crate::store::RuntimeStoreError> {
+            self.inner.load_runtime_state(runtime_id).await
+        }
+
+        async fn atomic_lifecycle_commit(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            runtime_state: RuntimeState,
+            input_states: &[crate::input_state::StoredInputState],
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+                .await?;
+            if runtime_state == RuntimeState::Destroyed {
+                self.destroy_commit_started.notify_one();
+                self.release_destroy_commit.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(BlockingDestroyCommitStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let destroy_task = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let runtime_id = runtime_id.clone();
+        async move { crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id).await }
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        store.destroy_commit_started.notified(),
+    )
+    .await
+    .expect("destroy should reach the durable lifecycle commit");
+
+    assert_eq!(
+        store.inner.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "test probe should observe the store after durable destroyed commit",
+    );
+
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions
+        .get(&session_id)
+        .expect("destroy keeps the session entry available for terminal snapshots");
+    assert_eq!(
+        entry.control_snapshot().phase,
+        RuntimeState::Destroyed,
+        "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
+    );
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+        RuntimeState::Destroyed,
+        "durable destroyed state must not race ahead of canonical DSL destroy truth",
+    );
+    drop(authority);
+    drop(sessions);
+
+    store.release_destroy_commit.notify_waiters();
+    let report = tokio::time::timeout(Duration::from_secs(2), destroy_task)
+        .await
+        .expect("destroy task should finish after releasing the store")
+        .expect("destroy task should not panic")
+        .expect("destroy should succeed");
+    assert_eq!(report.inputs_abandoned, 0);
+}
+
+#[tokio::test]
 async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_but_preserves_wait_all()
  {
     let adapter = Arc::new(MeerkatMachine::ephemeral());

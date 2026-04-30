@@ -1232,9 +1232,9 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::WaitingForOps,
         active_run_id: Some(RunId::new()),
         primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
-        admitted_content_shape: Some(meerkat_core::turn_execution_authority::ContentShape(
-            "prompt_text".to_string(),
-        )),
+        admitted_content_shape: Some(
+            meerkat_core::turn_execution_authority::ContentShape::Conversation,
+        ),
         vision_enabled: true,
         image_tool_results_enabled: false,
         tool_calls_pending: 2,

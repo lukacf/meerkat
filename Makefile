@@ -380,6 +380,7 @@ machine-check-drift: xtask-build
 # terminal mapping, ownership-ledger drift, and heuristic authority hygiene checks.
 rmat-audit:
 	@echo "$(GREEN)Running RMAT structural seam audit...$(NC)"
+	./scripts/audit-effect-authority.sh
 	$(CARGO) run -p xtask -- ownership-ledger --check-drift
 	$(CARGO) run -p xtask -- rmat-audit --strict
 

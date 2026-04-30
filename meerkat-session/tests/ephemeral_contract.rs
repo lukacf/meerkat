@@ -816,6 +816,17 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
     }
 }
 
+fn runtime_content_turn_req(prompt: &str) -> StartTurnRequest {
+    let mut req = turn_req(prompt);
+    req.turn_metadata = Some(
+        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            ..Default::default()
+        },
+    );
+    req
+}
+
 // ---------------------------------------------------------------------------
 // Contract tests
 // ---------------------------------------------------------------------------
@@ -1427,7 +1438,7 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
         .apply_runtime_turn(
             &session_id,
             run_id.clone(),
-            turn_req("needs callback"),
+            runtime_content_turn_req("needs callback"),
             RunApplyBoundary::RunStart,
             contributing_input_ids.clone(),
         )
@@ -1446,6 +1457,40 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
     };
     assert_eq!(tool_name, "external_mock");
     assert_eq!(args, json!({ "value": "browser" }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_apply_runtime_turn_rejects_missing_execution_kind_before_no_pending_terminal()
+-> Result<(), String> {
+    let service = make_service(MockAgentBuilder::new());
+    let mut create = create_req_deferred("Hello");
+    create.deferred_prompt_policy = DeferredPromptPolicy::Discard;
+    let _ = service
+        .create_session(create)
+        .await
+        .expect("create deferred session");
+    let session_id = service
+        .list(SessionQuery::default())
+        .await
+        .expect("list sessions")[0]
+        .session_id
+        .clone();
+
+    let error = service
+        .apply_runtime_turn(
+            &session_id,
+            meerkat_core::lifecycle::RunId::new(),
+            turn_req(""),
+            RunApplyBoundary::RunStart,
+            vec![meerkat_core::lifecycle::InputId::new()],
+        )
+        .await
+        .expect_err("runtime apply must reject missing execution kind before no-pending commit");
+
+    if !error.to_string().contains("runtime_execution_kind not set") {
+        return Err(format!("unexpected error: {error}"));
+    }
     Ok(())
 }
 

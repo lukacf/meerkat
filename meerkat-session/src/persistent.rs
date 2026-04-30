@@ -1347,6 +1347,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
+        Self::require_runtime_execution_kind_stamp(&req)?;
         let _ = self.discard_stale_live_session_if_needed(id).await?;
         let pre_turn_context_events = req.pre_turn_context_appends.clone();
         match self.inner.start_turn(id, req).await {
@@ -1395,6 +1396,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
             }
         }
+    }
+
+    fn require_runtime_execution_kind_stamp(req: &StartTurnRequest) -> Result<(), SessionError> {
+        if req
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.execution_kind)
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(
+                "runtime_execution_kind not set: runtime-backed turn did not stamp RuntimeTurnMetadata.execution_kind"
+                    .to_string(),
+            ),
+        ))
     }
 
     pub async fn apply_runtime_context_appends(
@@ -3681,6 +3700,17 @@ mod tests {
         }
     }
 
+    fn runtime_content_turn_request(prompt: &str) -> StartTurnRequest {
+        let mut req = start_turn_request(prompt);
+        req.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            },
+        );
+        req
+    }
+
     fn start_turn_request_with_system_prompt(
         prompt: &str,
         system_prompt: Option<&str>,
@@ -3963,14 +3993,13 @@ mod tests {
             .expect("create_session should succeed");
 
         let run_id = RunId::new();
+        let mut req = runtime_content_turn_request("ignored");
+        req.prompt = image_prompt("runtime");
         service
             .apply_runtime_turn(
                 &created.session_id,
                 run_id,
-                StartTurnRequest {
-                    prompt: image_prompt("runtime"),
-                    ..start_turn_request("ignored")
-                },
+                req,
                 RunApplyBoundary::RunStart,
                 vec![],
             )
@@ -4037,6 +4066,42 @@ mod tests {
             output.terminal,
             Some(CoreApplyTerminal::NoPendingBoundary)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_apply_runtime_turn_rejects_missing_execution_kind_before_no_pending_terminal() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+
+        let error = service
+            .apply_runtime_turn(
+                &created.session_id,
+                RunId::new(),
+                start_turn_request(""),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err(
+                "runtime apply must reject missing execution kind before no-pending commit",
+            );
+
+        assert!(
+            error.to_string().contains("runtime_execution_kind not set"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -4145,7 +4210,7 @@ mod tests {
             .apply_runtime_turn(
                 &created.session_id,
                 RunId::new(),
-                start_turn_request("runtime turn with failed commit"),
+                runtime_content_turn_request("runtime turn with failed commit"),
                 RunApplyBoundary::RunStart,
                 vec![meerkat_core::lifecycle::InputId::new()],
             )
@@ -4913,7 +4978,7 @@ mod tests {
             .apply_runtime_turn(
                 &result.session_id,
                 RunId::new(),
-                start_turn_request("runtime committed turn"),
+                runtime_content_turn_request("runtime committed turn"),
                 RunApplyBoundary::Immediate,
                 vec![],
             )
@@ -4997,7 +5062,7 @@ mod tests {
             .apply_runtime_turn(
                 &result.session_id,
                 RunId::new(),
-                start_turn_request("runtime committed turn"),
+                runtime_content_turn_request("runtime committed turn"),
                 RunApplyBoundary::Immediate,
                 vec![],
             )
@@ -5954,7 +6019,7 @@ mod tests {
             .apply_runtime_turn(
                 &result.session_id,
                 RunId::new(),
-                start_turn_request("runtime committed turn"),
+                runtime_content_turn_request("runtime committed turn"),
                 RunApplyBoundary::Immediate,
                 vec![],
             )

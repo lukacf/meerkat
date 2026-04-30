@@ -1205,6 +1205,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
+        Self::require_runtime_execution_kind_stamp(&req)?;
         match self.start_turn(id, req).await {
             Ok(run_result) => {
                 self.build_runtime_output(
@@ -1241,6 +1242,24 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 }
             }
         }
+    }
+
+    fn require_runtime_execution_kind_stamp(req: &StartTurnRequest) -> Result<(), SessionError> {
+        if req
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.execution_kind)
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(
+                "runtime_execution_kind not set: runtime-backed turn did not stamp RuntimeTurnMetadata.execution_kind"
+                    .to_string(),
+            ),
+        ))
     }
 
     pub async fn apply_runtime_context_appends(

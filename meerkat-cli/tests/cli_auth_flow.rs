@@ -16,27 +16,37 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 fn seed_managed_openai_realm_config(root: &std::path::Path) {
+    seed_managed_openai_realm_config_with_ids(root, "default_openai", "default_openai");
+}
+
+fn seed_managed_openai_realm_config_with_ids(
+    root: &std::path::Path,
+    auth_profile_id: &str,
+    binding_id: &str,
+) {
     let realm_dir = root.join("realms").join("dev");
     std::fs::create_dir_all(&realm_dir).expect("mkdir realm config dir");
     std::fs::write(
         realm_dir.join("config.toml"),
-        r#"
+        format!(
+            r#"
 [realm.dev]
-default_binding = "default_openai"
+default_binding = "{binding_id}"
 
 [realm.dev.backend.openai_backend]
 provider = "openai"
 backend_kind = "openai_api"
 
-[realm.dev.auth.default_openai]
+[realm.dev.auth.{auth_profile_id}]
 provider = "openai"
 auth_method = "api_key"
-source = { kind = "managed_store" }
+source = {{ kind = "managed_store" }}
 
-[realm.dev.binding.default_openai]
+[realm.dev.binding.{binding_id}]
 backend_profile = "openai_backend"
-auth_profile = "default_openai"
-"#,
+auth_profile = "{auth_profile_id}"
+"#
+        ),
     )
     .expect("write realm config");
 }
@@ -314,6 +324,50 @@ fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
     assert!(
         !stdout.contains("auth_mode:"),
         "status must not expose token-derived metadata without lifecycle; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn rkat_auth_status_resolves_binding_that_references_auth_profile() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_managed_openai_realm_config_with_ids(tmp.path(), "openai_managed", "default_openai");
+
+    let status = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "status",
+            "--realm",
+            "dev",
+            "openai_managed",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth status must spawn");
+    assert!(
+        status.status.success(),
+        "status must resolve binding-scoped lease identity from auth profile; stderr={}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("binding_id:  default_openai"),
+        "status must report the binding that owns the auth lease key; stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("state:       unknown"),
+        "status should still be lease-unknown without a live AuthMachine lifecycle; stdout:\n{stdout}"
     );
 }
 

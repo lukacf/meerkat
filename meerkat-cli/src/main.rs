@@ -2594,6 +2594,7 @@ struct RuntimeScope {
     origin_hint: RealmOrigin,
     context_root: Option<PathBuf>,
     user_config_root: Option<PathBuf>,
+    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
 }
 
 impl RuntimeScope {
@@ -2644,6 +2645,7 @@ fn resolve_runtime_scope(cli: &Cli) -> anyhow::Result<RuntimeScope> {
         origin_hint,
         context_root,
         user_config_root,
+        auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
     })
 }
 
@@ -2893,7 +2895,8 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             let realm_set = meerkat_core::RealmConnectionSet::from_config(&realm, section)
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
             let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
-            let env = meerkat_providers::ResolverEnvironment::with_process_env();
+            let env = meerkat_providers::ResolverEnvironment::with_process_env()
+                .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
             let connection_ref = meerkat_core::ConnectionRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
@@ -2932,23 +2935,27 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             println!("provider:    {}", profile.provider.as_str());
             println!("auth_method: {}", profile.auth_method);
             println!("source_kind: {}", source_kind_label(&profile.source));
-            use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+            let binding_id = auth_status_binding_id(&realm, &profile_id, &realm_set)?;
+            println!("binding_id:  {binding_id}");
+            use meerkat_core::handles::LeaseKey;
             let connection_ref = ConnectionRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
-                binding: meerkat_core::BindingId::parse(profile_id.clone())
-                    .map_err(|e| anyhow::anyhow!("invalid binding id '{profile_id}': {e}"))?,
+                binding: meerkat_core::BindingId::parse(binding_id)
+                    .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
             };
-            let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-            let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-            let phase = AuthStatusPhase::from_lease_snapshot(chrono::Utc::now(), &snapshot);
-            println!("state:       {}", phase.as_public_str());
-            if let Some(expires_at) = meerkat_core::lease_snapshot_expires_at_datetime(&snapshot) {
+            let snapshot = scope
+                .auth_lease
+                .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+            let projection =
+                meerkat_core::project_published_auth_status(chrono::Utc::now(), None, &snapshot);
+            println!("state:       {}", projection.phase.as_public_str());
+            if let Some(expires_at) = projection.expires_at {
                 println!("expires_at:  {}", expires_at.to_rfc3339());
             }
-            if phase == AuthStatusPhase::Unknown {
-                println!("note:        no live AuthMachine lease for '{realm}:{profile_id}'.");
+            if projection.phase == AuthStatusPhase::Unknown {
+                println!("note:        no live AuthMachine lease for '{realm}:{binding_id}'.");
             }
         }
         AuthCommands::ProfileDelete {
@@ -3000,10 +3007,9 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                         binding: key.binding.clone(),
                         profile: key.profile.clone(),
                     };
-                    let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
                     meerkat_core::clear_tokens_and_publish_lifecycle_released(
                         store.as_ref(),
-                        &auth_lease,
+                        scope.auth_lease.as_ref(),
                         &connection_ref,
                     )
                     .await
@@ -3111,7 +3117,7 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
         AuthCommands::Refresh { realm, profile_id } => {
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
-                refresh_auth_profile(&realm, &profile_id, &config).await?;
+                refresh_auth_profile(&realm, &profile_id, &config, scope).await?;
             }
             #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
             {
@@ -3145,6 +3151,7 @@ async fn refresh_auth_profile(
     realm: &str,
     profile_id: &str,
     config: &meerkat_core::Config,
+    scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     use meerkat_core::auth::AuthRefreshReason;
     use meerkat_providers::ResolverEnvironment;
@@ -3225,7 +3232,8 @@ async fn refresh_auth_profile(
 
     let env = ResolverEnvironment::with_process_env()
         .with_token_store(store.clone())
-        .with_refresh_coordinator(coord);
+        .with_refresh_coordinator(coord)
+        .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
     let registry = meerkat_providers::ProviderRuntimeRegistry::empty();
     let connection_ref = meerkat_core::ConnectionRef {
         realm: meerkat_core::RealmId::parse(realm)
@@ -3846,7 +3854,7 @@ fn token_store_load_error_allows_clear(e: &meerkat_providers::auth_store::TokenS
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::Result<()> {
+async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
 
     let store = TokenStoreBackend::default_auto()
@@ -3869,7 +3877,6 @@ async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::
         ],
     };
     let mut cleared = 0;
-    let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
     for key in keys {
         let should_clear = match store.load(&key).await {
             Ok(present) => present.is_some(),
@@ -3884,7 +3891,7 @@ async fn interactive_logout(profile_id: &str, _scope: &RuntimeScope) -> anyhow::
             };
             meerkat_core::clear_tokens_and_publish_lifecycle_released(
                 store.as_ref(),
-                &auth_lease,
+                scope.auth_lease.as_ref(),
                 &connection_ref,
             )
             .await
@@ -3920,6 +3927,37 @@ fn source_kind_label(source: &meerkat_core::CredentialSourceSpec) -> &'static st
         meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",
         meerkat_core::CredentialSourceSpec::Command { .. } => "command",
         meerkat_core::CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
+}
+
+fn auth_status_binding_id<'a>(
+    realm: &str,
+    profile_id: &str,
+    realm_set: &'a meerkat_core::RealmConnectionSet,
+) -> anyhow::Result<&'a str> {
+    let matches = realm_set
+        .bindings
+        .iter()
+        .filter_map(|(id, binding)| (binding.auth_profile == profile_id).then_some(id.as_str()))
+        .collect::<Vec<_>>();
+
+    if let Some(default_binding) = realm_set.default_binding.as_deref()
+        && matches.contains(&default_binding)
+    {
+        return Ok(default_binding);
+    }
+
+    match matches.as_slice() {
+        [binding_id] => Ok(*binding_id),
+        [] => anyhow::bail!(
+            "No binding in realm '{realm}' references auth profile '{profile_id}'; \
+             auth status is binding-scoped because AuthMachine leases are binding-scoped."
+        ),
+        _ => anyhow::bail!(
+            "Multiple bindings in realm '{realm}' reference auth profile '{profile_id}' ({}); \
+             set a default binding for this profile or query a binding-specific status surface.",
+            matches.join(", ")
+        ),
     }
 }
 
@@ -5229,6 +5267,7 @@ fn build_cli_runtime_backed_service_with_defaults(
     factory: AgentFactory,
     config: Config,
     persistence: PersistenceBundle,
+    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     default_schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
 ) -> (
     meerkat::PersistentSessionService<FactoryAgentBuilder>,
@@ -5236,7 +5275,10 @@ fn build_cli_runtime_backed_service_with_defaults(
 ) {
     let builder = FactoryAgentBuilder::new(factory, config);
     meerkat::surface::set_default_schedule_tools(&builder, default_schedule_tools);
-    meerkat::surface::build_runtime_backed_service(builder, 64, persistence)
+    let (service, runtime_adapter) =
+        meerkat::surface::build_runtime_backed_service(builder, 64, persistence);
+    runtime_adapter.set_auth_lease_handle(auth_lease);
+    (service, runtime_adapter)
 }
 
 #[cfg(test)]
@@ -5587,6 +5629,7 @@ async fn run_agent(
             factory,
             config.clone(),
             persistence.clone(),
+            Arc::clone(&scope.auth_lease),
             default_schedule_tools,
         );
 
@@ -6649,6 +6692,7 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         factory,
         config,
         persistence,
+        Arc::clone(&scope.auth_lease),
         default_schedule_tools,
     );
     let service = Arc::new(service);
@@ -9855,6 +9899,7 @@ mod tests {
             origin_hint: RealmOrigin::Explicit,
             context_root: None,
             user_config_root: None,
+            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
         }
     }
 
@@ -13444,10 +13489,13 @@ capabilities = ["definitely_missing_capability"]
             .session_store(session_store)
             .builtins(false)
             .shell(false);
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
         let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
             factory,
             Config::default(),
             persistence,
+            Arc::clone(&auth_lease),
             None,
         );
 
@@ -13457,6 +13505,22 @@ capabilities = ["definitely_missing_capability"]
             .prepare_bindings(session_id.clone())
             .await
             .expect("runtime bindings should be prepared");
+        let connection_ref = meerkat_core::ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("realm id parses"),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("binding id parses"),
+            profile: None,
+        };
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        bindings
+            .auth_lease
+            .acquire_lease(&lease_key, u64::MAX)
+            .expect("runtime bindings should publish into the CLI scope auth lease");
+        let snapshot = auth_lease.snapshot(&lease_key);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::Valid),
+            "CLI runtime-backed surfaces must share the same auth lease authority that status reads"
+        );
         let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(None)),
@@ -14195,6 +14259,7 @@ supports_reasoning = true
             origin_hint: RealmOrigin::Explicit,
             context_root: Some(root),
             user_config_root: None,
+            auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
         }
     }
 

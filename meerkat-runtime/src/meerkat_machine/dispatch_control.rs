@@ -7,15 +7,16 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeControlPlaneError> {
         match command {
             MeerkatMachineCommand::Ingest { runtime_id, input } => {
-                let (session_id, driver, _completions, wake_tx, control_tx) = {
+                let (session_id, driver, _completions, wake_tx, control_tx, control_handle) = {
                     let (sid, d, c, w) = self.lookup_entry(&runtime_id).await?;
-                    let ctrl = {
+                    let (ctrl, ctrl_handle) = {
                         let sessions = self.sessions.read().await;
-                        sessions
-                            .get(&sid)
-                            .and_then(RuntimeSessionEntry::control_sender)
+                        match sessions.get(&sid) {
+                            Some(entry) => (entry.control_sender(), entry.control_handle()),
+                            None => (None, None),
+                        }
                     };
-                    (sid, d, c, w, ctrl)
+                    (sid, d, c, w, ctrl, ctrl_handle)
                 };
 
                 // DSL-first: stage Ingest input before driver mutation.
@@ -125,6 +126,21 @@ impl MeerkatMachine {
                     let _ = tx.try_send(
                         meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
                     );
+                }
+                if signal.should_interrupt_yielding()
+                    && let Some(control_handle) = control_handle
+                {
+                    let result = control_handle
+                        .control(
+                            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+                        )
+                        .await;
+                    if let Err(err) = result {
+                        tracing::trace!(
+                            error = %err,
+                            "out-of-band Ingest InterruptYielding control was not applied"
+                        );
+                    }
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptOutcome(outcome))

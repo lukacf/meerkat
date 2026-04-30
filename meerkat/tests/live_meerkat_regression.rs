@@ -563,6 +563,7 @@ mod scenario_22_session_service_lifecycle {
 
                     skill_references: None,
                     flow_tool_overlay: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )

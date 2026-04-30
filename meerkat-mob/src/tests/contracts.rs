@@ -1124,6 +1124,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )
@@ -1198,6 +1199,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )

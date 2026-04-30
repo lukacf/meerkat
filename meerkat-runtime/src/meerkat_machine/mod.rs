@@ -124,10 +124,10 @@ pub(crate) use driver::{
     machine_apply_run_return_projection, machine_batch_primitive_projections,
     machine_batch_runtime_semantics, machine_begin_run, machine_commit_prepared_destroy,
     machine_executor_attach_projection, machine_input_boundary,
-    machine_prepare_bindings_projection, machine_recover_ephemeral_driver,
+    machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
     machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
-    machine_prepare_destroy, machine_retire, machine_select_runtime_loop_batch,
-    machine_stop_runtime, machine_unregister_session_projection, prepare_runtime_loop_batch_start,
+    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
+    machine_unregister_session_projection, prepare_runtime_loop_batch_start,
 };
 
 pub(crate) mod driver;

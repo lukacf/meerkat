@@ -8,7 +8,7 @@ pub mod transport;
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
 use crate::lifecycle::run_primitive::RuntimeTurnMetadata;
-use crate::session::SystemContextStageError;
+use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -755,6 +755,9 @@ pub struct StartTurnRequest {
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
     pub flow_tool_overlay: Option<TurnToolOverlay>,
+    /// Runtime-owned system-context appends that must be applied at this
+    /// turn boundary before the model run starts.
+    pub pre_turn_context_appends: Vec<PendingSystemContextAppend>,
     /// Canonical runtime-authored metadata for this turn.
     ///
     /// Runtime-backed callers populate this once at the machine boundary and

@@ -86,6 +86,7 @@ enum SessionCommand {
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<TurnToolOverlay>,
+        pre_turn_context_appends: Vec<PendingSystemContextAppend>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
     },
     ReplaceClient {
@@ -1645,10 +1646,30 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             })?;
         }
 
-        let initial_execution_kind = req
+        let initial_turn_metadata = req
             .build
             .as_ref()
             .and_then(|build| build.initial_turn_metadata.as_ref())
+            .cloned();
+        let initial_render_metadata = req.render_metadata.or_else(|| {
+            initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.render_metadata.clone())
+        });
+        let initial_handling_mode = initial_turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.handling_mode)
+            .unwrap_or(meerkat_core::types::HandlingMode::Queue);
+        let initial_skill_references = req.skill_references.or_else(|| {
+            initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.skill_references.clone())
+        });
+        let initial_flow_tool_overlay = initial_turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.flow_tool_overlay.clone());
+        let initial_execution_kind = initial_turn_metadata
+            .as_ref()
             .and_then(|metadata| metadata.execution_kind);
 
         // Run the first turn
@@ -1656,12 +1677,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
-                render_metadata: req.render_metadata,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                render_metadata: initial_render_metadata,
+                handling_mode: initial_handling_mode,
                 event_tx: caller_event_tx,
                 result_tx,
-                skill_references: req.skill_references,
-                flow_tool_overlay: None,
+                skill_references: initial_skill_references,
+                flow_tool_overlay: initial_flow_tool_overlay,
+                pre_turn_context_appends: Vec::new(),
                 execution_kind: initial_execution_kind,
             })
             .await
@@ -1776,6 +1798,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     .as_ref()
                     .and_then(|metadata| metadata.flow_tool_overlay.clone())
             });
+            let pre_turn_context_appends = req.pre_turn_context_appends;
             let execution_kind = metadata
                 .as_ref()
                 .and_then(|metadata| metadata.execution_kind);
@@ -1790,6 +1813,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     result_tx,
                     skill_references,
                     flow_tool_overlay,
+                    pre_turn_context_appends,
                     execution_kind,
                 })
                 .await
@@ -2280,6 +2304,47 @@ fn render_runtime_system_context_event_prompt(
     Some(rendered)
 }
 
+fn apply_runtime_system_context_and_publish<A: SessionAgent>(
+    agent: &mut A,
+    appends: &[PendingSystemContextAppend],
+    control: &SessionTaskControl,
+    next_seq: &mut u64,
+    source_id: &str,
+) {
+    agent.apply_runtime_system_context(appends);
+    let snap = agent.snapshot();
+    control.publish_summary(SessionSummaryCache {
+        updated_at: snap.updated_at,
+        message_count: snap.message_count,
+        total_tokens: snap.total_tokens,
+        usage: snap.usage,
+        last_assistant_text: snap.last_assistant_text,
+    });
+    if let Some(prompt) = render_runtime_system_context_event_prompt(appends) {
+        let session_id = agent.session_id();
+        let started = stamp_event_envelope(
+            next_seq,
+            source_id,
+            AgentEvent::RunStarted {
+                session_id: session_id.clone(),
+                prompt: ContentInput::Text(prompt),
+            },
+        );
+        let _ = control.session_event_tx.send(started);
+
+        let completed = stamp_event_envelope(
+            next_seq,
+            source_id,
+            AgentEvent::RunCompleted {
+                session_id,
+                result: String::new(),
+                usage: Usage::default(),
+            },
+        );
+        let _ = control.session_event_tx.send(completed);
+    }
+}
+
 fn lock_deferred_turn_state(
     state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
 ) -> std::sync::MutexGuard<'_, SessionDeferredTurnState> {
@@ -2484,6 +2549,7 @@ async fn session_task<A: SessionAgent>(
                 result_tx,
                 skill_references,
                 flow_tool_overlay,
+                pre_turn_context_appends,
                 execution_kind,
             } => {
                 let current_phase = lock_turn_admission(&control.turn_admission).phase();
@@ -2531,6 +2597,16 @@ async fn session_task<A: SessionAgent>(
                     abort_admitted_turn(&control);
                     let _ = result_tx.send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
                     continue;
+                }
+
+                if !pre_turn_context_appends.is_empty() {
+                    apply_runtime_system_context_and_publish(
+                        &mut agent,
+                        &pre_turn_context_appends,
+                        &control,
+                        &mut next_seq,
+                        &source_id,
+                    );
                 }
 
                 agent.set_skill_references(skill_references);
@@ -2747,38 +2823,13 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(agent.external_tool_surface_snapshot());
             }
             SessionCommand::ApplyRuntimeSystemContext { appends, reply_tx } => {
-                agent.apply_runtime_system_context(&appends);
-                let snap = agent.snapshot();
-                control.publish_summary(SessionSummaryCache {
-                    updated_at: snap.updated_at,
-                    message_count: snap.message_count,
-                    total_tokens: snap.total_tokens,
-                    usage: snap.usage,
-                    last_assistant_text: snap.last_assistant_text,
-                });
-                if let Some(prompt) = render_runtime_system_context_event_prompt(&appends) {
-                    let session_id = agent.session_id();
-                    let started = stamp_event_envelope(
-                        &mut next_seq,
-                        &source_id,
-                        AgentEvent::RunStarted {
-                            session_id: session_id.clone(),
-                            prompt: ContentInput::Text(prompt),
-                        },
-                    );
-                    let _ = control.session_event_tx.send(started);
-
-                    let completed = stamp_event_envelope(
-                        &mut next_seq,
-                        &source_id,
-                        AgentEvent::RunCompleted {
-                            session_id,
-                            result: String::new(),
-                            usage: Usage::default(),
-                        },
-                    );
-                    let _ = control.session_event_tx.send(completed);
-                }
+                apply_runtime_system_context_and_publish(
+                    &mut agent,
+                    &appends,
+                    &control,
+                    &mut next_seq,
+                    &source_id,
+                );
                 let _ = reply_tx.send(());
             }
             SessionCommand::AppendExternalUserContent { content, reply_tx } => {
@@ -2893,6 +2944,261 @@ async fn session_task<A: SessionAgent>(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_turn_metadata_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use meerkat_core::lifecycle::RuntimeExecutionKind;
+    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+    use meerkat_core::service::{
+        DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
+    };
+    use meerkat_core::skills::{SkillKey, SkillName};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct MetadataProbeBuilder {
+        observed_skill_references: Arc<Mutex<Vec<Option<Vec<SkillKey>>>>>,
+        observed_context_texts: Arc<Mutex<Vec<String>>>,
+        run_context_counts: Arc<Mutex<Vec<usize>>>,
+    }
+
+    struct MetadataProbeAgent {
+        session_id: SessionId,
+        observed_skill_references: Arc<Mutex<Vec<Option<Vec<SkillKey>>>>>,
+        observed_context_texts: Arc<Mutex<Vec<String>>>,
+        run_context_counts: Arc<Mutex<Vec<usize>>>,
+        system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgentBuilder for MetadataProbeBuilder {
+        type Agent = MetadataProbeAgent;
+
+        async fn build_agent(
+            &self,
+            _req: &CreateSessionRequest,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            Ok(MetadataProbeAgent {
+                session_id: SessionId::new(),
+                observed_skill_references: Arc::clone(&self.observed_skill_references),
+                observed_context_texts: Arc::clone(&self.observed_context_texts),
+                run_context_counts: Arc::clone(&self.run_context_counts),
+                system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            })
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionAgent for MetadataProbeAgent {
+        async fn run_with_events(
+            &mut self,
+            _prompt: ContentInput,
+            _event_tx: mpsc::Sender<AgentEvent>,
+        ) -> Result<RunResult, AgentError> {
+            self.run_context_counts
+                .lock()
+                .expect("run context counts lock poisoned")
+                .push(
+                    self.observed_context_texts
+                        .lock()
+                        .expect("observed context texts lock poisoned")
+                        .len(),
+                );
+            Ok(RunResult {
+                text: "ok".to_string(),
+                session_id: self.session_id.clone(),
+                usage: Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
+        fn set_skill_references(&mut self, refs: Option<Vec<SkillKey>>) {
+            self.observed_skill_references
+                .lock()
+                .expect("observed skill references lock poisoned")
+                .push(refs);
+        }
+
+        fn set_flow_tool_overlay(
+            &mut self,
+            _overlay: Option<TurnToolOverlay>,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn hot_swap_llm_identity(
+            &mut self,
+            _client: Arc<dyn meerkat_core::AgentLlmClient>,
+            _identity: SessionLlmIdentity,
+            _request_policy: meerkat_core::SessionLlmRequestPolicy,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn cancel(&mut self) {}
+
+        fn session_id(&self) -> SessionId {
+            self.session_id.clone()
+        }
+
+        fn snapshot(&self) -> SessionSnapshot {
+            SessionSnapshot {
+                created_at: SystemTime::now(),
+                updated_at: SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                usage: Usage::default(),
+                last_assistant_text: None,
+            }
+        }
+
+        fn session_clone(&self) -> meerkat_core::Session {
+            meerkat_core::Session::new()
+        }
+
+        fn apply_runtime_system_context(&mut self, appends: &[PendingSystemContextAppend]) {
+            self.observed_context_texts
+                .lock()
+                .expect("observed context texts lock poisoned")
+                .extend(appends.iter().map(|append| append.text.clone()));
+        }
+
+        fn system_context_state(
+            &self,
+        ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
+            Arc::clone(&self.system_context_state)
+        }
+    }
+
+    #[tokio::test]
+    async fn eager_initial_turn_forwards_full_runtime_metadata_carrier() {
+        let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
+        let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
+        let run_context_counts = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references: Arc::clone(&observed_skill_references),
+                observed_context_texts,
+                run_context_counts,
+            },
+            1,
+        );
+        let skill = SkillKey::builtin(SkillName::parse("metadata-probe").expect("valid skill"));
+
+        service
+            .create_session(CreateSessionRequest {
+                model: "metadata-probe-model".to_string(),
+                prompt: ContentInput::Text("hello".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::RunImmediately,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    initial_turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        skill_references: Some(vec![skill.clone()]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("eager first turn should run");
+
+        assert_eq!(
+            *observed_skill_references
+                .lock()
+                .expect("observed skill references lock poisoned"),
+            vec![Some(vec![skill])],
+            "eager first turn must forward the full runtime metadata carrier"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_turn_applies_pre_turn_context_before_run() {
+        let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
+        let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
+        let run_context_counts = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references,
+                observed_context_texts: Arc::clone(&observed_context_texts),
+                run_context_counts: Arc::clone(&run_context_counts),
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "metadata-probe-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred session should create");
+
+        service
+            .start_turn(
+                &result.session_id,
+                StartTurnRequest {
+                    prompt: ContentInput::Text("reaction".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    event_tx: None,
+                    skill_references: None,
+                    flow_tool_overlay: None,
+                    pre_turn_context_appends: vec![PendingSystemContextAppend {
+                        text: "terminal peer context".to_string(),
+                        source: Some("peer_response_terminal:test:req".to_string()),
+                        idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+                        accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    }],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .expect("pre-turn context turn should run");
+
+        assert_eq!(
+            *observed_context_texts
+                .lock()
+                .expect("observed context texts lock poisoned"),
+            vec!["terminal peer context".to_string()]
+        );
+        assert_eq!(
+            *run_context_counts
+                .lock()
+                .expect("run context counts lock poisoned"),
+            vec![1],
+            "pre-turn context must be applied before the agent run starts"
+        );
     }
 }
 
@@ -3102,6 +3408,7 @@ mod inline_video_admission_tests {
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
+            pre_turn_context_appends: Vec::new(),
             turn_metadata: None,
         }
     }

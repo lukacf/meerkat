@@ -7,15 +7,15 @@
 //! under the hood).
 
 use meerkat_core::lifecycle::core_executor::{CoreApplyFailureCause, CoreApplyTerminal};
-use meerkat_core::lifecycle::run_primitive::{
-    PeerResponseTerminalApplyIntent, RunApplyBoundary, RunPrimitive, StagedRunInput,
-};
+use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive, StagedRunInput};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::turn_execution_authority::ContentShape as TurnContentShape;
 
+use crate::input::Input;
 #[cfg(test)]
 use crate::input::input_prompt_text;
-use crate::input::{Input, runtime_input_projection_for_machine_batch};
+#[cfg(test)]
+use crate::input::runtime_input_projection_for_machine_batch;
 use crate::runtime_state::RuntimeState;
 use crate::tokio;
 

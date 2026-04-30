@@ -7643,6 +7643,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )
@@ -19432,6 +19433,27 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        let pre_turn_context_appends = req.pre_turn_context_appends;
+        if !pre_turn_context_appends.is_empty() {
+            for append in pre_turn_context_appends {
+                self.append_system_context(
+                    session_id,
+                    AppendSystemContextRequest {
+                        text: append.text,
+                        source: append.source,
+                        idempotency_key: append.idempotency_key,
+                    },
+                )
+                .await
+                .map_err(|err| match err {
+                    SessionControlError::Session(err) => err,
+                    err => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        err.to_string(),
+                    )),
+                })?;
+            }
+        }
+
         self.applied_runtime_prompts
             .write()
             .await

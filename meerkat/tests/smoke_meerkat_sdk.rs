@@ -1223,6 +1223,7 @@ mod scenario_09_session_service {
 
             skill_references: None,
             flow_tool_overlay: None,
+            pre_turn_context_appends: Vec::new(),
             turn_metadata: None,
         };
 
@@ -1695,6 +1696,7 @@ mod scenario_22_runtime_host_comms {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             };
 

@@ -181,6 +181,14 @@ fn start_turn_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Result<meerkat_core::service::StartTurnRequest, CoreExecutorError> {
     let metadata = primitive.turn_metadata();
+    let pre_turn_context_appends = match primitive {
+        RunPrimitive::StagedInput(staged)
+            if primitive.is_peer_response_terminal_context_and_run() =>
+        {
+            pending_system_context_appends(&staged.context_appends)
+        }
+        _ => Vec::new(),
+    };
 
     Ok(meerkat_core::service::StartTurnRequest {
         prompt: primitive.extract_content_input(),
@@ -192,6 +200,7 @@ fn start_turn_request_from_primitive(
         event_tx: None,
         skill_references: metadata.and_then(|metadata| metadata.skill_references.clone()),
         flow_tool_overlay: metadata.and_then(|metadata| metadata.flow_tool_overlay.clone()),
+        pre_turn_context_appends,
         turn_metadata: metadata.cloned(),
     })
 }
@@ -226,21 +235,6 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 .map_err(|error| {
                     CoreExecutorError::apply_failed_runtime_context(error.to_string())
                 });
-        }
-
-        if primitive.is_peer_response_terminal_context_and_run() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("terminal peer-response apply intent only matches staged primitives");
-            };
-            self.service
-                .apply_runtime_system_context_for_turn(
-                    &self.session_id,
-                    pending_system_context_appends(&staged.context_appends),
-                )
-                .await
-                .map_err(|error| {
-                    CoreExecutorError::apply_failed_runtime_context(error.to_string())
-                })?;
         }
 
         let boundary = primitive.apply_boundary();

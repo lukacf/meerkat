@@ -1964,6 +1964,7 @@ impl MobActor {
 
                                 skill_references: None,
                                 flow_tool_overlay: None,
+                                pre_turn_context_appends: Vec::new(),
                                 turn_metadata: None,
 
                             },
@@ -9156,6 +9157,7 @@ impl MobActor {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;

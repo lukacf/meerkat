@@ -77,6 +77,7 @@ pub async fn handle(
             event_tx: None,
             skill_references: None,
             flow_tool_overlay: None,
+            pre_turn_context_appends: Vec::new(),
             turn_metadata: None,
         };
 

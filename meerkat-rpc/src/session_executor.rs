@@ -309,20 +309,15 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
 
-        if primitive.is_peer_response_terminal_context_and_run() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("terminal peer-response apply intent only matches staged primitives");
-            };
-            self.session_service
-                .apply_runtime_system_context_for_turn(
-                    &self.session_id,
-                    pending_system_context_appends_from_primitive(&staged.context_appends),
-                )
-                .await
-                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
-        }
-
         let prompt = primitive.extract_content_input();
+        let pre_turn_context_appends = match &primitive {
+            RunPrimitive::StagedInput(staged)
+                if primitive.is_peer_response_terminal_context_and_run() =>
+            {
+                pending_system_context_appends_from_primitive(&staged.context_appends)
+            }
+            _ => Vec::new(),
+        };
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();
         let sid = self.session_id.clone();
@@ -344,6 +339,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
+            pre_turn_context_appends,
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 

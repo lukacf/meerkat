@@ -367,6 +367,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             event_tx: Some(event_tx),
                             skill_references: None,
                             flow_tool_overlay,
+                            pre_turn_context_appends: Vec::new(),
                             turn_metadata: None,
                         },
                     )

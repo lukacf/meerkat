@@ -836,7 +836,7 @@ impl SessionRuntime {
             provider_params,
             render_metadata: None,
             connection_ref,
-            execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+            execution_kind: None,
             peer_response_terminal_apply_intent: None,
         };
         (!metadata.is_empty()).then_some(metadata)
@@ -847,12 +847,14 @@ impl SessionRuntime {
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        provider_hint: Option<&str>,
     ) -> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
         meerkat_runtime::runtime_stamped_prompt_turn_metadata(Self::turn_metadata_from_overrides(
             skill_references,
             flow_tool_overlay,
             additional_instructions,
             overrides,
+            provider_hint,
         ))
     }
 
@@ -2455,18 +2457,14 @@ impl SessionRuntime {
                 .map_err(session_error_to_rpc);
         }
 
-        if primitive.is_peer_response_terminal_context_and_run() {
-            let RunPrimitive::StagedInput(staged) = primitive else {
-                unreachable!("terminal peer-response apply intent only matches staged primitives");
-            };
-            self.service
-                .apply_runtime_system_context_for_turn(
-                    session_id,
-                    pending_system_context_appends(&staged.context_appends),
-                )
-                .await
-                .map_err(session_error_to_rpc)?;
-        }
+        let pre_turn_context_appends = match primitive {
+            RunPrimitive::StagedInput(staged)
+                if primitive.is_peer_response_terminal_context_and_run() =>
+            {
+                pending_system_context_appends(&staged.context_appends)
+            }
+            _ => Vec::new(),
+        };
 
         let effective_identity = self
             .effective_llm_identity_for_turn(session_id, overrides.as_ref())
@@ -2540,6 +2538,7 @@ impl SessionRuntime {
 
                 skill_references: skill_references.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
+                pre_turn_context_appends: pre_turn_context_appends.clone(),
                 turn_metadata: primitive.turn_metadata().cloned(),
             };
 
@@ -2768,6 +2767,7 @@ impl SessionRuntime {
 
                         skill_references,
                         flow_tool_overlay,
+                        pre_turn_context_appends: pre_turn_context_appends.clone(),
                         turn_metadata: primitive.turn_metadata().cloned(),
                     },
                     match primitive {
@@ -2828,6 +2828,7 @@ impl SessionRuntime {
 
                     skill_references,
                     flow_tool_overlay,
+                    pre_turn_context_appends,
                     turn_metadata: primitive.turn_metadata().cloned(),
                 },
                 match primitive {
@@ -3125,12 +3126,17 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
+            let initial_turn_provider_hint = build_config
+                .provider
+                .or_else(|| meerkat_core::Provider::infer_from_model(&build_config.model))
+                .map(|provider| provider.as_str());
             build.initial_turn_metadata =
                 Some(Self::runtime_stamped_prompt_turn_metadata_from_overrides(
                     skill_references.clone(),
                     flow_tool_overlay.clone(),
                     additional_instructions.clone(),
                     overrides.as_ref(),
+                    initial_turn_provider_hint,
                 ));
 
             let event_tx = self
@@ -3243,6 +3249,7 @@ impl SessionRuntime {
             flow_tool_overlay.clone(),
             additional_instructions.clone(),
             overrides.as_ref(),
+            overrides.as_ref().and_then(|ov| ov.provider.as_deref()),
         ));
 
         let req = StartTurnRequest {
@@ -3253,6 +3260,7 @@ impl SessionRuntime {
             event_tx: Some(event_tx.clone()),
             skill_references: skill_references.clone(),
             flow_tool_overlay: flow_tool_overlay.clone(),
+            pre_turn_context_appends: Vec::new(),
             turn_metadata,
         };
 
@@ -4723,6 +4731,7 @@ mod tests {
             None,
             Some(vec!["runtime note".to_string()]),
             None,
+            None,
         )
         .expect("additional instructions should produce metadata");
 
@@ -4735,6 +4744,7 @@ mod tests {
             None,
             None,
             Some(vec!["runtime note".to_string()]),
+            None,
             None,
         );
 

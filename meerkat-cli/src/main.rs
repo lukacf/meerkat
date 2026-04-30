@@ -4882,6 +4882,49 @@ struct CliRuntimeExecutor {
     event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
 }
 
+fn cli_render_context_append_text(
+    content: &meerkat_core::lifecycle::run_primitive::CoreRenderable,
+) -> String {
+    use meerkat_core::lifecycle::run_primitive::CoreRenderable;
+
+    match content {
+        CoreRenderable::Text { text } => text.clone(),
+        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+        CoreRenderable::Json { value } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        CoreRenderable::Reference { uri, label } => match label {
+            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
+            _ => format!("[Reference] {uri}"),
+        },
+        _ => String::new(),
+    }
+}
+
+fn cli_terminal_pre_turn_context_appends(
+    primitive: &meerkat_core::lifecycle::run_primitive::RunPrimitive,
+) -> Vec<meerkat_core::PendingSystemContextAppend> {
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+
+    let RunPrimitive::StagedInput(staged) = primitive else {
+        return Vec::new();
+    };
+    if !primitive.is_peer_response_terminal_context_and_run() {
+        return Vec::new();
+    }
+    let accepted_at = meerkat_core::time_compat::SystemTime::now();
+    staged
+        .context_appends
+        .iter()
+        .map(|append| meerkat_core::PendingSystemContextAppend {
+            text: cli_render_context_append_text(&append.content),
+            source: Some(append.key.clone()),
+            idempotency_key: Some(append.key.clone()),
+            accepted_at,
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     async fn apply(
@@ -4894,6 +4937,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
     > {
         // Forward the primitive metadata carrier as the single runtime-authored
         // source for per-turn policy.
+        let pre_turn_context_appends = cli_terminal_pre_turn_context_appends(&primitive);
         let turn_req = StartTurnRequest {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
@@ -4906,6 +4950,7 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
+            pre_turn_context_appends,
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 
@@ -10743,6 +10788,7 @@ default_model = "gemma"
     struct CapturingEventTurnService {
         session_id: SessionId,
         saw_event_tx: std::sync::atomic::AtomicBool,
+        pre_turn_context_appends: Mutex<Vec<meerkat_core::PendingSystemContextAppend>>,
     }
 
     impl CapturingEventTurnService {
@@ -10750,6 +10796,7 @@ default_model = "gemma"
             Self {
                 session_id,
                 saw_event_tx: std::sync::atomic::AtomicBool::new(false),
+                pre_turn_context_appends: Mutex::new(Vec::new()),
             }
         }
     }
@@ -10780,6 +10827,10 @@ default_model = "gemma"
             if id != &self.session_id {
                 return Err(SessionError::NotFound { id: id.clone() });
             }
+            *self
+                .pre_turn_context_appends
+                .lock()
+                .expect("pre-turn context appends lock poisoned") = req.pre_turn_context_appends;
             if let Some(tx) = req.event_tx {
                 self.saw_event_tx
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -11091,6 +11142,66 @@ default_model = "gemma"
                 .saw_event_tx
                 .load(std::sync::atomic::Ordering::Acquire),
             "runtime-backed executor must forward the caller event sender"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cli_runtime_executor_forwards_terminal_peer_response_context() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, CoreRenderable, PeerResponseTerminalApplyIntent,
+            RunApplyBoundary, RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let session_id = SessionId::new();
+        let service = Arc::new(CapturingEventTurnService::new(session_id.clone()));
+        let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let mut executor = CliRuntimeExecutor {
+            service: service.clone(),
+            #[cfg(feature = "session-store")]
+            persistent_service: None,
+            session_id,
+            runtime_adapter,
+            event_tx: None,
+        };
+        let append_key = "peer_response_terminal:cli-peer:req-1";
+        let primitive =
+            meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(StagedRunInput {
+                boundary: RunApplyBoundary::RunStart,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: append_key.to_string(),
+                    content: CoreRenderable::Text {
+                        text: "terminal peer response token: ash twelve".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                    peer_response_terminal_apply_intent: Some(
+                        PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                    ),
+                    ..Default::default()
+                }),
+            });
+
+        meerkat_core::lifecycle::CoreExecutor::apply(
+            &mut executor,
+            meerkat_core::lifecycle::RunId::new(),
+            primitive,
+        )
+        .await
+        .expect("terminal peer-response CLI turn should succeed");
+
+        let appends = service
+            .pre_turn_context_appends
+            .lock()
+            .expect("pre-turn context appends lock poisoned");
+        assert_eq!(appends.len(), 1);
+        assert_eq!(appends[0].source.as_deref(), Some(append_key));
+        assert!(
+            appends[0].text.contains("ash twelve"),
+            "terminal peer-response context must reach the CLI start_turn request"
         );
     }
 

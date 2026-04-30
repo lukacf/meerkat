@@ -692,7 +692,29 @@ impl Session {
             return;
         }
 
-        let rendered = appends
+        let current_system_prompt = self
+            .messages
+            .first()
+            .and_then(|message| match message {
+                Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut state = self.system_context_state().unwrap_or_default();
+        let new_appends = appends
+            .iter()
+            .filter(|append| {
+                append.idempotency_key.as_ref().is_none_or(|_| {
+                    !current_system_prompt.contains(&render_system_context_block(append))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if new_appends.is_empty() {
+            return;
+        }
+
+        let rendered = new_appends
             .iter()
             .map(render_system_context_block)
             .collect::<Vec<_>>()
@@ -706,11 +728,19 @@ impl Session {
         };
         self.set_system_prompt(next);
 
-        let mut state = self.system_context_state().unwrap_or_default();
-        for append in appends {
-            if !state.applied.contains(append) {
-                state.applied.push(append.clone());
+        for append in new_appends {
+            if let Some(key) = append.idempotency_key.as_ref() {
+                if state
+                    .applied
+                    .iter()
+                    .any(|applied| applied.idempotency_key.as_ref() == Some(key))
+                {
+                    continue;
+                }
+            } else if state.applied.contains(&append) {
+                continue;
             }
+            state.applied.push(append);
         }
         if let Err(err) = self.set_system_context_state(state) {
             tracing::warn!(error = %err, "failed to persist applied system-context state");
@@ -1570,5 +1600,42 @@ mod tests {
             .system_context_state()
             .expect("append should persist typed context state");
         assert_eq!(state.applied, vec![append]);
+    }
+
+    #[test]
+    fn append_system_context_blocks_skips_duplicate_idempotency_key() {
+        let first = PendingSystemContextAppend {
+            text: "Authoritative peer token is birch seventeen.".to_string(),
+            source: Some("peer_response_terminal:analyst:req-1".to_string()),
+            idempotency_key: Some("req-1".to_string()),
+            accepted_at: SystemTime::UNIX_EPOCH,
+        };
+        let duplicate = PendingSystemContextAppend {
+            accepted_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            ..first.clone()
+        };
+        let mut session = Session::new();
+
+        session.append_system_context_blocks(std::slice::from_ref(&first));
+        session.append_system_context_blocks(std::slice::from_ref(&duplicate));
+
+        let state = session
+            .system_context_state()
+            .expect("append should persist typed context state");
+        assert_eq!(state.applied, vec![first]);
+        let system_prompt = session
+            .messages()
+            .first()
+            .and_then(|message| match message {
+                Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            system_prompt
+                .matches("Authoritative peer token is birch seventeen.")
+                .count(),
+            1
+        );
     }
 }

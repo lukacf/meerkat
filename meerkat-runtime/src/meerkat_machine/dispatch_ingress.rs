@@ -457,10 +457,12 @@ impl MeerkatMachine {
                             std::slice::from_ref(&dequeued_id),
                         ) {
                             Some(mut semantics) if semantics.len() == 1 => {
+                                let projection_inputs =
+                                    [(dequeued_id.clone(), dequeued_input.clone())];
                                 let projections =
                                     crate::meerkat_machine::machine_batch_primitive_projections(
                                         &driver,
-                                        std::slice::from_ref(&dequeued_id),
+                                        &projection_inputs,
                                     );
                                 crate::runtime_loop::admitted_input_to_primitive(
                                     &dequeued_input,

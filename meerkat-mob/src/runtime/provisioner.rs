@@ -777,20 +777,15 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
 
-        if primitive.is_peer_response_terminal_context_and_run() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("terminal peer-response apply intent only matches staged primitives");
-            };
-            self.session_service
-                .apply_runtime_system_context_for_turn(
-                    &self.bridge_session_id,
-                    pending_system_context_appends_for_runtime_executor(&staged.context_appends),
-                )
-                .await
-                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
-        }
-
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
+        let pre_turn_context_appends = match &primitive {
+            RunPrimitive::StagedInput(staged)
+                if primitive.is_peer_response_terminal_context_and_run() =>
+            {
+                pending_system_context_appends_for_runtime_executor(&staged.context_appends)
+            }
+            _ => Vec::new(),
+        };
         let queued_context = self
             .state
             .take_turn_context_for_inputs(&contributing_input_ids)
@@ -812,6 +807,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
+            pre_turn_context_appends,
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 

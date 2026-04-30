@@ -595,19 +595,6 @@ async fn apply_runtime_turn(
             .await;
     }
 
-    if primitive.is_peer_response_terminal_context_and_run() {
-        let RunPrimitive::StagedInput(staged) = primitive else {
-            unreachable!("terminal peer-response apply intent only matches staged primitives");
-        };
-        context
-            .session_service
-            .apply_runtime_system_context_for_turn(
-                session_id,
-                pending_system_context_appends(&staged.context_appends),
-            )
-            .await?;
-    }
-
     let (event_tx, event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(100);
     let forwarder = spawn_event_forwarder(
         event_rx,
@@ -615,6 +602,14 @@ async fn apply_runtime_turn(
         session_id.clone(),
         false,
     );
+    let pre_turn_context_appends = match primitive {
+        RunPrimitive::StagedInput(staged)
+            if primitive.is_peer_response_terminal_context_and_run() =>
+        {
+            pending_system_context_appends(&staged.context_appends)
+        }
+        _ => Vec::new(),
+    };
     // The turn-metadata keep_alive carrier is typed (`KeepAlivePolicy`); the
     // session recovery override and stored session metadata still track a
     // boolean. Collapse the typed per-turn policy into the boolean used by
@@ -652,6 +647,7 @@ async fn apply_runtime_turn(
         flow_tool_overlay: primitive
             .turn_metadata()
             .and_then(|meta| meta.flow_tool_overlay.clone()),
+        pre_turn_context_appends: pre_turn_context_appends.clone(),
         turn_metadata: primitive.turn_metadata().cloned(),
     };
 
@@ -766,6 +762,7 @@ async fn apply_runtime_turn(
                         flow_tool_overlay: primitive
                             .turn_metadata()
                             .and_then(|meta| meta.flow_tool_overlay.clone()),
+                        pre_turn_context_appends,
                         turn_metadata: primitive.turn_metadata().cloned(),
                     },
                     boundary,
@@ -6011,6 +6008,7 @@ mod tests {
 
                     skill_references: None,
                     flow_tool_overlay: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )

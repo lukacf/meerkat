@@ -3720,6 +3720,7 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )
@@ -3906,6 +3907,7 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )
@@ -5377,6 +5379,7 @@ mod tests {
                 event_tx: None,
                 skill_references: None,
                 flow_tool_overlay: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,

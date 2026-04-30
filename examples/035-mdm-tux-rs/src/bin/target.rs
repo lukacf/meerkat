@@ -1137,6 +1137,7 @@ impl CoreExecutor for TargetCoreExecutor {
             flow_tool_overlay: primitive
                 .turn_metadata()
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
+            pre_turn_context_appends: Vec::new(),
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 
@@ -2590,6 +2591,7 @@ mod tests {
                     event_tx: None,
                     skill_references: None,
                     flow_tool_overlay: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )

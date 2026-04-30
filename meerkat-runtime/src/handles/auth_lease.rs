@@ -65,6 +65,33 @@ pub struct RuntimeAuthLeaseHandle {
     machines: Arc<Mutex<AuthLeaseRegistry>>,
 }
 
+#[cfg(test)]
+type ReleaseAfterAcceptHook = Arc<dyn Fn(&LeaseKey) + Send + Sync>;
+
+#[cfg(test)]
+static RELEASE_AFTER_ACCEPT_HOOK: std::sync::OnceLock<Mutex<Option<ReleaseAfterAcceptHook>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_release_after_accept_hook(hook: Option<ReleaseAfterAcceptHook>) {
+    *RELEASE_AFTER_ACCEPT_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = hook;
+}
+
+#[cfg(test)]
+fn run_release_after_accept_hook(lease_key: &LeaseKey) {
+    let hook = RELEASE_AFTER_ACCEPT_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook(lease_key);
+    }
+}
+
 #[derive(Default)]
 struct AuthLeaseRegistry {
     authorities: HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>,
@@ -110,6 +137,7 @@ impl RuntimeAuthLeaseHandle {
         create_if_missing: bool,
     ) -> Result<u64, DslTransitionError> {
         let action = Self::audit_action_for(&input);
+        let remove_after_accept = matches!(&input, auth_dsl::AuthMachineInput::Release);
         let mut guard = self
             .machines
             .lock()
@@ -144,6 +172,9 @@ impl RuntimeAuthLeaseHandle {
         let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
         *generation = generation.saturating_add(1);
         let accepted_generation = *generation;
+        if remove_after_accept {
+            guard.authorities.remove(lease_key);
+        }
         emit_audit(lease_key, action, from_phase, to_phase);
         Ok(accepted_generation)
     }
@@ -269,24 +300,18 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
     }
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-        // Drive the DSL transition, then drop the machine from the
-        // registry: a released lease has no observable state and
-        // keeping the spent AuthMachine around is shell-side bookkeeping
-        // that dogma §14 forbids (local state, no canonical role). Release
-        // is idempotent for logout/clear surfaces: clearing stale token
-        // material after process restart must not fail just because no
-        // in-memory AuthMachine has observed that binding yet.
+        // Drive the DSL transition and drop the machine from the registry
+        // under the same lock. A released lease has no observable state, but
+        // removal must not race with a concurrent reacquire that already
+        // accepted a newer generation.
         self.apply(
             lease_key,
             auth_dsl::AuthMachineInput::Release,
             "AuthLeaseHandle::release_lease",
             true,
         )?;
-        let mut guard = self
-            .machines
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.authorities.remove(lease_key);
+        #[cfg(test)]
+        run_release_after_accept_hook(lease_key);
         Ok(())
     }
 
@@ -405,6 +430,48 @@ mod tests {
         let snap = h.snapshot(&key);
         assert!(snap.phase.is_none());
         assert!(snap.expires_at.is_none());
+    }
+
+    #[test]
+    fn release_does_not_remove_concurrent_reacquire() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "shared");
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+
+        let acquire_handle = RuntimeAuthLeaseHandle {
+            machines: Arc::clone(&h.machines),
+        };
+        let acquire_key = key.clone();
+        let hook_key = key.clone();
+        let acquired_generation = Arc::new(Mutex::new(None));
+        let hook_generation = Arc::clone(&acquired_generation);
+        set_release_after_accept_hook(Some(Arc::new(move |released_key| {
+            if released_key != &hook_key {
+                return;
+            }
+            let generation = acquire_handle
+                .acquire_lease(&acquire_key, 1_800_000_000)
+                .unwrap()
+                .generation;
+            *hook_generation.lock().unwrap() = Some(generation);
+        })));
+
+        h.release_lease(&key).unwrap();
+        set_release_after_accept_hook(None);
+
+        let acquired_generation = acquired_generation
+            .lock()
+            .unwrap()
+            .expect("release hook should reacquire the lease");
+
+        let snap = h.snapshot(&key);
+        assert_eq!(
+            snap.phase,
+            Some(AuthLeasePhase::Valid),
+            "accepted reacquire generation {acquired_generation} must remain visible after release completes; snapshot was {snap:?}"
+        );
+        assert_eq!(snap.expires_at, Some(1_800_000_000));
+        assert_eq!(snap.generation, acquired_generation);
     }
 
     #[test]

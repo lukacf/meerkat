@@ -6,6 +6,10 @@
 //! through the same authority before committing terminal login state.
 
 use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -199,7 +203,12 @@ pub struct OAuthDeviceFlowRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OAuthDeviceFlowState {
     record: OAuthDeviceFlowRecord,
-    poll_in_progress: bool,
+    poll_lease: Option<OAuthDevicePollLeaseState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OAuthDevicePollLeaseState {
+    id: u64,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -219,6 +228,84 @@ pub enum OAuthFlowError {
     CapacityExceeded { max_outstanding: usize },
     #[error("oauth device code poll is already in progress")]
     DevicePollInProgress,
+}
+
+#[derive(Debug)]
+pub struct OAuthDevicePollLease {
+    device_flows: Arc<Mutex<HashMap<String, OAuthDeviceFlowState>>>,
+    device_code: String,
+    provider: OAuthProviderIdentity,
+    lease_id: u64,
+    active: bool,
+}
+
+impl OAuthDevicePollLease {
+    fn new(
+        device_flows: Arc<Mutex<HashMap<String, OAuthDeviceFlowState>>>,
+        device_code: String,
+        provider: OAuthProviderIdentity,
+        lease_id: u64,
+    ) -> Self {
+        Self {
+            device_flows,
+            device_code,
+            provider,
+            lease_id,
+            active: true,
+        }
+    }
+
+    pub fn finish(mut self) -> Result<(), OAuthFlowError> {
+        let result = {
+            let mut flows = self.device_flows.lock();
+            let result = release_device_poll_lease_locked(
+                &mut flows,
+                &self.device_code,
+                self.provider,
+                self.lease_id,
+            );
+            prune_expired_device_locked(&mut flows);
+            result
+        };
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
+    }
+
+    pub fn consume(mut self) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        let result = {
+            let mut flows = self.device_flows.lock();
+            let result = consume_device_poll_lease_locked(
+                &mut flows,
+                &self.device_code,
+                self.provider,
+                self.lease_id,
+            );
+            prune_expired_device_locked(&mut flows);
+            result
+        };
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
+    }
+}
+
+impl Drop for OAuthDevicePollLease {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut flows = self.device_flows.lock();
+        let _ = release_device_poll_lease_locked(
+            &mut flows,
+            &self.device_code,
+            self.provider,
+            self.lease_id,
+        );
+        prune_expired_device_locked(&mut flows);
+    }
 }
 
 pub trait OAuthFlowAuthority: Send + Sync {
@@ -253,19 +340,7 @@ pub trait OAuthFlowAuthority: Send + Sync {
         &self,
         device_code: &str,
         provider: OAuthProviderIdentity,
-    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError>;
-
-    fn finish_device_code_poll(
-        &self,
-        device_code: &str,
-        provider: OAuthProviderIdentity,
-    ) -> Result<(), OAuthFlowError>;
-
-    fn consume_device_code(
-        &self,
-        device_code: &str,
-        provider: OAuthProviderIdentity,
-    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError>;
+    ) -> Result<OAuthDevicePollLease, OAuthFlowError>;
 }
 
 #[derive(Debug)]
@@ -273,7 +348,8 @@ pub struct OAuthFlowRegistry {
     ttl: Duration,
     max_outstanding: usize,
     flows: Mutex<HashMap<String, OAuthFlowRecord>>,
-    device_flows: Mutex<HashMap<String, OAuthDeviceFlowState>>,
+    device_flows: Arc<Mutex<HashMap<String, OAuthDeviceFlowState>>>,
+    next_device_poll_lease_id: AtomicU64,
 }
 
 impl OAuthFlowRegistry {
@@ -286,7 +362,8 @@ impl OAuthFlowRegistry {
             ttl,
             max_outstanding: max_outstanding.max(1),
             flows: Mutex::new(HashMap::new()),
-            device_flows: Mutex::new(HashMap::new()),
+            device_flows: Arc::new(Mutex::new(HashMap::new())),
+            next_device_poll_lease_id: AtomicU64::new(1),
         }
     }
 
@@ -339,24 +416,8 @@ impl OAuthFlowRegistry {
         &self,
         device_code: &str,
         provider: OAuthProviderIdentity,
-    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+    ) -> Result<OAuthDevicePollLease, OAuthFlowError> {
         <Self as OAuthFlowAuthority>::begin_device_code_poll(self, device_code, provider)
-    }
-
-    pub fn finish_device_code_poll(
-        &self,
-        device_code: &str,
-        provider: OAuthProviderIdentity,
-    ) -> Result<(), OAuthFlowError> {
-        <Self as OAuthFlowAuthority>::finish_device_code_poll(self, device_code, provider)
-    }
-
-    pub fn consume_device_code(
-        &self,
-        device_code: &str,
-        provider: OAuthProviderIdentity,
-    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
-        <Self as OAuthFlowAuthority>::consume_device_code(self, device_code, provider)
     }
 }
 
@@ -442,7 +503,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
             device_code,
             OAuthDeviceFlowState {
                 record,
-                poll_in_progress: false,
+                poll_lease: None,
             },
         );
         Ok(())
@@ -471,7 +532,7 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
         &self,
         device_code: &str,
         provider: OAuthProviderIdentity,
-    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+    ) -> Result<OAuthDevicePollLease, OAuthFlowError> {
         let mut flows = self.device_flows.lock();
         prune_expired_device_locked(&mut flows);
         let Some(state) = flows.get_mut(device_code) else {
@@ -483,52 +544,19 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
                 actual: provider,
             });
         }
-        if state.poll_in_progress {
+        if state.poll_lease.is_some() {
             return Err(OAuthFlowError::DevicePollInProgress);
         }
-        state.poll_in_progress = true;
-        Ok(state.record.clone())
-    }
-
-    fn finish_device_code_poll(
-        &self,
-        device_code: &str,
-        provider: OAuthProviderIdentity,
-    ) -> Result<(), OAuthFlowError> {
-        let mut flows = self.device_flows.lock();
-        let Some(state) = flows.get_mut(device_code) else {
-            prune_expired_device_locked(&mut flows);
-            return Err(OAuthFlowError::Missing);
-        };
-        if state.record.provider != provider {
-            return Err(OAuthFlowError::ProviderMismatch {
-                expected: state.record.provider,
-                actual: provider,
-            });
-        }
-        state.poll_in_progress = false;
-        prune_expired_device_locked(&mut flows);
-        Ok(())
-    }
-
-    fn consume_device_code(
-        &self,
-        device_code: &str,
-        provider: OAuthProviderIdentity,
-    ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
-        let mut flows = self.device_flows.lock();
-        let Some(state) = flows.remove(device_code) else {
-            prune_expired_device_locked(&mut flows);
-            return Err(OAuthFlowError::Missing);
-        };
-        prune_expired_device_locked(&mut flows);
-        if state.record.provider != provider {
-            return Err(OAuthFlowError::ProviderMismatch {
-                expected: state.record.provider,
-                actual: provider,
-            });
-        }
-        Ok(state.record)
+        let lease_id = self
+            .next_device_poll_lease_id
+            .fetch_add(1, Ordering::Relaxed);
+        state.poll_lease = Some(OAuthDevicePollLeaseState { id: lease_id });
+        Ok(OAuthDevicePollLease::new(
+            Arc::clone(&self.device_flows),
+            device_code.to_string(),
+            provider,
+            lease_id,
+        ))
     }
 }
 
@@ -545,9 +573,60 @@ fn prune_expired_locked(flows: &mut HashMap<String, OAuthFlowRecord>, ttl: Durat
     flows.retain(|_, record| record.created_at.elapsed() <= ttl);
 }
 
+fn release_device_poll_lease_locked(
+    flows: &mut HashMap<String, OAuthDeviceFlowState>,
+    device_code: &str,
+    provider: OAuthProviderIdentity,
+    lease_id: u64,
+) -> Result<(), OAuthFlowError> {
+    let Some(state) = flows.get_mut(device_code) else {
+        return Err(OAuthFlowError::Missing);
+    };
+    if state.record.provider != provider {
+        return Err(OAuthFlowError::ProviderMismatch {
+            expected: state.record.provider,
+            actual: provider,
+        });
+    }
+    match state.poll_lease {
+        Some(lease) if lease.id == lease_id => {
+            state.poll_lease = None;
+            Ok(())
+        }
+        Some(_) => Err(OAuthFlowError::DevicePollInProgress),
+        None => Err(OAuthFlowError::Missing),
+    }
+}
+
+fn consume_device_poll_lease_locked(
+    flows: &mut HashMap<String, OAuthDeviceFlowState>,
+    device_code: &str,
+    provider: OAuthProviderIdentity,
+    lease_id: u64,
+) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+    let Some(state) = flows.get(device_code) else {
+        return Err(OAuthFlowError::Missing);
+    };
+    if state.record.provider != provider {
+        return Err(OAuthFlowError::ProviderMismatch {
+            expected: state.record.provider,
+            actual: provider,
+        });
+    }
+    match state.poll_lease {
+        Some(lease) if lease.id == lease_id => {}
+        Some(_) => return Err(OAuthFlowError::DevicePollInProgress),
+        None => return Err(OAuthFlowError::Missing),
+    }
+    flows
+        .remove(device_code)
+        .map(|state| state.record)
+        .ok_or(OAuthFlowError::Missing)
+}
+
 fn prune_expired_device_locked(flows: &mut HashMap<String, OAuthDeviceFlowState>) {
     let now = Instant::now();
-    flows.retain(|_, state| state.poll_in_progress || state.record.expires_at >= now);
+    flows.retain(|_, state| state.poll_lease.is_some() || state.record.expires_at >= now);
 }
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -776,9 +855,10 @@ mod tests {
             .expect("pending device flow remains visible");
         assert_eq!(observed.device_code, "device-code");
 
-        let consumed = registry
-            .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
-            .expect("terminal device flow consumes");
+        let poll = registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("poll begins");
+        let consumed = poll.consume().expect("terminal device flow consumes");
         assert_eq!(consumed.provider, OAuthProviderIdentity::GoogleCodeAssist);
         assert!(matches!(
             registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
@@ -801,11 +881,10 @@ mod tests {
             registry.verify_device_code("device-code", OAuthProviderIdentity::OpenAiChatGpt),
             Err(OAuthFlowError::ProviderMismatch { .. })
         ));
-        assert!(
-            registry
-                .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
-                .is_ok()
-        );
+        let poll = registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("correct provider poll begins after mismatch");
+        assert!(poll.consume().is_ok());
     }
 
     #[test]
@@ -824,7 +903,7 @@ mod tests {
                         .checked_sub(Duration::from_secs(1))
                         .expect("test duration is representable"),
                 },
-                poll_in_progress: false,
+                poll_lease: None,
             },
         );
 
@@ -837,25 +916,29 @@ mod tests {
     #[test]
     fn oauth_device_terminal_consume_survives_local_expiry_boundary() {
         let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
-        registry.device_flows.lock().insert(
-            "device-code".to_string(),
-            OAuthDeviceFlowState {
-                record: OAuthDeviceFlowRecord {
-                    provider: OAuthProviderIdentity::GoogleCodeAssist,
-                    device_code: "device-code".to_string(),
-                    created_at: Instant::now()
-                        .checked_sub(Duration::from_secs(601))
-                        .expect("test duration is representable"),
-                    expires_at: Instant::now()
-                        .checked_sub(Duration::from_secs(1))
-                        .expect("test duration is representable"),
-                },
-                poll_in_progress: false,
-            },
-        );
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+        let poll = registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("poll begins before local expiry boundary");
+        {
+            let mut flows = registry.device_flows.lock();
+            flows
+                .get_mut("device-code")
+                .expect("device flow exists")
+                .record
+                .expires_at = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test duration is representable");
+        }
 
-        let consumed = registry
-            .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+        let consumed = poll
+            .consume()
             .expect("terminal provider result should still consume verified local state");
         assert_eq!(consumed.device_code, "device-code");
         assert!(matches!(
@@ -874,7 +957,7 @@ mod tests {
                 Duration::from_secs(600),
             )
             .expect("device code admitted");
-        registry
+        let poll = registry
             .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
             .expect("poll begins");
         assert!(matches!(
@@ -899,10 +982,68 @@ mod tests {
                 "verifier",
             )
             .expect("unrelated start should not prune in-flight poll");
-        let consumed = registry
-            .consume_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+        let consumed = poll
+            .consume()
             .expect("terminal provider result should consume in-flight expired state");
         assert_eq!(consumed.device_code, "device-code");
+    }
+
+    #[test]
+    fn oauth_device_poll_drop_releases_in_progress_lifecycle() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+
+        let poll = registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("poll begins");
+        assert!(matches!(
+            registry.begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::DevicePollInProgress)
+        ));
+
+        drop(poll);
+
+        registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("dropped poll lease releases the in-progress lifecycle");
+    }
+
+    #[test]
+    fn oauth_device_poll_drop_prunes_expired_in_progress_record() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+        let poll = registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("poll begins");
+        {
+            let mut flows = registry.device_flows.lock();
+            flows
+                .get_mut("device-code")
+                .expect("device flow exists")
+                .record
+                .expires_at = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test duration is representable");
+        }
+
+        drop(poll);
+
+        assert!(matches!(
+            registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::Missing)
+        ));
     }
 
     #[test]

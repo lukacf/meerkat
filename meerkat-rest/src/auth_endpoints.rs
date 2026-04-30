@@ -33,7 +33,7 @@ use meerkat_providers::auth_oauth::{
     request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
-use meerkat_providers::oauth_flow::{OAuthFlowError, resolve_oauth_provider};
+use meerkat_providers::oauth_flow::{OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider};
 
 use crate::AppState;
 
@@ -186,26 +186,16 @@ fn oauth_device_state_error(err: OAuthFlowError) -> (StatusCode, String) {
 }
 
 fn consume_terminal_device_flow(
-    state: &AppState,
-    device_code: &str,
-    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+    poll_lease: OAuthDevicePollLease,
 ) -> Result<(), (StatusCode, String)> {
-    state
-        .oauth_flows
-        .consume_device_code(device_code, provider)
+    poll_lease
+        .consume()
         .map(|_| ())
         .map_err(oauth_device_state_error)
 }
 
-fn finish_device_flow_poll(
-    state: &AppState,
-    device_code: &str,
-    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
-) -> Result<(), (StatusCode, String)> {
-    state
-        .oauth_flows
-        .finish_device_code_poll(device_code, provider)
-        .map_err(oauth_device_state_error)
+fn finish_device_flow_poll(poll_lease: OAuthDevicePollLease) -> Result<(), (StatusCode, String)> {
+    poll_lease.finish().map_err(oauth_device_state_error)
 }
 
 async fn save_tokens_and_publish_lifecycle(
@@ -1017,13 +1007,16 @@ pub async fn complete_device_login(
         )
             .into_response();
     }
-    if let Err(err) = state
+    let poll_lease = match state
         .oauth_flows
         .begin_device_code_poll(&body.device_code, resolved.identity)
     {
-        let (status, message) = oauth_device_state_error(err);
-        return (status, Json(serde_json::json!({ "error": message }))).into_response();
-    }
+        Ok(lease) => lease,
+        Err(err) => {
+            let (status, message) = oauth_device_state_error(err);
+            return (status, Json(serde_json::json!({ "error": message }))).into_response();
+        }
+    };
     let http = reqwest::Client::new();
     let outcome = match poll_device_code(
         &http,
@@ -1035,7 +1028,6 @@ pub async fn complete_device_login(
     {
         Ok(o) => o,
         Err(e) => {
-            let _ = finish_device_flow_poll(&state, &body.device_code, resolved.identity);
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -1046,58 +1038,48 @@ pub async fn complete_device_login(
         }
     };
     match outcome {
-        DevicePollOutcome::Pending => {
-            match finish_device_flow_poll(&state, &body.device_code, resolved.identity) {
-                Ok(()) => (
-                    StatusCode::ACCEPTED,
-                    Json(serde_json::json!({ "state": "pending" })),
-                )
-                    .into_response(),
-                Err((status, message)) => {
-                    (status, Json(serde_json::json!({ "error": message }))).into_response()
-                }
+        DevicePollOutcome::Pending => match finish_device_flow_poll(poll_lease) {
+            Ok(()) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "state": "pending" })),
+            )
+                .into_response(),
+            Err((status, message)) => {
+                (status, Json(serde_json::json!({ "error": message }))).into_response()
             }
-        }
-        DevicePollOutcome::SlowDown => {
-            match finish_device_flow_poll(&state, &body.device_code, resolved.identity) {
-                Ok(()) => (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(serde_json::json!({ "state": "slow_down" })),
-                )
-                    .into_response(),
-                Err((status, message)) => {
-                    (status, Json(serde_json::json!({ "error": message }))).into_response()
-                }
+        },
+        DevicePollOutcome::SlowDown => match finish_device_flow_poll(poll_lease) {
+            Ok(()) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "state": "slow_down" })),
+            )
+                .into_response(),
+            Err((status, message)) => {
+                (status, Json(serde_json::json!({ "error": message }))).into_response()
             }
-        }
-        DevicePollOutcome::AccessDenied => {
-            match consume_terminal_device_flow(&state, &body.device_code, resolved.identity) {
-                Ok(()) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "state": "access_denied" })),
-                )
-                    .into_response(),
-                Err((status, message)) => {
-                    (status, Json(serde_json::json!({ "error": message }))).into_response()
-                }
+        },
+        DevicePollOutcome::AccessDenied => match consume_terminal_device_flow(poll_lease) {
+            Ok(()) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "state": "access_denied" })),
+            )
+                .into_response(),
+            Err((status, message)) => {
+                (status, Json(serde_json::json!({ "error": message }))).into_response()
             }
-        }
-        DevicePollOutcome::Expired => {
-            match consume_terminal_device_flow(&state, &body.device_code, resolved.identity) {
-                Ok(()) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "state": "expired" })),
-                )
-                    .into_response(),
-                Err((status, message)) => {
-                    (status, Json(serde_json::json!({ "error": message }))).into_response()
-                }
+        },
+        DevicePollOutcome::Expired => match consume_terminal_device_flow(poll_lease) {
+            Ok(()) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "state": "expired" })),
+            )
+                .into_response(),
+            Err((status, message)) => {
+                (status, Json(serde_json::json!({ "error": message }))).into_response()
             }
-        }
+        },
         DevicePollOutcome::Ready(result) => {
-            if let Err((status, message)) =
-                consume_terminal_device_flow(&state, &body.device_code, resolved.identity)
-            {
+            if let Err((status, message)) = consume_terminal_device_flow(poll_lease) {
                 return (status, Json(serde_json::json!({ "error": message }))).into_response();
             }
             let expires_at = result
@@ -1534,6 +1516,95 @@ mod tests {
             )
             .expect("starting app state owns the flow");
         assert!(!flow.pkce_verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rest_device_completion_poll_drop_releases_app_state_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .oauth_flows
+            .admit_device_code(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code".to_string(),
+                std::time::Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+
+        let poll = state
+            .oauth_flows
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("device completion poll begins");
+        assert!(matches!(
+            state.oauth_flows.begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            ),
+            Err(OAuthFlowError::DevicePollInProgress)
+        ));
+
+        drop(poll);
+
+        state
+            .oauth_flows
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("dropped REST completion poll releases app-state authority");
+    }
+
+    #[tokio::test]
+    async fn rest_device_completion_poll_abort_releases_app_state_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state
+            .oauth_flows
+            .admit_device_code(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code".to_string(),
+                std::time::Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+
+        let authority = Arc::clone(&state.oauth_flows);
+        let (begun_tx, begun_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _poll = authority
+                .begin_device_code_poll(
+                    "device-code",
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                )
+                .expect("device completion poll begins");
+            begun_tx.send(()).expect("signal poll start");
+            std::future::pending::<()>().await;
+        });
+        begun_rx.await.expect("poll lease was acquired");
+        assert!(matches!(
+            state.oauth_flows.begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            ),
+            Err(OAuthFlowError::DevicePollInProgress)
+        ));
+
+        task.abort();
+        let _ = task.await;
+
+        state
+            .oauth_flows
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("aborted REST completion poll releases app-state authority");
     }
 
     #[tokio::test]

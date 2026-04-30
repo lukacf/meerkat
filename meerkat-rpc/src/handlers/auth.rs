@@ -27,7 +27,7 @@ use meerkat_providers::auth_oauth::{
     request_device_code,
 };
 use meerkat_providers::auth_store::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
-use meerkat_providers::oauth_flow::{OAuthFlowError, resolve_oauth_provider};
+use meerkat_providers::oauth_flow::{OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider};
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
@@ -253,14 +253,9 @@ fn oauth_device_state_error(id: Option<RpcId>, err: OAuthFlowError) -> RpcRespon
 
 fn consume_terminal_device_flow(
     id: Option<RpcId>,
-    runtime: &SessionRuntime,
-    device_code: &str,
-    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+    poll_lease: OAuthDevicePollLease,
 ) -> Option<RpcResponse> {
-    match runtime
-        .oauth_flow_authority()
-        .consume_device_code(device_code, provider)
-    {
+    match poll_lease.consume() {
         Ok(_) => None,
         Err(err) => Some(oauth_device_state_error(id, err)),
     }
@@ -268,14 +263,9 @@ fn consume_terminal_device_flow(
 
 fn finish_device_flow_poll(
     id: Option<RpcId>,
-    runtime: &SessionRuntime,
-    device_code: &str,
-    provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
+    poll_lease: OAuthDevicePollLease,
 ) -> Option<RpcResponse> {
-    match runtime
-        .oauth_flow_authority()
-        .finish_device_code_poll(device_code, provider)
-    {
+    match poll_lease.finish() {
         Ok(()) => None,
         Err(err) => Some(oauth_device_state_error(id, err)),
     }
@@ -962,12 +952,13 @@ pub async fn handle_auth_login_device_complete(
             ),
         );
     }
-    if let Err(err) = runtime
+    let poll_lease = match runtime
         .oauth_flow_authority()
         .begin_device_code_poll(&parsed.device_code, resolved.identity)
     {
-        return oauth_device_state_error(id, err);
-    }
+        Ok(lease) => lease,
+        Err(err) => return oauth_device_state_error(id, err),
+    };
     let http = reqwest::Client::new();
     let outcome = match poll_device_code(
         &http,
@@ -979,12 +970,6 @@ pub async fn handle_auth_login_device_complete(
     {
         Ok(o) => o,
         Err(e) => {
-            let _ = finish_device_flow_poll(
-                id.clone(),
-                runtime,
-                &parsed.device_code,
-                resolved.identity,
-            );
             return RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
@@ -993,49 +978,26 @@ pub async fn handle_auth_login_device_complete(
         }
     };
     match outcome {
-        DevicePollOutcome::Pending => match finish_device_flow_poll(
-            id.clone(),
-            runtime,
-            &parsed.device_code,
-            resolved.identity,
-        ) {
+        DevicePollOutcome::Pending => match finish_device_flow_poll(id.clone(), poll_lease) {
             None => RpcResponse::success(id, WireDeviceCompleteResult::Pending),
             Some(resp) => resp,
         },
-        DevicePollOutcome::SlowDown => match finish_device_flow_poll(
-            id.clone(),
-            runtime,
-            &parsed.device_code,
-            resolved.identity,
-        ) {
+        DevicePollOutcome::SlowDown => match finish_device_flow_poll(id.clone(), poll_lease) {
             None => RpcResponse::success(id, WireDeviceCompleteResult::SlowDown),
             Some(resp) => resp,
         },
-        DevicePollOutcome::AccessDenied => match consume_terminal_device_flow(
-            id.clone(),
-            runtime,
-            &parsed.device_code,
-            resolved.identity,
-        ) {
-            None => RpcResponse::success(id, WireDeviceCompleteResult::AccessDenied),
-            Some(resp) => resp,
-        },
-        DevicePollOutcome::Expired => match consume_terminal_device_flow(
-            id.clone(),
-            runtime,
-            &parsed.device_code,
-            resolved.identity,
-        ) {
+        DevicePollOutcome::AccessDenied => {
+            match consume_terminal_device_flow(id.clone(), poll_lease) {
+                None => RpcResponse::success(id, WireDeviceCompleteResult::AccessDenied),
+                Some(resp) => resp,
+            }
+        }
+        DevicePollOutcome::Expired => match consume_terminal_device_flow(id.clone(), poll_lease) {
             None => RpcResponse::success(id, WireDeviceCompleteResult::Expired),
             Some(resp) => resp,
         },
         DevicePollOutcome::Ready(result) => {
-            if let Some(resp) = consume_terminal_device_flow(
-                id.clone(),
-                runtime,
-                &parsed.device_code,
-                resolved.identity,
-            ) {
+            if let Some(resp) = consume_terminal_device_flow(id.clone(), poll_lease) {
                 return resp;
             }
             let store = match require_token_store(runtime, id.clone()) {
@@ -1668,6 +1630,89 @@ mod tests {
             )
             .expect("starting runtime owns the flow");
         assert!(!flow.pkce_verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_completion_poll_drop_releases_session_runtime_authority() {
+        let runtime = test_runtime();
+        runtime
+            .oauth_flow_authority()
+            .admit_device_code(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code".to_string(),
+                std::time::Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+
+        let poll = runtime
+            .oauth_flow_authority()
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("device completion poll begins");
+        assert!(matches!(
+            runtime.oauth_flow_authority().begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            ),
+            Err(OAuthFlowError::DevicePollInProgress)
+        ));
+
+        drop(poll);
+
+        runtime
+            .oauth_flow_authority()
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("dropped RPC completion poll releases runtime authority");
+    }
+
+    #[tokio::test]
+    async fn device_completion_poll_abort_releases_session_runtime_authority() {
+        let runtime = test_runtime();
+        runtime
+            .oauth_flow_authority()
+            .admit_device_code(
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code".to_string(),
+                std::time::Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+
+        let authority = runtime.oauth_flow_authority();
+        let (begun_tx, begun_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _poll = authority
+                .begin_device_code_poll(
+                    "device-code",
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+                )
+                .expect("device completion poll begins");
+            begun_tx.send(()).expect("signal poll start");
+            std::future::pending::<()>().await;
+        });
+        begun_rx.await.expect("poll lease was acquired");
+        assert!(matches!(
+            runtime.oauth_flow_authority().begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            ),
+            Err(OAuthFlowError::DevicePollInProgress)
+        ));
+
+        task.abort();
+        let _ = task.await;
+
+        runtime
+            .oauth_flow_authority()
+            .begin_device_code_poll(
+                "device-code",
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+            )
+            .expect("aborted RPC completion poll releases runtime authority");
     }
 
     #[tokio::test]

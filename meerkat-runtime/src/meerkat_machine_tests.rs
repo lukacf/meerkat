@@ -11933,16 +11933,12 @@ async fn ingest_rejects_stopped_session() {
 }
 
 #[tokio::test]
-async fn retire_rejects_initializing_session() {
+async fn retire_rejection_from_stopped_surfaces_dsl_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    // Don't register, just create a session entry in Initializing state.
-    // Since there's no way to create a session in Initializing via the
-    // public API (register_session transitions to Idle), we test that
-    // retire guards against the union of incompatible phases. The Idle →
-    // Retired path is already exercised above. Focus here on the existing
-    // Stopped guard and Destroyed guard.
+    // Retire legality is DSL-owned; the Idle -> Retired path is exercised
+    // above, so this anchors an incompatible Stopped phase.
     adapter.register_session(session_id.clone()).await;
 
     // First stop
@@ -11963,11 +11959,12 @@ async fn retire_rejects_initializing_session() {
     assert!(
         matches!(
             err,
-            RuntimeControlPlaneError::InvalidState {
-                state: RuntimeState::Stopped
-            }
+            RuntimeControlPlaneError::Internal(ref reason)
+                if reason.contains("DSL authority (Retire)")
+                    && reason.contains("Stopped")
+                    && reason.contains("Retire")
         ),
-        "expected InvalidState(Stopped), got {err:?}"
+        "expected DSL authority rejection for Retire from Stopped, got {err:?}"
     );
 }
 
@@ -17783,9 +17780,115 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
 // Per-session mutation gate tests
 // ---------------------------------------------------------------------------
 
+#[tokio::test]
+async fn retire_from_retired_is_backed_by_dsl_idempotent_transition() {
+    let schema = schema_meerkat_machine();
+    let has_retired_self_loop = schema.transitions.iter().any(|transition| {
+        transition.on.variant_str() == "Retire"
+            && transition
+                .from
+                .iter()
+                .any(|phase| phase.as_str() == "Retired")
+            && transition.to.as_str() == "Retired"
+    });
+    assert!(
+        has_retired_self_loop,
+        "Retire idempotence must be represented by the MeerkatMachine DSL"
+    );
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("initial retire should succeed");
+
+    let report = crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("retire from Retired should succeed idempotently through DSL");
+    assert_eq!(report.inputs_abandoned, 0);
+    assert_eq!(report.inputs_pending_drain, 0);
+
+    let state = crate::traits::RuntimeControlPlane::runtime_state(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("runtime state should remain readable");
+    assert_eq!(state, RuntimeState::Retired);
+}
+
+#[tokio::test]
+async fn reset_from_running_surfaces_dsl_rejection() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&fixture.adapter)),
+            MeerkatMachineCommand::Reset {
+                runtime_id: fixture.runtime_id.clone(),
+            },
+        )
+        .await;
+
+    fixture.cleanup().await;
+
+    let err = result.expect_err("reset from Running should reject through DSL");
+    assert!(
+        matches!(
+            err,
+            MeerkatMachineCommandError::Control(RuntimeControlPlaneError::Internal(ref reason))
+                if reason.contains("DSL authority (Reset)")
+                    && reason.contains("Running")
+                    && reason.contains("Reset")
+        ),
+        "expected DSL authority rejection for Reset from Running, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn destroy_from_bound_initializing_is_backed_by_dsl_guard() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should establish active runtime identity");
+
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("prepared session should exist")
+                .driver,
+        )
+    };
+    {
+        let mut entry = driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *entry else {
+            panic!("test uses ephemeral driver");
+        };
+        driver.force_runtime_authority(RuntimeState::Initializing, None, None);
+        driver.sync_control_projection_from_dsl_authority();
+    }
+
+    let report = crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("bound Initializing destroy should follow the DSL DestroyInitializing guard");
+    assert_eq!(report.inputs_abandoned, 0);
+
+    let state = crate::traits::RuntimeControlPlane::runtime_state(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("runtime state should remain readable after destroy");
+    assert_eq!(state, RuntimeState::Destroyed);
+}
+
 /// Two concurrent Retire commands on the same session must serialize: the
-/// first stages the DSL transition, and the second observes the
-/// DSL-authoritative Retired phase and completes idempotently.
+/// first stages the mutating DSL transition, and the second reaches the
+/// DSL-authoritative Retired self-loop and completes idempotently.
 #[tokio::test]
 async fn concurrent_retire_serializes_via_mutation_gate() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -17819,7 +17922,8 @@ async fn concurrent_retire_serializes_via_mutation_gate() {
     let result_b = result_b.expect("task b should not panic");
 
     // Both command calls should succeed. The mutation gate still matters:
-    // it ensures only one call stages the non-self-looping Retire DSL input.
+    // it ensures the mutating Retire and idempotent Retire self-loop are
+    // observed in sequence.
     let successes = [&result_a, &result_b].iter().filter(|r| r.is_ok()).count();
     let failures = [&result_a, &result_b].iter().filter(|r| r.is_err()).count();
 
@@ -17843,9 +17947,8 @@ async fn concurrent_retire_serializes_via_mutation_gate() {
     );
 }
 
-/// Once the DSL-authoritative session phase is Retired, another command-level
-/// retire should succeed idempotently without restaging the raw DSL Retire
-/// transition.
+/// Once the DSL-authoritative session phase is Retired, another retire should
+/// succeed through the DSL-owned idempotent Retire self-loop.
 #[tokio::test]
 async fn retire_runtime_is_idempotent_from_retired() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -17885,7 +17988,7 @@ async fn retire_runtime_is_idempotent_from_retired() {
     assert_eq!(state, RuntimeState::Retired);
 
     // Attempt a second Retire from Retired. The command path should be
-    // idempotent without staging the non-self-looping DSL Retire input again.
+    // idempotent through the DSL Retire self-loop.
     let report =
         <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id)
             .await

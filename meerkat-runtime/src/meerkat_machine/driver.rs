@@ -1694,16 +1694,8 @@ pub(crate) fn machine_prepare_destroy(
     driver: &mut DriverEntry,
 ) -> Result<PreparedDestroy, RuntimeDriverError> {
     match driver.runtime_state() {
-        RuntimeState::Initializing => {
-            return Err(RuntimeDriverError::Internal(
-                crate::runtime_state::RuntimeStateTransitionError {
-                    from: driver.runtime_state(),
-                    to: RuntimeState::Destroyed,
-                }
-                .to_string(),
-            ));
-        }
-        RuntimeState::Idle
+        RuntimeState::Initializing
+        | RuntimeState::Idle
         | RuntimeState::Attached
         | RuntimeState::Running
         | RuntimeState::Retired

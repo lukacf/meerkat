@@ -1465,6 +1465,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeRetired`
 - To: `Retired`
 
+### `RetireAlreadyRetired`
+- From: `Retired`
+- On: `Retire`(session_id)
+- To: `Retired`
+
 ### `Reset`
 - From: `Initializing`, `Idle`, `Attached`, `Retired`
 - On: `Reset`()
@@ -1518,8 +1523,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RuntimeExecutorExited`()
 - To: `Stopped`
 
+### `DestroyInitializing`
+- From: `Initializing`
+- On: `Destroy`(session_id)
+- Guards:
+  - `runtime_is_bound`
+- Emits: `RuntimeDestroyed`
+- To: `Destroyed`
+
 ### `Destroy`
-- From: `Initializing`, `Idle`, `Attached`, `Running`, `Retired`, `Stopped`
+- From: `Idle`, `Attached`, `Running`, `Retired`, `Stopped`
 - On: `Destroy`(session_id)
 - Emits: `RuntimeDestroyed`
 - To: `Destroyed`

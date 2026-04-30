@@ -187,58 +187,39 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = self
-                    .existing_session_runtime_state(&session_id)
-                    .await
-                    .unwrap_or(RuntimeState::Destroyed);
-                if matches!(state, RuntimeState::Destroyed | RuntimeState::Stopped) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
-                let staged_dsl = if state == RuntimeState::Retired {
-                    // The DSL Retire transition is intentionally not
-                    // self-looping. Command-level idempotence belongs here,
-                    // after reading the DSL-authoritative phase, while the
-                    // driver still owns retire realization and reporting.
-                    None
-                } else {
-                    Some(
-                        self.stage_session_dsl_transition(
-                            &session_id,
-                            crate::meerkat_machine::dsl::MeerkatMachineInput::Retire {
-                                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
-                                    &session_id,
-                                ),
-                            },
-                            "Retire",
-                        )
-                        .await
-                        .map_err(RuntimeControlPlaneError::Internal)?,
+                let staged_dsl = self
+                    .stage_session_dsl_transition(
+                        &session_id,
+                        crate::meerkat_machine::dsl::MeerkatMachineInput::Retire {
+                            session_id: crate::meerkat_machine::dsl::SessionId::from_domain(
+                                &session_id,
+                            ),
+                        },
+                        "Retire",
                     )
-                };
+                    .await
+                    .map_err(RuntimeControlPlaneError::Internal)?;
 
                 let mut drv = driver.lock().await;
                 let mut report = match machine_retire(&mut drv).await {
                     Ok(report) => report,
                     Err(err) => {
                         drop(drv);
-                        if let Some(staged_dsl) = staged_dsl {
-                            self.restore_session_dsl_state(&session_id, staged_dsl.previous_state)
-                                .await;
-                        }
+                        self.restore_session_dsl_state(&session_id, staged_dsl.previous_state)
+                            .await;
                         return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                     }
                 };
                 drop(drv);
 
                 let mut commit_error = None;
-                if let Some(staged_dsl) = staged_dsl
-                    && let Err(reason) = self
-                        .commit_session_dsl_transition_preserving_committed_state(
-                            &session_id,
-                            staged_dsl,
-                            "Retire",
-                        )
-                        .await
+                if let Err(reason) = self
+                    .commit_session_dsl_transition_preserving_committed_state(
+                        &session_id,
+                        staged_dsl,
+                        "Retire",
+                    )
+                    .await
                 {
                     driver
                         .lock()
@@ -342,13 +323,6 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = self
-                    .existing_session_runtime_state(&session_id)
-                    .await
-                    .unwrap_or(RuntimeState::Destroyed);
-                if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -384,13 +358,6 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = self
-                    .existing_session_runtime_state(&session_id)
-                    .await
-                    .unwrap_or(RuntimeState::Destroyed);
-                if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -440,24 +407,6 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = self
-                    .existing_session_runtime_state(&session_id)
-                    .await
-                    .unwrap_or(RuntimeState::Destroyed);
-                if matches!(state, RuntimeState::Destroyed) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
-
-                // Guard: runtime_is_bound — reject Destroy if the runtime was
-                // never bound via PrepareBindings. The driver's Initializing
-                // state means Initialize hasn't even been called. Beyond that,
-                // the ephemeral driver transitions through PrepareBindings ->
-                // Attached, so Initializing is the only state where the runtime
-                // is definitely unbound. (The schema field `active_runtime_id`
-                // maps to "has PrepareBindings been called and not reset".)
-                if matches!(state, RuntimeState::Initializing) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
                 let destroy_input = crate::meerkat_machine::dsl::MeerkatMachineInput::Destroy {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
                 };

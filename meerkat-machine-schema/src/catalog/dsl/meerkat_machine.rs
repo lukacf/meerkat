@@ -3641,6 +3641,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Retired
             emit RuntimeRetired { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
+        transition RetireAlreadyRetired {
+            on input Retire { session_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {}
+            to Retired
+        }
 
         // 15. Reset: from [Initializing, Idle, Attached, Retired] → Idle
         transition Reset {
@@ -3753,12 +3759,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Stopped
         }
 
-        // 17. Destroy: from all non-Destroyed → Destroyed
+        // 17. Destroy: from all non-Destroyed bound runtime phases → Destroyed.
+        transition DestroyInitializing {
+            on input Destroy { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
+            }
+            to Destroyed
+            emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
         transition Destroy {
             on input Destroy { session_id }
             guard {
-                self.lifecycle_phase == Phase::Initializing
-                || self.lifecycle_phase == Phase::Idle
+                self.lifecycle_phase == Phase::Idle
                 || self.lifecycle_phase == Phase::Attached
                 || self.lifecycle_phase == Phase::Running
                 || self.lifecycle_phase == Phase::Retired

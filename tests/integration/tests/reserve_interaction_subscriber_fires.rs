@@ -130,7 +130,7 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
         "A should observe exactly one response",
     );
     assert_eq!(
-        response_at_a[0].class,
+        response_at_a[0].class(),
         PeerInputClass::ResponseTerminal,
         "terminal response class must be machine-owned at ingress"
     );

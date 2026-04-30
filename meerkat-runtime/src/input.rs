@@ -925,17 +925,19 @@ mod tests {
     }
 
     #[test]
-    fn peer_response_terminal_context_uses_display_label_without_changing_canonical_projection() {
+    fn peer_response_terminal_context_uses_display_text_without_changing_canonical_key() {
+        let route_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f2";
+        let request_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f1";
         let mut header = make_header();
         header.source = InputOrigin::Peer {
-            peer_id: "canonical-peer-id".into(),
+            peer_id: route_id.into(),
             display_identity: Some("display-agent".into()),
             runtime_id: None,
         };
         let input = Input::Peer(PeerInput {
             header,
             convention: Some(PeerConvention::ResponseTerminal {
-                request_id: "req-123".into(),
+                request_id: request_id.into(),
                 status: ResponseTerminalStatus::Completed,
             }),
             body: "legacy response body".into(),
@@ -947,21 +949,22 @@ mod tests {
         let Input::Peer(peer) = &input else {
             panic!("expected peer input");
         };
+        let expected_canonical_key = format!("peer_response_terminal:{route_id}:{request_id}");
         assert_eq!(
             peer_projection_from_peer_input(peer)
                 .and_then(|projection| projection.context_key())
                 .as_deref(),
-            Some("peer_response_terminal:canonical-peer-id:req-123")
+            Some(expected_canonical_key.as_str())
         );
 
         let projection = runtime_input_projection(&input);
         let context = projection.context_append.expect("context append");
-        assert_eq!(context.key, "peer_response_terminal:display-agent:req-123");
+        assert_eq!(context.key, expected_canonical_key);
         let CoreRenderable::Text { text } = context.content else {
             panic!("expected text context");
         };
         assert!(text.contains("from display-agent"));
-        assert!(!text.contains("from canonical-peer-id"));
+        assert!(!text.contains(route_id));
     }
 
     #[test]

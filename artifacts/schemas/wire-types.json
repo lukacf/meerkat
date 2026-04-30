@@ -2501,6 +2501,130 @@
         ],
         "type": "object"
       },
+      "WireAnthropicCompactionConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "edit": true,
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicContextWindow": {
+        "enum": [
+          "one_megabyte"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicInferenceGeo": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicThinkingConfig": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireContentBlock": {
         "description": "Wire-safe content block (no `source_path` — internal only).",
         "oneOf": [
@@ -2639,6 +2763,44 @@
         ],
         "description": "Wire-safe content input (mirrors `ContentInput`)."
       },
+      "WireGeminiThinkingConfig": {
+        "properties": {
+          "include_thoughts": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireGeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireGeminiThinkingLevel": {
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -2714,9 +2876,75 @@
         "oneOf": [
           {
             "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "provider": {
                 "const": "anthropic",
                 "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "thinking_budget_tokens": {
                 "format": "uint32",
@@ -2725,7 +2953,16 @@
                   "integer",
                   "null"
                 ]
-              }
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": true
             },
             "required": [
               "provider"
@@ -2734,10 +2971,26 @@
           },
           {
             "properties": {
+              "chat_template_kwargs": true,
+              "frequency_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
               "provider": {
                 "const": "open_ai",
                 "type": "string"
               },
+              "reasoning": true,
               "reasoning_effort": {
                 "anyOf": [
                   {
@@ -2747,7 +3000,38 @@
                     "type": "null"
                   }
                 ]
-              }
+              },
+              "seed": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_reasoning_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": true,
+              "web_search": true
             },
             "required": [
               "provider"
@@ -2764,9 +3048,63 @@
                   "null"
                 ]
               },
+              "google_search": true,
               "provider": {
                 "const": "gemini",
                 "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
               }
             },
             "required": [

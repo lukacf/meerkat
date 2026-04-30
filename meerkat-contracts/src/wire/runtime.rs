@@ -638,6 +638,243 @@ impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::Reaso
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireAnthropicThinkingConfig {
+    Adaptive,
+    Enabled { budget_tokens: u32 },
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig>
+    for WireAnthropicThinkingConfig
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig as Core;
+        match value {
+            Core::Adaptive => Self::Adaptive,
+            Core::Enabled { budget_tokens } => Self::Enabled { budget_tokens },
+        }
+    }
+}
+
+impl From<WireAnthropicThinkingConfig>
+    for meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig
+{
+    fn from(value: WireAnthropicThinkingConfig) -> Self {
+        match value {
+            WireAnthropicThinkingConfig::Adaptive => Self::Adaptive,
+            WireAnthropicThinkingConfig::Enabled { budget_tokens } => {
+                Self::Enabled { budget_tokens }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAnthropicEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicEffort> for WireAnthropicEffort {
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicEffort) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort as Core;
+        match value {
+            Core::Low => Self::Low,
+            Core::Medium => Self::Medium,
+            Core::High => Self::High,
+            Core::Max => Self::Max,
+            Core::XHigh => Self::XHigh,
+        }
+    }
+}
+
+impl From<WireAnthropicEffort> for meerkat_core::lifecycle::run_primitive::AnthropicEffort {
+    fn from(value: WireAnthropicEffort) -> Self {
+        match value {
+            WireAnthropicEffort::Low => Self::Low,
+            WireAnthropicEffort::Medium => Self::Medium,
+            WireAnthropicEffort::High => Self::High,
+            WireAnthropicEffort::Max => Self::Max,
+            WireAnthropicEffort::XHigh => Self::XHigh,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireAnthropicInferenceGeo {
+    Us,
+    Global,
+    Other { region: String },
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo>
+    for WireAnthropicInferenceGeo
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo as Core;
+        match value {
+            Core::Us => Self::Us,
+            Core::Global => Self::Global,
+            Core::Other { region } => Self::Other { region },
+        }
+    }
+}
+
+impl From<WireAnthropicInferenceGeo>
+    for meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo
+{
+    fn from(value: WireAnthropicInferenceGeo) -> Self {
+        match value {
+            WireAnthropicInferenceGeo::Us => Self::Us,
+            WireAnthropicInferenceGeo::Global => Self::Global,
+            WireAnthropicInferenceGeo::Other { region } => Self::Other { region },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireAnthropicCompactionConfig {
+    Auto,
+    Custom { edit: serde_json::Value },
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig>
+    for WireAnthropicCompactionConfig
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig as Core;
+        match value {
+            Core::Auto => Self::Auto,
+            Core::Custom { edit } => Self::Custom {
+                edit: edit.as_value(),
+            },
+        }
+    }
+}
+
+impl From<WireAnthropicCompactionConfig>
+    for meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig
+{
+    fn from(value: WireAnthropicCompactionConfig) -> Self {
+        use meerkat_core::lifecycle::run_primitive::OpaqueProviderBody;
+        match value {
+            WireAnthropicCompactionConfig::Auto => Self::Auto,
+            WireAnthropicCompactionConfig::Custom { edit } => Self::Custom {
+                edit: OpaqueProviderBody::from_value(&edit),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAnthropicContextWindow {
+    OneMegabyte,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicContextWindow>
+    for WireAnthropicContextWindow
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicContextWindow) -> Self {
+        match value {
+            meerkat_core::lifecycle::run_primitive::AnthropicContextWindow::OneMegabyte => {
+                Self::OneMegabyte
+            }
+        }
+    }
+}
+
+impl From<WireAnthropicContextWindow>
+    for meerkat_core::lifecycle::run_primitive::AnthropicContextWindow
+{
+    fn from(value: WireAnthropicContextWindow) -> Self {
+        match value {
+            WireAnthropicContextWindow::OneMegabyte => Self::OneMegabyte,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireGeminiThinkingLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel> for WireGeminiThinkingLevel {
+    fn from(value: meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel) -> Self {
+        use meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel as Core;
+        match value {
+            Core::Minimal => Self::Minimal,
+            Core::Low => Self::Low,
+            Core::Medium => Self::Medium,
+            Core::High => Self::High,
+        }
+    }
+}
+
+impl From<WireGeminiThinkingLevel> for meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel {
+    fn from(value: WireGeminiThinkingLevel) -> Self {
+        match value {
+            WireGeminiThinkingLevel::Minimal => Self::Minimal,
+            WireGeminiThinkingLevel::Low => Self::Low,
+            WireGeminiThinkingLevel::Medium => Self::Medium,
+            WireGeminiThinkingLevel::High => Self::High,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireGeminiThinkingConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_thoughts: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<WireGeminiThinkingLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::GeminiThinkingConfig>
+    for WireGeminiThinkingConfig
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::GeminiThinkingConfig) -> Self {
+        Self {
+            include_thoughts: value.include_thoughts,
+            thinking_level: value.thinking_level.map(Into::into),
+            thinking_budget: value.thinking_budget,
+        }
+    }
+}
+
+impl From<WireGeminiThinkingConfig>
+    for meerkat_core::lifecycle::run_primitive::GeminiThinkingConfig
+{
+    fn from(value: WireGeminiThinkingConfig) -> Self {
+        Self {
+            include_thoughts: value.include_thoughts,
+            thinking_level: value.thinking_level.map(Into::into),
+            thinking_budget: value.thinking_budget,
+        }
+    }
+}
+
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -645,13 +882,65 @@ impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::Reaso
 pub enum WireProviderTag {
     Anthropic {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<WireAnthropicThinkingConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_budget_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        web_search: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_k: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<WireAnthropicEffort>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<meerkat_core::OutputSchema>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inference_geo: Option<WireAnthropicInferenceGeo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<WireAnthropicCompactionConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<WireAnthropicContextWindow>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_temperature_override: Option<bool>,
     },
     OpenAi {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<WireReasoningEffort>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frequency_penalty: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presence_penalty: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        web_search: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<meerkat_core::OutputSchema>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_template_kwargs: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_temperature_override: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_reasoning_override: Option<bool>,
     },
     Gemini {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<WireGeminiThinkingConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_budget: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_level: Option<WireGeminiThinkingLevel>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_k: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_p: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<meerkat_core::OutputSchema>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        google_search: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate_count: Option<u32>,
     },
@@ -666,12 +955,38 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
         use meerkat_core::lifecycle::run_primitive::ProviderTag as Core;
         match value {
             Core::Anthropic(t) => Self::Anthropic {
+                thinking: t.thinking.map(Into::into),
                 thinking_budget_tokens: t.thinking_budget_tokens,
+                web_search: t.web_search.map(|v| v.as_value()),
+                top_k: t.top_k,
+                effort: t.effort.map(Into::into),
+                structured_output: t.structured_output,
+                inference_geo: t.inference_geo.map(Into::into),
+                compaction: t.compaction.map(Into::into),
+                context: t.context.map(Into::into),
+                supports_temperature_override: t.supports_temperature_override,
             },
             Core::OpenAi(t) => Self::OpenAi {
                 reasoning_effort: t.reasoning_effort.map(Into::into),
+                seed: t.seed,
+                frequency_penalty: t.frequency_penalty,
+                presence_penalty: t.presence_penalty,
+                web_search: t.web_search.map(|v| v.as_value()),
+                structured_output: t.structured_output,
+                reasoning: t.reasoning.map(|v| v.as_value()),
+                chat_template_kwargs: t.chat_template_kwargs.map(|v| v.as_value()),
+                thinking: t.thinking.map(|v| v.as_value()),
+                supports_temperature_override: t.supports_temperature_override,
+                supports_reasoning_override: t.supports_reasoning_override,
             },
             Core::Gemini(t) => Self::Gemini {
+                thinking: t.thinking.map(Into::into),
+                thinking_budget: t.thinking_budget,
+                thinking_level: t.thinking_level.map(Into::into),
+                top_k: t.top_k,
+                top_p: t.top_p,
+                structured_output: t.structured_output,
+                google_search: t.google_search.map(|v| v.as_value()),
                 candidate_count: t.candidate_count,
             },
             Core::Unknown { bag } => Self::Unknown { bag },
@@ -682,22 +997,76 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
 impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderTag {
     fn from(value: WireProviderTag) -> Self {
         use meerkat_core::lifecycle::run_primitive::{
-            AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag,
+            AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiProviderTag,
         };
         match value {
             WireProviderTag::Anthropic {
+                thinking,
                 thinking_budget_tokens,
+                web_search,
+                top_k,
+                effort,
+                structured_output,
+                inference_geo,
+                compaction,
+                context,
+                supports_temperature_override,
             } => Self::Anthropic(AnthropicProviderTag {
+                thinking: thinking.map(Into::into),
                 thinking_budget_tokens,
-                ..Default::default()
+                web_search: web_search.map(|v| OpaqueProviderBody::from_value(&v)),
+                top_k,
+                effort: effort.map(Into::into),
+                structured_output,
+                inference_geo: inference_geo.map(Into::into),
+                compaction: compaction.map(Into::into),
+                context: context.map(Into::into),
+                supports_temperature_override,
             }),
-            WireProviderTag::OpenAi { reasoning_effort } => Self::OpenAi(OpenAiProviderTag {
+            WireProviderTag::OpenAi {
+                reasoning_effort,
+                seed,
+                frequency_penalty,
+                presence_penalty,
+                web_search,
+                structured_output,
+                reasoning,
+                chat_template_kwargs,
+                thinking,
+                supports_temperature_override,
+                supports_reasoning_override,
+            } => Self::OpenAi(OpenAiProviderTag {
                 reasoning_effort: reasoning_effort.map(Into::into),
-                ..Default::default()
+                seed,
+                frequency_penalty,
+                presence_penalty,
+                web_search: web_search.map(|v| OpaqueProviderBody::from_value(&v)),
+                structured_output,
+                reasoning: reasoning.map(|v| OpaqueProviderBody::from_value(&v)),
+                chat_template_kwargs: chat_template_kwargs
+                    .map(|v| OpaqueProviderBody::from_value(&v)),
+                thinking: thinking.map(|v| OpaqueProviderBody::from_value(&v)),
+                supports_temperature_override,
+                supports_reasoning_override,
             }),
-            WireProviderTag::Gemini { candidate_count } => Self::Gemini(GeminiProviderTag {
+            WireProviderTag::Gemini {
+                thinking,
+                thinking_budget,
+                thinking_level,
+                top_k,
+                top_p,
+                structured_output,
+                google_search,
                 candidate_count,
-                ..Default::default()
+            } => Self::Gemini(GeminiProviderTag {
+                thinking: thinking.map(Into::into),
+                thinking_budget,
+                thinking_level: thinking_level.map(Into::into),
+                top_k,
+                top_p,
+                structured_output,
+                google_search: google_search.map(|v| OpaqueProviderBody::from_value(&v)),
+                candidate_count,
             }),
             WireProviderTag::Unknown { bag } => Self::Unknown { bag },
         }

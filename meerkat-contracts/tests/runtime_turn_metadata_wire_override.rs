@@ -4,6 +4,9 @@ use meerkat_contracts::wire::WireConnectionRef;
 use meerkat_contracts::wire::runtime::{
     WireProviderParamsOverride, WireRuntimeTurnMetadata, WireTurnMetadataOverride,
 };
+use meerkat_core::lifecycle::run_primitive::{
+    ProviderParamsOverride, RuntimeTurnMetadata, TurnMetadataOverride,
+};
 
 fn wire_connection_ref() -> WireConnectionRef {
     WireConnectionRef {
@@ -140,4 +143,46 @@ fn wire_metadata_malformed_tagged_override_payloads_fail_at_boundary() {
     }))
     .expect_err("clear override with value must fail");
     assert!(err.to_string().contains("clear"), "unexpected error: {err}");
+}
+
+#[test]
+fn wire_metadata_provider_tag_preserves_provider_native_fields() {
+    let provider_params = ProviderParamsOverride::from_legacy_provider_value(
+        "anthropic",
+        &serde_json::json!({
+            "effort": "xhigh",
+            "web_search": null,
+        }),
+    );
+    let meta = RuntimeTurnMetadata {
+        provider_params: Some(TurnMetadataOverride::Set(provider_params)),
+        ..Default::default()
+    };
+
+    let wire: WireRuntimeTurnMetadata = meta.into();
+    let json = serde_json::to_value(&wire).expect("serialize wire metadata");
+    let provider_tag = json["provider_params"]["value"]["provider_tag"]
+        .as_object()
+        .expect("provider_tag object");
+    assert_eq!(provider_tag["provider"], serde_json::json!("anthropic"));
+    assert_eq!(provider_tag["effort"], serde_json::json!("xhigh"));
+    assert!(
+        provider_tag.contains_key("web_search"),
+        "explicit provider-native null must not be dropped by wire projection"
+    );
+    assert!(provider_tag["web_search"].is_null());
+
+    let round_tripped: RuntimeTurnMetadata = wire.into();
+    let Some(TurnMetadataOverride::Set(provider_params)) = round_tripped.provider_params else {
+        panic!("provider params set override should survive wire round trip");
+    };
+    let legacy = provider_params.to_legacy_provider_value();
+    assert_eq!(legacy["effort"], serde_json::json!("xhigh"));
+    assert!(
+        legacy
+            .as_object()
+            .is_some_and(|obj| obj.contains_key("web_search")),
+        "explicit provider-native null must survive wire round trip"
+    );
+    assert!(legacy["web_search"].is_null());
 }

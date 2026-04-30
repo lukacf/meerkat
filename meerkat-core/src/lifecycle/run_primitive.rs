@@ -626,9 +626,9 @@ impl AnthropicProviderTag {
                     _ => return Err(LegacyProviderParamsError::unknown_shape("context")),
                 },
                 "web_search" => {
-                    if v.is_object() {
+                    if v.is_object() || v.is_boolean() || v.is_null() {
                         tag.web_search = Some(OpaqueProviderBody::from_value(v));
-                    } else if !v.is_boolean() && !v.is_null() {
+                    } else {
                         return Err(LegacyProviderParamsError::unknown_shape("web_search"));
                     }
                 }
@@ -686,9 +686,9 @@ impl OpenAiProviderTag {
                     tag.presence_penalty = Some(f as f32);
                 }
                 "web_search" => {
-                    if v.is_object() {
+                    if v.is_object() || v.is_boolean() || v.is_null() {
                         tag.web_search = Some(OpaqueProviderBody::from_value(v));
-                    } else if !v.is_boolean() && !v.is_null() {
+                    } else {
                         return Err(LegacyProviderParamsError::unknown_shape("web_search"));
                     }
                 }
@@ -786,9 +786,9 @@ impl GeminiProviderTag {
                     tag.structured_output = Some(schema);
                 }
                 "google_search" => {
-                    if v.is_object() {
+                    if v.is_object() || v.is_boolean() || v.is_null() {
                         tag.google_search = Some(OpaqueProviderBody::from_value(v));
-                    } else if !v.is_boolean() && !v.is_null() {
+                    } else {
                         return Err(LegacyProviderParamsError::unknown_shape("google_search"));
                     }
                 }
@@ -2065,6 +2065,7 @@ mod tests {
             "temperature": 0.2,
             "thinking": { "budget_tokens": 10_000 },
             "effort": "xhigh",
+            "web_search": null,
         });
         let params = ProviderParamsOverride::from_legacy_provider_value("anthropic", &legacy);
 
@@ -2081,6 +2082,13 @@ mod tests {
             serde_json::json!(10_000)
         );
         assert_eq!(projected["effort"], serde_json::json!("xhigh"));
+        assert!(
+            projected
+                .as_object()
+                .is_some_and(|obj| obj.contains_key("web_search")),
+            "explicit provider-native null must not be dropped"
+        );
+        assert!(projected["web_search"].is_null());
     }
 
     #[test]

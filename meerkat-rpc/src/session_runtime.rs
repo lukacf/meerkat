@@ -8052,6 +8052,7 @@ mod tests {
             provider_params: Some(serde_json::json!({
                 "thinking": { "budget_tokens": 10_000 },
                 "effort": "xhigh",
+                "web_search": null,
             })),
             ..Default::default()
         };
@@ -8079,6 +8080,13 @@ mod tests {
             serde_json::json!(10_000)
         );
         assert_eq!(provider_params["effort"], serde_json::json!("xhigh"));
+        assert!(
+            provider_params
+                .as_object()
+                .is_some_and(|obj| obj.contains_key("web_search")),
+            "explicit provider-native null must not be dropped"
+        );
+        assert!(provider_params["web_search"].is_null());
     }
 
     #[test]

@@ -55,6 +55,18 @@
         ],
         "type": "object"
       },
+      "AuthStatusPhase": {
+        "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
+        "enum": [
+          "valid",
+          "expiring",
+          "expired",
+          "reauth_required",
+          "refresh_failed",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
@@ -12152,8 +12164,8 @@
             "type": "string"
           },
           "state": {
-            "description": "High-level health: \"valid\" / \"expiring\" / \"expired\" /\n\"reauth_required\" / \"refresh_failed\" / \"unknown\".",
-            "type": "string"
+            "$ref": "#/components/schemas/AuthStatusPhase",
+            "description": "High-level health projected from typed auth-lease lifecycle truth."
           }
         },
         "required": [
@@ -12208,7 +12220,7 @@
             "type": "string"
           },
           "state": {
-            "type": "string"
+            "$ref": "#/components/schemas/AuthStatusPhase"
           }
         },
         "required": [

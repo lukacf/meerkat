@@ -1386,8 +1386,7 @@ enum AuthCommands {
     },
 
     /// Print auth profile status — reports realm config shape and the
-    /// state of the persisted TokenStore entry (auth_mode, expiry,
-    /// refresh attempt count).
+    /// observed AuthMachine lease lifecycle state.
     Status {
         /// Realm id.
         #[arg(long, default_value = "dev")]
@@ -2933,92 +2932,23 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             println!("provider:    {}", profile.provider.as_str());
             println!("auth_method: {}", profile.auth_method);
             println!("source_kind: {}", source_kind_label(&profile.source));
-            // TokenStore lookup: `<realm>:<profile_id>` is the canonical key.
-            #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-            {
-                use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
-                use meerkat_providers::auth_store::{TokenKey, TokenStoreBackend};
-                let store = TokenStoreBackend::default_auto()
-                    .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
-                    .open()
-                    .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
-                let key = TokenKey::parse(&realm, &profile_id)
-                    .map_err(|e| anyhow::anyhow!("invalid token-key realm/profile: {e}"))?;
-                let stored = store
-                    .load(&key)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
-                let connection_ref = meerkat_core::ConnectionRef {
-                    realm: key.realm.clone(),
-                    binding: key.binding.clone(),
-                    profile: key.profile.clone(),
-                };
-                let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
-                let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-                let projection = meerkat_core::project_published_auth_status(
-                    chrono::Utc::now(),
-                    stored.as_ref(),
-                    &snapshot,
-                );
-                match projection.tokens {
-                    Some(tokens) => {
-                        println!("state:       {}", projection.phase.as_public_str());
-                        println!("auth_mode:   {:?}", tokens.auth_mode);
-                        println!(
-                            "has_secret:  {}",
-                            tokens
-                                .primary_secret
-                                .as_ref()
-                                .map(|s| !s.is_empty())
-                                .unwrap_or(false)
-                        );
-                        println!(
-                            "has_refresh: {}",
-                            tokens
-                                .refresh_token
-                                .as_ref()
-                                .map(|s| !s.is_empty())
-                                .unwrap_or(false)
-                        );
-                        if let Some(expires_at) = tokens.expires_at {
-                            println!("expires_at:  {}", expires_at.to_rfc3339());
-                        }
-                        if let Some(last_refresh) = tokens.last_refresh {
-                            println!("last_refresh:{}", last_refresh.to_rfc3339());
-                        }
-                        if let Some(account_id) = tokens.account_id.as_ref() {
-                            println!("account_id:  {account_id}");
-                        }
-                        if !tokens.scopes.is_empty() {
-                            println!("scopes:      {}", tokens.scopes.join(", "));
-                        }
-                        println!("backend:     {}", store.backend_name());
-                    }
-                    None => {
-                        println!("state:       {}", projection.phase.as_public_str());
-                        println!("backend:     {}", store.backend_name());
-                        if stored.is_none() {
-                            println!(
-                                "note:        no persisted credential for '{realm}:{profile_id}';"
-                            );
-                            println!(
-                                "             run `rkat auth login {}` or rely on env-var fallback.",
-                                profile.provider.as_str(),
-                            );
-                        } else {
-                            println!(
-                                "note:        persisted credential metadata hidden until AuthMachine lifecycle is live."
-                            );
-                        }
-                    }
-                }
+            use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+            let connection_ref = ConnectionRef {
+                realm: meerkat_core::RealmId::parse(realm.clone())
+                    .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
+                binding: meerkat_core::BindingId::parse(profile_id.clone())
+                    .map_err(|e| anyhow::anyhow!("invalid binding id '{profile_id}': {e}"))?,
+                profile: None,
+            };
+            let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+            let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+            let phase = AuthStatusPhase::from_lease_snapshot(chrono::Utc::now(), &snapshot);
+            println!("state:       {}", phase.as_public_str());
+            if let Some(expires_at) = meerkat_core::lease_snapshot_expires_at_datetime(&snapshot) {
+                println!("expires_at:  {}", expires_at.to_rfc3339());
             }
-            #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
-            {
-                println!(
-                    "state:       {} (TokenStore disabled at build time)",
-                    AuthStatusPhase::Unknown.as_public_str()
-                );
+            if phase == AuthStatusPhase::Unknown {
+                println!("note:        no live AuthMachine lease for '{realm}:{profile_id}'.");
             }
         }
         AuthCommands::ProfileDelete {

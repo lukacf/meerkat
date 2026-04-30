@@ -1096,7 +1096,7 @@ pub async fn get_auth_status(
             profile_id: auth_profile.id.clone(),
             provider: auth_profile.provider.as_str().to_string(),
             auth_method: auth_profile.auth_method.clone(),
-            state: projection.phase.as_public_str().to_string(),
+            state: projection.phase,
             expires_at: projection.expires_at.map(|e| e.to_rfc3339()),
             last_refresh_at: tokens.and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
             account_id: tokens.and_then(|t| t.account_id.clone()),
@@ -1468,7 +1468,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, "unknown");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
         assert_eq!(detail.expires_at, None);
         assert_eq!(detail.last_refresh_at, None);
         assert_eq!(detail.account_id, None);
@@ -1517,7 +1517,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(detail.state, "unknown");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Unknown);
         assert_eq!(detail.expires_at, None);
         assert!(!detail.has_refresh_token);
     }
@@ -1568,7 +1568,7 @@ mod tests {
             get_auth_status(State(state.clone()), Path(binding_id()), Query(query())).await,
         )
         .await;
-        assert_eq!(detail.state, "valid");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
 
         let bindings = state
             .runtime_adapter
@@ -1580,7 +1580,7 @@ mod tests {
             get_auth_status(State(state.clone()), Path(binding_id()), Query(query())).await,
         )
         .await;
-        assert_eq!(detail.state, "expiring");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Expiring);
 
         bindings
             .auth_lease
@@ -1594,7 +1594,7 @@ mod tests {
             get_auth_status(State(state), Path(binding_id()), Query(query())).await,
         )
         .await;
-        assert_eq!(detail.state, "reauth_required");
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::ReauthRequired);
     }
 
     #[test]

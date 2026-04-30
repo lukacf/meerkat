@@ -1132,7 +1132,7 @@ pub async fn handle_auth_status_get(
             profile_id: auth_profile.id,
             provider: auth_profile.provider.as_str().to_string(),
             auth_method: auth_profile.auth_method,
-            state: projection.phase.as_public_str().to_string(),
+            state: projection.phase,
             expires_at: projection.expires_at.map(|e| e.to_rfc3339()),
             last_refresh_at: tokens.and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),
             account_id: tokens.and_then(|t| t.account_id.clone()),

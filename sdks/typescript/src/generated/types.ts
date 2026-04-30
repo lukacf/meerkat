@@ -1938,7 +1938,7 @@ export interface WireAuthStatus {
   last_refresh_at?: string;
   profile_id: string;
   provider: string;
-  state: string;
+  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
 }
 
 export interface WireAuthStatusDetail {
@@ -1952,7 +1952,7 @@ export interface WireAuthStatusDetail {
   profile_id: string;
   provider: string;
   realm_id: string;
-  state: string;
+  state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
 }
 
 export interface WireAuthErrorMissingSecret {

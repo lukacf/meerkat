@@ -269,6 +269,54 @@ fn rkat_auth_status_hides_token_metadata_without_lifecycle() {
     }
 }
 
+#[test]
+fn rkat_auth_status_ignores_malformed_token_storage_without_lifecycle() {
+    let Some(rkat) = rkat_binary() else {
+        eprintln!("SKIP: rkat binary unavailable");
+        return;
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    seed_managed_openai_realm_config(tmp.path());
+    seed_token_file(tmp.path(), "{ malformed token json");
+
+    let status = Command::new(&rkat)
+        .args([
+            "--state-root",
+            tmp.path().join("realms").to_str().expect("utf8 path"),
+            "--realm",
+            "dev",
+            "auth",
+            "status",
+            "--realm",
+            "dev",
+            "default_openai",
+        ])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join("config"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("rkat auth status must spawn");
+    if !status.status.success() {
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        if stderr.contains("requires the `anthropic`, `openai`, and `gemini`") {
+            eprintln!("SKIP: auth provider features unavailable");
+            return;
+        }
+        panic!("status must not be owned by malformed token storage; stderr={stderr}");
+    }
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        stdout.contains("state:       unknown"),
+        "status should report lease-unknown without token-store truth; stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("auth_mode:"),
+        "status must not expose token-derived metadata without lifecycle; stdout:\n{stdout}"
+    );
+}
+
 /// `rkat auth profile list --realm <empty>` returns either 0 (empty
 /// list) or a typed error; it must not panic or spew an unstructured
 /// stack trace.

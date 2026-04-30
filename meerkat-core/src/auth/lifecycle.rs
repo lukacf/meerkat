@@ -265,6 +265,7 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
                 expires_at: None,
+                generation: 1,
             }
         }
     }

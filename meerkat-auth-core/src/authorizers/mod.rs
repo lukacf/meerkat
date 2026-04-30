@@ -46,6 +46,7 @@ impl LeaseFreshnessObserver {
         &self,
         authorizer_label: &str,
         expires_at: DateTime<Utc>,
+        lease_generation: Option<u64>,
         now: DateTime<Utc>,
     ) -> Result<bool, AuthError> {
         let snapshot = self.handle.snapshot(&self.lease_key);
@@ -60,19 +61,59 @@ impl LeaseFreshnessObserver {
             | None => return Ok(false),
         }
 
+        let Some(lease_generation) = lease_generation else {
+            tracing::warn!(
+                authorizer = %authorizer_label,
+                lease_key = %self.lease_key,
+                snapshot_generation = snapshot.generation,
+                "cloud authorizer cache has no auth lease generation; refreshing"
+            );
+            return Ok(false);
+        };
+
+        if snapshot.generation != lease_generation {
+            tracing::warn!(
+                authorizer = %authorizer_label,
+                lease_key = %self.lease_key,
+                cached_lease_generation = lease_generation,
+                snapshot_generation = snapshot.generation,
+                "cloud authorizer cache belongs to an older auth lease generation; refreshing"
+            );
+            return Ok(false);
+        }
+
         let expected_expires_at = epoch_secs(expires_at);
-        if snapshot.expires_at != Some(expected_expires_at) {
+        let Some(lease_expires_at) = snapshot.expires_at else {
             tracing::warn!(
                 authorizer = %authorizer_label,
                 lease_key = %self.lease_key,
                 cached_expires_at = expected_expires_at,
-                lease_expires_at = snapshot.expires_at,
+                snapshot_generation = snapshot.generation,
+                "cloud authorizer cache has no auth lease expiry truth; refreshing"
+            );
+            return Ok(false);
+        };
+        if lease_expires_at != expected_expires_at {
+            tracing::warn!(
+                authorizer = %authorizer_label,
+                lease_key = %self.lease_key,
+                cached_expires_at = expected_expires_at,
+                lease_expires_at,
+                snapshot_generation = snapshot.generation,
                 "cloud authorizer cache disagrees with auth lease truth; refreshing"
             );
             return Ok(false);
         }
 
-        Ok(token_is_fresh_at(expires_at, now))
+        Ok(lease_epoch_secs_is_fresh_at(lease_expires_at, now))
+    }
+
+    pub(crate) fn expires_at(&self) -> Option<DateTime<Utc>> {
+        let snapshot = self.handle.snapshot(&self.lease_key);
+        snapshot
+            .expires_at
+            .and_then(|secs| i64::try_from(secs).ok())
+            .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
     }
 
     pub(crate) async fn begin_refresh(
@@ -122,7 +163,7 @@ impl LeaseFreshnessObserver {
         lifecycle: LeaseRefreshLifecycle,
         expires_at: DateTime<Utc>,
         now: DateTime<Utc>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<u64, AuthError> {
         let expires_at = epoch_secs(expires_at);
         match lifecycle {
             LeaseRefreshLifecycle::InitialAcquire => {
@@ -138,7 +179,7 @@ impl LeaseFreshnessObserver {
                     })?;
             }
         }
-        Ok(())
+        Ok(self.handle.snapshot(&self.lease_key).generation)
     }
 
     pub(crate) fn refresh_failed(
@@ -185,6 +226,12 @@ enum LeaseRefreshStart {
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
 pub(crate) fn token_is_fresh_at(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
     expires_at - now > Duration::seconds(AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64)
+}
+
+#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+fn lease_epoch_secs_is_fresh_at(expires_at: u64, now: DateTime<Utc>) -> bool {
+    let expires_at = i64::try_from(expires_at).unwrap_or(i64::MAX);
+    expires_at.saturating_sub(now.timestamp()) > AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64
 }
 
 #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]

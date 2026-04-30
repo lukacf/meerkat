@@ -1020,11 +1020,15 @@ impl std::fmt::Display for LeaseKey {
 /// Observable snapshot of an auth lease's DSL state for a given [`LeaseKey`].
 ///
 /// Returned by [`AuthLeaseHandle::snapshot`]. If the binding is not tracked
-/// at all, `phase` is `None` and `expires_at` is `None`.
+/// at all, `phase` is `None` and `expires_at` is `None`. `generation`
+/// advances whenever the lease lifecycle accepts a transition, so consumers
+/// can distinguish a stale projection from a freshly reacquired lease even
+/// when the expiry timestamp is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
     pub expires_at: Option<u64>,
+    pub generation: u64,
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is

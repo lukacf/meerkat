@@ -1238,6 +1238,7 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                generation: 0,
             }
         }
     }
@@ -1293,6 +1294,7 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
                 expires_at: Some(1_800_000_000),
+                generation: 1,
             }
         }
     }

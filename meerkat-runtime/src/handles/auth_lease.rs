@@ -61,17 +61,26 @@ fn emit_audit(
 /// also allowed before acquire so token-clear surfaces remain idempotent after
 /// process restart.
 pub struct RuntimeAuthLeaseHandle {
-    machines: Arc<Mutex<HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>>>,
+    registry: Arc<Mutex<AuthLeaseRegistry>>,
+}
+
+#[derive(Default)]
+struct AuthLeaseRegistry {
+    machines: HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>,
+    // Projection version for AuthLeaseHandle::snapshot consumers. This is not
+    // lifecycle state; it is retained after release so authorizer-side token
+    // material can detect a later reacquire even when the expiry is identical.
+    generations: HashMap<LeaseKey, u64>,
 }
 
 impl std::fmt::Debug for RuntimeAuthLeaseHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let guard = self
-            .machines
+            .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         f.debug_struct("RuntimeAuthLeaseHandle")
-            .field("leases", &guard.keys().collect::<Vec<_>>())
+            .field("leases", &guard.machines.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -79,7 +88,7 @@ impl std::fmt::Debug for RuntimeAuthLeaseHandle {
 impl RuntimeAuthLeaseHandle {
     pub fn new() -> Self {
         Self {
-            machines: Arc::new(Mutex::new(HashMap::new())),
+            registry: Arc::new(Mutex::new(AuthLeaseRegistry::default())),
         }
     }
 
@@ -101,28 +110,35 @@ impl RuntimeAuthLeaseHandle {
     ) -> Result<(), DslTransitionError> {
         let action = Self::audit_action_for(&input);
         let mut guard = self
-            .machines
+            .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = if create_if_missing {
-            guard.entry(lease_key.clone()).or_insert_with(|| {
-                auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState::default())
-            })
-        } else {
-            match guard.get_mut(lease_key) {
-                Some(m) => m,
-                None => {
-                    return Err(DslTransitionError::new(
-                        context,
-                        format!("no auth lease registered for lease_key `{lease_key}`"),
-                    ));
+        let (from_phase, to_phase) = {
+            let entry = if create_if_missing {
+                guard.machines.entry(lease_key.clone()).or_insert_with(|| {
+                    auth_dsl::AuthMachineAuthority::from_state(
+                        auth_dsl::AuthMachineState::default(),
+                    )
+                })
+            } else {
+                match guard.machines.get_mut(lease_key) {
+                    Some(m) => m,
+                    None => {
+                        return Err(DslTransitionError::new(
+                            context,
+                            format!("no auth lease registered for lease_key `{lease_key}`"),
+                        ));
+                    }
                 }
-            }
+            };
+            let from_phase = map_phase(entry.state.lifecycle_phase);
+            auth_dsl::AuthMachineMutator::apply(entry, input)
+                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+            let to_phase = map_phase(entry.state.lifecycle_phase);
+            (from_phase, to_phase)
         };
-        let from_phase = map_phase(entry.state.lifecycle_phase);
-        auth_dsl::AuthMachineMutator::apply(entry, input)
-            .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
-        let to_phase = map_phase(entry.state.lifecycle_phase);
+        let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
+        *generation = generation.saturating_add(1);
         emit_audit(lease_key, action, from_phase, to_phase);
         Ok(())
     }
@@ -256,26 +272,29 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             true,
         )?;
         let mut guard = self
-            .machines
+            .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.remove(lease_key);
+        guard.machines.remove(lease_key);
         Ok(())
     }
 
     fn snapshot(&self, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         let guard = self
-            .machines
+            .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match guard.get(lease_key) {
+        let generation = guard.generations.get(lease_key).copied().unwrap_or(0);
+        match guard.machines.get(lease_key) {
             Some(machine) => AuthLeaseSnapshot {
                 phase: Some(map_phase(machine.state.lifecycle_phase)),
                 expires_at: machine.state.expires_at,
+                generation,
             },
             None => AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                generation,
             },
         }
     }

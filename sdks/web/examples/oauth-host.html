@@ -3,14 +3,14 @@
 
   Demonstrates how a browser host page runs an OAuth flow outside
   Meerkat, keeps the refresh token in its own secure storage, and
-  hands Meerkat a resolved bearer token per session via the
+  hands Meerkat a resolved auth lease per session via the
   `registerExternalAuthResolver` callback.
 
   What this example does:
     1. Initialize the meerkat WASM runtime with a single realm config
        that declares an `external_resolver`-backed auth profile.
     2. Register a JS callback the runtime invokes when it needs a
-       fresh bearer token for a structural connection reference.
+       fresh auth lease for a structural connection reference.
     3. Run a single turn with `connection_ref:
        { realm: "hosted", binding: "chatgpt" }` —
        the runtime consults the callback for credentials and never
@@ -61,7 +61,7 @@
     <p>
       This page owns the OAuth flow and refresh-token storage. The
       Meerkat WASM runtime never sees the refresh token — it asks the
-      page for a bearer token when it needs one.
+      page for a structured bearer lease when it needs one.
     </p>
     <button id="start">Create session with host-resolved auth</button>
     <h2>Stream output</h2>
@@ -83,17 +83,24 @@
       // host's secure storage; only the short-lived access token
       // crosses into Meerkat.
       const myOAuthClient = {
-        async freshAccessToken(connectionRef) {
+        async freshAuthLease(connectionRef) {
           // connectionRef arrives as { realm, binding, profile? } —
           // look up the
           // matching OAuth session in your auth provider store,
-          // refresh if needed, return the access token string.
+          // refresh if needed, return a structured auth envelope.
           console.log(
             '[oauth-host] runtime asked for bearer for',
             connectionRef,
           );
           // Placeholder: real code fetches an access token here.
-          return 'sk-access-placeholder-from-host-oauth';
+          const accessToken = 'sk-access-placeholder-from-host-oauth';
+          return {
+            kind: 'inline_secret',
+            secret: accessToken,
+            metadata: {},
+            // Use the actual token endpoint expiry when available.
+            expires_at: new Date(Date.now() + 55 * 60 * 1000).toISOString(),
+          };
         },
       };
 
@@ -134,7 +141,7 @@
 
       // ---- Wire the host's OAuth callback into the runtime ----
       registerExternalAuthResolver(rt.wasm, (connectionRef) =>
-        myOAuthClient.freshAccessToken(connectionRef),
+        myOAuthClient.freshAuthLease(connectionRef),
       );
 
       document.getElementById('start').addEventListener('click', async () => {

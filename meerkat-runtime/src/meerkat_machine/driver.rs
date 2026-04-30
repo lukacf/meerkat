@@ -397,12 +397,13 @@ impl DriverEntry {
         run_id: RunId,
         contributing_input_ids: Vec<InputId>,
         replay_plan: crate::driver::ephemeral::ReplayQueuedContributorsPlan,
-        failure: CoreApplyFailureCause,
+        terminal_error: &str,
+        runtime_apply_failure: Option<&CoreApplyFailureCause>,
         recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => {
-                let _ = (failure, recoverable);
+                let _ = (terminal_error, runtime_apply_failure, recoverable);
                 d.machine_realize_run_failed(&run_id, &contributing_input_ids, &replay_plan)
             }
             DriverEntry::Persistent(d) => {
@@ -410,7 +411,8 @@ impl DriverEntry {
                     &run_id,
                     &contributing_input_ids,
                     &replay_plan,
-                    &failure,
+                    terminal_error,
+                    runtime_apply_failure,
                     recoverable,
                 )
                 .await
@@ -789,7 +791,8 @@ fn machine_apply_turn_run_completed(
 fn machine_apply_turn_run_failed(
     driver: &mut DriverEntry,
     run_id: &RunId,
-    failure: &CoreApplyFailureCause,
+    terminal_error: &str,
+    runtime_apply_failure: Option<&CoreApplyFailureCause>,
 ) -> Result<(), RuntimeDriverError> {
     let authority = driver.shared_dsl_authority();
     let mut auth = authority
@@ -805,11 +808,11 @@ fn machine_apply_turn_run_failed(
         &mut *auth,
         crate::meerkat_machine::dsl::MeerkatMachineInput::RunFailed {
             run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-            runtime_apply_failure_cause: Some(
-                crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from(failure),
-            ),
-            runtime_apply_failure_message: Some(failure.message().to_owned()),
-            error: failure.message().to_owned(),
+            runtime_apply_failure_cause: runtime_apply_failure
+                .map(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from),
+            runtime_apply_failure_message: runtime_apply_failure
+                .map(|failure| failure.message().to_owned()),
+            error: terminal_error.to_owned(),
         },
     )
     .map(|_| ())
@@ -1844,6 +1847,23 @@ pub(crate) async fn fail_runtime_loop_run(
     run_id: RunId,
     failure: CoreApplyFailureCause,
 ) -> Result<(), RuntimeLoopRunFailError> {
+    fail_runtime_loop_run_inner(driver, run_id, failure.message().to_owned(), Some(failure)).await
+}
+
+pub(crate) async fn fail_machine_run_without_runtime_apply_cause(
+    driver: &SharedDriver,
+    run_id: RunId,
+    error: String,
+) -> Result<(), RuntimeLoopRunFailError> {
+    fail_runtime_loop_run_inner(driver, run_id, error, None).await
+}
+
+async fn fail_runtime_loop_run_inner(
+    driver: &SharedDriver,
+    run_id: RunId,
+    terminal_error: String,
+    runtime_apply_failure: Option<CoreApplyFailureCause>,
+) -> Result<(), RuntimeLoopRunFailError> {
     let mut driver = driver.lock().await;
     let next_phase =
         crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
@@ -1851,8 +1871,13 @@ pub(crate) async fn fail_runtime_loop_run(
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
-    machine_apply_turn_run_failed(&mut driver, &failed_run_id, &failure)
-        .map_err(RuntimeLoopRunFailError::Rejected)?;
+    machine_apply_turn_run_failed(
+        &mut driver,
+        &failed_run_id,
+        &terminal_error,
+        runtime_apply_failure.as_ref(),
+    )
+    .map_err(RuntimeLoopRunFailError::Rejected)?;
     let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
     machine_apply_run_return_projection(
         &mut driver,
@@ -1870,7 +1895,8 @@ pub(crate) async fn fail_runtime_loop_run(
             failed_run_id.clone(),
             staged_input_ids,
             replay_plan,
-            failure,
+            &terminal_error,
+            runtime_apply_failure.as_ref(),
             true,
         )
         .await

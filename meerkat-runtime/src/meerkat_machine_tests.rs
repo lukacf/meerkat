@@ -580,6 +580,43 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
     );
 }
 
+#[tokio::test]
+async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let result: Result<(), RuntimeDriverError> = adapter
+        .accept_input_and_run(
+            &session_id,
+            make_prompt("legacy fail"),
+            |_run_id, _primitive| async {
+                Err::<((), CoreApplyOutput), RuntimeDriverError>(RuntimeDriverError::Internal(
+                    "legacy synchronous failure".to_string(),
+                ))
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(RuntimeDriverError::Internal(_))));
+
+    let (cause, message) = {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("session should exist");
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            authority.state.last_runtime_apply_failure_cause,
+            authority.state.last_runtime_apply_failure_message.clone(),
+        )
+    };
+
+    assert_eq!(cause, None);
+    assert_eq!(message, None);
+}
+
 fn make_progress_input(label: &str) -> Input {
     Input::Peer(crate::input::PeerInput {
         header: crate::input::InputHeader {

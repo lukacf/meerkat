@@ -11,4 +11,4 @@ pub use comms_bootstrap::{
 pub use comms_config::CoreCommsConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use comms_config::ResolvedCommsConfig;
-pub use comms_runtime::{CommsRuntime, CommsRuntimeError};
+pub use comms_runtime::{CommsRuntime, CommsRuntimeError, PeerRequestResponseAuthority};

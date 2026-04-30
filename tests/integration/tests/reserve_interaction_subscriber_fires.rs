@@ -27,8 +27,14 @@ use meerkat_core::PeerInputClass;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{CommsCommand, InputStreamMode, PeerName, PeerRoute, SendReceipt};
 use meerkat_core::{
-    ClassifiedInboxInteraction, HandlingMode, InteractionContent, InteractionId, ResponseStatus,
+    ClassifiedInboxInteraction, HandlingMode, InteractionContent, InteractionId, PeerCorrelationId,
+    ResponseStatus,
 };
+use meerkat_runtime::handles::{
+    HandleDslAuthority, RuntimeInteractionStreamHandle, RuntimePeerInteractionHandle,
+};
+use meerkat_runtime::meerkat_machine::dsl as mm_dsl;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -40,6 +46,8 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     let (a, b) = CommsRuntime::inproc_pair_with_mutual_trust(&name_a, &name_b)
         .await
         .expect("inproc pair with mutual trust");
+    install_ephemeral_peer_request_response_authority(&a, &format!("authority-a-{suffix}"));
+    install_ephemeral_peer_request_response_authority(&b, &format!("authority-b-{suffix}"));
 
     // 1. A sends a reserved-stream PeerRequest to B.
     let receipt = CoreCommsRuntime::send(
@@ -92,6 +100,10 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
         InteractionId(envelope_id),
         "request envelope id at B must equal A's send receipt envelope id",
     );
+    b.peer_interaction_handle()
+        .expect("B should have explicit peer interaction authority")
+        .request_received(PeerCorrelationId::from_uuid(envelope_id))
+        .expect("direct comms-drain bypass must seed inbound request state");
 
     let _response_receipt = CoreCommsRuntime::send(
         b.as_ref(),
@@ -146,6 +158,26 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
     );
     let second = CoreCommsRuntime::interaction_subscriber(a.as_ref(), &InteractionId(envelope_id));
     assert!(second.is_none(), "subscriber should be one-shot");
+}
+
+fn install_ephemeral_peer_request_response_authority(runtime: &Arc<CommsRuntime>, session: &str) {
+    let dsl = Arc::new(HandleDslAuthority::ephemeral());
+    dsl.apply_signal(mm_dsl::MeerkatMachineSignal::Initialize, "test::initialize")
+        .expect("Initialize signal");
+    dsl.apply_input(
+        mm_dsl::MeerkatMachineInput::RegisterSession {
+            session_id: mm_dsl::SessionId::from(session.to_string()),
+        },
+        "test::register_session",
+    )
+    .expect("RegisterSession input");
+
+    runtime.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::new(RuntimePeerInteractionHandle::new(Arc::clone(&dsl))),
+            Arc::new(RuntimeInteractionStreamHandle::new(dsl)),
+        ),
+    );
 }
 
 async fn drain_until_nonempty(

@@ -936,12 +936,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .await
         .expect("prepare runtime bindings");
     requester_comms.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
-    requester_comms.install_peer_interaction_handle(
-        bindings
-            .peer_interaction
-            .clone()
-            .expect("runtime bindings include peer interaction handle"),
-    );
+    requester_comms.install_peer_interaction_handle(Arc::clone(&bindings.peer_interaction));
 
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(Notify::new());

@@ -80,8 +80,8 @@ pub use turn_state::RuntimeTurnStateHandle;
 /// authority.
 ///
 /// A standalone ephemeral constructor ([`HandleDslAuthority::ephemeral`]) is
-/// also provided for legacy code paths (recovery fallback, test sites) that
-/// do not yet have a session-owned DSL authority to share. Ephemeral
+/// also provided for tests and minimal hosts that explicitly need
+/// machine-owned semantics without a durable session authority. Ephemeral
 /// authorities do not synchronize with any other state; transitions land on a
 /// private initial DSL state only.
 pub struct HandleDslAuthority {

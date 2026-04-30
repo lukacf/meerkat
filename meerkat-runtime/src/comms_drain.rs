@@ -195,16 +195,14 @@ pub fn spawn_comms_drain(
                             // the terminal event to), THEN fire the DSL
                             // terminal transition. The transition emits
                             // `PeerInteractionCleanup`; the observer drops
-                            // the now-idle stream registry entry. If the
-                            // DSL is not installed (standalone / WASM),
-                            // `mark_interaction_complete` below handles
-                            // cleanup; when the DSL IS installed, the
-                            // effect drives cleanup and `mark_interaction_complete`
-                            // becomes a no-op.
+                            // the now-idle stream registry entry. Without a
+                            // peer-interaction handle, this drain path is
+                            // transport-only for lifecycle purposes and does
+                            // not synthesize semantic cleanup.
                             let subscriber = comms_runtime.interaction_subscriber(&interaction_id);
-                            let dsl_installed = comms_runtime.peer_interaction_handle().is_some();
+                            let peer_interaction_handle = comms_runtime.peer_interaction_handle();
                             if let (Some(handle), Some(disposition)) =
-                                (comms_runtime.peer_interaction_handle(), terminal_status)
+                                (peer_interaction_handle.as_ref(), terminal_status)
                             {
                                 let corr_id =
                                     meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0);
@@ -231,8 +229,6 @@ pub fn spawn_comms_drain(
                                             subscriber,
                                             handle,
                                         );
-                                    } else if !dsl_installed {
-                                        comms_runtime.mark_interaction_complete(&interaction_id);
                                     }
                                 }
                                 Err(err) => {
@@ -240,9 +236,6 @@ pub fn spawn_comms_drain(
                                         error = %err,
                                         "comms_drain: failed to inject terminal response"
                                     );
-                                    if !dsl_installed {
-                                        comms_runtime.mark_interaction_complete(&interaction_id);
-                                    }
                                 }
                             }
                         } else {
@@ -865,6 +858,26 @@ async fn resolve_peer_route(
         .map(|entry| PeerRoute::with_display_name(entry.peer_id, entry.name.clone()))
 }
 
+fn record_bridge_inbound_peer_request(
+    comms_runtime: &Arc<dyn CommsRuntime>,
+    candidate: &PeerInputCandidate,
+) {
+    let Some(handle) = comms_runtime.peer_interaction_handle() else {
+        return;
+    };
+    let corr_id = meerkat_core::PeerCorrelationId::from_uuid(candidate.interaction.id.0);
+    if handle.inbound_state(corr_id).is_some() {
+        return;
+    }
+    if let Err(err) = handle.request_received(corr_id) {
+        tracing::warn!(
+            error = %err,
+            corr_id = %corr_id,
+            "PeerInteractionHandle::request_received rejected for supervisor bridge command"
+        );
+    }
+}
+
 async fn send_bridge_failure(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
@@ -908,6 +921,10 @@ async fn try_handle_supervisor_bridge_command(
     if intent != SUPERVISOR_BRIDGE_INTENT {
         return false;
     }
+
+    // Bridge commands are handled before the generic drain branch that records
+    // inbound peer-request state, but their replies are semantic PeerResponses.
+    record_bridge_inbound_peer_request(comms_runtime, candidate);
 
     let command: BridgeCommand = match decode_bridge_command(params.clone()) {
         Ok(cmd) => cmd,
@@ -1773,6 +1790,123 @@ mod tests {
     const PEER_ID_CURRENT_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000cccc"; // "current-supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
 
+    #[derive(Default)]
+    struct CountingPeerInteractionHandle {
+        inbound: std::sync::Mutex<HashSet<meerkat_core::PeerCorrelationId>>,
+        request_received_count: std::sync::atomic::AtomicUsize,
+        response_replied_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingPeerInteractionHandle {
+        fn rejected(
+            context: &'static str,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> meerkat_core::handles::DslTransitionError {
+            meerkat_core::handles::DslTransitionError::guard_rejected(
+                context,
+                format!("test authority rejected corr_id {corr_id}"),
+            )
+        }
+
+        fn request_received_count(&self) -> usize {
+            self.request_received_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn response_replied_count(&self) -> usize {
+            self.response_replied_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl meerkat_core::handles::PeerInteractionHandle for CountingPeerInteractionHandle {
+        fn request_sent(
+            &self,
+            _corr_id: meerkat_core::PeerCorrelationId,
+            _to: String,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn response_progress(
+            &self,
+            _corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn response_terminal(
+            &self,
+            _corr_id: meerkat_core::PeerCorrelationId,
+            _disposition: meerkat_core::handles::PeerTerminalDisposition,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn request_timed_out(
+            &self,
+            _corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            Ok(())
+        }
+
+        fn request_received(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            let mut inbound = self.inbound.lock().expect("inbound mutex");
+            if !inbound.insert(corr_id) {
+                return Err(Self::rejected(
+                    "PeerInteractionHandle::request_received",
+                    corr_id,
+                ));
+            }
+            self.request_received_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn response_replied(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+            let mut inbound = self.inbound.lock().expect("inbound mutex");
+            if !inbound.remove(&corr_id) {
+                return Err(Self::rejected(
+                    "PeerInteractionHandle::response_replied",
+                    corr_id,
+                ));
+            }
+            self.response_replied_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn outbound_state(
+            &self,
+            _corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Option<meerkat_core::OutboundPeerRequestState> {
+            None
+        }
+
+        fn inbound_state(
+            &self,
+            corr_id: meerkat_core::PeerCorrelationId,
+        ) -> Option<meerkat_core::InboundPeerRequestState> {
+            self.inbound
+                .lock()
+                .expect("inbound mutex")
+                .contains(&corr_id)
+                .then_some(meerkat_core::InboundPeerRequestState::Received)
+        }
+
+        fn install_cleanup_observer(
+            &self,
+            _observer: Arc<dyn meerkat_core::handles::PeerInteractionCleanupObserver>,
+        ) {
+        }
+    }
+
     fn typed_peer_id(raw: &str) -> PeerId {
         PeerId::parse(raw).expect("test peer id must be valid")
     }
@@ -1978,6 +2112,97 @@ mod tests {
         assert_eq!(
             route.display_name.as_ref().map(|name| name.as_str()),
             Some(peer_spec.name.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_response_seeds_inbound_request_before_peer_response_send() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let member_name = format!("bridge-response-member-{suffix}");
+        let supervisor_name = format!("bridge-response-supervisor-{suffix}");
+        let member_runtime =
+            Arc::new(meerkat_comms::CommsRuntime::inproc_only(&member_name).expect("member"));
+        let supervisor_runtime = Arc::new(
+            meerkat_comms::CommsRuntime::inproc_only(&supervisor_name).expect("supervisor"),
+        );
+        let peer_handle = Arc::new(CountingPeerInteractionHandle::default());
+        member_runtime.install_peer_request_response_authority(
+            meerkat_comms::PeerRequestResponseAuthority::new(
+                peer_handle.clone(),
+                Arc::new(crate::handles::RuntimeInteractionStreamHandle::ephemeral()),
+            ),
+        );
+
+        let supervisor_pubkey = supervisor_runtime.public_key();
+        let supervisor_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            &supervisor_name,
+            supervisor_pubkey.to_peer_id().as_str(),
+            *supervisor_pubkey.as_bytes(),
+            &format!("inproc://{supervisor_name}"),
+        )
+        .expect("valid supervisor spec");
+        member_runtime
+            .add_trusted_peer(supervisor_spec.clone())
+            .await
+            .expect("member should trust supervisor");
+
+        let member_pubkey = member_runtime.public_key();
+        let member_spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            &member_name,
+            member_pubkey.to_peer_id().as_str(),
+            *member_pubkey.as_bytes(),
+            &format!("inproc://{member_name}"),
+        )
+        .expect("valid member spec");
+        supervisor_runtime
+            .add_trusted_peer(member_spec)
+            .await
+            .expect("supervisor should trust member");
+
+        let adapter = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        adapter.register_session(session_id.clone()).await;
+        adapter
+            .stage_supervisor_bind(
+                &session_id,
+                supervisor_spec.name.to_string(),
+                supervisor_spec.peer_id.as_str(),
+                supervisor_spec.address.to_string(),
+                1,
+            )
+            .await
+            .expect("pre-bind supervisor");
+        let command = BridgeCommand::ObserveMember(BridgeSupervisorPayload {
+            supervisor: BridgePeerSpec::from(supervisor_spec.clone()),
+            epoch: 1,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+        });
+        let candidate = bridge_candidate_with_typed_sender(
+            supervisor_spec.name.as_str(),
+            Some(supervisor_spec.peer_id),
+            &command,
+        );
+
+        assert!(
+            try_handle_supervisor_bridge_command(
+                &adapter,
+                &session_id,
+                &(member_runtime.clone() as Arc<dyn CommsRuntime>),
+                &candidate,
+            )
+            .await,
+            "bridge handler must own ObserveMember"
+        );
+
+        assert_eq!(
+            peer_handle.request_received_count(),
+            1,
+            "bridge handler must seed inbound peer request state before replying"
+        );
+        assert_eq!(
+            peer_handle.response_replied_count(),
+            1,
+            "real CommsRuntime::send(PeerResponse) should pass the inbound-state guard"
         );
     }
 

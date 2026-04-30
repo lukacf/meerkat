@@ -63,8 +63,8 @@ impl RuntimeInteractionStreamHandle {
         }
     }
 
-    /// Construct a handle backed by an ephemeral DSL authority (tests / WASM /
-    /// standalone fallback).
+    /// Construct a handle backed by an ephemeral DSL authority for tests and
+    /// minimal hosts that explicitly opt into machine-owned semantics.
     pub fn ephemeral() -> Self {
         Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }

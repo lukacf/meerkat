@@ -4589,6 +4589,37 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
 
+    #[cfg(feature = "comms")]
+    fn install_ephemeral_peer_request_response_authority(
+        runtime: &Arc<meerkat::CommsRuntime>,
+        session: &str,
+    ) {
+        let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+        dsl.apply_signal(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+            "test::initialize",
+        )
+        .expect("Initialize");
+        dsl.apply_input(
+            meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+                session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(
+                    session.to_string(),
+                ),
+            },
+            "test::register_session",
+        )
+        .expect("RegisterSession");
+
+        runtime.install_peer_request_response_authority(
+            meerkat_comms::PeerRequestResponseAuthority::new(
+                Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
+                    Arc::clone(&dsl),
+                )),
+                Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(dsl)),
+            ),
+        );
+    }
+
     #[test]
     fn realtime_open_config_context_comes_from_typed_system_context_state() {
         let mut state = SessionSystemContextState::default();
@@ -5534,6 +5565,7 @@ mod tests {
         let sender = Arc::new(
             meerkat::CommsRuntime::inproc_only("analyst-drain-test").expect("sender comms runtime"),
         );
+        install_ephemeral_peer_request_response_authority(&sender, "analyst-drain-test");
         let sender_public_key = sender.public_key();
         let sender_peer_id = sender_public_key.to_peer_id().to_string();
         let sender_addr = sender.advertised_address();
@@ -5575,6 +5607,13 @@ mod tests {
             .await
             .expect("subscribe_session_events");
 
+        let in_reply_to = InteractionId(uuid::Uuid::new_v4());
+        sender
+            .peer_interaction_handle()
+            .expect("sender peer response authority")
+            .request_received(meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0))
+            .expect("seed inbound request before terminal peer response");
+
         CoreCommsRuntime::send(
             &*sender,
             CommsCommand::PeerResponse {
@@ -5582,7 +5621,7 @@ mod tests {
                     operator_pubkey.to_peer_id(),
                     PeerName::new(operator_name.to_string()).expect("valid operator peer name"),
                 ),
-                in_reply_to: InteractionId(uuid::Uuid::new_v4()),
+                in_reply_to,
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({
                     "request_intent": "checksum_token",

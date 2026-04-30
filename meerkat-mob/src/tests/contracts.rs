@@ -11,7 +11,8 @@
 )]
 
 use async_trait::async_trait;
-use meerkat_comms::CommsRuntime;
+use meerkat_comms::{CommsRuntime, PeerRequestResponseAuthority};
+use meerkat_core::PeerCorrelationId;
 use meerkat_core::Provider;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
@@ -47,6 +48,29 @@ fn inproc_peer_route(name: &str, runtime: &CommsRuntime) -> Result<PeerRoute, St
     ))
 }
 
+fn install_ephemeral_peer_request_response_authority(runtime: &Arc<CommsRuntime>, session: &str) {
+    let dsl = Arc::new(meerkat_runtime::HandleDslAuthority::ephemeral());
+    dsl.apply_signal(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineSignal::Initialize,
+        "test::initialize",
+    )
+    .expect("Initialize");
+    dsl.apply_input(
+        meerkat_runtime::meerkat_machine::dsl::MeerkatMachineInput::RegisterSession {
+            session_id: meerkat_runtime::meerkat_machine::dsl::SessionId::from(session.to_string()),
+        },
+        "test::register_session",
+    )
+    .expect("RegisterSession");
+
+    runtime.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+        Arc::new(meerkat_runtime::RuntimePeerInteractionHandle::new(
+            Arc::clone(&dsl),
+        )),
+        Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(dsl)),
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // CONTRACT-MOB-002: PeerRequest/PeerResponse round-trip via CommsRuntime
 // ---------------------------------------------------------------------------
@@ -57,29 +81,36 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     let sender_name = format!("c002-sender-{suffix}");
     let receiver_name = format!("c002-receiver-{suffix}");
 
-    let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
-    let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+    let sender = Arc::new(CommsRuntime::inproc_only(&sender_name).unwrap());
+    let receiver = Arc::new(CommsRuntime::inproc_only(&receiver_name).unwrap());
+    install_ephemeral_peer_request_response_authority(&sender, &format!("c002-sender-{suffix}"));
+    install_ephemeral_peer_request_response_authority(
+        &receiver,
+        &format!("c002-receiver-{suffix}"),
+    );
 
     // Establish bidirectional trust
-    let peer_spec = inproc_peer_descriptor(&receiver_name, &receiver).expect("valid peer spec");
-    CoreCommsRuntime::add_trusted_peer(&sender, peer_spec)
+    let peer_spec =
+        inproc_peer_descriptor(&receiver_name, receiver.as_ref()).expect("valid peer spec");
+    CoreCommsRuntime::add_trusted_peer(sender.as_ref(), peer_spec)
         .await
         .expect("add sender->receiver trust");
 
-    let reverse_spec = inproc_peer_descriptor(&sender_name, &sender).expect("valid reverse spec");
-    CoreCommsRuntime::add_trusted_peer(&receiver, reverse_spec)
+    let reverse_spec =
+        inproc_peer_descriptor(&sender_name, sender.as_ref()).expect("valid reverse spec");
+    CoreCommsRuntime::add_trusted_peer(receiver.as_ref(), reverse_spec)
         .await
         .expect("add receiver->sender trust");
 
     // Send PeerRequest from sender to receiver
     let request_cmd = CommsCommand::PeerRequest {
-        to: inproc_peer_route(&receiver_name, &receiver).expect("valid peer route"),
+        to: inproc_peer_route(&receiver_name, receiver.as_ref()).expect("valid peer route"),
         intent: "mob.ping".to_string(),
         params: serde_json::json!({"seq": 1}),
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
     };
-    let receipt = CoreCommsRuntime::send(&sender, request_cmd)
+    let receipt = CoreCommsRuntime::send(sender.as_ref(), request_cmd)
         .await
         .expect("PeerRequest send should succeed");
     let (request_envelope_id, request_interaction_id) = match receipt {
@@ -101,7 +132,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     );
 
     // Receiver drains inbox and sees the request
-    let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+    let interactions = CoreCommsRuntime::drain_inbox_interactions(receiver.as_ref()).await;
     assert_eq!(
         interactions.len(),
         1,
@@ -131,16 +162,21 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         }
         other => panic!("expected Request interaction, got: {other:?}"),
     };
+    receiver
+        .peer_interaction_handle()
+        .expect("receiver should have peer interaction authority")
+        .request_received(PeerCorrelationId::from_uuid(request_id.0))
+        .expect("direct comms-drain bypass must seed inbound request state");
 
     // Receiver sends PeerResponse back
     let response_cmd = CommsCommand::PeerResponse {
-        to: inproc_peer_route(&sender_name, &sender).expect("valid peer route"),
+        to: inproc_peer_route(&sender_name, sender.as_ref()).expect("valid peer route"),
         in_reply_to: request_id,
         status: meerkat_core::ResponseStatus::Completed,
         result: serde_json::json!({"pong": true}),
         handling_mode: None,
     };
-    let resp_receipt = CoreCommsRuntime::send(&receiver, response_cmd)
+    let resp_receipt = CoreCommsRuntime::send(receiver.as_ref(), response_cmd)
         .await
         .expect("PeerResponse send should succeed");
     assert!(
@@ -149,7 +185,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     );
 
     // Sender drains inbox and sees the response
-    let sender_interactions = CoreCommsRuntime::drain_inbox_interactions(&sender).await;
+    let sender_interactions = CoreCommsRuntime::drain_inbox_interactions(sender.as_ref()).await;
     assert_eq!(
         sender_interactions.len(),
         1,
@@ -186,7 +222,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
 async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effect() {
     use meerkat_core::comms::InputStreamMode;
     use meerkat_core::handles::{PeerInteractionHandle, PeerTerminalDisposition};
-    use meerkat_runtime::RuntimePeerInteractionHandle;
+    use meerkat_runtime::{RuntimeInteractionStreamHandle, RuntimePeerInteractionHandle};
 
     let suffix = Uuid::new_v4().simple().to_string();
     let sender_name = format!("c002b-sender-{suffix}");
@@ -216,7 +252,12 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
     .expect("RegisterSession");
     let handle: Arc<dyn PeerInteractionHandle> =
         Arc::new(RuntimePeerInteractionHandle::new(Arc::clone(&dsl)));
-    sender.install_peer_interaction_handle(Arc::clone(&handle));
+    sender.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::clone(&handle),
+            Arc::new(RuntimeInteractionStreamHandle::new(Arc::clone(&dsl))),
+        ),
+    );
 
     // Establish bidirectional trust.
     CoreCommsRuntime::add_trusted_peer(
@@ -278,8 +319,8 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
 
     // Drive the DSL terminal transition directly through the handle (the
     // exact thing comms_drain does when a Completed response arrives).
-    // This MUST fire `PeerInteractionCleanup`, and the observer installed
-    // on `install_peer_interaction_handle` MUST drop the registry entry.
+    // This MUST fire `PeerInteractionCleanup`, and the observer installed by
+    // `install_peer_request_response_authority` MUST drop the registry entry.
     handle
         .response_terminal(corr_id, PeerTerminalDisposition::Completed)
         .expect("terminal transition must succeed");
@@ -341,7 +382,12 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
     let handle: Arc<dyn PeerInteractionHandle> = Arc::new(
         meerkat_runtime::RuntimePeerInteractionHandle::new(Arc::clone(&dsl)),
     );
-    sender.install_peer_interaction_handle(Arc::clone(&handle));
+    sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+        Arc::clone(&handle),
+        Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(
+            Arc::clone(&dsl),
+        )),
+    ));
 
     CoreCommsRuntime::add_trusted_peer(
         sender.as_ref(),
@@ -446,7 +492,12 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
     let handle: Arc<dyn PeerInteractionHandle> = Arc::new(
         meerkat_runtime::RuntimePeerInteractionHandle::new(Arc::clone(&dsl)),
     );
-    responder.install_peer_interaction_handle(Arc::clone(&handle));
+    responder.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+        Arc::clone(&handle),
+        Arc::new(meerkat_runtime::RuntimeInteractionStreamHandle::new(
+            Arc::clone(&dsl),
+        )),
+    ));
 
     CoreCommsRuntime::add_trusted_peer(
         responder.as_ref(),
@@ -896,16 +947,20 @@ impl SessionService for ContractSessionService {
             .and_then(|b| b.comms_name.clone())
             .unwrap_or_else(|| format!("contract-session-{}", Uuid::new_v4().simple()));
 
-        let comms = CommsRuntime::inproc_only(&comms_name).map_err(|e| {
+        let comms = Arc::new(CommsRuntime::inproc_only(&comms_name).map_err(|e| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to create comms runtime: {e}"
             )))
-        })?;
+        })?);
+        install_ephemeral_peer_request_response_authority(
+            &comms,
+            &format!("contract-{session_id}"),
+        );
 
         self.sessions
             .write()
             .await
-            .insert(session_id.clone(), Arc::new(comms));
+            .insert(session_id.clone(), comms);
 
         Ok(run_result(session_id, "session created"))
     }

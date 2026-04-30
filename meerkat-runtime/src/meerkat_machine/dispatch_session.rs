@@ -143,19 +143,15 @@ impl MeerkatMachine {
                         &shared_handle_authority,
                     )),
                 ),
-                peer_interaction: Some(Arc::new(
-                    crate::handles::RuntimePeerInteractionHandle::new(Arc::clone(
-                        &shared_handle_authority,
-                    )),
+                peer_interaction: Arc::new(crate::handles::RuntimePeerInteractionHandle::new(
+                    Arc::clone(&shared_handle_authority),
                 )),
                 session_context: Arc::new(crate::handles::RuntimeSessionContextHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
                 session_claim_handle: self.session_claim_handle(),
-                interaction_stream: Some(Arc::new(
-                    crate::handles::RuntimeInteractionStreamHandle::new(Arc::clone(
-                        &shared_handle_authority,
-                    )),
+                interaction_stream: Arc::new(crate::handles::RuntimeInteractionStreamHandle::new(
+                    Arc::clone(&shared_handle_authority),
                 )),
                 realtime_product_turn: Arc::new(
                     crate::handles::RuntimeRealtimeProductTurnHandle::new(Arc::clone(

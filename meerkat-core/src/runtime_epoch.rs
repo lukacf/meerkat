@@ -184,12 +184,11 @@ pub struct SessionRuntimeBindings {
     pub mcp_server_lifecycle: Arc<dyn McpServerLifecycleHandle>,
     /// Peer interaction lifecycle DSL handle (W1-A / issue #264).
     ///
-    /// Optional: surfaces without a runtime-owned session DSL (WASM,
-    /// standalone ephemeral tests) leave this `None` and the comms runtime
-    /// falls back to inline channel bookkeeping. Surfaces with a real session
-    /// runtime populate this with [`RuntimePeerInteractionHandle`] sharing the
-    /// same `HandleDslAuthority` as the other five handles.
-    pub peer_interaction: Option<Arc<dyn PeerInteractionHandle>>,
+    /// Any session-owned runtime binding that can emit semantic peer
+    /// request/response receipts carries this handle. Standalone/embedded
+    /// builds without bindings are transport-only unless they explicitly
+    /// prepare an ephemeral machine authority and use `SessionOwned`.
+    pub peer_interaction: Arc<dyn PeerInteractionHandle>,
     /// Session-context advancement DSL handle (W2-E / issue #264).
     ///
     /// Fires `AdvanceSessionContext` at every canonical session-truth
@@ -208,10 +207,9 @@ pub struct SessionRuntimeBindings {
     pub session_claim_handle: Arc<dyn SessionClaimHandle>,
     /// Interaction stream lifecycle DSL handle (U6 / dogma #5).
     ///
-    /// Optional for the same reason as [`Self::peer_interaction`]; surfaces
-    /// without a session DSL leave this `None` and the comms runtime falls
-    /// back to standalone bookkeeping seeded by an ephemeral handle.
-    pub interaction_stream: Option<Arc<dyn InteractionStreamHandle>>,
+    /// Required with session-owned peer request/response semantics so stream
+    /// reservations remain a projection of machine state.
+    pub interaction_stream: Arc<dyn InteractionStreamHandle>,
     /// Realtime product-turn lifecycle DSL handle (U9 / dogma #4).
     ///
     /// Replaces the shell-local `product_turn_in_flight` /
@@ -238,10 +236,10 @@ impl Clone for SessionRuntimeBindings {
             model_routing: Arc::clone(&self.model_routing),
             auth_lease: Arc::clone(&self.auth_lease),
             mcp_server_lifecycle: Arc::clone(&self.mcp_server_lifecycle),
-            peer_interaction: self.peer_interaction.as_ref().map(Arc::clone),
+            peer_interaction: Arc::clone(&self.peer_interaction),
             session_context: Arc::clone(&self.session_context),
             session_claim_handle: Arc::clone(&self.session_claim_handle),
-            interaction_stream: self.interaction_stream.as_ref().map(Arc::clone),
+            interaction_stream: Arc::clone(&self.interaction_stream),
             realtime_product_turn: Arc::clone(&self.realtime_product_turn),
         }
     }
@@ -263,22 +261,10 @@ impl std::fmt::Debug for SessionRuntimeBindings {
             .field("model_routing", &"<dyn ModelRoutingHandle>")
             .field("auth_lease", &"<dyn AuthLeaseHandle>")
             .field("mcp_server_lifecycle", &"<dyn McpServerLifecycleHandle>")
-            .field(
-                "peer_interaction",
-                &self
-                    .peer_interaction
-                    .as_ref()
-                    .map(|_| "<dyn PeerInteractionHandle>"),
-            )
+            .field("peer_interaction", &"<dyn PeerInteractionHandle>")
             .field("session_context", &"<dyn SessionContextHandle>")
             .field("session_claim_handle", &"<dyn SessionClaimHandle>")
-            .field(
-                "interaction_stream",
-                &self
-                    .interaction_stream
-                    .as_ref()
-                    .map(|_| "<dyn InteractionStreamHandle>"),
-            )
+            .field("interaction_stream", &"<dyn InteractionStreamHandle>")
             .field("realtime_product_turn", &"<dyn RealtimeProductTurnHandle>")
             .finish()
     }
@@ -286,8 +272,9 @@ impl std::fmt::Debug for SessionRuntimeBindings {
 
 /// Discriminant for how the factory should resolve async-operation lifecycle resources.
 ///
-/// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings.
-///   Suitable for WASM, tests, embedded, and doc examples.
+/// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings for
+///   non-comms semantics. Comms peer request/response remains transport-only
+///   unless the host prepares explicit `SessionOwned` authority.
 /// - `SessionOwned`: factory consumes pre-created bindings from the runtime
 ///   epoch owner. Never creates a competing registry.
 ///
@@ -296,7 +283,8 @@ impl std::fmt::Debug for SessionRuntimeBindings {
 /// through the factory exactly once, never lands in a collection, so paying
 /// for an extra heap indirection on every construction would regress the hot
 /// path. The `StandaloneEphemeral` path only appears in WASM, tests, and
-/// standalone embedded runs.
+/// standalone embedded runs that do not need semantic peer request/response
+/// authority.
 #[allow(clippy::large_enum_variant)]
 pub enum RuntimeBuildMode {
     /// Standalone: factory creates local-only ephemeral bindings.

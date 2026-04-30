@@ -3180,26 +3180,16 @@ impl AgentFactory {
             if let Some(runtime) = &comms_runtime {
                 runtime.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
             }
-            // W1-A: install the peer-interaction DSL handle on the session's
-            // comms runtime so outbound PeerRequest sends record into
-            // `pending_peer_requests` and `comms_drain` fires response
-            // progress / terminal transitions.
+            // W1-A/U6: install the typed machine authority required before
+            // comms can emit semantic peer request/response receipts.
             #[cfg(feature = "comms")]
-            if let (Some(runtime), Some(handle)) =
-                (&comms_runtime, bindings.peer_interaction.as_ref())
-            {
-                runtime.install_peer_interaction_handle(Arc::clone(handle));
-            }
-            // U6 (dogma #5): install the interaction-stream DSL handle so the
-            // shell-side `interaction_stream_registry` becomes a pure
-            // projection of DSL truth — `Reserved` / `Attached` / `Completed`
-            // / `Expired` / `ClosedEarly` lifecycle and the cleanup observer
-            // both flow through the DSL.
-            #[cfg(feature = "comms")]
-            if let (Some(runtime), Some(handle)) =
-                (&comms_runtime, bindings.interaction_stream.as_ref())
-            {
-                runtime.install_interaction_stream_handle(Arc::clone(handle));
+            if let Some(runtime) = &comms_runtime {
+                runtime.install_peer_request_response_authority(
+                    meerkat_comms::PeerRequestResponseAuthority::new(
+                        Arc::clone(&bindings.peer_interaction),
+                        Arc::clone(&bindings.interaction_stream),
+                    ),
+                );
             }
         }
 

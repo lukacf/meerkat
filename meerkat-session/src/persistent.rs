@@ -449,13 +449,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(Vec::new());
         };
         let mut stored_states: Vec<StoredInputState> = Vec::new();
+        let mut primary_alias_loaded = false;
         for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
             .into_iter()
             .enumerate()
         {
             let candidate_states = match runtime_store.load_input_states(&runtime_id).await {
-                Ok(states) => states,
-                Err(err) if candidate_index > 0 && !stored_states.is_empty() => {
+                Ok(states) => {
+                    if candidate_index == 0 {
+                        primary_alias_loaded = true;
+                    }
+                    states
+                }
+                Err(err) if candidate_index > 0 && primary_alias_loaded => {
                     tracing::warn!(
                         session_id = %id,
                         runtime_id = %runtime_id,
@@ -5189,6 +5195,35 @@ mod tests {
         assert_eq!(updates[0].seed.phase, InputLifecycleState::Consumed);
         assert_eq!(updates[0].seed.last_run_id, Some(run_id));
         assert_eq!(updates[0].seed.last_boundary_sequence, Some(7));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_input_updates_ignore_legacy_alias_load_error_after_empty_canonical_read()
+    {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        runtime_store
+            .fail_input_state_load_for(LogicalRuntimeId::legacy_session_uuid_alias(&id))
+            .await;
+
+        let updates = service
+            .runtime_input_updates(&id, &RunId::new(), 0, &[])
+            .await
+            .expect("legacy input-state load failure must not poison empty canonical updates");
+
+        assert!(
+            updates.is_empty(),
+            "no-contributor boundary should not need legacy input-state data"
+        );
     }
 
     #[tokio::test]

@@ -1157,6 +1157,7 @@ async fn load_input_states_for_storage_aliases(
     runtime_id: &LogicalRuntimeId,
 ) -> Result<Vec<(LogicalRuntimeId, StoredInputState)>, crate::store::RuntimeStoreError> {
     let mut merged: Vec<(usize, LogicalRuntimeId, StoredInputState)> = Vec::new();
+    let mut primary_alias_loaded = false;
 
     for (candidate_index, candidate) in runtime_id
         .storage_alias_candidates()
@@ -1164,8 +1165,13 @@ async fn load_input_states_for_storage_aliases(
         .enumerate()
     {
         let states = match store.load_input_states(&candidate).await {
-            Ok(states) => states,
-            Err(_err) if candidate_index > 0 && !merged.is_empty() => continue,
+            Ok(states) => {
+                if candidate_index == 0 {
+                    primary_alias_loaded = true;
+                }
+                states
+            }
+            Err(_err) if candidate_index > 0 && primary_alias_loaded => continue,
             Err(err) => return Err(err),
         };
         for state in states {
@@ -1564,11 +1570,22 @@ pub(crate) async fn machine_recover_persistent_driver(
     }
 
     let mut recovered_runtime_state = None;
-    for candidate in runtime_id.storage_alias_candidates() {
-        recovered_runtime_state = store
-            .load_runtime_state(&candidate)
-            .await
-            .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
+    let mut primary_runtime_state_loaded = false;
+    for (candidate_index, candidate) in runtime_id
+        .storage_alias_candidates()
+        .into_iter()
+        .enumerate()
+    {
+        match store.load_runtime_state(&candidate).await {
+            Ok(state) => {
+                if candidate_index == 0 {
+                    primary_runtime_state_loaded = true;
+                }
+                recovered_runtime_state = state;
+            }
+            Err(_err) if candidate_index > 0 && primary_runtime_state_loaded => continue,
+            Err(err) => return Err(RuntimeDriverError::Internal(err.to_string())),
+        }
         if recovered_runtime_state.is_some() {
             break;
         }

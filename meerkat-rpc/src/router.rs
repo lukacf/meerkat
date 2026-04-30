@@ -110,13 +110,22 @@ fn load_configured_mcp_tools_for_rpc_mob(
     let adapter = Arc::new(meerkat::McpRouterAdapter::new(router));
     let adapter_for_poll = adapter.clone();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| format!("build MCP connect runtime: {error}"))
-            .map(|runtime| {
-                runtime.block_on(async move {
+    let thread_tx = tx.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("rpc-mob-mcp-runtime".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = thread_tx.send(Err(format!("build MCP connect runtime: {error}")));
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let result = async {
                     let apply = adapter_for_poll
                         .apply_staged()
                         .await
@@ -139,14 +148,18 @@ fn load_configured_mcp_tools_for_rpc_mob(
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     }
-                })
+                }
+                .await;
+                let should_keep_alive = result.is_ok();
+                let _ = thread_tx.send(result);
+                if should_keep_alive {
+                    futures::future::pending::<()>().await;
+                }
             });
-        let flattened = match result {
-            Ok(inner) => inner,
-            Err(error) => Err(error),
-        };
-        let _ = tx.send(flattened);
-    });
+        })
+    {
+        let _ = tx.send(Err(format!("spawn MCP connect runtime thread: {error}")));
+    }
     match rx.recv() {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -2615,6 +2628,7 @@ mod tests {
         ToolDispatchOutcome, ToolError,
     };
     use serde::Serialize;
+    use serde_json::value::RawValue;
 
     use crate::protocol::RpcId;
 
@@ -2671,6 +2685,98 @@ mod tests {
 
         assert!(names.contains("callback_tool"));
         assert!(names.contains("linear_add_comment"));
+    }
+
+    #[cfg(all(feature = "mob", feature = "mcp"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_mob_configured_mcp_tools_remain_callable_after_loader_returns() {
+        let temp = tempfile::tempdir().unwrap();
+        let rkat_dir = temp.path().join(".rkat");
+        std::fs::create_dir_all(&rkat_dir).unwrap();
+        let server_path = temp.path().join("echo_mcp.py");
+        std::fs::write(
+            &server_path,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "echo-mcp", "version": "test"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [{
+                "name": "echo",
+                "description": "Echoes the input message",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                },
+            }]
+        }
+    elif method == "tools/call":
+        arguments = request.get("params", {}).get("arguments", {})
+        result = {
+            "content": [{
+                "type": "text",
+                "text": arguments.get("message", ""),
+            }],
+            "isError": False,
+        }
+    else:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "error": {"code": -32601, "message": "not found"},
+        }), flush=True)
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            rkat_dir.join("mcp.toml"),
+            format!(
+                r#"[[servers]]
+name = "echo-server"
+command = "python3"
+args = [{}]
+"#,
+                serde_json::to_string(server_path.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let dispatcher =
+            load_configured_mcp_tools_for_rpc_mob(Some(temp.path().to_path_buf()), None)
+                .expect("configured MCP dispatcher");
+        assert!(
+            dispatcher.tools().iter().any(|tool| tool.name == "echo"),
+            "configured MCP tool should be visible before the mob member turn"
+        );
+
+        let args = RawValue::from_string(r#"{"message":"runtime is alive"}"#.to_string()).unwrap();
+        let outcome = dispatcher
+            .dispatch(ToolCallView {
+                id: "call-1",
+                name: "echo",
+                args: &args,
+            })
+            .await
+            .expect("configured MCP tool call should remain callable after loader returns");
+
+        assert_eq!(outcome.result.text_content(), "runtime is alive");
     }
 
     #[cfg(feature = "comms")]

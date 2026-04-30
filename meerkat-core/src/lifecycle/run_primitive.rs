@@ -1368,6 +1368,7 @@ pub struct RuntimeTurnMetadata {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RuntimeTurnMetadataFields {
     #[serde(default)]
     handling_mode: Option<HandlingMode>,
@@ -1400,30 +1401,7 @@ impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
     where
         D: serde::Deserializer<'de>,
     {
-        let mut raw = serde_json::Value::deserialize(deserializer)?;
-        let (clear_provider_params, clear_connection_ref) =
-            if let Some(object) = raw.as_object_mut() {
-                (
-                    take_legacy_clear_bool(object, "clear_provider_params")?,
-                    take_legacy_clear_bool(object, "clear_connection_ref")?,
-                )
-            } else {
-                (false, false)
-            };
-        let fields: RuntimeTurnMetadataFields =
-            serde_json::from_value(raw).map_err(de::Error::custom)?;
-        let provider_params = legacy_override_from_split_fields(
-            fields.provider_params,
-            clear_provider_params,
-            "provider_params",
-            "clear_provider_params",
-        )?;
-        let connection_ref = legacy_override_from_split_fields(
-            fields.connection_ref,
-            clear_connection_ref,
-            "connection_ref",
-            "clear_connection_ref",
-        )?;
+        let fields = RuntimeTurnMetadataFields::deserialize(deserializer)?;
 
         Ok(Self {
             handling_mode: fields.handling_mode,
@@ -1432,8 +1410,8 @@ impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
             additional_instructions: fields.additional_instructions,
             model: fields.model,
             provider: fields.provider,
-            provider_params,
-            connection_ref,
+            provider_params: fields.provider_params,
+            connection_ref: fields.connection_ref,
             keep_alive: fields.keep_alive,
             render_metadata: fields.render_metadata,
             execution_kind: fields.execution_kind,
@@ -1566,41 +1544,6 @@ fn merge_override<T: PartialEq>(
             field,
             reason: "one input sets the field while another clears it",
         }),
-    }
-}
-
-fn legacy_override_from_split_fields<T, E>(
-    set_value: Option<TurnMetadataOverride<T>>,
-    clear: bool,
-    set_field: &'static str,
-    clear_field: &'static str,
-) -> Result<Option<TurnMetadataOverride<T>>, E>
-where
-    E: de::Error,
-{
-    if clear && set_value.is_some() {
-        return Err(E::custom(format!(
-            "{clear_field} cannot be combined with {set_field}"
-        )));
-    }
-    if clear {
-        Ok(Some(TurnMetadataOverride::Clear))
-    } else {
-        Ok(set_value)
-    }
-}
-
-fn take_legacy_clear_bool<E>(
-    object: &mut serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-) -> Result<bool, E>
-where
-    E: de::Error,
-{
-    match object.remove(field) {
-        None => Ok(false),
-        Some(serde_json::Value::Bool(value)) => Ok(value),
-        Some(_) => Err(E::custom(format!("{field} must be a boolean"))),
     }
 }
 

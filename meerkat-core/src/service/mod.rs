@@ -726,13 +726,11 @@ impl std::fmt::Debug for SessionBuildOptions {
 /// ```compile_fail
 /// use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 /// use meerkat_core::service::StartTurnRequest;
-/// use meerkat_core::types::{ContentInput, HandlingMode};
+/// use meerkat_core::types::ContentInput;
 ///
 /// let _ = StartTurnRequest {
 ///     prompt: ContentInput::Text("hello".to_string()),
 ///     system_prompt: None,
-///     render_metadata: None,
-///     handling_mode: HandlingMode::Steer,
 ///     event_tx: None,
 ///     skill_references: None,
 ///     flow_tool_overlay: None,

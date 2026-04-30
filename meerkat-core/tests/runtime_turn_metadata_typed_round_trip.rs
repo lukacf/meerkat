@@ -193,27 +193,18 @@ fn set_overrides_round_trip_with_explicit_action() {
 }
 
 #[test]
-fn legacy_clear_only_payloads_deserialize_as_clear_overrides() {
-    let parsed: RuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+fn legacy_split_clear_payloads_fail_closed() {
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
         "clear_provider_params": true,
         "clear_connection_ref": true,
     }))
-    .expect("legacy clear-only payloads remain accepted");
-
-    assert_eq!(
-        parsed.provider_params,
-        Some(TurnMetadataOverride::Clear),
-        "legacy provider clear must become a clear override"
+    .expect_err("legacy split clear fields must not be accepted inside turn_metadata");
+    assert!(
+        err.to_string().contains("clear_provider_params")
+            || err.to_string().contains("unknown field"),
+        "unexpected error: {err}"
     );
-    assert_eq!(
-        parsed.connection_ref,
-        Some(TurnMetadataOverride::Clear),
-        "legacy connection clear must become a clear override"
-    );
-}
 
-#[test]
-fn legacy_set_and_clear_payloads_fail_at_boundary() {
     let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
         "provider_params": { "temperature": 0.2 },
         "clear_provider_params": true,
@@ -234,6 +225,19 @@ fn legacy_set_and_clear_payloads_fail_at_boundary() {
     .expect_err("connection_ref set plus legacy clear must fail");
     assert!(
         err.to_string().contains("clear_connection_ref"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn unknown_runtime_turn_metadata_fields_fail_closed() {
+    let err = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+        "skill_references": [],
+        "flow_tool_overaly": {},
+    }))
+    .expect_err("misspelled nested turn metadata fields must fail closed");
+    assert!(
+        err.to_string().contains("flow_tool_overaly") || err.to_string().contains("unknown field"),
         "unexpected error: {err}"
     );
 }

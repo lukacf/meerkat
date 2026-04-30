@@ -134,7 +134,7 @@ TurnToolOverlay {
 }
 ```
 
-Set on `StartTurnRequest.flow_tool_overlay` by the flow engine. Ephemeral — cleared after the turn completes. Composes with the external filter using most-restrictive semantics.
+Set on `RuntimeTurnMetadata.flow_tool_overlay` by the flow engine and passed through `StartTurnRequest.turn_metadata`. Ephemeral — cleared after the turn completes. Composes with the external filter using most-restrictive semantics.
 
 **Source:** `meerkat-core/src/service/mod.rs`, `meerkat-mob/src/runtime/flow.rs`
 </Accordion>

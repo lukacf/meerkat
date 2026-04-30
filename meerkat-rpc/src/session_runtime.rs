@@ -34,7 +34,8 @@ use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive, RuntimeTurnMetadata,
+    TurnMetadataOverride,
 };
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
@@ -759,173 +760,57 @@ fn approval_service_from_persistence(
     }
 }
 
-/// Internal compatibility projection for legacy SessionRuntime paths that have
-/// not yet been fully retyped to consume `RuntimeTurnMetadata` directly.
-#[doc(hidden)]
-#[derive(Debug, Default)]
-pub struct TurnOverrides {
-    keep_alive: Option<bool>,
-    model: Option<String>,
-    provider: Option<String>,
-    max_tokens: Option<u32>,
-    system_prompt: Option<String>,
-    output_schema: Option<serde_json::Value>,
-    structured_output_retries: Option<u32>,
-    provider_params: Option<serde_json::Value>,
-    clear_provider_params: bool,
-    connection_ref: Option<meerkat_core::ConnectionRef>,
-    clear_connection_ref: bool,
-}
-
-impl TurnOverrides {
-    fn is_empty(&self) -> bool {
-        self.keep_alive.is_none()
-            && self.model.is_none()
-            && self.provider.is_none()
-            && self.max_tokens.is_none()
-            && self.system_prompt.is_none()
-            && self.output_schema.is_none()
-            && self.structured_output_retries.is_none()
-            && self.provider_params.is_none()
-            && !self.clear_provider_params
-            && self.connection_ref.is_none()
-            && !self.clear_connection_ref
-    }
-}
-
 impl SessionRuntime {
-    fn turn_keep_alive_policy(
-        requested: Option<bool>,
-    ) -> Option<
-        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
-            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy,
-        >,
-    > {
-        match requested {
-            Some(true) => Some(
-                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
-                    meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                        ttl: std::time::Duration::from_secs(30),
-                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-                    },
-                ),
-            ),
-            Some(false) => {
-                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
-            }
+    fn turn_metadata_keep_alive_override(metadata: Option<&RuntimeTurnMetadata>) -> Option<bool> {
+        match metadata.and_then(|metadata| metadata.keep_alive.as_ref()) {
+            Some(TurnMetadataOverride::Set(_)) => Some(true),
+            Some(TurnMetadataOverride::Clear) => Some(false),
             None => None,
         }
     }
 
-    fn turn_additional_instructions(
-        requested: Option<Vec<String>>,
-    ) -> Option<Vec<meerkat_core::lifecycle::run_primitive::TurnInstruction>> {
-        requested.map(|instructions| {
-            instructions
-                .into_iter()
-                .map(
-                    |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
-                        body,
-                    },
-                )
-                .collect()
-        })
+    fn turn_metadata_provider_params(metadata: &RuntimeTurnMetadata) -> Option<serde_json::Value> {
+        match metadata.provider_params.as_ref() {
+            Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
+            Some(TurnMetadataOverride::Clear) | None => None,
+        }
     }
 
-    fn turn_metadata_from_overrides(
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        additional_instructions: Option<Vec<String>>,
-        overrides: Option<&TurnOverrides>,
-        provider_hint: Option<&str>,
-    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
-        use meerkat_core::lifecycle::run_primitive::{
-            ProviderParamsOverride, TurnMetadataOverride,
-        };
-
-        let provider_params = overrides.and_then(|ov| {
-            if ov.clear_provider_params {
-                Some(TurnMetadataOverride::Clear)
-            } else {
-                let provider = ov
-                    .provider
-                    .as_deref()
-                    .or(provider_hint)
-                    .unwrap_or("unknown");
-                ov.provider_params.clone().map(|params| {
-                    TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
-                        provider, &params,
-                    ))
-                })
-            }
-        });
-        let connection_ref = overrides.and_then(|ov| {
-            if ov.clear_connection_ref {
-                Some(TurnMetadataOverride::Clear)
-            } else {
-                ov.connection_ref.clone().map(TurnMetadataOverride::Set)
-            }
-        });
-        let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-            handling_mode: None,
-            keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
-            skill_references,
-            flow_tool_overlay,
-            additional_instructions: Self::turn_additional_instructions(additional_instructions),
-            model: overrides
-                .and_then(|ov| ov.model.clone())
-                .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
-            provider: overrides
-                .and_then(|ov| ov.provider.as_ref())
-                .map(|provider| meerkat_core::Provider::from_name(provider)),
-            provider_params,
-            render_metadata: None,
-            connection_ref,
-            execution_kind: None,
-            peer_response_terminal_apply_intent: None,
-        };
-        (!metadata.is_empty()).then_some(metadata)
+    fn turn_metadata_connection_ref(
+        metadata: &RuntimeTurnMetadata,
+    ) -> Option<meerkat_core::ConnectionRef> {
+        match metadata.connection_ref.as_ref() {
+            Some(TurnMetadataOverride::Set(connection_ref)) => Some(connection_ref.clone()),
+            Some(TurnMetadataOverride::Clear) | None => None,
+        }
     }
 
-    fn turn_overrides_from_metadata(
-        metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-    ) -> Option<TurnOverrides> {
-        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+    fn turn_metadata_reconfigures_llm(metadata: &RuntimeTurnMetadata) -> bool {
+        metadata.model.is_some()
+            || metadata.provider.is_some()
+            || metadata.provider_params.is_some()
+            || metadata.connection_ref.is_some()
+    }
 
-        let metadata = metadata?;
-        let (provider_params, clear_provider_params) = match &metadata.provider_params {
-            Some(TurnMetadataOverride::Set(params)) => {
-                (Some(params.to_legacy_provider_value()), false)
-            }
-            Some(TurnMetadataOverride::Clear) => (None, true),
-            None => (None, false),
-        };
-        let (connection_ref, clear_connection_ref) = match &metadata.connection_ref {
-            Some(TurnMetadataOverride::Set(connection_ref)) => {
-                (Some(connection_ref.clone()), false)
-            }
-            Some(TurnMetadataOverride::Clear) => (None, true),
-            None => (None, false),
-        };
-        let overrides = TurnOverrides {
-            keep_alive: metadata.keep_alive.as_ref().map(|keep_alive| {
-                matches!(
-                    keep_alive,
-                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)
-                )
-            }),
+    fn reconfigure_request_from_turn_metadata(
+        metadata: &RuntimeTurnMetadata,
+    ) -> SessionLlmReconfigureRequest {
+        SessionLlmReconfigureRequest {
             model: metadata.model.as_ref().map(ToString::to_string),
             provider: metadata
                 .provider
                 .map(|provider| provider.as_str().to_string()),
-            provider_params,
-            clear_provider_params,
-            connection_ref,
-            clear_connection_ref,
-            ..Default::default()
-        };
-        (!overrides.is_empty()).then_some(overrides)
+            provider_params: Self::turn_metadata_provider_params(metadata),
+            clear_provider_params: matches!(
+                metadata.provider_params.as_ref(),
+                Some(TurnMetadataOverride::Clear)
+            ),
+            connection_ref: Self::turn_metadata_connection_ref(metadata),
+            clear_connection_ref: matches!(
+                metadata.connection_ref.as_ref(),
+                Some(TurnMetadataOverride::Clear)
+            ),
+        }
     }
 
     #[cfg(feature = "comms")]
@@ -1333,35 +1218,27 @@ impl SessionRuntime {
 
     fn recovery_overrides_from_turn(
         &self,
-        overrides: Option<&TurnOverrides>,
+        turn_metadata: Option<&RuntimeTurnMetadata>,
         keep_alive: bool,
     ) -> Result<SurfaceSessionRecoveryOverrides, RpcError> {
-        let output_schema = match overrides.and_then(|ov| ov.output_schema.clone()) {
-            Some(value) => Some(meerkat_core::OutputSchema::from_json_value(value).map_err(
-                |e| RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: format!("Invalid output_schema override: {e}"),
-                    data: None,
-                },
-            )?),
-            None => None,
-        };
-
         Ok(SurfaceSessionRecoveryOverrides {
-            model: overrides.and_then(|ov| ov.model.clone()),
-            provider: overrides.and_then(|ov| {
-                ov.provider
-                    .as_ref()
-                    .map(|provider| meerkat_core::Provider::from_name(provider))
+            model: turn_metadata
+                .and_then(|metadata| metadata.model.as_ref().map(ToString::to_string)),
+            provider: turn_metadata.and_then(|metadata| metadata.provider),
+            provider_params: turn_metadata.and_then(Self::turn_metadata_provider_params),
+            clear_provider_params: turn_metadata.is_some_and(|metadata| {
+                matches!(
+                    metadata.provider_params.as_ref(),
+                    Some(TurnMetadataOverride::Clear)
+                )
             }),
-            provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
-            clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
-            connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
-            clear_connection_ref: overrides.is_some_and(|ov| ov.clear_connection_ref),
-            max_tokens: overrides.and_then(|ov| ov.max_tokens),
-            system_prompt: overrides.and_then(|ov| ov.system_prompt.clone()),
-            output_schema,
-            structured_output_retries: overrides.and_then(|ov| ov.structured_output_retries),
+            connection_ref: turn_metadata.and_then(Self::turn_metadata_connection_ref),
+            clear_connection_ref: turn_metadata.is_some_and(|metadata| {
+                matches!(
+                    metadata.connection_ref.as_ref(),
+                    Some(TurnMetadataOverride::Clear)
+                )
+            }),
             keep_alive: Some(keep_alive),
             ..Default::default()
         })
@@ -1580,39 +1457,24 @@ impl SessionRuntime {
     async fn resolve_target_llm_identity(
         &self,
         current: &SessionLlmIdentity,
-        ov: &TurnOverrides,
+        metadata: &RuntimeTurnMetadata,
     ) -> Result<SessionLlmIdentity, RpcError> {
-        if ov.provider.is_some() && ov.model.is_none() {
+        if metadata.provider.is_some() && metadata.model.is_none() {
             return Err(RpcError {
                 code: error::INVALID_PARAMS,
                 message: "provider override requires model on an existing session".to_string(),
                 data: None,
             });
         }
-        if ov.clear_provider_params && ov.provider_params.is_some() {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: "clear_provider_params cannot be combined with provider_params"
-                    .to_string(),
-                data: None,
-            });
-        }
-        if ov.clear_connection_ref && ov.connection_ref.is_some() {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: "clear_connection_ref cannot be combined with connection_ref".to_string(),
-                data: None,
-            });
-        }
 
         let registry = self.model_registry().await?;
-        let model = ov.model.clone().unwrap_or_else(|| current.model.clone());
-        let provider = if let Some(provider_name) = ov.provider.as_ref() {
-            meerkat_core::Provider::from_name(provider_name)
-        } else {
-            current.provider
-        };
-        if (ov.model.is_some() || ov.provider.is_some())
+        let model = metadata
+            .model
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| current.model.clone());
+        let provider = metadata.provider.unwrap_or(current.provider);
+        if (metadata.model.is_some() || metadata.provider.is_some())
             && let Some(reason) =
                 registered_model_provider_mismatch_reason(&registry, provider, &model)
         {
@@ -1622,15 +1484,13 @@ impl SessionRuntime {
                 data: None,
             });
         }
-        let provider_params = if ov.clear_provider_params {
-            None
-        } else {
-            ov.provider_params
-                .clone()
-                .or_else(|| current.provider_params.clone())
+        let provider_params = match metadata.provider_params.as_ref() {
+            Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => current.provider_params.clone(),
         };
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
-            if ov.model.is_none() {
+            if metadata.model.is_none() {
                 current.self_hosted_server_id.clone().or_else(|| {
                     registry
                         .entry_for_provider(meerkat_core::Provider::SelfHosted, &model)
@@ -1658,12 +1518,10 @@ impl SessionRuntime {
             None
         };
 
-        let connection_ref = if ov.clear_connection_ref {
-            None
-        } else {
-            ov.connection_ref
-                .clone()
-                .or_else(|| current.connection_ref.clone())
+        let connection_ref = match metadata.connection_ref.as_ref() {
+            Some(TurnMetadataOverride::Set(connection_ref)) => Some(connection_ref.clone()),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => current.connection_ref.clone(),
         };
 
         Ok(SessionLlmIdentity {
@@ -1717,26 +1575,30 @@ impl SessionRuntime {
     async fn effective_llm_identity_for_turn(
         &self,
         session_id: &SessionId,
-        overrides: Option<&TurnOverrides>,
+        turn_metadata: Option<&RuntimeTurnMetadata>,
     ) -> Result<SessionLlmIdentity, RpcError> {
         let pending_identity = self
             .staged_sessions
             .effective_llm_identity(session_id)
             .await;
         if let Some(pending_identity) = pending_identity {
-            return match overrides {
-                Some(ov) => {
-                    self.resolve_target_llm_identity(&pending_identity, ov)
+            return match turn_metadata {
+                Some(metadata) if Self::turn_metadata_reconfigures_llm(metadata) => {
+                    self.resolve_target_llm_identity(&pending_identity, metadata)
                         .await
                 }
                 None => Ok(pending_identity),
+                Some(_) => Ok(pending_identity),
             };
         }
 
         let current = self.current_materialized_llm_identity(session_id).await?;
-        match overrides {
-            Some(ov) => self.resolve_target_llm_identity(&current, ov).await,
+        match turn_metadata {
+            Some(metadata) if Self::turn_metadata_reconfigures_llm(metadata) => {
+                self.resolve_target_llm_identity(&current, metadata).await
+            }
             None => Ok(current),
+            Some(_) => Ok(current),
         }
     }
 
@@ -1878,16 +1740,9 @@ impl SessionRuntime {
     async fn hot_swap_llm_client(
         &self,
         session_id: &SessionId,
-        ov: &TurnOverrides,
+        turn_metadata: &RuntimeTurnMetadata,
     ) -> Result<(), RpcError> {
-        let request = SessionLlmReconfigureRequest {
-            model: ov.model.clone(),
-            provider: ov.provider.clone(),
-            provider_params: ov.provider_params.clone(),
-            clear_provider_params: ov.clear_provider_params,
-            connection_ref: ov.connection_ref.clone(),
-            clear_connection_ref: ov.clear_connection_ref,
-        };
+        let request = Self::reconfigure_request_from_turn_metadata(turn_metadata);
 
         if !self.runtime_adapter.contains_session(session_id).await
             && self.service.read(session_id).await.is_ok()
@@ -2288,9 +2143,8 @@ impl SessionRuntime {
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
         let mut prompt = prompt;
-        let turn_overrides = Self::turn_overrides_from_metadata(turn_metadata.as_ref());
         let effective_identity = self
-            .effective_llm_identity_for_turn(session_id, turn_overrides.as_ref())
+            .effective_llm_identity_for_turn(session_id, turn_metadata.as_ref())
             .await?;
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
@@ -2317,14 +2171,13 @@ impl SessionRuntime {
             }
         }
 
-        let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
+        let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata.as_ref());
 
         self.ensure_runtime_executor(session_id).await?;
 
         // Manage comms drain lifecycle based on keep_alive override.
         #[cfg(feature = "comms")]
         {
-            let keep_alive_override = turn_overrides.as_ref().and_then(|ov| ov.keep_alive);
             let pending_keep_alive_override_applied = if let Some(keep_alive) = keep_alive_override
             {
                 self.apply_pending_keep_alive_override(session_id, keep_alive)
@@ -2407,6 +2260,8 @@ impl SessionRuntime {
                 }
             }
         }
+
+        let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
 
         let (outcome, handle) = self
             .runtime_adapter
@@ -2581,18 +2436,18 @@ impl SessionRuntime {
         }
 
         let turn_metadata = primitive.turn_metadata();
-        let turn_overrides = Self::turn_overrides_from_metadata(turn_metadata);
         let service_turn_metadata = turn_metadata.cloned();
         let skill_references = turn_metadata.and_then(|meta| meta.skill_references.clone());
+        let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata);
 
         #[cfg(feature = "comms")]
-        if let Some(keep_alive) = turn_overrides.as_ref().and_then(|ov| ov.keep_alive) {
+        if let Some(keep_alive) = keep_alive_override {
             self.apply_runtime_turn_keep_alive_override_before_validation(session_id, keep_alive)
                 .await?;
         }
 
         let effective_identity = self
-            .effective_llm_identity_for_turn(session_id, turn_overrides.as_ref())
+            .effective_llm_identity_for_turn(session_id, turn_metadata)
             .await?;
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
@@ -2630,9 +2485,7 @@ impl SessionRuntime {
         } else {
             None
         };
-        let keep_alive = turn_overrides
-            .as_ref()
-            .and_then(|ov| ov.keep_alive)
+        let keep_alive = keep_alive_override
             .or_else(|| {
                 pending_session
                     .as_ref()
@@ -2643,15 +2496,10 @@ impl SessionRuntime {
 
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
             // Hot-swap LLM client if model/provider overrides are present.
-            if let Some(ref ov) = turn_overrides
-                && (ov.model.is_some()
-                    || ov.provider.is_some()
-                    || ov.provider_params.is_some()
-                    || ov.clear_provider_params
-                    || ov.connection_ref.is_some()
-                    || ov.clear_connection_ref)
+            if let Some(metadata) = turn_metadata
+                && Self::turn_metadata_reconfigures_llm(metadata)
             {
-                self.hot_swap_llm_client(session_id, ov).await?;
+                self.hot_swap_llm_client(session_id, metadata).await?;
             }
 
             let req = StartTurnRequest {
@@ -2690,8 +2538,8 @@ impl SessionRuntime {
                 runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
             }
 
-            if let Some(ref ov) = turn_overrides {
-                if ov.provider.is_some() && ov.model.is_none() {
+            if let Some(metadata) = turn_metadata {
+                if metadata.provider.is_some() && metadata.model.is_none() {
                     self.restore_pending_from_promoting(
                         session_id,
                         build_config,
@@ -2707,44 +2555,16 @@ impl SessionRuntime {
                         data: None,
                     });
                 }
-                let resolved_identity = self
-                    .resolve_target_llm_identity(
-                        &self.llm_identity_from_pending_build(&build_config).await?,
-                        ov,
-                    )
-                    .await?;
-                Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
-                if let Some(max_tokens) = ov.max_tokens {
-                    build_config.max_tokens = Some(max_tokens);
+                if Self::turn_metadata_reconfigures_llm(metadata) {
+                    let resolved_identity = self
+                        .resolve_target_llm_identity(
+                            &self.llm_identity_from_pending_build(&build_config).await?,
+                            metadata,
+                        )
+                        .await?;
+                    Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 }
-                if let Some(ref system_prompt) = ov.system_prompt {
-                    build_config.system_prompt = Some(system_prompt.clone());
-                }
-                if let Some(ref output_schema) = ov.output_schema {
-                    match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
-                        Ok(os) => build_config.output_schema = Some(os),
-                        Err(e) => {
-                            self.restore_pending_from_promoting(
-                                session_id,
-                                build_config,
-                                labels,
-                                saved_deferred_prompt,
-                                created_at_secs,
-                                updated_at_secs,
-                            )
-                            .await;
-                            return Err(RpcError {
-                                code: error::INVALID_PARAMS,
-                                message: format!("Invalid output_schema override: {e}"),
-                                data: None,
-                            });
-                        }
-                    }
-                }
-                if let Some(retries) = ov.structured_output_retries {
-                    build_config.structured_output_retries = retries;
-                }
-                if let Some(keep_alive) = ov.keep_alive {
+                if let Some(keep_alive) = keep_alive_override {
                     build_config.keep_alive = keep_alive;
                 }
             }
@@ -2830,10 +2650,7 @@ impl SessionRuntime {
                                 .peer_ingress_enabled_for_keep_alive(
                                     session_id,
                                     build_config.keep_alive,
-                                    turn_overrides
-                                        .as_ref()
-                                        .and_then(|ov| ov.keep_alive)
-                                        .is_some(),
+                                    keep_alive_override.is_some(),
                                 )
                                 .await;
                             let comms_rt = Self::comms_runtime_for_peer_ingress(
@@ -2914,8 +2731,7 @@ impl SessionRuntime {
                 message: format!("session not found: {session_id}"),
                 data: None,
             })?;
-        let recovery_overrides =
-            self.recovery_overrides_from_turn(turn_overrides.as_ref(), keep_alive)?;
+        let recovery_overrides = self.recovery_overrides_from_turn(turn_metadata, keep_alive)?;
         let create_request = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
@@ -2934,10 +2750,7 @@ impl SessionRuntime {
                     .peer_ingress_enabled_for_keep_alive(
                         session_id,
                         keep_alive,
-                        turn_overrides
-                            .as_ref()
-                            .and_then(|ov| ov.keep_alive)
-                            .is_some(),
+                        keep_alive_override.is_some(),
                     )
                     .await;
                 let comms_rt = Self::comms_runtime_for_peer_ingress(peer_ingress_enabled, comms_rt);
@@ -3087,23 +2900,24 @@ impl SessionRuntime {
     /// Events are forwarded to `event_tx` during the turn. Returns the
     /// `RunResult` when the turn completes.
     ///
-    /// `overrides` may contain per-turn overrides. For pending (deferred)
-    /// sessions, all overrides are applied to the staged `AgentBuildConfig`.
-    /// For materialized sessions, only `keep_alive` is allowed; all other
-    /// overrides are rejected with an error.
-    #[allow(clippy::too_many_arguments)]
+    /// `turn_metadata` is the single per-turn runtime metadata carrier. For
+    /// pending sessions, compatible model/provider/keep-alive fields are applied
+    /// before materialization. For materialized sessions, model/provider changes
+    /// are applied through the runtime LLM reconfigure path.
     pub async fn start_turn(
         &self,
         session_id: &SessionId,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        additional_instructions: Option<Vec<String>>,
-        overrides: Option<TurnOverrides>,
+        turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
+        let turn_metadata_ref = turn_metadata.as_ref();
+        let service_turn_metadata = turn_metadata.clone();
+        let skill_references =
+            turn_metadata_ref.and_then(|metadata| metadata.skill_references.clone());
+        let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata_ref);
         #[cfg(feature = "mcp")]
         {
             let mut mcp_text = String::new();
@@ -3157,9 +2971,9 @@ impl SessionRuntime {
             if let Some(deferred) = deferred_prompt {
                 turn_prompt = merge_content_inputs(deferred, turn_prompt);
             }
-            // Apply per-turn overrides to the pending build config.
-            if let Some(ref ov) = overrides {
-                if ov.provider.is_some() && ov.model.is_none() {
+            // Apply per-turn metadata to the pending build config.
+            if let Some(metadata) = turn_metadata_ref {
+                if metadata.provider.is_some() && metadata.model.is_none() {
                     self.restore_pending_from_promoting(
                         session_id,
                         build_config,
@@ -3175,45 +2989,16 @@ impl SessionRuntime {
                         data: None,
                     });
                 }
-                let resolved_identity = self
-                    .resolve_target_llm_identity(
-                        &self.llm_identity_from_pending_build(&build_config).await?,
-                        ov,
-                    )
-                    .await?;
-                Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
-                if let Some(max_tokens) = ov.max_tokens {
-                    build_config.max_tokens = Some(max_tokens);
+                if Self::turn_metadata_reconfigures_llm(metadata) {
+                    let resolved_identity = self
+                        .resolve_target_llm_identity(
+                            &self.llm_identity_from_pending_build(&build_config).await?,
+                            metadata,
+                        )
+                        .await?;
+                    Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 }
-                if let Some(ref system_prompt) = ov.system_prompt {
-                    build_config.system_prompt = Some(system_prompt.clone());
-                }
-                if let Some(ref output_schema) = ov.output_schema {
-                    match meerkat_core::OutputSchema::from_json_value(output_schema.clone()) {
-                        Ok(os) => build_config.output_schema = Some(os),
-                        Err(e) => {
-                            // Restore pending state before returning error.
-                            self.restore_pending_from_promoting(
-                                session_id,
-                                build_config,
-                                labels,
-                                saved_deferred_prompt,
-                                saved_created_at_secs,
-                                saved_updated_at_secs,
-                            )
-                            .await;
-                            return Err(RpcError {
-                                code: error::INVALID_PARAMS,
-                                message: format!("Invalid output_schema override: {e}"),
-                                data: None,
-                            });
-                        }
-                    }
-                }
-                if let Some(retries) = ov.structured_output_retries {
-                    build_config.structured_output_retries = retries;
-                }
-                if let Some(keep_alive) = ov.keep_alive {
+                if let Some(keep_alive) = keep_alive_override {
                     build_config.keep_alive = keep_alive;
                 }
             }
@@ -3328,29 +3113,7 @@ impl SessionRuntime {
         }
 
         // Normal turn on an existing (materialized) session.
-        // Reject overrides that cannot be applied mid-session.
-        if let Some(ref ov) = overrides {
-            let rejected = [
-                ov.max_tokens.map(|_| "max_tokens"),
-                ov.system_prompt.as_ref().map(|_| "system_prompt"),
-                ov.output_schema.as_ref().map(|_| "output_schema"),
-                ov.structured_output_retries
-                    .map(|_| "structured_output_retries"),
-            ];
-            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
-            if !rejected.is_empty() {
-                return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: format!(
-                        "Cannot override {} on a materialized session; use deferred session/create",
-                        rejected.join(", ")
-                    ),
-                    data: None,
-                });
-            }
-        }
-
-        let keep_alive = match overrides.as_ref().and_then(|ov| ov.keep_alive) {
+        let keep_alive = match keep_alive_override {
             Some(keep_alive) => keep_alive,
             None => self
                 .load_persisted_session(session_id)
@@ -3359,27 +3122,11 @@ impl SessionRuntime {
                 .unwrap_or(false),
         };
 
-        let provider_hint = if overrides.as_ref().is_some_and(|ov| {
-            ov.provider_params.is_some() && ov.provider.is_none() && !ov.clear_provider_params
-        }) {
-            Some(self.current_materialized_llm_identity(session_id).await?)
-        } else {
-            None
-        };
-
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
             system_prompt: None,
             event_tx: Some(event_tx.clone()),
-            turn_metadata: Self::turn_metadata_from_overrides(
-                skill_references.clone(),
-                flow_tool_overlay.clone(),
-                additional_instructions.clone(),
-                overrides.as_ref(),
-                provider_hint
-                    .as_ref()
-                    .map(|identity| identity.provider.as_str()),
-            ),
+            turn_metadata: service_turn_metadata.clone(),
         };
 
         if self.live_session_is_stale(session_id).await? {
@@ -3388,10 +3135,7 @@ impl SessionRuntime {
                 turn_prompt,
                 event_tx,
                 keep_alive,
-                skill_references,
-                flow_tool_overlay,
-                additional_instructions,
-                overrides.as_ref(),
+                turn_metadata,
             ))
             .await;
         }
@@ -3400,7 +3144,7 @@ impl SessionRuntime {
         // (REST/MCP resume with None) observe the updated intent.
         // This is not fire-and-forget: if the update fails, the turn must not
         // proceed with divergent runtime vs persisted state.
-        if overrides.as_ref().and_then(|ov| ov.keep_alive).is_some() {
+        if keep_alive_override.is_some() {
             #[cfg(feature = "comms")]
             let comms_rt = self.service.comms_runtime(session_id).await;
             #[cfg(feature = "comms")]
@@ -3430,15 +3174,10 @@ impl SessionRuntime {
         }
 
         // Hot-swap LLM client if model/provider/provider_params changed.
-        if let Some(ref ov) = overrides
-            && (ov.model.is_some()
-                || ov.provider.is_some()
-                || ov.provider_params.is_some()
-                || ov.clear_provider_params
-                || ov.connection_ref.is_some()
-                || ov.clear_connection_ref)
+        if let Some(metadata) = turn_metadata_ref
+            && Self::turn_metadata_reconfigures_llm(metadata)
         {
-            self.hot_swap_llm_client(session_id, ov).await?;
+            self.hot_swap_llm_client(session_id, metadata).await?;
         }
 
         match self.service.start_turn(session_id, req).await {
@@ -3451,10 +3190,7 @@ impl SessionRuntime {
                     turn_prompt,
                     event_tx,
                     keep_alive,
-                    skill_references,
-                    flow_tool_overlay,
-                    additional_instructions,
-                    overrides.as_ref(),
+                    turn_metadata,
                 ))
                 .await
             }
@@ -3499,17 +3235,13 @@ impl SessionRuntime {
     /// fall through to the normal materialization path.
     ///
     /// Returns `SESSION_NOT_FOUND` if the session cannot be recovered.
-    #[allow(clippy::too_many_arguments)]
     async fn try_recover_persisted_session(
         &self,
         session_id: &SessionId,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         keep_alive: bool,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        additional_instructions: Option<Vec<String>>,
-        overrides: Option<&TurnOverrides>,
+        turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Result<RunResult, RpcError> {
         let loaded_session = self.load_persisted_session(session_id).await?;
 
@@ -3528,7 +3260,8 @@ impl SessionRuntime {
             });
         }
 
-        let recovery_overrides = self.recovery_overrides_from_turn(overrides, keep_alive)?;
+        let recovery_overrides =
+            self.recovery_overrides_from_turn(turn_metadata.as_ref(), keep_alive)?;
         let create_request = self
             .recovered_create_request(session_id, session, recovery_overrides)
             .await?;
@@ -3579,16 +3312,7 @@ impl SessionRuntime {
 
         // Recursively call start_turn which will now find the pending session.
         // Use Box::pin to avoid infinite recursion concerns in async.
-        Box::pin(self.start_turn(
-            session_id,
-            prompt,
-            event_tx,
-            skill_references,
-            flow_tool_overlay,
-            additional_instructions,
-            None,
-        ))
-        .await
+        Box::pin(self.start_turn(session_id, prompt, event_tx, turn_metadata)).await
     }
 
     async fn take_promoting_system_context_state(
@@ -4800,6 +4524,9 @@ mod tests {
     use meerkat::AgentBuildConfig;
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::StopReason;
+    use meerkat_core::lifecycle::run_primitive::{
+        KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride,
+    };
     use meerkat_core::skills::{
         SkillKey, SkillKeyRemap, SkillName, SourceIdentityLineage, SourceIdentityLineageEvent,
         SourceUuid,
@@ -4811,6 +4538,29 @@ mod tests {
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::Arc;
+
+    fn provider_params_override(
+        provider: &str,
+        value: serde_json::Value,
+    ) -> TurnMetadataOverride<ProviderParamsOverride> {
+        TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
+            provider, &value,
+        ))
+    }
+
+    fn keep_alive_metadata(enabled: bool) -> RuntimeTurnMetadata {
+        RuntimeTurnMetadata {
+            keep_alive: Some(if enabled {
+                TurnMetadataOverride::Set(KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(30),
+                    policy: KeepAliveMode::Pinned,
+                })
+            } else {
+                TurnMetadataOverride::Clear
+            }),
+            ..Default::default()
+        }
+    }
 
     #[cfg(feature = "comms")]
     fn install_ephemeral_peer_request_response_authority(
@@ -5002,15 +4752,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
         runtime
@@ -5085,15 +4827,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
 
@@ -5149,15 +4883,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
 
@@ -5173,16 +4899,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
-            .try_recover_persisted_session(
-                &session_id,
-                "Recover".into(),
-                event_tx,
-                false,
-                None,
-                None,
-                None,
-                None,
-            )
+            .try_recover_persisted_session(&session_id, "Recover".into(), event_tx, false, None)
             .await
             .expect("try_recover_persisted_session");
 
@@ -5235,15 +4952,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
         runtime
@@ -5347,15 +5056,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
         runtime
@@ -5453,16 +5154,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
-            .try_recover_persisted_session(
-                &session_id,
-                "Recover".into(),
-                event_tx,
-                false,
-                None,
-                None,
-                None,
-                None,
-            )
+            .try_recover_persisted_session(&session_id, "Recover".into(), event_tx, false, None)
             .await
             .expect("try_recover_persisted_session");
 
@@ -5527,15 +5219,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
         runtime
@@ -5648,15 +5332,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
         runtime
@@ -5772,15 +5448,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
         runtime
@@ -5904,15 +5572,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("start_turn");
 
@@ -5978,15 +5638,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "hello".into(), event_tx, None)
             .await
             .expect("start_turn");
 
@@ -6351,13 +6003,13 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = TurnOverrides {
-            model: Some("claude-opus-4-6".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-opus-4-6")),
             ..Default::default()
         };
 
         let resolved = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect("model-only override should resolve against the current provider");
 
@@ -6380,13 +6032,13 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = TurnOverrides {
-            model: Some("gpt-5.4".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
             ..Default::default()
         };
 
         let err = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect_err("model owned by another provider must fail closed");
 
@@ -6411,14 +6063,14 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = TurnOverrides {
-            model: Some("gpt-5.4".to_string()),
-            provider: Some("anthropic".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
+            provider: Some(meerkat_core::Provider::Anthropic),
             ..Default::default()
         };
 
         let err = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect_err("explicit turn provider must match catalog owner");
 
@@ -6574,13 +6226,16 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = TurnOverrides {
-            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
+        let turn_metadata = RuntimeTurnMetadata {
+            provider_params: Some(provider_params_override(
+                "self_hosted",
+                serde_json::json!({ "temperature": 0.2 }),
+            )),
             ..Default::default()
         };
 
         let resolved = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect("provider-param override should resolve");
 
@@ -6614,17 +6269,17 @@ mod tests {
                 profile: None,
             }),
         };
-        let overrides = TurnOverrides {
-            connection_ref: Some(meerkat_core::ConnectionRef {
+        let turn_metadata = RuntimeTurnMetadata {
+            connection_ref: Some(TurnMetadataOverride::Set(meerkat_core::ConnectionRef {
                 realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
                 profile: None,
-            }),
+            })),
             ..Default::default()
         };
 
         let resolved = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect("connection_ref override should resolve");
 
@@ -6662,13 +6317,16 @@ mod tests {
                 profile: None,
             }),
         };
-        let overrides = TurnOverrides {
-            provider_params: Some(serde_json::json!({ "temperature": 0.1 })),
+        let turn_metadata = RuntimeTurnMetadata {
+            provider_params: Some(provider_params_override(
+                "anthropic",
+                serde_json::json!({ "temperature": 0.1 }),
+            )),
             ..Default::default()
         };
 
         let resolved = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect("resolve must succeed");
 
@@ -6690,13 +6348,13 @@ mod tests {
             provider_params: Some(serde_json::json!({ "temperature": 0.7 })),
             connection_ref: None,
         };
-        let overrides = TurnOverrides {
-            clear_provider_params: true,
+        let turn_metadata = RuntimeTurnMetadata {
+            provider_params: Some(TurnMetadataOverride::Clear),
             ..Default::default()
         };
 
         let resolved = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect("clear override should resolve");
 
@@ -6719,73 +6377,17 @@ mod tests {
                 profile: None,
             }),
         };
-        let overrides = TurnOverrides {
-            clear_connection_ref: true,
+        let turn_metadata = RuntimeTurnMetadata {
+            connection_ref: Some(TurnMetadataOverride::Clear),
             ..Default::default()
         };
 
         let resolved = runtime
-            .resolve_target_llm_identity(&current, &overrides)
+            .resolve_target_llm_identity(&current, &turn_metadata)
             .await
             .expect("clear override should resolve");
 
         assert!(resolved.connection_ref.is_none());
-    }
-
-    #[tokio::test]
-    async fn turn_rejects_set_and_clear_connection_ref_together() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
-        let current = SessionLlmIdentity {
-            model: "claude-sonnet-4-5".to_string(),
-            provider: meerkat_core::Provider::Anthropic,
-            self_hosted_server_id: None,
-            provider_params: None,
-            connection_ref: None,
-        };
-        let overrides = TurnOverrides {
-            connection_ref: Some(meerkat_core::ConnectionRef {
-                realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
-                binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
-                profile: None,
-            }),
-            clear_connection_ref: true,
-            ..Default::default()
-        };
-
-        let err = runtime
-            .resolve_target_llm_identity(&current, &overrides)
-            .await
-            .expect_err("set+clear must be rejected");
-
-        assert_eq!(err.code, error::INVALID_PARAMS);
-        assert!(err.message.contains("clear_connection_ref"));
-    }
-
-    #[tokio::test]
-    async fn turn_rejects_set_and_clear_provider_params_together() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
-        let current = SessionLlmIdentity {
-            model: "claude-sonnet-4-5".to_string(),
-            provider: meerkat_core::Provider::Anthropic,
-            self_hosted_server_id: None,
-            provider_params: None,
-            connection_ref: None,
-        };
-        let overrides = TurnOverrides {
-            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
-            clear_provider_params: true,
-            ..Default::default()
-        };
-
-        let err = runtime
-            .resolve_target_llm_identity(&current, &overrides)
-            .await
-            .expect_err("set+clear must be rejected");
-
-        assert_eq!(err.code, error::INVALID_PARAMS);
-        assert!(err.message.contains("clear_provider_params"));
     }
 
     #[cfg(feature = "mcp")]
@@ -6833,15 +6435,7 @@ mod tests {
         let (event_tx, _event_rx) = mpsc::channel(100);
 
         let result = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -6867,7 +6461,7 @@ mod tests {
         let sid_clone = session_id.clone();
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "Hello".into(), event_tx, None, None, None, None)
+                .start_turn(&sid_clone, "Hello".into(), event_tx, None)
                 .await
         });
 
@@ -6941,7 +6535,7 @@ mod tests {
 
         let turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(&sid_clone, "Hello".into(), event_tx, None, None, None, None)
+                .start_turn(&sid_clone, "Hello".into(), event_tx, None)
                 .await
         });
 
@@ -6989,15 +6583,7 @@ mod tests {
         let sid_clone = session_id.clone();
         let _turn_handle = tokio::spawn(async move {
             runtime_clone
-                .start_turn(
-                    &sid_clone,
-                    "First".into(),
-                    event_tx1,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                .start_turn(&sid_clone, "First".into(), event_tx1, None)
                 .await
         });
 
@@ -7019,15 +6605,7 @@ mod tests {
         // Try to start a second turn
         let (event_tx2, _rx2) = mpsc::channel(100);
         let result = runtime
-            .start_turn(
-                &session_id,
-                "Second".into(),
-                event_tx2,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Second".into(), event_tx2, None)
             .await;
 
         assert!(result.is_err(), "Second turn should fail");
@@ -7053,15 +6631,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(100);
 
         let _result = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -7269,15 +6839,7 @@ mod tests {
         // (the broken server fails asynchronously, not at staging time).
         let (event_tx, mut event_rx) = mpsc::channel(32);
         let first = runtime
-            .start_turn(
-                &session_id,
-                "hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "hello".into(), event_tx, None)
             .await;
         assert!(
             first.is_ok(),
@@ -7295,15 +6857,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(32);
         let second = runtime
-            .start_turn(
-                &session_id,
-                "hello again".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "hello again".into(), event_tx, None)
             .await;
         assert!(
             second.is_ok(),
@@ -7332,15 +6886,7 @@ mod tests {
         // Non-blocking: add is now async — boundary emits "pending" not "applied".
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(
-                &session_id,
-                "turn add".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn add".into(), event_tx, None)
             .await
             .expect("turn add should apply staged add");
         let add_events = collect_tool_config_events(&mut event_rx);
@@ -7356,15 +6902,7 @@ mod tests {
             .expect("stage remove");
         let (event_tx, mut event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(
-                &session_id,
-                "turn remove".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn remove".into(), event_tx, None)
             .await
             .expect("turn remove should apply staged remove");
         let remove_events = collect_tool_config_events(&mut event_rx);
@@ -7395,15 +6933,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(
-                &session_id,
-                "turn add".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn add".into(), event_tx, None)
             .await
             .expect("add boundary");
 
@@ -7433,15 +6963,7 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(
-                &session_id,
-                "turn remove".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn remove".into(), event_tx, None)
             .await
             .expect("remove boundary");
         let first_turn_events = collect_tool_config_events(&mut event_rx);
@@ -7468,15 +6990,7 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(
-                &session_id,
-                "turn after timeout".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn after timeout".into(), event_tx, None)
             .await
             .expect("follow-up boundary");
         let second_turn_events = tokio::time::timeout(Duration::from_secs(1), async {
@@ -7524,15 +7038,7 @@ mod tests {
             .expect("stage add draining server");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(
-                &session_id,
-                "turn add first".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn add first".into(), event_tx, None)
             .await
             .expect("add first server at boundary");
 
@@ -7555,15 +7061,7 @@ mod tests {
             .expect("stage remove");
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(
-                &session_id,
-                "turn remove first".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn remove first".into(), event_tx, None)
             .await
             .expect("remove starts draining");
         let first_turn_events = collect_tool_config_events(&mut event_rx);
@@ -7593,15 +7091,7 @@ mod tests {
         // not "applied". The actual connection completes asynchronously.
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(
-                &session_id,
-                "turn apply staged add".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn apply staged add".into(), event_tx, None)
             .await
             .expect("next boundary should apply staged add");
 
@@ -7620,15 +7110,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let (event_tx, mut event_rx) = mpsc::channel(128);
         runtime
-            .start_turn(
-                &session_id,
-                "turn drain pending add".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn drain pending add".into(), event_tx, None)
             .await
             .expect("drain should resolve pending add");
 
@@ -7671,15 +7153,7 @@ mod tests {
             .expect("stage add");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(
-                &session_id,
-                "turn add".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn add".into(), event_tx, None)
             .await
             .expect("add boundary");
 
@@ -7702,15 +7176,7 @@ mod tests {
             .expect("stage remove");
         let (event_tx, _event_rx) = mpsc::channel(64);
         runtime
-            .start_turn(
-                &session_id,
-                "turn remove".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "turn remove".into(), event_tx, None)
             .await
             .expect("remove boundary");
 
@@ -7743,9 +7209,6 @@ mod tests {
                 &session_id,
                 "turn with broken add and queued removal".into(),
                 event_tx,
-                None,
-                None,
-                None,
                 None,
             )
             .await;
@@ -7871,15 +7334,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         let result = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -7911,15 +7366,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         let result = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
         assert!(result.text.contains("Hello from mock"));
@@ -7962,15 +7409,7 @@ mod tests {
         // Materialize the session with a first turn.
         let (event_tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "First".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "First".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -7978,20 +7417,9 @@ mod tests {
         // should not be rejected — keep_alive is allowed on materialized sessions.
         // Use keep_alive: false to avoid needing comms runtime.
         let (event_tx, _rx) = mpsc::channel(100);
-        let overrides = TurnOverrides {
-            keep_alive: Some(false),
-            ..Default::default()
-        };
+        let turn_metadata = keep_alive_metadata(false);
         let result = runtime
-            .start_turn(
-                &session_id,
-                "Second".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                Some(overrides),
-            )
+            .start_turn(&session_id, "Second".into(), event_tx, Some(turn_metadata))
             .await;
         assert!(
             result.is_ok(),
@@ -8012,20 +7440,12 @@ mod tests {
 
         // Start turn with model override on pending session.
         let (event_tx, _rx) = mpsc::channel(100);
-        let overrides = TurnOverrides {
-            model: Some("claude-opus-4-6".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-opus-4-6")),
             ..Default::default()
         };
         let result = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                Some(overrides),
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, Some(turn_metadata))
             .await;
         assert!(
             result.is_ok(),
@@ -8062,20 +7482,12 @@ mod tests {
             .unwrap();
 
         let (event_tx, _rx) = mpsc::channel(100);
-        let overrides = TurnOverrides {
-            provider: Some("openai".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            provider: Some(meerkat_core::Provider::OpenAI),
             ..Default::default()
         };
         let err = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                Some(overrides),
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, Some(turn_metadata))
             .await
             .expect_err("provider-only override should be rejected on pending sessions too");
         assert_eq!(err.code, error::INVALID_PARAMS);
@@ -8100,15 +7512,7 @@ mod tests {
         // Materialize the session.
         let (event_tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "First".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "First".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -8117,20 +7521,12 @@ mod tests {
         // is fine — the point is that the override is accepted, not rejected at the
         // parameter validation layer.
         let (event_tx, _rx) = mpsc::channel(100);
-        let overrides = TurnOverrides {
-            model: Some("claude-opus-4-6".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-opus-4-6")),
             ..Default::default()
         };
         let result = runtime
-            .start_turn(
-                &session_id,
-                "Second".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                Some(overrides),
-            )
+            .start_turn(&session_id, "Second".into(), event_tx, Some(turn_metadata))
             .await;
         if let Err(ref err) = result {
             assert_ne!(
@@ -8232,26 +7628,15 @@ mod tests {
     }
 
     #[test]
-    fn runtime_turn_metadata_from_overrides_preserves_provider_params_set() {
-        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
-
+    fn runtime_turn_metadata_provider_params_preserves_set() {
         let provider_params = serde_json::json!({
             "temperature": 0.2,
             "thinking": { "budget_tokens": 10_000 }
         });
-        let overrides = TurnOverrides {
-            provider_params: Some(provider_params),
+        let metadata = RuntimeTurnMetadata {
+            provider_params: Some(provider_params_override("anthropic", provider_params)),
             ..Default::default()
         };
-
-        let metadata = SessionRuntime::turn_metadata_from_overrides(
-            None,
-            None,
-            None,
-            Some(&overrides),
-            Some("anthropic"),
-        )
-        .expect("provider params set should produce turn metadata");
 
         let Some(TurnMetadataOverride::Set(params)) = metadata.provider_params else {
             panic!("provider_params set override should be preserved");
@@ -8265,28 +7650,19 @@ mod tests {
 
     #[test]
     fn runtime_turn_metadata_round_trips_provider_native_params_as_legacy_json() {
-        let overrides = TurnOverrides {
-            provider_params: Some(serde_json::json!({
-                "thinking": { "budget_tokens": 10_000 },
-                "effort": "xhigh",
-                "web_search": null,
-            })),
+        let metadata = RuntimeTurnMetadata {
+            provider_params: Some(provider_params_override(
+                "anthropic",
+                serde_json::json!({
+                    "thinking": { "budget_tokens": 10_000 },
+                    "effort": "xhigh",
+                    "web_search": null,
+                }),
+            )),
             ..Default::default()
         };
-        let metadata = SessionRuntime::turn_metadata_from_overrides(
-            None,
-            None,
-            None,
-            Some(&overrides),
-            Some("anthropic"),
-        )
-        .expect("provider params set should produce turn metadata");
-
-        let round_tripped = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
-            .expect("metadata should reconstruct turn overrides");
-        let provider_params = round_tripped
-            .provider_params
-            .expect("provider params should survive metadata round trip");
+        let provider_params = SessionRuntime::turn_metadata_provider_params(&metadata)
+            .expect("provider params should survive metadata projection");
 
         assert!(
             provider_params.get("provider_tag").is_none(),
@@ -8311,14 +7687,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let connection_ref = test_connection_ref("dev", "default");
-        let overrides = TurnOverrides {
-            clear_provider_params: true,
-            connection_ref: Some(connection_ref.clone()),
+        let turn_metadata = RuntimeTurnMetadata {
+            provider_params: Some(TurnMetadataOverride::Clear),
+            connection_ref: Some(TurnMetadataOverride::Set(connection_ref.clone())),
             ..Default::default()
         };
 
         let recovered = runtime
-            .recovery_overrides_from_turn(Some(&overrides), false)
+            .recovery_overrides_from_turn(Some(&turn_metadata), false)
             .expect("valid recovery overrides");
 
         assert!(recovered.clear_provider_params);
@@ -8326,8 +7702,8 @@ mod tests {
         assert_eq!(recovered.connection_ref, Some(connection_ref));
         assert!(!recovered.clear_connection_ref);
 
-        let clear_connection = TurnOverrides {
-            clear_connection_ref: true,
+        let clear_connection = RuntimeTurnMetadata {
+            connection_ref: Some(TurnMetadataOverride::Clear),
             ..Default::default()
         };
         let recovered = runtime
@@ -8350,15 +7726,7 @@ mod tests {
         let unknown_id = SessionId::new();
         let (event_tx, _rx) = mpsc::channel(100);
         let result = runtime
-            .start_turn(
-                &unknown_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&unknown_id, "Hello".into(), event_tx, None)
             .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, error::SESSION_NOT_FOUND);
@@ -8444,15 +7812,7 @@ mod tests {
         // Materialize the session with a turn.
         let (event_tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -8485,22 +7845,14 @@ mod tests {
 
         // Materialize the session with the first turn.
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
         // Hot-swap to an OpenAI model (does NOT support image_tool_results).
-        let overrides = TurnOverrides {
-            model: Some("gpt-5.4".to_string()),
-            provider: Some("openai".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
+            provider: Some(meerkat_core::Provider::OpenAI),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -8509,10 +7861,7 @@ mod tests {
                 &session_id,
                 "Second turn".into(),
                 event_tx2,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .unwrap();
@@ -8553,22 +7902,14 @@ mod tests {
 
         // Materialize with first turn.
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
         // Hot-swap to OpenAI (deny view_image).
-        let overrides = TurnOverrides {
-            model: Some("gpt-5.4".to_string()),
-            provider: Some("openai".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
+            provider: Some(meerkat_core::Provider::OpenAI),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -8577,18 +7918,15 @@ mod tests {
                 &session_id,
                 "Second turn".into(),
                 event_tx2,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .unwrap();
 
         // Hot-swap back to Anthropic (should clear the deny).
-        let overrides = TurnOverrides {
-            model: Some("claude-sonnet-4-5".to_string()),
-            provider: Some("anthropic".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-sonnet-4-5")),
+            provider: Some(meerkat_core::Provider::Anthropic),
             ..Default::default()
         };
         let (event_tx3, _event_rx3) = mpsc::channel(100);
@@ -8597,10 +7935,7 @@ mod tests {
                 &session_id,
                 "Third turn".into(),
                 event_tx3,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .unwrap();
@@ -8640,15 +7975,7 @@ mod tests {
 
         // Materialize with first turn.
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -8663,9 +7990,9 @@ mod tests {
             .expect("staging deny filter for datetime should succeed");
 
         // Hot-swap to OpenAI — should add view_image to the deny set, not replace it.
-        let overrides = TurnOverrides {
-            model: Some("gpt-5.4".to_string()),
-            provider: Some("openai".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
+            provider: Some(meerkat_core::Provider::OpenAI),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -8674,10 +8001,7 @@ mod tests {
                 &session_id,
                 "Second turn".into(),
                 event_tx2,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .unwrap();
@@ -8716,15 +8040,7 @@ mod tests {
 
         // Materialize with first turn.
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
@@ -8749,8 +8065,8 @@ mod tests {
             .expect("staging mixed capability and external denies should succeed");
 
         // Hot-swap to Anthropic — should clear only the capability-owned deny.
-        let overrides = TurnOverrides {
-            model: Some("claude-sonnet-4-5".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-sonnet-4-5")),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -8759,10 +8075,7 @@ mod tests {
                 &session_id,
                 "Second turn".into(),
                 event_tx2,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .unwrap();
@@ -8798,20 +8111,12 @@ mod tests {
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
-        let overrides = TurnOverrides {
-            provider: Some("openai".to_string()),
+        let turn_metadata = RuntimeTurnMetadata {
+            provider: Some(meerkat_core::Provider::OpenAI),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -8820,10 +8125,7 @@ mod tests {
                 &session_id,
                 "Second turn".into(),
                 event_tx2,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .expect_err("provider-only override should be rejected");
@@ -8847,23 +8149,20 @@ mod tests {
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
         let provider_params = serde_json::json!({
             "thinking": { "budget_tokens": 10_000 }
         });
-        let overrides = TurnOverrides {
-            provider_params: Some(provider_params.clone()),
+        let provider_params_override = provider_params_override("anthropic", provider_params);
+        let expected_provider_params = match &provider_params_override {
+            TurnMetadataOverride::Set(params) => params.to_legacy_provider_value(),
+            TurnMetadataOverride::Clear => unreachable!("provider params helper always sets"),
+        };
+        let turn_metadata = RuntimeTurnMetadata {
+            provider_params: Some(provider_params_override),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -8872,10 +8171,7 @@ mod tests {
                 &session_id,
                 "Second turn".into(),
                 event_tx2,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .unwrap();
@@ -8890,7 +8186,10 @@ mod tests {
             .expect("live session metadata after provider_params hot-swap");
         assert_eq!(live_meta.model, "claude-sonnet-4-5");
         assert_eq!(live_meta.provider, meerkat_core::Provider::Anthropic);
-        assert_eq!(live_meta.provider_params, Some(provider_params.clone()));
+        assert_eq!(
+            live_meta.provider_params,
+            Some(expected_provider_params.clone())
+        );
 
         let stored = runtime
             .load_persisted_session(&session_id)
@@ -8902,7 +8201,7 @@ mod tests {
             .expect("stored session metadata after provider_params hot-swap");
         assert_eq!(stored_meta.model, "claude-sonnet-4-5");
         assert_eq!(stored_meta.provider, meerkat_core::Provider::Anthropic);
-        assert_eq!(stored_meta.provider_params, Some(provider_params));
+        assert_eq!(stored_meta.provider_params, Some(expected_provider_params));
     }
 
     #[tokio::test]
@@ -8917,25 +8216,17 @@ mod tests {
             .unwrap();
         let (event_tx, _event_rx) = mpsc::channel(100);
         let _ = runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .unwrap();
 
         let provider_params = serde_json::json!({
             "reasoning": { "effort": "medium" }
         });
-        let overrides = TurnOverrides {
-            model: Some("gpt-5.4".to_string()),
-            provider: Some("openai".to_string()),
-            provider_params: Some(provider_params.clone()),
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
+            provider: Some(meerkat_core::Provider::OpenAI),
+            provider_params: Some(provider_params_override("openai", provider_params.clone())),
             ..Default::default()
         };
         let (event_tx2, _event_rx2) = mpsc::channel(100);
@@ -8944,10 +8235,7 @@ mod tests {
                 &session_id,
                 "Second turn".into(),
                 event_tx2,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .unwrap();
@@ -8967,16 +8255,7 @@ mod tests {
 
         let (event_tx, _rx) = mpsc::channel(100);
         let recovered = runtime
-            .try_recover_persisted_session(
-                &session_id,
-                "recover".into(),
-                event_tx,
-                false,
-                None,
-                None,
-                None,
-                None,
-            )
+            .try_recover_persisted_session(&session_id, "recover".into(), event_tx, false, None)
             .await;
         assert!(
             recovered.is_ok(),
@@ -9014,15 +8293,7 @@ mod tests {
             .expect("create_session");
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "Hello".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "Hello".into(), event_tx, None)
             .await
             .expect("initial materialization");
 
@@ -9037,9 +8308,9 @@ mod tests {
             .await;
 
         let connection_ref = test_connection_ref("dev", "default");
-        let overrides = TurnOverrides {
-            clear_provider_params: true,
-            connection_ref: Some(connection_ref.clone()),
+        let turn_metadata = RuntimeTurnMetadata {
+            provider_params: Some(TurnMetadataOverride::Clear),
+            connection_ref: Some(TurnMetadataOverride::Set(connection_ref.clone())),
             ..Default::default()
         };
         let (event_tx, _event_rx) = mpsc::channel(100);
@@ -9048,10 +8319,7 @@ mod tests {
                 &session_id,
                 "Recover with overrides".into(),
                 event_tx,
-                None,
-                None,
-                None,
-                Some(overrides),
+                Some(turn_metadata),
             )
             .await
             .expect("recovery turn should apply overrides");
@@ -9130,15 +8398,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "after rejection".into(),
-                tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "after rejection".into(), tx, None)
             .await
             .expect("staged session should remain promotable after rejected override");
     }
@@ -9160,15 +8420,7 @@ mod tests {
             .expect("create session");
         let (tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "materialize".into(),
-                tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "materialize".into(), tx, None)
             .await
             .expect("materialize keep_alive session");
         runtime
@@ -9306,15 +8558,7 @@ mod tests {
             .expect("create session");
         let (tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "materialize".into(),
-                tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "materialize".into(), tx, None)
             .await
             .expect("materialize session");
 
@@ -9369,9 +8613,6 @@ mod tests {
                 "materialize after validation failure".into(),
                 tx,
                 None,
-                None,
-                None,
-                None,
             )
             .await
             .expect("staged session should remain promotable");
@@ -9404,15 +8645,7 @@ mod tests {
             .expect("create session");
         let (tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "materialize".into(),
-                tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "materialize".into(), tx, None)
             .await
             .expect("materialize session");
 
@@ -9471,15 +8704,7 @@ mod tests {
             .expect("create session");
         let (tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "materialize".into(),
-                tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .start_turn(&session_id, "materialize".into(), tx, None)
             .await
             .expect("materialize session");
 
@@ -9644,6 +8869,27 @@ mod tests {
         assert_eq!(data["resumable"], true);
         assert_eq!(data["tool_name"], "external_mock");
         assert_eq!(data["args"], serde_json::json!({ "value": "browser" }));
+    }
+
+    #[test]
+    fn session_runtime_has_no_turn_metadata_shadow_carrier() {
+        let source = include_str!("session_runtime.rs");
+        let shadow_type = concat!("struct ", "Turn", "Overrides");
+        let shadow_projection = concat!("turn_", "overrides", "_from_", "metadata");
+        let split_start_signature = concat!("flow_", "tool_", "overlay: Option<");
+
+        assert!(
+            !source.contains(shadow_type),
+            "runtime turn metadata must not be mirrored into a second TurnOverrides carrier"
+        );
+        assert!(
+            !source.contains(shadow_projection),
+            "runtime turn metadata must be consumed directly, not projected into a shadow carrier"
+        );
+        assert!(
+            !source.contains(split_start_signature),
+            "SessionRuntime::start_turn must not accept split flow overlay outside RuntimeTurnMetadata"
+        );
     }
 
     // -- P2-6: Typed BuildError → PROVIDER_ERROR classification --

@@ -564,9 +564,9 @@ Returns `ModelsCatalogResponse` with providers, default models, and per-model pr
 
 Model and provider can be changed on a live session without rebuilding the agent:
 
-- **RPC**: `turn/start` with `model`, `provider`, `provider_params` fields. Works on both pending (deferred) and materialized sessions.
-- **REST**: `POST /sessions/{id}/messages` with `model`, `provider` fields.
-- **MCP**: `meerkat_resume` with `model`, `provider` fields.
+- **RPC**: `turn/start` with `turn_metadata.model`, `turn_metadata.provider`, and `turn_metadata.provider_params`. Works on both pending (deferred) and materialized sessions.
+- **REST**: `POST /sessions/{id}/messages` with `turn_metadata.model`, `turn_metadata.provider`, and `turn_metadata.provider_params`.
+- **MCP**: `meerkat_resume` with `model`, `provider`, and `provider_params` fields.
 - **Rust SDK**: `Agent::replace_client()` for direct library usage.
 
 On materialized sessions, the LLM client is hot-swapped for the remainder of the session. Ephemeral sessions return `SessionError::Unsupported`.
@@ -675,7 +675,7 @@ In `autonomous_host` mode, agents run a continuous loop: wake on inbox → proce
 Tool visibility can change during a session without restarting the agent. All changes are staged then atomically applied at the turn boundary.
 
 - **External filters** — allow-list or deny-list staged via `ToolScopeHandle`, applied at `CallingLlm` boundary. Persisted in session metadata (`tool_scope_external_filter`).
-- **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.flow_tool_overlay`. Ephemeral, used by mob flow steps to restrict tools per step.
+- **Per-turn overlay** — `TurnToolOverlay` on `RuntimeTurnMetadata.flow_tool_overlay`, passed through `StartTurnRequest.turn_metadata`. Ephemeral, used by mob flow steps to restrict tools per step.
 - **Live MCP mutation** — `mcp/add`, `mcp/remove`, `mcp/reload` stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.
 - **Async MCP loading** — At startup, MCP servers connect in parallel in the background. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary. Tools appear as each server completes its handshake. A `[MCP_PENDING]` system notice is injected while servers are still connecting.
   - Per-server timeout: `connect_timeout_secs` in `.rkat/mcp.toml` (default: 10s)

@@ -141,7 +141,7 @@ For **testing or embedded use** where runtime semantics are intentionally not ne
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::{InitialTurnPolicy, HandlingMode};
+use meerkat_core::service::InitialTurnPolicy;
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
@@ -163,12 +163,8 @@ let session_id = result.session_id;
 let result = service.start_turn(&session_id, StartTurnRequest {
     prompt: "What's my name?".into(),
     system_prompt: None,
-    render_metadata: None,
-    handling_mode: HandlingMode::Queue,
     event_tx: None,
-    skill_references: None,
-    flow_tool_overlay: None,
-    additional_instructions: None,
+    turn_metadata: None,
 }).await?;
 
 // Read session state
@@ -183,7 +179,7 @@ service.archive(&session_id).await?;
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::{HandlingMode, InitialTurnPolicy};
+use meerkat_core::service::InitialTurnPolicy;
 
 let created = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
@@ -201,12 +197,8 @@ let created = service.create_session(CreateSessionRequest {
 let result = service.start_turn(&created.session_id, StartTurnRequest {
     prompt: "Now run with the first-turn override.".into(),
     system_prompt: Some("You are the deferred first-turn override.".into()),
-    render_metadata: None,
-    handling_mode: HandlingMode::Queue,
     event_tx: None,
-    skill_references: None,
-    flow_tool_overlay: None,
-    additional_instructions: None,
+    turn_metadata: None,
 }).await?;
 ```
 

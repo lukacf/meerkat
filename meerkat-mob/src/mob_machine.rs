@@ -19,6 +19,7 @@ use crate::tasks::MobTask;
 use crate::tokio;
 use indexmap::IndexSet;
 use meerkat_machine_derive::CommandManifest;
+use meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -224,7 +225,8 @@ pub(crate) enum MobMachineCommandResult {
 pub fn canonical_mob_machine_command_manifest() -> IndexSet<&'static str> {
     canonical_mob_machine_command_classifications()
         .into_iter()
-        .flat_map(|record| record.classification.catalog_input_names())
+        .flat_map(|record| record.classification.catalog_inputs())
+        .map(MobMachineCatalogInput::as_str)
         .collect()
 }
 
@@ -255,10 +257,10 @@ impl MobMachineCommandClassification {
     }
 
     #[must_use]
-    pub fn catalog_input_names(self) -> Vec<&'static str> {
+    pub fn catalog_input_variants(self) -> Vec<MobMachineInputVariant> {
         self.catalog_inputs()
             .into_iter()
-            .map(MobMachineCatalogInput::as_str)
+            .map(MobMachineCatalogInput::input_variant)
             .collect()
     }
 }
@@ -390,6 +392,94 @@ impl MobMachineCatalogInput {
         Self::KickoffCancelRequested,
         Self::KickoffClear,
     ];
+
+    #[must_use]
+    pub const fn input_variant(self) -> MobMachineInputVariant {
+        match self {
+            Self::RunFlow => MobMachineInputVariant::RunFlow,
+            Self::CancelFlow => MobMachineInputVariant::CancelFlow,
+            Self::FlowStatus => MobMachineInputVariant::FlowStatus,
+            Self::Spawn => MobMachineInputVariant::Spawn,
+            Self::EnsureMember => MobMachineInputVariant::EnsureMember,
+            Self::Reconcile => MobMachineInputVariant::Reconcile,
+            Self::Retire => MobMachineInputVariant::Retire,
+            Self::Respawn => MobMachineInputVariant::Respawn,
+            Self::RetireAll => MobMachineInputVariant::RetireAll,
+            Self::WireMembers => MobMachineInputVariant::WireMembers,
+            Self::UnwireMembers => MobMachineInputVariant::UnwireMembers,
+            Self::WireExternalPeer => MobMachineInputVariant::WireExternalPeer,
+            Self::UnwireExternalPeer => MobMachineInputVariant::UnwireExternalPeer,
+            Self::SubmitWork => MobMachineInputVariant::SubmitWork,
+            Self::CancelWork => MobMachineInputVariant::CancelWork,
+            Self::CancelAllWork => MobMachineInputVariant::CancelAllWork,
+            Self::Stop => MobMachineInputVariant::Stop,
+            Self::Resume => MobMachineInputVariant::Resume,
+            Self::Complete => MobMachineInputVariant::Complete,
+            Self::Reset => MobMachineInputVariant::Reset,
+            Self::Destroy => MobMachineInputVariant::Destroy,
+            Self::TaskCreate => MobMachineInputVariant::TaskCreate,
+            Self::TaskUpdate => MobMachineInputVariant::TaskUpdate,
+            Self::TaskList => MobMachineInputVariant::TaskList,
+            Self::TaskGet => MobMachineInputVariant::TaskGet,
+            Self::McpServerStates => MobMachineInputVariant::McpServerStates,
+            Self::RosterSnapshot => MobMachineInputVariant::RosterSnapshot,
+            Self::ListMembers => MobMachineInputVariant::ListMembers,
+            Self::ListMembersIncludingRetiring => {
+                MobMachineInputVariant::ListMembersIncludingRetiring
+            }
+            Self::ListAllMembers => MobMachineInputVariant::ListAllMembers,
+            Self::MemberStatus => MobMachineInputVariant::MemberStatus,
+            Self::SubscribeAgentEvents => MobMachineInputVariant::SubscribeAgentEvents,
+            Self::SubscribeAllAgentEvents => MobMachineInputVariant::SubscribeAllAgentEvents,
+            Self::SubscribeMobEvents => MobMachineInputVariant::SubscribeMobEvents,
+            Self::PollEvents => MobMachineInputVariant::PollEvents,
+            Self::ReplayAllEvents => MobMachineInputVariant::ReplayAllEvents,
+            Self::RecordOperatorActionProvenance => {
+                MobMachineInputVariant::RecordOperatorActionProvenance
+            }
+            Self::GetMember => MobMachineInputVariant::GetMember,
+            Self::SetSpawnPolicy => MobMachineInputVariant::SetSpawnPolicy,
+            Self::Shutdown => MobMachineInputVariant::Shutdown,
+            Self::ForceCancel => MobMachineInputVariant::ForceCancel,
+            Self::CreateRunSeed => MobMachineInputVariant::CreateRunSeed,
+            Self::CreateFrameSeed => MobMachineInputVariant::CreateFrameSeed,
+            Self::CreateLoopSeed => MobMachineInputVariant::CreateLoopSeed,
+            Self::RecordLoopBodyFrameCompleted => {
+                MobMachineInputVariant::RecordLoopBodyFrameCompleted
+            }
+            Self::RecordLoopUntilConditionMet => {
+                MobMachineInputVariant::RecordLoopUntilConditionMet
+            }
+            Self::RecordLoopUntilConditionFailed => {
+                MobMachineInputVariant::RecordLoopUntilConditionFailed
+            }
+            Self::AuthorizeFlowRunReducerCommand => {
+                MobMachineInputVariant::AuthorizeFlowRunReducerCommand
+            }
+            Self::AuthorizeFlowFrameReducerCommand => {
+                MobMachineInputVariant::AuthorizeFlowFrameReducerCommand
+            }
+            Self::AuthorizeLoopIterationReducerCommand => {
+                MobMachineInputVariant::AuthorizeLoopIterationReducerCommand
+            }
+            Self::SessionIngressDetachedForMobDestroy => {
+                MobMachineInputVariant::SessionIngressDetachedForMobDestroy
+            }
+            Self::SessionIngressDetachFailedForMobDestroy => {
+                MobMachineInputVariant::SessionIngressDetachFailedForMobDestroy
+            }
+            Self::KickoffMarkPending => MobMachineInputVariant::KickoffMarkPending,
+            Self::KickoffMarkStarting => MobMachineInputVariant::KickoffMarkStarting,
+            Self::StartupMarkReady => MobMachineInputVariant::StartupMarkReady,
+            Self::KickoffResolveStarted => MobMachineInputVariant::KickoffResolveStarted,
+            Self::KickoffResolveCallbackPending => {
+                MobMachineInputVariant::KickoffResolveCallbackPending
+            }
+            Self::KickoffResolveFailed => MobMachineInputVariant::KickoffResolveFailed,
+            Self::KickoffCancelRequested => MobMachineInputVariant::KickoffCancelRequested,
+            Self::KickoffClear => MobMachineInputVariant::KickoffClear,
+        }
+    }
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {

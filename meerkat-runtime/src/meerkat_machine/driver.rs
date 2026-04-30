@@ -1355,45 +1355,28 @@ pub(crate) struct RecoveredIngressEntry {
 pub(crate) fn machine_build_recovered_ingress_entry(
     state: &InputState,
 ) -> Option<RecoveredIngressEntry> {
+    let persisted_input = state.persisted_input.as_ref()?;
     let handling_mode = state
         .policy
         .as_ref()
         .map(|policy| crate::accept::handling_mode_from_policy(&policy.decision))
         .unwrap_or(meerkat_core::types::HandlingMode::Queue);
-    let content_shape = state
-        .persisted_input
-        .as_ref()
-        .map(|input| crate::ingress_types::ContentShape(input.kind_id().to_string()))
-        .unwrap_or_else(|| crate::ingress_types::ContentShape("unknown".into()));
+    let content_shape = crate::ingress_types::ContentShape::from_kind(persisted_input.kind());
     let policy = match state.policy.as_ref() {
         Some(policy) => policy.decision.clone(),
-        None => match state.persisted_input.as_ref() {
-            Some(input) => crate::policy_table::DefaultPolicyTable::resolve(input, true),
-            None => return None,
-        },
+        None => crate::policy_table::DefaultPolicyTable::resolve(persisted_input, true),
     };
-    let recovered_kind = state
-        .persisted_input
-        .as_ref()
-        .map(Input::kind)
-        .unwrap_or(crate::identifiers::InputKind::Prompt);
+    let recovered_kind = persisted_input.kind();
     let runtime_semantics =
         crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, recovered_kind);
-    let primitive_projection = state
-        .persisted_input
-        .as_ref()
-        .map(crate::input::runtime_input_projection)
-        .unwrap_or_default();
+    let primitive_projection = crate::input::runtime_input_projection(persisted_input);
 
     Some(RecoveredIngressEntry {
         content_shape,
         handling_mode,
         runtime_semantics,
         primitive_projection,
-        is_prompt: matches!(
-            state.persisted_input.as_ref(),
-            Some(crate::input::Input::Prompt(_))
-        ),
+        is_prompt: matches!(persisted_input, crate::input::Input::Prompt(_)),
         policy,
     })
 }
@@ -1493,11 +1476,6 @@ pub(crate) fn machine_recover_ephemeral_driver(
         recovered += delta.recovered;
         abandoned += delta.abandoned;
         requeued += delta.requeued;
-        // Persist the normalized shell back into the ledger; the DSL seeding
-        // happens below via admit_recovered_to_ingress.
-        if let Some(ledger_slot) = driver.ledger_mut().get_mut(input_id) {
-            *ledger_slot = bundle.state.clone();
-        }
         normalized.push((input_id.clone(), bundle));
     }
 
@@ -1505,16 +1483,24 @@ pub(crate) fn machine_recover_ephemeral_driver(
     // No rebuilt authority — the DSL is the only owner of recovered phase,
     // run/boundary associations, typed terminal metadata, attempt count, and
     // lane membership.
-    let recovered_entries: Vec<(InputId, RecoveredIngressEntry, InputState, InputStateSeed)> =
-        normalized
-            .into_iter()
-            .filter_map(|(input_id, bundle)| {
-                machine_build_recovered_ingress_entry(&bundle.state)
-                    .map(|entry| (input_id, entry, bundle.state, bundle.seed))
-            })
-            .collect();
+    let mut recovered_entries: Vec<(InputId, RecoveredIngressEntry, InputState, InputStateSeed)> =
+        Vec::with_capacity(normalized.len());
+    for (input_id, bundle) in normalized {
+        let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
+            return Err(RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
+                bundle.state.input_id
+            )));
+        };
+        recovered_entries.push((input_id, entry, bundle.state, bundle.seed));
+    }
 
     for (input_id, entry, state, seed) in recovered_entries {
+        // Persist the normalized shell back into the ledger only after we have
+        // proven the recovered input can re-enter ingress with typed metadata.
+        if let Some(ledger_slot) = driver.ledger_mut().get_mut(&input_id) {
+            *ledger_slot = state.clone();
+        }
         driver.admit_recovered_to_ingress(
             input_id,
             entry.content_shape,
@@ -1555,10 +1541,16 @@ pub(crate) async fn machine_recover_persistent_driver(
             machine_normalize_recovered_input_state(store, runtime_id, &stored_runtime_id, bundle)
                 .await?;
 
+        if bundle.state.durability == Some(crate::input::InputDurability::Ephemeral) {
+            continue;
+        }
+
         if driver.input_state(&bundle.state.input_id).is_none() {
             let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
-                driver.ledger_mut().recover(bundle.state);
-                continue;
+                return Err(RuntimeDriverError::Internal(format!(
+                    "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
+                    bundle.state.input_id
+                )));
             };
 
             let inserted = driver.ledger_mut().recover(bundle.state.clone());
@@ -2009,4 +2001,93 @@ async fn fail_runtime_loop_run_inner(
                 "failed to record run-failed event: {run_err}"
             )))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{
+        ApplyMode, ConsumePoint, DrainPolicy, QueueMode, RoutingDisposition, WakeMode,
+    };
+
+    fn policy(apply_mode: ApplyMode) -> crate::policy::PolicyDecision {
+        crate::policy::PolicyDecision {
+            apply_mode,
+            wake_mode: WakeMode::WakeIfIdle,
+            queue_mode: QueueMode::Fifo,
+            consume_point: ConsumePoint::OnRunComplete,
+            drain_policy: DrainPolicy::QueueNextTurn,
+            routing_disposition: RoutingDisposition::Queue,
+            record_transcript: true,
+            emit_operator_content: true,
+            policy_version: crate::policy_table::DEFAULT_POLICY_VERSION,
+        }
+    }
+
+    #[test]
+    fn recovered_ingress_entry_requires_persisted_input_for_content_shape() {
+        let mut state = crate::input_state::InputState::new_accepted(InputId::new());
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::policy_table::DEFAULT_POLICY_VERSION,
+            decision: policy(ApplyMode::StageRunStart),
+        });
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must not synthesize an unknown admitted-input content shape"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_recovery_rejects_state_without_persisted_input_content_shape() {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("missing-persisted-input-content-shape");
+        let input_id = InputId::new();
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        let bundle = crate::input_state::StoredInputState::new_accepted(input_id.clone());
+        store
+            .persist_input_state(&runtime_id, &bundle)
+            .await
+            .expect("persist corrupt recovered input state");
+
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
+        let err = machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+            .await
+            .expect_err("missing persisted input must not recover as a ledger-only row");
+
+        assert!(
+            err.to_string()
+                .contains("cannot derive admitted-input content shape"),
+            "unexpected recovery error: {err}"
+        );
+        assert!(
+            driver.input_state(&input_id).is_none(),
+            "failed recovery must not leave a ledger-only input row"
+        );
+    }
+
+    #[tokio::test]
+    async fn ephemeral_recovery_rejects_state_without_persisted_input_content_shape() {
+        let runtime_id = LogicalRuntimeId::new("ephemeral-missing-persisted-content-shape");
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id);
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let input_id = input.id().clone();
+
+        driver.accept_input(input).await.expect("accept input");
+        driver
+            .ledger_mut()
+            .get_mut(&input_id)
+            .expect("accepted input ledger state")
+            .persisted_input = None;
+
+        let err = machine_recover_ephemeral_driver(&mut driver)
+            .expect_err("missing persisted input must not be silently skipped");
+
+        assert!(
+            err.to_string()
+                .contains("cannot derive admitted-input content shape"),
+            "unexpected recovery error: {err}"
+        );
+    }
 }

@@ -19621,10 +19621,9 @@ fn assert_peer_response_terminal_consumed(
         .admission_order
         .iter()
         .find(|entry| {
-            entry
-                .content_shape
-                .as_ref()
-                .is_some_and(|shape| shape.0 == "peer_response_terminal")
+            entry.content_shape.as_ref().is_some_and(|shape| {
+                shape.kind() == meerkat_runtime::identifiers::InputKind::PeerResponseTerminal
+            })
         })
         .unwrap_or_else(|| {
             panic!(
@@ -20344,10 +20343,9 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         .admission_order
         .iter()
         .find(|input| {
-            input
-                .content_shape
-                .as_ref()
-                .is_some_and(|shape| shape.0.as_str() == "peer_response_terminal")
+            input.content_shape.as_ref().is_some_and(|shape| {
+                shape.kind() == meerkat_runtime::identifiers::InputKind::PeerResponseTerminal
+            })
         })
         .expect("requester should admit a terminal peer response input");
     assert_eq!(
@@ -20402,12 +20400,11 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
                     .admission_order
                     .iter()
                     .filter(|input| {
-                        input
-                            .content_shape
-                            .as_ref()
-                            .is_some_and(|shape| shape.0.as_str() == "peer_response_terminal")
-                            && input.lifecycle
-                                == Some(meerkat_runtime::InputLifecycleState::Consumed)
+                        input.content_shape.as_ref().is_some_and(|shape| {
+                            shape.kind()
+                                == meerkat_runtime::identifiers::InputKind::PeerResponseTerminal
+                        }) && input.lifecycle
+                            == Some(meerkat_runtime::InputLifecycleState::Consumed)
                     })
                     .count()
                     >= 2

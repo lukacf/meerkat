@@ -12,15 +12,51 @@ use meerkat_core::lifecycle::run_primitive::{
     RunApplyBoundary,
 };
 
-use crate::identifiers::InputKind;
+use crate::identifiers::{InputKind, KindId};
 use crate::policy::{ApplyMode, PolicyDecision};
 
 /// Content shape classification for admitted inputs.
 ///
 /// Used by the admitted-input snapshot surface so callers can correlate
 /// admissions by content type without re-parsing the Input payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContentShape(pub String);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContentShape(InputKind);
+
+impl ContentShape {
+    pub const fn from_kind(kind: InputKind) -> Self {
+        Self(kind)
+    }
+
+    pub const fn from_kind_id(kind_id: KindId) -> Self {
+        Self(kind_id.kind())
+    }
+
+    pub const fn kind(self) -> InputKind {
+        self.0
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0.as_str()
+    }
+}
+
+impl From<InputKind> for ContentShape {
+    fn from(kind: InputKind) -> Self {
+        Self::from_kind(kind)
+    }
+}
+
+impl From<KindId> for ContentShape {
+    fn from(kind_id: KindId) -> Self {
+        Self::from_kind_id(kind_id)
+    }
+}
+
+impl std::fmt::Display for ContentShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Reservation key for admitted inputs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -141,5 +177,43 @@ mod tests {
             RuntimeExecutionKind::ResumePending
         );
         assert_eq!(semantics.peer_response_terminal_apply_intent, None);
+    }
+
+    #[test]
+    fn admitted_content_shape_is_closed_to_input_kind_contract() {
+        let shapes = [
+            (InputKind::Prompt, "prompt"),
+            (InputKind::PeerMessage, "peer_message"),
+            (InputKind::PeerRequest, "peer_request"),
+            (InputKind::PeerResponseProgress, "peer_response_progress"),
+            (InputKind::PeerResponseTerminal, "peer_response_terminal"),
+            (InputKind::FlowStep, "flow_step"),
+            (InputKind::ExternalEvent, "external_event"),
+            (InputKind::Continuation, "continuation"),
+            (InputKind::Operation, "operation"),
+        ];
+
+        for (kind, label) in shapes {
+            let shape = ContentShape::from_kind(kind);
+            assert_eq!(shape.kind(), kind);
+            assert_eq!(shape.as_str(), label);
+            assert_eq!(shape.to_string(), label);
+        }
+    }
+
+    #[test]
+    fn admitted_content_shape_source_has_no_string_newtype_contract() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("ingress_types.rs"),
+        )
+        .expect("read ingress types source");
+
+        let forbidden = ["pub struct ContentShape", "(pub String)"].concat();
+        assert!(
+            !source.contains(&forbidden),
+            "runtime admitted-input ContentShape must not be a public arbitrary string newtype"
+        );
     }
 }

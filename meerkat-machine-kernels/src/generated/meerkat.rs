@@ -3314,22 +3314,37 @@ impl std::fmt::Display for WorkOrigin {
 )]
 pub enum ContentShape {
     #[default]
+    #[serde(rename = "conversation")]
     Conversation,
+    #[serde(rename = "conversation+context")]
     ConversationAndContext,
+    #[serde(rename = "context")]
     Context,
+    #[serde(rename = "empty")]
     Empty,
+    #[serde(rename = "immediate_append")]
     ImmediateAppend,
+    #[serde(rename = "immediate_context")]
     ImmediateContext,
 }
 impl ContentShape {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Conversation => "Conversation",
-            Self::ConversationAndContext => "ConversationAndContext",
-            Self::Context => "Context",
-            Self::Empty => "Empty",
-            Self::ImmediateAppend => "ImmediateAppend",
-            Self::ImmediateContext => "ImmediateContext",
+            Self::Conversation => {
+                meerkat_core::turn_execution_authority::ContentShape::Conversation.as_str()
+            }
+            Self::ConversationAndContext => {
+                meerkat_core::turn_execution_authority::ContentShape::ConversationAndContext
+                    .as_str()
+            }
+            Self::Context => meerkat_core::turn_execution_authority::ContentShape::Context.as_str(),
+            Self::Empty => meerkat_core::turn_execution_authority::ContentShape::Empty.as_str(),
+            Self::ImmediateAppend => {
+                meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend.as_str()
+            }
+            Self::ImmediateContext => {
+                meerkat_core::turn_execution_authority::ContentShape::ImmediateContext.as_str()
+            }
         }
     }
 }

@@ -529,7 +529,7 @@ impl EphemeralRuntimeDriver {
 
     /// Content shape captured at admission time.
     pub fn admitted_content_shape(&self, input_id: &InputId) -> Option<ContentShape> {
-        self.content_shape.get(input_id).cloned()
+        self.content_shape.get(input_id).copied()
     }
 
     /// Request ID captured at admission time.
@@ -806,8 +806,7 @@ impl EphemeralRuntimeDriver {
         if !self.admission_order.contains(work_id) {
             self.admission_order.push(work_id.clone());
         }
-        self.content_shape
-            .insert(work_id.clone(), content_shape.clone());
+        self.content_shape.insert(work_id.clone(), *content_shape);
         self.handling_mode.insert(work_id.clone(), handling_mode);
         self.runtime_semantics
             .insert(work_id.clone(), runtime_semantics);
@@ -1834,7 +1833,7 @@ impl EphemeralRuntimeDriver {
 
         let runtime_idle = runtime_phase.is_idle_or_attached();
         let handling_mode = resolved.handling_mode;
-        let content_shape = ContentShape(input.kind_id().to_string());
+        let content_shape = ContentShape::from_kind(input.kind());
         let is_prompt = matches!(input, Input::Prompt(_));
         match resolved.admission_plan {
             AdmissionPlan::ConsumedOnAccept => {

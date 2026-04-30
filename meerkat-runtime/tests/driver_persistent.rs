@@ -478,10 +478,15 @@ async fn recover_rebuilds_dedup_index() {
     let key = meerkat_runtime::identifiers::IdempotencyKey::new("dedup-key");
 
     // Pre-populate store with a state that has an idempotency key
-    let input_id = InputId::new();
+    let mut input = make_prompt("dedup original");
+    if let Input::Prompt(ref mut p) = input {
+        p.header.idempotency_key = Some(key.clone());
+    }
+    let input_id = input.id().clone();
     let mut state = InputState::new_accepted(input_id.clone());
     state.idempotency_key = Some(key.clone());
     state.durability = Some(InputDurability::Durable);
+    state.persisted_input = Some(input);
     store
         .persist_input_state(&rid, &stored_accepted(state))
         .await

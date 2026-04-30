@@ -5,7 +5,7 @@ use meerkat::surface::{
     RequestTerminal, RequestTerminalResolution, StdioJsonWriter, SurfaceRequestExecutor,
     SurfaceRequestSemantics, noop_request_action, spawn_stdio_json_writer,
 };
-use meerkat_contracts::ErrorCode;
+use meerkat_contracts::{ErrorCode, mcp_tool_request_lifecycle};
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_store::RealmBackend;
 use serde_json::{Value, json};
@@ -231,7 +231,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let state = Arc::clone(&state);
                         let completion_tx = completion_tx.clone();
                         let tool_name = name.clone();
-                        let semantics = SurfaceRequestSemantics::for_mcp_tool_call(&tool_name);
+                        let semantics =
+                            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle(&tool_name));
                         let request_id_for_task = request_id.clone();
                         let request_key_for_task = request_key.clone();
                         let handle = tokio::spawn(async move {
@@ -372,16 +373,17 @@ mod tests {
     #[test]
     fn meerkat_run_and_resume_publish_on_success() {
         assert!(matches!(
-            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_run").classify_terminal(true, ()),
-            RequestTerminal::Publish(())
-        ));
-        assert!(matches!(
-            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_resume")
+            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle("meerkat_run"))
                 .classify_terminal(true, ()),
             RequestTerminal::Publish(())
         ));
         assert!(matches!(
-            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_sessions")
+            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle("meerkat_resume"))
+                .classify_terminal(true, ()),
+            RequestTerminal::Publish(())
+        ));
+        assert!(matches!(
+            SurfaceRequestSemantics::from(mcp_tool_request_lifecycle("meerkat_sessions"))
                 .classify_terminal(true, ()),
             RequestTerminal::RespondWithoutPublish(())
         ));

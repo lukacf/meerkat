@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::RpcRequestLifecycleRule;
+
 #[derive(Debug, Clone, Copy)]
 pub struct RpcMethodCatalogOptions {
     pub runtime_available: bool,
@@ -51,6 +53,8 @@ pub struct RpcMethodDescriptor {
     pub params_type: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_type: Option<&'static str>,
+    #[serde(skip_serializing)]
+    pub request_lifecycle: RpcRequestLifecycleRule,
 }
 
 impl RpcMethodDescriptor {
@@ -60,6 +64,7 @@ impl RpcMethodDescriptor {
             description,
             params_type: None,
             result_type: None,
+            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
         }
     }
 
@@ -74,7 +79,13 @@ impl RpcMethodDescriptor {
             description,
             params_type: Some(params_type),
             result_type: Some(result_type),
+            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
         }
+    }
+
+    const fn with_request_lifecycle(mut self, request_lifecycle: RpcRequestLifecycleRule) -> Self {
+        self.request_lifecycle = request_lifecycle;
+        self
     }
 
     const fn result_only(
@@ -87,6 +98,7 @@ impl RpcMethodDescriptor {
             description,
             params_type: None,
             result_type: Some(result_type),
+            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
         }
     }
 }
@@ -99,7 +111,8 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Create session + run first turn",
             "CreateSessionParams",
             "WireRunResult | DeferredCreateResult",
-        ),
+        )
+        .with_request_lifecycle(RpcRequestLifecycleRule::SessionCreateInitialTurn),
         RpcMethodDescriptor::typed(
             "session/list",
             "List active sessions",
@@ -129,7 +142,8 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Start a new turn on existing session",
             "StartTurnParams",
             "WireRunResult",
-        ),
+        )
+        .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
         RpcMethodDescriptor::typed(
             "turn/interrupt",
             "Cancel in-flight turn",
@@ -603,7 +617,8 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Start a turn on a mob member by identity",
                 "MobTurnStartParams",
                 "WireRunResult",
-            ),
+            )
+            .with_request_lifecycle(RpcRequestLifecycleRule::LONG_RUNNING_PUBLISH_ON_SUCCESS),
             RpcMethodDescriptor::typed(
                 "mob/member_status",
                 "Get live status for a mob member",
@@ -813,6 +828,7 @@ pub fn rpc_notification_names(options: RpcMethodCatalogOptions) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use crate::{RequestLifecycle, mcp_tool_request_lifecycle, rpc_request_lifecycle};
 
     #[test]
     fn documented_surface_keeps_live_runtime_and_mob_methods() {
@@ -850,6 +866,59 @@ mod tests {
         assert!(notifications.iter().any(|n| n == "session/stream_end"));
         assert!(notifications.iter().any(|n| n == "mob/stream_event"));
         assert!(notifications.iter().any(|n| n == "mob/stream_end"));
+    }
+
+    #[test]
+    fn rpc_catalog_owns_request_lifecycle_rules() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        let descriptor = |name: &str| {
+            methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"))
+        };
+
+        assert_eq!(
+            descriptor("turn/start").request_lifecycle.resolve(None),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            descriptor("mob/turn_start").request_lifecycle.resolve(None),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            descriptor("session/create")
+                .request_lifecycle
+                .resolve(Some(r#"{"initial_turn":"deferred"}"#)),
+            RequestLifecycle::InlineObservation
+        );
+        assert_eq!(
+            rpc_request_lifecycle(
+                "session/create",
+                Some(r#"{"initial_turn":"run_immediately"}"#),
+            ),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            rpc_request_lifecycle("session/list", None),
+            RequestLifecycle::InlineObservation
+        );
+    }
+
+    #[test]
+    fn mcp_tool_catalog_owns_request_lifecycle_rules() {
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_run"),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_resume"),
+            RequestLifecycle::LongRunningPublishOnSuccess
+        );
+        assert_eq!(
+            mcp_tool_request_lifecycle("meerkat_sessions"),
+            RequestLifecycle::LongRunningObservation
+        );
     }
 
     #[test]

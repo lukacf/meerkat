@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use meerkat_contracts::RequestLifecycle;
 use meerkat_core::{Session, SessionId, SessionRuntimeBindings};
 
 #[cfg(target_arch = "wasm32")]
@@ -132,34 +133,6 @@ impl SurfaceRequestSemantics {
         }
     }
 
-    /// Canonical RPC request semantics for an already-parsed `session/create`
-    /// initial-turn policy. Prefer [`Self::for_rpc_request`] at protocol
-    /// boundaries so request lifecycle classification stays machine-owned.
-    pub fn for_rpc_method(method: &str, session_create_runs_immediately: bool) -> Self {
-        match method {
-            "turn/start" | "mob/turn_start" => Self::long_running_publish_on_success(),
-            "session/create" if session_create_runs_immediately => {
-                Self::long_running_publish_on_success()
-            }
-            _ => Self::inline_observation(),
-        }
-    }
-
-    /// Canonical RPC request semantics, including wire-parameter classification.
-    pub fn for_rpc_request(method: &str, params_json: Option<&str>) -> Self {
-        let session_create_runs_immediately =
-            rpc_session_create_runs_immediately(method, params_json);
-        Self::for_rpc_method(method, session_create_runs_immediately)
-    }
-
-    /// Canonical MCP tool-call request semantics.
-    pub fn for_mcp_tool_call(tool_name: &str) -> Self {
-        match tool_name {
-            "meerkat_run" | "meerkat_resume" => Self::long_running_publish_on_success(),
-            _ => Self::long_running_observation(),
-        }
-    }
-
     pub const fn requires_long_running_executor(self) -> bool {
         matches!(self.execution, SurfaceRequestExecution::LongRunning)
     }
@@ -178,22 +151,16 @@ impl SurfaceRequestSemantics {
     }
 }
 
-fn rpc_session_create_runs_immediately(method: &str, params_json: Option<&str>) -> bool {
-    if method != "session/create" {
-        return false;
+impl From<RequestLifecycle> for SurfaceRequestSemantics {
+    fn from(lifecycle: RequestLifecycle) -> Self {
+        match lifecycle {
+            RequestLifecycle::InlineObservation => Self::inline_observation(),
+            RequestLifecycle::LongRunningPublishOnSuccess => {
+                Self::long_running_publish_on_success()
+            }
+            RequestLifecycle::LongRunningObservation => Self::long_running_observation(),
+        }
     }
-    let Some(params_json) = params_json else {
-        return true;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(params_json) else {
-        return true;
-    };
-    !matches!(
-        value
-            .get("initial_turn")
-            .and_then(serde_json::Value::as_str),
-        Some("deferred")
-    )
 }
 
 /// Canonical lifecycle phase of a tracked request.
@@ -743,52 +710,35 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn canonical_request_classifiers_cover_rpc_and_mcp_names() {
-        assert_eq!(
-            SurfaceRequestSemantics::for_rpc_request("turn/start", None),
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        );
-        assert_eq!(
-            SurfaceRequestSemantics::for_rpc_request("mob/turn_start", Some("{}")),
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        );
-        assert_eq!(
-            SurfaceRequestSemantics::for_rpc_request("session/create", None),
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        );
-        assert_eq!(
-            SurfaceRequestSemantics::for_rpc_request(
-                "session/create",
-                Some(r#"{"initial_turn":"immediate"}"#),
-            ),
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        );
-        assert_eq!(
-            SurfaceRequestSemantics::for_rpc_request(
-                "session/create",
-                Some(r#"{"initial_turn":"deferred"}"#),
-            ),
-            SurfaceRequestSemantics::inline_observation()
-        );
-        assert_eq!(
-            SurfaceRequestSemantics::for_rpc_request("session/create", Some("{not json")),
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        );
-        assert_eq!(
-            SurfaceRequestSemantics::for_rpc_request("session/list", None),
-            SurfaceRequestSemantics::inline_observation()
-        );
+    fn surface_semantics_do_not_own_raw_request_lifecycle_tables() {
+        let source = include_str!("request_execution.rs");
+        for forbidden in [
+            concat!("for_", "rpc_method"),
+            concat!("for_", "mcp_tool_call"),
+            concat!("\"", "turn", "/start", "\""),
+            concat!("\"", "mob", "/turn_start", "\""),
+            concat!("\"", "meerkat", "_run", "\""),
+            concat!("\"", "meerkat", "_resume", "\""),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "surface request execution must adapt catalog-owned lifecycle semantics, not classify `{forbidden}` locally"
+            );
+        }
+    }
 
+    #[test]
+    fn catalog_request_lifecycle_adapter_preserves_surface_semantics() {
         assert_eq!(
-            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_run"),
+            SurfaceRequestSemantics::from(RequestLifecycle::InlineObservation),
+            SurfaceRequestSemantics::inline_observation()
+        );
+        assert_eq!(
+            SurfaceRequestSemantics::from(RequestLifecycle::LongRunningPublishOnSuccess),
             SurfaceRequestSemantics::long_running_publish_on_success()
         );
         assert_eq!(
-            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_resume"),
-            SurfaceRequestSemantics::long_running_publish_on_success()
-        );
-        assert_eq!(
-            SurfaceRequestSemantics::for_mcp_tool_call("meerkat_sessions"),
+            SurfaceRequestSemantics::from(RequestLifecycle::LongRunningObservation),
             SurfaceRequestSemantics::long_running_observation()
         );
     }

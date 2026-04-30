@@ -198,6 +198,15 @@ fn finish_device_flow_poll(poll_lease: OAuthDevicePollLease) -> Result<(), (Stat
     poll_lease.finish().map_err(oauth_device_state_error)
 }
 
+fn verify_terminal_device_flow(
+    poll_lease: &OAuthDevicePollLease,
+) -> Result<(), (StatusCode, String)> {
+    poll_lease
+        .verify()
+        .map(|_| ())
+        .map_err(oauth_device_state_error)
+}
+
 async fn save_tokens_and_publish_lifecycle(
     token_store: &dyn TokenStore,
     auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
@@ -245,6 +254,7 @@ async fn save_tokens_and_consume_device_flow(
     tokens: &PersistedTokens,
     poll_lease: OAuthDevicePollLease,
 ) -> Result<(), (StatusCode, String)> {
+    verify_terminal_device_flow(&poll_lease)?;
     save_tokens_and_publish_lifecycle(token_store, auth_lease, connection_ref, tokens).await?;
     consume_terminal_device_flow(poll_lease)
 }
@@ -805,9 +815,16 @@ pub async fn complete_login(
         }
     };
 
-    let expires_at = result
-        .expires_in_secs
-        .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+    let expires_at = match result.expires_at_from(chrono::Utc::now()) {
+        Ok(expires_at) => expires_at,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("token expiry is invalid: {e}") })),
+            )
+                .into_response();
+        }
+    };
     let tokens = PersistedTokens {
         auth_mode: resolved.auth_mode,
         primary_secret: Some(result.access_token),
@@ -1091,9 +1108,18 @@ pub async fn complete_device_login(
             }
         },
         DevicePollOutcome::Ready(result) => {
-            let expires_at = result
-                .expires_in_secs
-                .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+            let expires_at = match result.expires_at_from(chrono::Utc::now()) {
+                Ok(expires_at) => expires_at,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": format!("token expiry is invalid: {e}")
+                        })),
+                    )
+                        .into_response();
+                }
+            };
             let tokens = PersistedTokens {
                 auth_mode: resolved.auth_mode,
                 primary_secret: Some(result.access_token),

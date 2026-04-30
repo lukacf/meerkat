@@ -95,6 +95,24 @@ pub struct OAuthTokenResult {
     pub scope: Option<String>,
 }
 
+impl OAuthTokenResult {
+    pub fn expires_at_from(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, OAuthError> {
+        let Some(expires_in_secs) = self.expires_in_secs else {
+            return Ok(None);
+        };
+        let signed_seconds = i64::try_from(expires_in_secs)
+            .map_err(|_| OAuthError::TokenExpiryOutOfRange { expires_in_secs })?;
+        let lifetime = chrono::Duration::try_seconds(signed_seconds)
+            .ok_or(OAuthError::TokenExpiryOutOfRange { expires_in_secs })?;
+        now.checked_add_signed(lifetime)
+            .map(Some)
+            .ok_or(OAuthError::TokenExpiryOutOfRange { expires_in_secs })
+    }
+}
+
 /// OAuth flow errors.
 #[derive(Debug, Error)]
 pub enum OAuthError {
@@ -104,6 +122,8 @@ pub enum OAuthError {
     CallbackParse(String),
     #[error("token endpoint error: status={status} body={body}")]
     TokenEndpoint { status: u16, body: String },
+    #[error("token expires_in is out of range: {expires_in_secs}")]
+    TokenExpiryOutOfRange { expires_in_secs: u64 },
     #[error("network error: {0}")]
     Network(String),
     #[error("timeout")]
@@ -166,5 +186,43 @@ mod tests {
         let pkce = PkcePair::generate_s256();
         let url = ep.authorize_url_with_pkce(&pkce.challenge, "x");
         assert!(url.contains("prompt=consent&response_type=code"));
+    }
+
+    fn token_result(expires_in_secs: Option<u64>) -> OAuthTokenResult {
+        OAuthTokenResult {
+            access_token: "access-token".to_string(),
+            refresh_token: None,
+            id_token: None,
+            expires_in_secs,
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn token_expiry_rejects_lifetime_that_cannot_fit_signed_duration() {
+        let result = token_result(Some(u64::MAX));
+        let err = result
+            .expires_at_from(chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap())
+            .expect_err("oversized expires_in must not wrap negative");
+
+        assert!(matches!(
+            err,
+            OAuthError::TokenExpiryOutOfRange {
+                expires_in_secs: u64::MAX
+            }
+        ));
+    }
+
+    #[test]
+    fn token_expiry_rejects_timestamp_overflow() {
+        let result = token_result(Some(1));
+        let err = result
+            .expires_at_from(chrono::DateTime::<chrono::Utc>::MAX_UTC)
+            .expect_err("expires_in must not overflow DateTime bounds");
+
+        assert!(matches!(
+            err,
+            OAuthError::TokenExpiryOutOfRange { expires_in_secs: 1 }
+        ));
     }
 }

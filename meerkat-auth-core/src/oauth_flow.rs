@@ -228,6 +228,8 @@ pub enum OAuthFlowError {
     CapacityExceeded { max_outstanding: usize },
     #[error("oauth device code poll is already in progress")]
     DevicePollInProgress,
+    #[error("oauth device code is already admitted")]
+    DeviceCodeAlreadyAdmitted,
     #[error("oauth device code expiry is out of range")]
     DeviceExpiryOutOfRange,
 }
@@ -272,6 +274,18 @@ impl OAuthDevicePollLease {
         if result.is_ok() {
             self.active = false;
         }
+        result
+    }
+
+    pub fn verify(&self) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        let mut flows = self.device_flows.lock();
+        let result = verify_device_poll_lease_locked(
+            &mut flows,
+            &self.device_code,
+            self.provider,
+            self.lease_id,
+        );
+        prune_expired_device_locked(&mut flows);
         result
     }
 
@@ -489,6 +503,9 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
         let mut device_flows = self.device_flows.lock();
         prune_expired_locked(&mut flows, self.ttl);
         prune_expired_device_locked(&mut device_flows);
+        if device_flows.contains_key(&device_code) {
+            return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted);
+        }
         if flows.len() + device_flows.len() >= self.max_outstanding {
             return Err(OAuthFlowError::CapacityExceeded {
                 max_outstanding: self.max_outstanding,
@@ -603,7 +620,7 @@ fn release_device_poll_lease_locked(
     }
 }
 
-fn consume_device_poll_lease_locked(
+fn verify_device_poll_lease_locked(
     flows: &mut HashMap<String, OAuthDeviceFlowState>,
     device_code: &str,
     provider: OAuthProviderIdentity,
@@ -623,6 +640,16 @@ fn consume_device_poll_lease_locked(
         Some(_) => return Err(OAuthFlowError::DevicePollInProgress),
         None => return Err(OAuthFlowError::Missing),
     }
+    Ok(state.record.clone())
+}
+
+fn consume_device_poll_lease_locked(
+    flows: &mut HashMap<String, OAuthDeviceFlowState>,
+    device_code: &str,
+    provider: OAuthProviderIdentity,
+    lease_id: u64,
+) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+    verify_device_poll_lease_locked(flows, device_code, provider, lease_id)?;
     flows
         .remove(device_code)
         .map(|state| state.record)
@@ -869,6 +896,60 @@ mod tests {
             registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
             Err(OAuthFlowError::Missing)
         ));
+    }
+
+    #[test]
+    fn oauth_device_poll_verify_keeps_terminal_consume_available() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+        let poll = registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("poll begins");
+
+        let verified = poll
+            .verify()
+            .expect("terminal preflight verifies the current lease");
+
+        assert_eq!(verified.device_code, "device-code");
+        assert!(matches!(
+            registry.begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::DevicePollInProgress)
+        ));
+        let consumed = poll.consume().expect("verified lease still consumes");
+        assert_eq!(consumed.device_code, "device-code");
+    }
+
+    #[test]
+    fn oauth_device_admission_does_not_replace_active_poll_lease() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::from_secs(600),
+            )
+            .expect("device code admitted");
+        let poll = registry
+            .begin_device_code_poll("device-code", OAuthProviderIdentity::GoogleCodeAssist)
+            .expect("poll begins");
+
+        let duplicate = registry.admit_device_code(
+            OAuthProviderIdentity::GoogleCodeAssist,
+            "device-code",
+            Duration::from_secs(600),
+        );
+
+        assert_eq!(duplicate, Err(OAuthFlowError::DeviceCodeAlreadyAdmitted));
+        let consumed = poll
+            .consume()
+            .expect("duplicate admission must not replace the active poll lease");
+        assert_eq!(consumed.device_code, "device-code");
     }
 
     #[test]

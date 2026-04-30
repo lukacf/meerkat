@@ -271,6 +271,16 @@ fn finish_device_flow_poll(
     }
 }
 
+fn verify_terminal_device_flow(
+    id: Option<RpcId>,
+    poll_lease: &OAuthDevicePollLease,
+) -> Option<RpcResponse> {
+    match poll_lease.verify() {
+        Ok(_) => None,
+        Err(err) => Some(oauth_device_state_error(id, err)),
+    }
+}
+
 async fn save_tokens_and_publish_lifecycle(
     id: Option<RpcId>,
     store: &Arc<dyn TokenStore>,
@@ -317,6 +327,9 @@ async fn save_tokens_and_consume_device_flow(
     tokens: &PersistedTokens,
     poll_lease: OAuthDevicePollLease,
 ) -> Option<RpcResponse> {
+    if let Some(resp) = verify_terminal_device_flow(id.clone(), &poll_lease) {
+        return Some(resp);
+    }
     if let Err(resp) =
         save_tokens_and_publish_lifecycle(id.clone(), store, runtime, connection_ref, tokens).await
     {
@@ -794,9 +807,16 @@ pub async fn handle_auth_login_complete(
             );
         }
     };
-    let expires_at = result
-        .expires_in_secs
-        .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+    let expires_at = match result.expires_at_from(chrono::Utc::now()) {
+        Ok(expires_at) => expires_at,
+        Err(e) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("token expiry is invalid: {e}"),
+            );
+        }
+    };
     let tokens = PersistedTokens {
         auth_mode: resolved.auth_mode,
         primary_secret: Some(result.access_token),
@@ -1017,9 +1037,16 @@ pub async fn handle_auth_login_device_complete(
                 Ok(s) => s,
                 Err(r) => return r,
             };
-            let expires_at = result
-                .expires_in_secs
-                .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+            let expires_at = match result.expires_at_from(chrono::Utc::now()) {
+                Ok(expires_at) => expires_at,
+                Err(e) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("token expiry is invalid: {e}"),
+                    );
+                }
+            };
             let tokens = PersistedTokens {
                 auth_mode: resolved.auth_mode,
                 primary_secret: Some(result.access_token),
@@ -1273,7 +1300,7 @@ pub async fn handle_auth_logout(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use meerkat_core::handles::{

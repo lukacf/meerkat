@@ -2635,6 +2635,16 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
                 .await
         }
 
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: crate::store::SessionDelta,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
         async fn atomic_apply(
             &self,
             runtime_id: &LogicalRuntimeId,

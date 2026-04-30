@@ -45,8 +45,32 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          route through AgentFactory policy or an explicitly named low-level seam"
     );
     assert!(
-        builder.contains("build_with_factory_policy"),
-        "the canonical factory path should call a typed AgentBuilder factory-policy seam"
+        !builder.contains("pub async fn build_with_factory_policy"),
+        "meerkat_core::AgentBuilder must not expose a public factory-policy \
+         seam backed by a publicly mintable token"
+    );
+    assert!(
+        !builder.contains("pub struct AgentFactoryBuildToken")
+            && !builder.contains("new_unchecked_for_canonical_factory"),
+        "factory build authority must not be publicly mintable from \
+         meerkat_core::AgentBuilder"
+    );
+}
+
+#[test]
+fn core_factory_authority_token_is_not_reexported() {
+    let agent_mod = repo_file("meerkat-core/src/agent.rs");
+    let lib = repo_file("meerkat-core/src/lib.rs");
+
+    assert!(
+        !agent_mod.contains("AgentFactoryBuildToken"),
+        "meerkat_core::agent must not re-export a factory token that downstream \
+         crates can mint or pass"
+    );
+    assert!(
+        !lib.contains("AgentFactoryBuildToken"),
+        "meerkat_core must not re-export a factory token that downstream crates \
+         can mint or pass"
     );
 }
 
@@ -80,17 +104,20 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
         }
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        assert!(
-            !source.contains(".build_standalone("),
-            "production source must not bypass AgentFactory via build_standalone: {}",
-            path.display()
-        );
+        if path != allowed_factory {
+            assert!(
+                !source.contains(".build_standalone("),
+                "production source must not bypass AgentFactory via build_standalone: {}",
+                path.display()
+            );
+        }
 
         if path != allowed_factory {
             assert!(
                 !source.contains("build_with_factory_policy(")
                     && !source.contains("new_unchecked_for_canonical_factory"),
-                "only AgentFactory may enter the core factory-policy seam: {}",
+                "production source must not depend on a publicly mintable \
+                 core factory-token seam: {}",
                 path.display()
             );
         }
@@ -104,7 +131,8 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
 
     assert!(
         !factory.contains("builder.build(llm_adapter, tools, store_adapter)"),
-        "AgentFactory must use the typed factory-policy seam when entering meerkat_core"
+        "AgentFactory must not enter meerkat_core through the removed \
+         unqualified build seam"
     );
     assert!(
         !comms_agent.contains("pub struct CommsAgentBuilder"),

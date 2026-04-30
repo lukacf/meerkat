@@ -42,9 +42,9 @@ use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::SessionMeta;
 use meerkat_core::{
-    Agent, AgentBuilder, AgentEvent, AgentFactoryBuildToken, AgentLlmClient, AgentSessionStore,
-    AgentToolDispatcher, BlobStore, BudgetLimits, Config, ConnectionRef, CredentialSourceSpec,
-    HookRunOverrides, ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
+    Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
+    BlobStore, BudgetLimits, Config, ConnectionRef, CredentialSourceSpec, HookRunOverrides,
+    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
     SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
@@ -3798,14 +3798,11 @@ impl AgentFactory {
             hoisted_control_visibility_provider = Some(visibility_provider);
         }
 
-        // 13. Build agent
+        // 13. Build agent. AgentFactory owns the policy composition above; core
+        // intentionally exposes only an explicitly named standalone primitive
+        // rather than a public, forgeable factory-authority token.
         let mut agent = builder
-            .build_with_factory_policy(
-                AgentFactoryBuildToken::new_unchecked_for_canonical_factory(),
-                llm_adapter,
-                tools,
-                store_adapter,
-            )
+            .build_standalone(llm_adapter, tools, store_adapter)
             .await;
 
         if let Some(provider) = hoisted_control_visibility_provider {

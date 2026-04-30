@@ -735,7 +735,7 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = builder.build(client, tools, store).await;
+        let agent = builder.build_standalone(client, tools, store).await;
         Ok(CompactionSessionAgent { agent })
     }
 }
@@ -767,7 +767,7 @@ impl SessionAgentBuilder for RealAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = builder.build(client, tools, store).await;
+        let agent = builder.build_standalone(client, tools, store).await;
 
         Ok(RealSessionAgent { agent })
     }

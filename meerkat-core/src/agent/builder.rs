@@ -65,25 +65,6 @@ pub struct AgentBuilder {
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
 }
 
-/// Typed authority for the canonical [`AgentBuilder`] factory entrypoint.
-///
-/// The public unqualified `AgentBuilder::build(client, tools, store)` seam was
-/// too easy for production-facing code to call directly, bypassing
-/// `AgentFactory` policy composition. Factory-owned construction now enters
-/// core through `build_with_factory_policy`; intentionally standalone tests and
-/// embeddings must use the explicit `build_standalone` name.
-#[derive(Clone, Copy, Debug)]
-pub struct AgentFactoryBuildToken {
-    _private: (),
-}
-
-impl AgentFactoryBuildToken {
-    #[doc(hidden)]
-    pub fn new_unchecked_for_canonical_factory() -> Self {
-        Self { _private: () }
-    }
-}
-
 impl AgentBuilder {
     /// Create a new agent builder with default config
     pub fn new() -> Self {
@@ -229,22 +210,6 @@ impl AgentBuilder {
     pub fn compactor(mut self, compactor: Arc<dyn crate::compact::Compactor>) -> Self {
         self.compactor = Some(compactor);
         self
-    }
-
-    /// Build the agent through the canonical factory policy seam.
-    pub async fn build_with_factory_policy<C, T, S>(
-        self,
-        _authority: AgentFactoryBuildToken,
-        client: Arc<C>,
-        tools: Arc<T>,
-        store: Arc<S>,
-    ) -> Agent<C, T, S>
-    where
-        C: AgentLlmClient + ?Sized,
-        T: AgentToolDispatcher + ?Sized,
-        S: AgentSessionStore + ?Sized,
-    {
-        self.build_inner(client, tools, store).await
     }
 
     /// Build a standalone low-level agent without facade/factory policy.

@@ -956,6 +956,32 @@ impl ProviderParamsOverride {
 
         override_params
     }
+
+    pub fn to_legacy_provider_value(&self) -> serde_json::Value {
+        let mut object = serde_json::Map::new();
+        if let Some(value) = self.temperature {
+            object.insert("temperature".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.top_p {
+            object.insert("top_p".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.max_output_tokens {
+            object.insert("max_output_tokens".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.reasoning {
+            object.insert("reasoning".to_string(), serde_json::json!(value));
+        }
+        if let Some(value) = self.thinking_budget_tokens {
+            object.insert(
+                "thinking_budget_tokens".to_string(),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(tag) = self.provider_tag.as_ref() {
+            insert_provider_tag_legacy_fields(&mut object, tag);
+        }
+        serde_json::Value::Object(object)
+    }
 }
 
 fn parse_reasoning_mode(value: &str) -> Option<ReasoningMode> {
@@ -990,6 +1016,179 @@ fn unknown_provider_tag(provider: &str, value: &serde_json::Value) -> ProviderTa
             body: value.to_string(),
         },
     }
+}
+
+fn insert_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &ProviderTag,
+) {
+    match tag {
+        ProviderTag::Anthropic(tag) => insert_anthropic_provider_tag_legacy_fields(object, tag),
+        ProviderTag::OpenAi(tag) => insert_openai_provider_tag_legacy_fields(object, tag),
+        ProviderTag::Gemini(tag) => insert_gemini_provider_tag_legacy_fields(object, tag),
+        ProviderTag::Unknown { bag } => insert_unknown_provider_tag_legacy_fields(object, bag),
+    }
+}
+
+fn insert_serialized_legacy_field<T: Serialize>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+    value: &T,
+) {
+    if let Ok(value) = serde_json::to_value(value) {
+        object.insert(key.to_string(), value);
+    }
+}
+
+fn insert_anthropic_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &AnthropicProviderTag,
+) {
+    if let Some(thinking) = tag.thinking.as_ref() {
+        insert_serialized_legacy_field(object, "thinking", thinking);
+    }
+    if let Some(value) = tag.thinking_budget_tokens {
+        object.insert("thinking_budget".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.web_search.as_ref() {
+        object.insert("web_search".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.top_k {
+        object.insert("top_k".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.effort {
+        insert_serialized_legacy_field(object, "effort", &value);
+    }
+    if let Some(value) = tag.structured_output.as_ref() {
+        insert_serialized_legacy_field(object, "structured_output", value);
+    }
+    if let Some(value) = tag.inference_geo.as_ref() {
+        match value {
+            AnthropicInferenceGeo::Us => {
+                object.insert("inference_geo".to_string(), serde_json::json!("us"));
+            }
+            AnthropicInferenceGeo::Global => {
+                object.insert("inference_geo".to_string(), serde_json::json!("global"));
+            }
+            AnthropicInferenceGeo::Other { region } => {
+                object.insert("inference_geo".to_string(), serde_json::json!(region));
+            }
+        };
+    }
+    if let Some(value) = tag.compaction.as_ref() {
+        match value {
+            AnthropicCompactionConfig::Auto => {
+                object.insert("compaction".to_string(), serde_json::json!("auto"));
+            }
+            AnthropicCompactionConfig::Custom { edit } => {
+                object.insert("compaction".to_string(), edit.as_value());
+            }
+        };
+    }
+    if matches!(tag.context, Some(AnthropicContextWindow::OneMegabyte)) {
+        object.insert("context".to_string(), serde_json::json!("1m"));
+    }
+    if let Some(value) = tag.supports_temperature_override {
+        object.insert(
+            "__meerkat_supports_temperature".to_string(),
+            serde_json::json!(value),
+        );
+    }
+}
+
+fn insert_openai_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &OpenAiProviderTag,
+) {
+    if let Some(value) = tag.reasoning_effort {
+        insert_serialized_legacy_field(object, "reasoning_effort", &value);
+    }
+    if let Some(value) = tag.seed {
+        object.insert("seed".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.frequency_penalty {
+        object.insert("frequency_penalty".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.presence_penalty {
+        object.insert("presence_penalty".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.web_search.as_ref() {
+        object.insert("web_search".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.structured_output.as_ref() {
+        insert_serialized_legacy_field(object, "structured_output", value);
+    }
+    if let Some(value) = tag.reasoning.as_ref() {
+        object.insert("reasoning".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.chat_template_kwargs.as_ref() {
+        object.insert("chat_template_kwargs".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.thinking.as_ref() {
+        object.insert("thinking".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.supports_temperature_override {
+        object.insert(
+            "__meerkat_supports_temperature".to_string(),
+            serde_json::json!(value),
+        );
+    }
+    if let Some(value) = tag.supports_reasoning_override {
+        object.insert(
+            "__meerkat_supports_reasoning".to_string(),
+            serde_json::json!(value),
+        );
+    }
+}
+
+fn insert_gemini_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    tag: &GeminiProviderTag,
+) {
+    if let Some(value) = tag.thinking.as_ref() {
+        insert_serialized_legacy_field(object, "thinking", value);
+    }
+    if let Some(value) = tag.thinking_budget {
+        object.insert("thinking_budget".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.thinking_level {
+        object.insert(
+            "thinking_level".to_string(),
+            serde_json::json!(value.as_str()),
+        );
+    }
+    if let Some(value) = tag.top_k {
+        object.insert("top_k".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.top_p
+        && !object.contains_key("top_p")
+    {
+        object.insert("top_p".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = tag.structured_output.as_ref() {
+        insert_serialized_legacy_field(object, "structured_output", value);
+    }
+    if let Some(value) = tag.google_search.as_ref() {
+        object.insert("google_search".to_string(), value.as_value());
+    }
+    if let Some(value) = tag.candidate_count {
+        object.insert("candidate_count".to_string(), serde_json::json!(value));
+    }
+}
+
+fn insert_unknown_provider_tag_legacy_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    bag: &StructuredProviderExtension,
+) {
+    let body = serde_json::from_str::<serde_json::Value>(&bag.body)
+        .unwrap_or_else(|_| serde_json::Value::String(bag.body.clone()));
+    if bag.key == "provider_params"
+        && let serde_json::Value::Object(extension) = body
+    {
+        object.extend(extension);
+        return;
+    }
+    object.insert(bag.key.clone(), body);
 }
 
 /// Error returned when [`merge_batch_turn_metadata`] sees two distinct scalar
@@ -1842,6 +2041,28 @@ mod tests {
         assert_eq!(
             parsed.execution_kind,
             Some(RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn provider_params_override_projects_back_to_legacy_provider_json() {
+        let legacy = serde_json::json!({
+            "temperature": 0.2,
+            "thinking": { "budget_tokens": 10_000 },
+        });
+        let params = ProviderParamsOverride::from_legacy_provider_value("anthropic", &legacy);
+
+        let projected = params.to_legacy_provider_value();
+
+        assert!(projected.get("provider_tag").is_none());
+        let temperature = projected["temperature"].as_f64().expect("temperature");
+        assert!(
+            (temperature - 0.2).abs() < 0.000_001,
+            "unexpected temperature: {temperature}"
+        );
+        assert_eq!(
+            projected["thinking"]["budget_tokens"],
+            serde_json::json!(10_000)
         );
     }
 

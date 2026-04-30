@@ -849,7 +849,9 @@ impl SessionRuntime {
 
         let metadata = metadata?;
         let (provider_params, clear_provider_params) = match &metadata.provider_params {
-            Some(TurnMetadataOverride::Set(params)) => (serde_json::to_value(params).ok(), false),
+            Some(TurnMetadataOverride::Set(params)) => {
+                (Some(params.to_legacy_provider_value()), false)
+            }
             Some(TurnMetadataOverride::Clear) => (None, true),
             None => (None, false),
         };
@@ -8039,6 +8041,41 @@ mod tests {
         assert!(
             params.provider_tag.is_some(),
             "provider-native keys must stay represented on the typed override"
+        );
+    }
+
+    #[test]
+    fn runtime_turn_metadata_round_trips_provider_native_params_as_legacy_json() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let overrides = TurnOverrides {
+            provider_params: Some(serde_json::json!({
+                "thinking": { "budget_tokens": 10_000 },
+            })),
+            ..Default::default()
+        };
+        let metadata = SessionRuntime::turn_metadata_from_overrides(
+            None,
+            None,
+            None,
+            Some(&overrides),
+            Some("anthropic"),
+        )
+        .expect("provider params set should produce turn metadata");
+
+        let round_tripped = SessionRuntime::turn_overrides_from_metadata(Some(&metadata))
+            .expect("metadata should reconstruct turn overrides");
+        let provider_params = round_tripped
+            .provider_params
+            .expect("provider params should survive metadata round trip");
+
+        assert!(
+            provider_params.get("provider_tag").is_none(),
+            "runtime adapter must not feed typed provider_tag envelopes back as legacy params"
+        );
+        assert_eq!(
+            provider_params["thinking"]["budget_tokens"],
+            serde_json::json!(10_000)
         );
     }
 

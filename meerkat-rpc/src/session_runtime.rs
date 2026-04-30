@@ -793,6 +793,19 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
     ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+
+        let provider_params = overrides.and_then(|ov| {
+            ov.clear_provider_params
+                .then_some(TurnMetadataOverride::Clear)
+        });
+        let connection_ref = overrides.and_then(|ov| {
+            if ov.clear_connection_ref {
+                Some(TurnMetadataOverride::Clear)
+            } else {
+                ov.connection_ref.clone().map(TurnMetadataOverride::Set)
+            }
+        });
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
@@ -805,11 +818,9 @@ impl SessionRuntime {
             provider: overrides
                 .and_then(|ov| ov.provider.as_ref())
                 .map(|provider| meerkat_core::Provider::from_name(provider)),
-            provider_params: None,
-            clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
+            provider_params,
             render_metadata: None,
-            connection_ref: overrides.and_then(|ov| ov.connection_ref.clone()),
-            clear_connection_ref: overrides.is_some_and(|ov| ov.clear_connection_ref),
+            connection_ref,
             execution_kind: None,
             peer_response_terminal_apply_intent: None,
         };
@@ -819,17 +830,31 @@ impl SessionRuntime {
     pub(crate) fn turn_overrides_from_metadata(
         metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     ) -> Option<crate::handlers::turn::TurnOverrides> {
+        use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
+
         let metadata = metadata?;
+        let (provider_params, clear_provider_params) = match &metadata.provider_params {
+            Some(TurnMetadataOverride::Set(params)) => (serde_json::to_value(params).ok(), false),
+            Some(TurnMetadataOverride::Clear) => (None, true),
+            None => (None, false),
+        };
+        let (connection_ref, clear_connection_ref) = match &metadata.connection_ref {
+            Some(TurnMetadataOverride::Set(connection_ref)) => {
+                (Some(connection_ref.clone()), false)
+            }
+            Some(TurnMetadataOverride::Clear) => (None, true),
+            None => (None, false),
+        };
         let overrides = crate::handlers::turn::TurnOverrides {
             keep_alive: metadata.keep_alive.as_ref().map(|_| true),
             model: metadata.model.as_ref().map(ToString::to_string),
             provider: metadata
                 .provider
                 .map(|provider| provider.as_str().to_string()),
-            provider_params: None,
-            clear_provider_params: metadata.clear_provider_params,
-            connection_ref: metadata.connection_ref.clone(),
-            clear_connection_ref: metadata.clear_connection_ref,
+            provider_params,
+            clear_provider_params,
+            connection_ref,
+            clear_connection_ref,
             ..Default::default()
         };
         (!overrides.is_empty()).then_some(overrides)

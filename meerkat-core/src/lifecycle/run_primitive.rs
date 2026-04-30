@@ -3,6 +3,7 @@
 //! Core's entire world is: conversation mutations, run boundaries, and staged inputs.
 //! It knows nothing about input acceptance, policy, queueing, or topology.
 
+use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::InputId;
@@ -1011,6 +1012,82 @@ impl std::fmt::Display for TurnMetadataMergeConflict {
 
 impl std::error::Error for TurnMetadataMergeConflict {}
 
+/// Tri-state per-turn metadata override.
+///
+/// `None` on the containing field means preserve the durable session value.
+/// `Some(Set(value))` overrides it for this turn, and `Some(Clear)` removes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "action", content = "value", rename_all = "snake_case")]
+pub enum TurnMetadataOverride<T> {
+    Set(T),
+    Clear,
+}
+
+impl<T> TurnMetadataOverride<T> {
+    pub fn set(value: T) -> Self {
+        Self::Set(value)
+    }
+
+    pub const fn clear() -> Self {
+        Self::Clear
+    }
+
+    pub fn as_set(&self) -> Option<&T> {
+        match self {
+            Self::Set(value) => Some(value),
+            Self::Clear => None,
+        }
+    }
+
+    pub fn into_set(self) -> Option<T> {
+        match self {
+            Self::Set(value) => Some(value),
+            Self::Clear => None,
+        }
+    }
+
+    pub const fn is_clear(&self) -> bool {
+        matches!(self, Self::Clear)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for TurnMetadataOverride<T>
+where
+    T: DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        if let Some(action) = raw
+            .as_object()
+            .and_then(|object| object.get("action"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return match action {
+                "clear" => Ok(Self::Clear),
+                "set" => {
+                    let value = raw
+                        .as_object()
+                        .and_then(|object| object.get("value"))
+                        .ok_or_else(|| de::Error::custom("set override is missing value"))?;
+                    serde_json::from_value(value.clone())
+                        .map(Self::Set)
+                        .map_err(de::Error::custom)
+                }
+                other => Err(de::Error::custom(format!(
+                    "unknown turn metadata override action `{other}`"
+                ))),
+            };
+        }
+
+        serde_json::from_value(raw)
+            .map(Self::Set)
+            .map_err(de::Error::custom)
+    }
+}
+
 /// Canonical per-turn runtime metadata carried alongside a
 /// [`StagedRunInput`]. This is the typed seam consumed by the core layer —
 /// `serde_json::Value` does not appear anywhere in this shape.
@@ -1019,7 +1096,7 @@ impl std::error::Error for TurnMetadataMergeConflict {}
 /// `for_input(&Input)` constructor. Other code paths that previously built
 /// a `RuntimeTurnMetadata` literal are updated to call `for_input` or be
 /// deleted.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct RuntimeTurnMetadata {
     /// Handling mode for staged ordinary work when admitted through runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1037,20 +1114,14 @@ pub struct RuntimeTurnMetadata {
     /// Override provider for this turn (hot-swap on materialized sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
-    /// Override provider-specific parameters for this turn (typed; no Value).
+    /// Override, clear, or preserve provider-specific parameters for this turn
+    /// (typed; no Value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<ProviderParamsOverride>,
-    /// Explicitly clear durable provider params. Omitted `provider_params`
-    /// means inherit the current session value.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_provider_params: bool,
-    /// Explicit connection reference this turn must resolve against.
+    pub provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    /// Override, clear, or preserve the connection reference this turn must
+    /// resolve against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<ConnectionRef>,
-    /// Explicitly clear durable connection_ref. Omitted `connection_ref`
-    /// means inherit the current session value.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_connection_ref: bool,
+    pub connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
     /// Keep-alive policy for materialized resources for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<KeepAlivePolicy>,
@@ -1071,6 +1142,81 @@ pub struct RuntimeTurnMetadata {
     pub peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
 }
 
+#[derive(Deserialize)]
+struct RuntimeTurnMetadataFields {
+    #[serde(default)]
+    handling_mode: Option<HandlingMode>,
+    #[serde(default)]
+    skill_references: Option<Vec<SkillKey>>,
+    #[serde(default)]
+    flow_tool_overlay: Option<TurnToolOverlay>,
+    #[serde(default)]
+    additional_instructions: Option<Vec<TurnInstruction>>,
+    #[serde(default)]
+    model: Option<ModelId>,
+    #[serde(default)]
+    provider: Option<Provider>,
+    #[serde(default)]
+    provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    #[serde(default)]
+    connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
+    #[serde(default)]
+    keep_alive: Option<KeepAlivePolicy>,
+    #[serde(default)]
+    render_metadata: Option<RenderMetadata>,
+    #[serde(default)]
+    execution_kind: Option<RuntimeExecutionKind>,
+    #[serde(default)]
+    peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+}
+
+impl<'de> Deserialize<'de> for RuntimeTurnMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut raw = serde_json::Value::deserialize(deserializer)?;
+        let (clear_provider_params, clear_connection_ref) =
+            if let Some(object) = raw.as_object_mut() {
+                (
+                    take_legacy_clear_bool(object, "clear_provider_params")?,
+                    take_legacy_clear_bool(object, "clear_connection_ref")?,
+                )
+            } else {
+                (false, false)
+            };
+        let fields: RuntimeTurnMetadataFields =
+            serde_json::from_value(raw).map_err(de::Error::custom)?;
+        let provider_params = legacy_override_from_split_fields(
+            fields.provider_params,
+            clear_provider_params,
+            "provider_params",
+            "clear_provider_params",
+        )?;
+        let connection_ref = legacy_override_from_split_fields(
+            fields.connection_ref,
+            clear_connection_ref,
+            "connection_ref",
+            "clear_connection_ref",
+        )?;
+
+        Ok(Self {
+            handling_mode: fields.handling_mode,
+            skill_references: fields.skill_references,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            model: fields.model,
+            provider: fields.provider,
+            provider_params,
+            connection_ref,
+            keep_alive: fields.keep_alive,
+            render_metadata: fields.render_metadata,
+            execution_kind: fields.execution_kind,
+            peer_response_terminal_apply_intent: fields.peer_response_terminal_apply_intent,
+        })
+    }
+}
+
 impl RuntimeTurnMetadata {
     /// True when every field is `None` — used to skip serializing empty
     /// metadata carriers on the wire.
@@ -1082,9 +1228,7 @@ impl RuntimeTurnMetadata {
             && self.model.is_none()
             && self.provider.is_none()
             && self.provider_params.is_none()
-            && !self.clear_provider_params
             && self.connection_ref.is_none()
-            && !self.clear_connection_ref
             && self.keep_alive.is_none()
             && self.render_metadata.is_none()
             && self.execution_kind.is_none()
@@ -1109,32 +1253,16 @@ impl RuntimeTurnMetadata {
         )?;
         merge_scalar(&mut self.model, other.model, "model")?;
         merge_scalar(&mut self.provider, other.provider, "provider")?;
-        reject_set_clear_conflict(
-            self.provider_params.is_some(),
-            self.clear_provider_params,
-            other.provider_params.is_some(),
-            other.clear_provider_params,
-            "provider_params",
-        )?;
-        merge_scalar(
+        merge_override(
             &mut self.provider_params,
             other.provider_params,
             "provider_params",
         )?;
-        self.clear_provider_params |= other.clear_provider_params;
-        reject_set_clear_conflict(
-            self.connection_ref.is_some(),
-            self.clear_connection_ref,
-            other.connection_ref.is_some(),
-            other.clear_connection_ref,
-            "connection_ref",
-        )?;
-        merge_scalar(
+        merge_override(
             &mut self.connection_ref,
             other.connection_ref,
             "connection_ref",
         )?;
-        self.clear_connection_ref |= other.clear_connection_ref;
         merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
         merge_scalar(
             &mut self.render_metadata,
@@ -1167,26 +1295,6 @@ impl RuntimeTurnMetadata {
     }
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn reject_set_clear_conflict(
-    lhs_set: bool,
-    lhs_clear: bool,
-    rhs_set: bool,
-    rhs_clear: bool,
-    field: &'static str,
-) -> Result<(), TurnMetadataMergeConflict> {
-    if (lhs_set && rhs_clear) || (lhs_clear && rhs_set) {
-        return Err(TurnMetadataMergeConflict {
-            field,
-            reason: "one input sets the field while another clears it",
-        });
-    }
-    Ok(())
-}
-
 fn merge_scalar<T: PartialEq>(
     lhs: &mut Option<T>,
     rhs: Option<T>,
@@ -1208,6 +1316,66 @@ fn merge_scalar<T: PartialEq>(
                 })
             }
         }
+    }
+}
+
+fn merge_override<T: PartialEq>(
+    lhs: &mut Option<TurnMetadataOverride<T>>,
+    rhs: Option<TurnMetadataOverride<T>>,
+    field: &'static str,
+) -> Result<(), TurnMetadataMergeConflict> {
+    match (lhs.as_ref(), rhs) {
+        (_, None) => Ok(()),
+        (None, Some(override_fact)) => {
+            *lhs = Some(override_fact);
+            Ok(())
+        }
+        (Some(existing), Some(new)) if *existing == new => Ok(()),
+        (Some(TurnMetadataOverride::Set(_)), Some(TurnMetadataOverride::Set(_))) => {
+            Err(TurnMetadataMergeConflict {
+                field,
+                reason: "two inputs in one batch set distinct scalar overrides",
+            })
+        }
+        (Some(_), Some(_)) => Err(TurnMetadataMergeConflict {
+            field,
+            reason: "one input sets the field while another clears it",
+        }),
+    }
+}
+
+fn legacy_override_from_split_fields<T, E>(
+    set_value: Option<TurnMetadataOverride<T>>,
+    clear: bool,
+    set_field: &'static str,
+    clear_field: &'static str,
+) -> Result<Option<TurnMetadataOverride<T>>, E>
+where
+    E: de::Error,
+{
+    if clear && set_value.is_some() {
+        return Err(E::custom(format!(
+            "{clear_field} cannot be combined with {set_field}"
+        )));
+    }
+    if clear {
+        Ok(Some(TurnMetadataOverride::Clear))
+    } else {
+        Ok(set_value)
+    }
+}
+
+fn take_legacy_clear_bool<E>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<bool, E>
+where
+    E: de::Error,
+{
+    match object.remove(field) {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(value),
+        Some(_) => Err(E::custom(format!("{field} must be a boolean"))),
     }
 }
 

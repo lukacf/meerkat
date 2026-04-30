@@ -1297,6 +1297,11 @@ fn collect_protocol_feedback_constraint_findings(
                     return false;
                 }
                 if let Some(pos) = trimmed.find(&construction_pattern) {
+                    let prefix = trimmed[..pos].trim_end();
+                    // Companion input-variant enums are metadata facts, not feedback submissions.
+                    if prefix.ends_with("InputVariant") {
+                        return false;
+                    }
                     if trimmed.contains("=>") {
                         return false;
                     }

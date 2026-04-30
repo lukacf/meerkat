@@ -18,7 +18,7 @@ use meerkat_core::service::{
     SessionServiceHistoryExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    AssistantBlock, HandlingMode, RunResult, SessionId, StopReason, ToolCallView, ToolDef, Usage,
+    AssistantBlock, RunResult, SessionId, StopReason, ToolCallView, ToolDef, Usage,
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher, HookDecision,
@@ -806,11 +806,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
         prompt: prompt.to_string().into(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: None,
-        skill_references: None,
-        flow_tool_overlay: None,
         turn_metadata: None,
     }
 }
@@ -1274,7 +1270,12 @@ async fn test_flow_tool_overlay_is_cleared_after_canceled_turn() {
             .start_turn(
                 &sid_clone,
                 StartTurnRequest {
-                    flow_tool_overlay: Some(overlay),
+                    turn_metadata: Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            flow_tool_overlay: Some(overlay),
+                            ..Default::default()
+                        },
+                    ),
                     ..turn_req("Slow with overlay")
                 },
             )
@@ -1325,10 +1326,15 @@ async fn test_flow_tool_overlay_enforced_by_runtime_and_resets_next_turn() {
         .start_turn(
             &session_id,
             StartTurnRequest {
-                flow_tool_overlay: Some(TurnToolOverlay {
-                    allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
-                    blocked_tools: Some(vec!["beta".to_string()]),
-                }),
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        flow_tool_overlay: Some(TurnToolOverlay {
+                            allowed_tools: Some(vec!["alpha".to_string(), "beta".to_string()]),
+                            blocked_tools: Some(vec!["beta".to_string()]),
+                        }),
+                        ..Default::default()
+                    },
+                ),
                 ..turn_req("overlayed turn")
             },
         )
@@ -1380,10 +1386,15 @@ async fn test_start_turn_returns_error_when_overlay_clear_fails() {
         .start_turn(
             &session_id,
             StartTurnRequest {
-                flow_tool_overlay: Some(TurnToolOverlay {
-                    allowed_tools: Some(vec!["alpha".to_string()]),
-                    blocked_tools: None,
-                }),
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        flow_tool_overlay: Some(TurnToolOverlay {
+                            allowed_tools: Some(vec!["alpha".to_string()]),
+                            blocked_tools: None,
+                        }),
+                        ..Default::default()
+                    },
+                ),
                 ..turn_req("overlay clear fails")
             },
         )

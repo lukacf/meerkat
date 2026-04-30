@@ -8,7 +8,7 @@ use meerkat::SessionService;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
 };
-use meerkat_core::types::{HandlingMode, SessionId};
+use meerkat_core::types::SessionId;
 use meerkat_core::Session;
 
 use super::ToolCallError;
@@ -72,11 +72,7 @@ pub async fn handle(
         let req = StartTurnRequest {
             prompt: prompt.into(),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: HandlingMode::Queue,
             event_tx: None,
-            skill_references: None,
-            flow_tool_overlay: None,
             turn_metadata: None,
         };
 

@@ -180,6 +180,141 @@ def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | N
     ]
 
 
+def _turn_keep_alive_override(keep_alive: bool | None) -> dict[str, Any] | None:
+    if keep_alive is None:
+        return None
+    if not keep_alive:
+        return {"action": "clear"}
+    return {
+        "action": "set",
+        "value": {
+            "policy": "pinned",
+            "ttl_secs": 30,
+        },
+    }
+
+
+def _runtime_provider_wire(provider: str | None) -> str | None:
+    if provider is None:
+        return None
+    if provider in {"open_a_i", "open_ai"}:
+        return "openai"
+    if provider in {"anthropic", "openai", "gemini", "self_hosted", "other"}:
+        return provider
+    return "other"
+
+
+def _provider_params_namespace(provider: str | None) -> str:
+    if provider in {"open_a_i", "open_ai", "openai"}:
+        return "openai"
+    return provider or "unknown"
+
+
+def _is_json_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_json_u32(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_openai_provider(provider: str | None) -> bool:
+    return _provider_params_namespace(provider) == "openai"
+
+
+def _runtime_provider_params_override(
+    provider_params: Any,
+    provider: str | None,
+) -> dict[str, Any]:
+    if not isinstance(provider_params, dict):
+        return {
+            "provider_tag": {
+                "provider": "unknown",
+                "bag": {
+                    "namespace": _provider_params_namespace(provider),
+                    "key": "provider_params",
+                    "body": json.dumps(provider_params, separators=(",", ":")),
+                },
+            }
+        }
+    if "provider_tag" in provider_params:
+        return provider_params
+
+    wire: dict[str, Any] = {}
+    remaining: dict[str, Any] = {}
+    for key, value in provider_params.items():
+        if key in {"temperature", "top_p", "topP"} and _is_json_number(value):
+            wire["top_p" if key == "topP" else key] = value
+        elif key in {"max_output_tokens", "maxOutputTokens"} and _is_json_u32(value):
+            wire["max_output_tokens"] = value
+        elif (
+            key == "reasoning"
+            and not _is_openai_provider(provider)
+            and value in {"emit", "silent", "off"}
+        ):
+            wire["reasoning"] = value
+        elif key in {"thinking_budget_tokens", "thinkingBudgetTokens"} and _is_json_u32(value):
+            wire["thinking_budget_tokens"] = value
+        else:
+            remaining[key] = value
+
+    if remaining:
+        wire["provider_tag"] = {
+            "provider": "unknown",
+            "bag": {
+                "namespace": _provider_params_namespace(provider),
+                "key": "provider_params",
+                "body": json.dumps(remaining, separators=(",", ":")),
+            },
+        }
+
+    return wire
+
+
+def _runtime_turn_metadata(
+    *,
+    skill_refs: list[SkillRef] | None = None,
+    flow_tool_overlay: dict[str, Any] | None = None,
+    additional_instructions: list[str] | None = None,
+    keep_alive: bool | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    provider_params: Any | None = None,
+    clear_provider_params: bool | None = None,
+    connection_ref: WireConnectionRef | dict[str, str] | None = None,
+    clear_connection_ref: bool | None = None,
+) -> dict[str, Any] | None:
+    metadata: dict[str, Any] = {}
+    wire_refs = _skill_refs_to_wire(skill_refs)
+    if wire_refs is not None:
+        metadata["skill_references"] = wire_refs
+    if flow_tool_overlay is not None:
+        metadata["flow_tool_overlay"] = flow_tool_overlay
+    if additional_instructions is not None:
+        metadata["additional_instructions"] = [
+            {"kind": "user", "body": body} for body in additional_instructions
+        ]
+    keep_alive_override = _turn_keep_alive_override(keep_alive)
+    if keep_alive_override is not None:
+        metadata["keep_alive"] = keep_alive_override
+    if model is not None:
+        metadata["model"] = model
+    if provider is not None:
+        metadata["provider"] = _runtime_provider_wire(provider)
+    if clear_provider_params:
+        metadata["provider_params"] = {"action": "clear"}
+    elif provider_params is not None:
+        metadata["provider_params"] = {
+            "action": "set",
+            "value": _runtime_provider_params_override(provider_params, provider),
+        }
+    if clear_connection_ref:
+        metadata["connection_ref"] = {"action": "clear"}
+    elif connection_ref is not None:
+        metadata["connection_ref"] = {"action": "set", "value": _wire_value(connection_ref)}
+    return metadata or None
+
+
 class MeerkatClient:
     """Async client that manages a Meerkat agent runtime via rkat-rpc.
 
@@ -1461,10 +1596,6 @@ class MeerkatClient:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
-        max_tokens: int | None = None,
-        system_prompt: str | None = None,
-        output_schema: Any | None = None,
-        structured_output_retries: int | None = None,
         provider_params: Any | None = None,
         clear_provider_params: bool | None = None,
         connection_ref: WireConnectionRef | dict[str, str] | None = None,
@@ -1474,20 +1605,18 @@ class MeerkatClient:
             mob_id=mob_id,
             agent_identity=agent_identity,
             prompt=prompt,
-            skill_refs=_skill_refs_to_wire(skill_refs),
-            flow_tool_overlay=flow_tool_overlay,
-            additional_instructions=additional_instructions,
-            keep_alive=keep_alive,
-            model=model,
-            provider=provider,
-            max_tokens=max_tokens,
-            system_prompt=system_prompt,
-            output_schema=output_schema,
-            structured_output_retries=structured_output_retries,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            connection_ref=connection_ref,
-            clear_connection_ref=clear_connection_ref,
+            turn_metadata=_runtime_turn_metadata(
+                skill_refs=skill_refs,
+                flow_tool_overlay=flow_tool_overlay,
+                additional_instructions=additional_instructions,
+                keep_alive=keep_alive,
+                model=model,
+                provider=provider,
+                provider_params=provider_params,
+                clear_provider_params=clear_provider_params,
+                connection_ref=connection_ref,
+                clear_connection_ref=clear_connection_ref,
+            ),
         )
         return await self._request("mob/turn_start", _wire_value(params))
 
@@ -2027,36 +2156,26 @@ class MeerkatClient:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
-        max_tokens: int | None = None,
-        system_prompt: str | None = None,
-        output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int | None = None,
-        provider_params: dict[str, Any] | None = None,
+        provider_params: Any | None = None,
+        clear_provider_params: bool | None = None,
+        connection_ref: WireConnectionRef | dict[str, str] | None = None,
+        clear_connection_ref: bool | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
-        wire_refs = _skill_refs_to_wire(skill_refs)
-        if wire_refs is not None:
-            params["skill_refs"] = wire_refs
-        if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = flow_tool_overlay
-        if additional_instructions is not None:
-            params["additional_instructions"] = additional_instructions
-        if keep_alive is not None:
-            params["keep_alive"] = keep_alive
-        if model is not None:
-            params["model"] = model
-        if provider is not None:
-            params["provider"] = provider
-        if max_tokens is not None:
-            params["max_tokens"] = max_tokens
-        if system_prompt is not None:
-            params["system_prompt"] = system_prompt
-        if output_schema is not None:
-            params["output_schema"] = output_schema
-        if structured_output_retries is not None:
-            params["structured_output_retries"] = structured_output_retries
-        if provider_params is not None:
-            params["provider_params"] = provider_params
+        turn_metadata = _runtime_turn_metadata(
+            skill_refs=skill_refs,
+            flow_tool_overlay=flow_tool_overlay,
+            additional_instructions=additional_instructions,
+            keep_alive=keep_alive,
+            model=model,
+            provider=provider,
+            provider_params=provider_params,
+            clear_provider_params=clear_provider_params,
+            connection_ref=connection_ref,
+            clear_connection_ref=clear_connection_ref,
+        )
+        if turn_metadata is not None:
+            params["turn_metadata"] = turn_metadata
         raw = await self._request("turn/start", params)
         return self._parse_run_result(raw)
 
@@ -2071,11 +2190,10 @@ class MeerkatClient:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
-        max_tokens: int | None = None,
-        system_prompt: str | None = None,
-        output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int | None = None,
-        provider_params: dict[str, Any] | None = None,
+        provider_params: Any | None = None,
+        clear_provider_params: bool | None = None,
+        connection_ref: WireConnectionRef | dict[str, str] | None = None,
+        clear_connection_ref: bool | None = None,
         _session: Session | None = None,
     ) -> EventStream:
         if not self._dispatcher or not self._process or not self._process.stdin:
@@ -2085,29 +2203,20 @@ class MeerkatClient:
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
-        wire_refs = _skill_refs_to_wire(skill_refs)
-        if wire_refs is not None:
-            params["skill_refs"] = wire_refs
-        if flow_tool_overlay is not None:
-            params["flow_tool_overlay"] = flow_tool_overlay
-        if additional_instructions is not None:
-            params["additional_instructions"] = additional_instructions
-        if keep_alive is not None:
-            params["keep_alive"] = keep_alive
-        if model is not None:
-            params["model"] = model
-        if provider is not None:
-            params["provider"] = provider
-        if max_tokens is not None:
-            params["max_tokens"] = max_tokens
-        if system_prompt is not None:
-            params["system_prompt"] = system_prompt
-        if output_schema is not None:
-            params["output_schema"] = output_schema
-        if structured_output_retries is not None:
-            params["structured_output_retries"] = structured_output_retries
-        if provider_params is not None:
-            params["provider_params"] = provider_params
+        turn_metadata = _runtime_turn_metadata(
+            skill_refs=skill_refs,
+            flow_tool_overlay=flow_tool_overlay,
+            additional_instructions=additional_instructions,
+            keep_alive=keep_alive,
+            model=model,
+            provider=provider,
+            provider_params=provider_params,
+            clear_provider_params=clear_provider_params,
+            connection_ref=connection_ref,
+            clear_connection_ref=clear_connection_ref,
+        )
+        if turn_metadata is not None:
+            params["turn_metadata"] = turn_metadata
         request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start", "params": params}
         data = (json.dumps(request) + "\n").encode()
         return EventStream(

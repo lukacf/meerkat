@@ -1128,15 +1128,7 @@ impl CoreExecutor for TargetCoreExecutor {
         let req = StartTurnRequest {
             prompt,
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: HandlingMode::Queue,
             event_tx: None,
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 
@@ -2585,11 +2577,7 @@ mod tests {
                 StartTurnRequest {
                     prompt: ContentInput::Text("run shell".to_string()),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
                     turn_metadata: None,
                 },
             )

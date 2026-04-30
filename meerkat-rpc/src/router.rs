@@ -5623,7 +5623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_start_accepts_flow_tool_overlay() {
+    async fn turn_start_accepts_flow_tool_overlay_in_turn_metadata() {
         let (router, _notif_rx) = test_router().await;
         let create_req = make_request("session/create", serde_json::json!({"prompt":"Hello"}));
         let create_resp = router.dispatch(create_req).await.unwrap();
@@ -5638,9 +5638,11 @@ mod tests {
             serde_json::json!({
                 "session_id": session_id,
                 "prompt": "continue with overlay",
-                "flow_tool_overlay": {
-                    "allowed_tools": [],
-                    "blocked_tools": []
+                "turn_metadata": {
+                    "flow_tool_overlay": {
+                        "allowed_tools": [],
+                        "blocked_tools": []
+                    }
                 }
             }),
         );
@@ -7002,11 +7004,12 @@ mod tests {
             serde_json::json!({
                 "session_id": session_id,
                 "prompt": "Follow up",
-                "skill_refs": [{
-                    "kind": "structured",
-                    "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-                    "skill_name": "email-extractor"
-                }],
+                "turn_metadata": {
+                    "skill_references": [{
+                        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                        "skill_name": "email-extractor"
+                    }]
+                },
                 "skill_references": ["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"]
             }),
         );

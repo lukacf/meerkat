@@ -1595,9 +1595,11 @@ where
                         .filter(|params| !params.is_empty());
 
                     // Call LLM with retry — route errors through machine authority
-                    let boundary_system_context = self.take_pending_system_context_boundary();
+                    let mut boundary_system_context = self.take_pending_system_context_boundary();
+                    let mut turn_system_context = self.take_pending_turn_system_context_boundary();
+                    turn_system_context.append(&mut boundary_system_context);
                     let request_messages =
-                        self.llm_messages_with_runtime_system_context(&boundary_system_context);
+                        self.llm_messages_with_runtime_system_context(&turn_system_context);
                     let result = match self
                         .call_llm_with_retry(LlmRetryRequest {
                             run_id: &run_id,
@@ -4136,6 +4138,132 @@ mod tests {
             snapshot.terminal_outcome,
             crate::TurnTerminalOutcome::Failed,
             "RunCompleted hook denial should leave the canonical turn snapshot failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_llm_denial_clears_turn_scoped_system_context() {
+        use crate::hooks::{
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookInvocation,
+            HookPoint, HookReasonCode,
+        };
+
+        struct DenyPreLlmHook;
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for DenyPreLlmHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::PreLlmRequest {
+                    return Ok(HookExecutionReport::empty());
+                }
+                Ok(HookExecutionReport {
+                    decision: Some(HookDecision::Deny {
+                        hook_id: crate::hooks::HookId::new("deny-pre-llm"),
+                        reason_code: HookReasonCode::PolicyViolation,
+                        message: "deny pre llm".to_string(),
+                        payload: None,
+                    }),
+                    ..HookExecutionReport::empty()
+                })
+            }
+        }
+
+        let turn_handle =
+            Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(turn_handle)
+            .with_hook_engine(Arc::new(DenyPreLlmHook))
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.stage_turn_system_context(vec![crate::PendingSystemContextAppend {
+            text: "turn only instruction".to_string(),
+            source: Some("runtime_turn_metadata.additional_instructions".to_string()),
+            idempotency_key: None,
+            accepted_at: crate::time_compat::SystemTime::now(),
+        }]);
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("PreLlmRequest denial should fail the run");
+        assert!(matches!(
+            err,
+            AgentError::HookDenied {
+                point: HookPoint::PreLlmRequest,
+                ..
+            }
+        ));
+        assert!(
+            agent.pending_turn_system_context.is_empty(),
+            "turn-scoped runtime metadata must be discarded when the turn fails before LLM use"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_clears_turn_scoped_system_context_before_llm_use() {
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.stage_turn_system_context(vec![crate::PendingSystemContextAppend {
+            text: "cancelled turn instruction".to_string(),
+            source: Some("runtime_turn_metadata.additional_instructions".to_string()),
+            idempotency_key: None,
+            accepted_at: crate::time_compat::SystemTime::now(),
+        }]);
+
+        agent.cancel();
+
+        assert!(
+            agent.pending_turn_system_context.is_empty(),
+            "interrupt/cancel before the first LLM boundary must not leak turn-scoped context"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_pre_llm_terminal_clears_turn_scoped_system_context() {
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .build(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent.config.max_turns = Some(0);
+        agent.stage_turn_system_context(vec![crate::PendingSystemContextAppend {
+            text: "max turns terminal instruction".to_string(),
+            source: Some("runtime_turn_metadata.additional_instructions".to_string()),
+            idempotency_key: None,
+            accepted_at: crate::time_compat::SystemTime::now(),
+        }]);
+
+        let result = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect("turn-limit terminal result is surfaced as successful");
+
+        assert_eq!(result.turns, 0);
+        assert!(
+            agent.pending_turn_system_context.is_empty(),
+            "successful terminal exits before the first LLM boundary must not leak turn-scoped context"
         );
     }
 

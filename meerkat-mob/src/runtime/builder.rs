@@ -1532,11 +1532,7 @@ impl MobBuilder {
                             meerkat_core::service::StartTurnRequest {
                                 prompt: resume_message.into(),
                                 system_prompt: None,
-                                render_metadata: None,
-                                handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
-                                skill_references: None,
-                                flow_tool_overlay: None,
                                 turn_metadata: None,
                             },
                         )

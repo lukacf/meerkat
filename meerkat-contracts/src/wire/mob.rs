@@ -1,6 +1,7 @@
 //! Mob RPC wire contracts.
 
 use super::connection::WireConnectionRef;
+use super::runtime::WireRuntimeTurnMetadata;
 use super::session::WireContentInput;
 use super::supervisor_bridge::BridgeBootstrapToken;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -1550,33 +1551,7 @@ pub struct MobTurnStartParams {
     pub agent_identity: String,
     pub prompt: WireContentInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structured_output_retries: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
-    #[serde(default)]
-    pub clear_provider_params: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<WireConnectionRef>,
-    #[serde(default)]
-    pub clear_connection_ref: bool,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 /// Response payload for `mob/member_status`.
@@ -1872,6 +1847,7 @@ pub struct MobListMembersMatchingResult {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::wire::runtime::WireTurnMetadataOverride;
 
     #[test]
     fn wire_member_ref_round_trips_through_encode_decode() {
@@ -2105,32 +2081,34 @@ mod tests {
     }
 
     #[test]
-    fn mob_turn_start_params_capture_turn_override_fields() {
+    fn mob_turn_start_params_capture_turn_metadata_carrier() {
         let params = serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
             "mob_id": "mob-1",
             "agent_identity": "worker",
             "prompt": "continue",
-            "output_schema": { "type": "object" },
-            "structured_output_retries": 2
+            "turn_metadata": {
+                "model": "gpt-test",
+                "keep_alive": {
+                    "action": "clear"
+                }
+            }
         }))
-        .expect("turn_start should accept explicit turn override fields");
+        .expect("turn_start should accept a single turn_metadata carrier");
 
         assert_eq!(params.mob_id, "mob-1");
         assert_eq!(params.agent_identity, "worker");
         assert_eq!(params.prompt, WireContentInput::Text("continue".into()));
-        assert_eq!(
-            params.output_schema,
-            Some(serde_json::json!({ "type": "object" }))
-        );
-        assert_eq!(params.structured_output_retries, Some(2));
+        let metadata = params.turn_metadata.expect("turn metadata");
+        assert_eq!(metadata.model.as_deref(), Some("gpt-test"));
+        assert_eq!(metadata.keep_alive, Some(WireTurnMetadataOverride::Clear));
 
         let err = serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
             "mob_id": "mob-1",
             "agent_identity": "worker",
             "prompt": "continue",
-            "unknown_override": true
+            "model": "legacy-split-model"
         }))
-        .expect_err("turn_start must reject unknown override fields");
+        .expect_err("turn_start must reject split override fields");
         assert!(
             err.to_string().contains("unknown field"),
             "unexpected error: {err}"

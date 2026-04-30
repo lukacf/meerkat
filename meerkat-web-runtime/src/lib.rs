@@ -1412,11 +1412,7 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
             meerkat_core::service::StartTurnRequest {
                 prompt: content_input,
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
                 turn_metadata: None,
             },
         )

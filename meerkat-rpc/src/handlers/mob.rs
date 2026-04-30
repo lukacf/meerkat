@@ -13,12 +13,12 @@ use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::WireMobProfile;
+use meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata;
 use meerkat_contracts::{
     MobCreateParams, MobCreateResult, MobMemberListEntryWire, WireMemberState, WireMobBackendKind,
     WireMobMemberStatus, WireMobRuntimeMode,
 };
-use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
-use meerkat_core::skills::SkillRef;
+use meerkat_core::service::AppendSystemContextRequest;
 use meerkat_core::types::ContentInput;
 use meerkat_mob::runtime::MobMemberSnapshot;
 use meerkat_mob::{
@@ -1770,38 +1770,12 @@ pub struct MobTurnStartParams {
     pub mob_id: String,
     pub agent_identity: String,
     pub prompt: ContentInput,
-    #[serde(default)]
-    pub skill_refs: Option<Vec<SkillRef>>,
     /// Retired legacy string refs. Kept only to preserve the typed ingress
     /// error returned by `turn/start` for older clients.
     #[serde(default, deserialize_with = "reject_retired_skill_references")]
     pub skill_references: Option<Vec<String>>,
     #[serde(default)]
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
-    #[serde(default)]
-    pub additional_instructions: Option<Vec<String>>,
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub output_schema: Option<serde_json::Value>,
-    #[serde(default)]
-    pub structured_output_retries: Option<u32>,
-    #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
-    #[serde(default)]
-    pub clear_provider_params: bool,
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
-    #[serde(default)]
-    pub clear_connection_ref: bool,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 /// Handle `mob/turn_start` — resolve identity to session and delegate to turn/start.
@@ -1864,50 +1838,7 @@ pub async fn handle_mob_turn_start(
         "prompt".to_string(),
         serde_json::to_value(mob_params.prompt).unwrap_or(serde_json::Value::Null),
     );
-    insert_optional(&mut turn_params, "skill_refs", mob_params.skill_refs);
-    insert_optional(
-        &mut turn_params,
-        "flow_tool_overlay",
-        mob_params.flow_tool_overlay,
-    );
-    insert_optional(
-        &mut turn_params,
-        "additional_instructions",
-        mob_params.additional_instructions,
-    );
-    insert_optional(&mut turn_params, "keep_alive", mob_params.keep_alive);
-    insert_optional(&mut turn_params, "model", mob_params.model);
-    insert_optional(&mut turn_params, "provider", mob_params.provider);
-    insert_optional(&mut turn_params, "max_tokens", mob_params.max_tokens);
-    insert_optional(&mut turn_params, "system_prompt", mob_params.system_prompt);
-    insert_optional(&mut turn_params, "output_schema", mob_params.output_schema);
-    insert_optional(
-        &mut turn_params,
-        "structured_output_retries",
-        mob_params.structured_output_retries,
-    );
-    insert_optional(
-        &mut turn_params,
-        "provider_params",
-        mob_params.provider_params,
-    );
-    if mob_params.clear_provider_params {
-        turn_params.insert(
-            "clear_provider_params".to_string(),
-            serde_json::Value::Bool(true),
-        );
-    }
-    insert_optional(
-        &mut turn_params,
-        "connection_ref",
-        mob_params.connection_ref,
-    );
-    if mob_params.clear_connection_ref {
-        turn_params.insert(
-            "clear_connection_ref".to_string(),
-            serde_json::Value::Bool(true),
-        );
-    }
+    insert_optional(&mut turn_params, "turn_metadata", mob_params.turn_metadata);
     let raw_json = serde_json::to_string(&turn_params).unwrap_or_default();
     let raw_value = RawValue::from_string(raw_json).ok();
 
@@ -2370,66 +2301,77 @@ mod tests {
     }
 
     #[test]
-    fn mob_turn_start_params_accept_only_known_turn_overrides() {
+    fn mob_turn_start_params_accept_single_turn_metadata_carrier() {
         let value = serde_json::json!({
             "mob_id": "m1",
             "agent_identity": "w1",
             "prompt": [{"type": "text", "text": "continue"}],
-            "flow_tool_overlay": {
-                "allowed_tools": ["read"],
-                "blocked_tools": []
-            },
-            "additional_instructions": ["stay concise"],
-            "keep_alive": true,
-            "model": "gpt-test",
-            "provider": "openai",
-            "max_tokens": 128,
-            "system_prompt": "system",
-            "output_schema": { "type": "object" },
-            "structured_output_retries": 2,
-            "provider_params": { "temperature": 0.2 },
-            "clear_provider_params": true,
-            "connection_ref": {
-                "realm": "dev",
-                "binding": "default_openai"
-            },
-            "clear_connection_ref": true
+            "turn_metadata": {
+                "flow_tool_overlay": {
+                    "allowed_tools": ["read"],
+                    "blocked_tools": []
+                },
+                "additional_instructions": [
+                    { "kind": "user", "body": "stay concise" }
+                ],
+                "keep_alive": {
+                    "action": "set",
+                    "value": {
+                        "ttl_secs": 30,
+                        "policy": "pinned"
+                    }
+                },
+                "model": "gpt-test",
+                "provider": "openai",
+                "provider_params": {
+                    "action": "clear"
+                },
+                "connection_ref": {
+                    "action": "set",
+                    "value": {
+                        "realm": "dev",
+                        "binding": "default_openai"
+                    }
+                }
+            }
         });
         let params: MobTurnStartParams =
-            serde_json::from_value(value).expect("known turn overrides deserialize");
+            serde_json::from_value(value).expect("turn metadata carrier deserializes");
 
         assert!(matches!(params.prompt, ContentInput::Blocks(_)));
+        let metadata = params.turn_metadata.expect("turn metadata");
         assert_eq!(
-            params
+            metadata
                 .flow_tool_overlay
                 .as_ref()
                 .and_then(|overlay| overlay.allowed_tools.as_ref())
                 .expect("allowed tools"),
             &vec!["read".to_string()]
         );
-        assert_eq!(params.model.as_deref(), Some("gpt-test"));
-        assert_eq!(params.max_tokens, Some(128));
-        assert_eq!(params.structured_output_retries, Some(2));
-        assert!(params.clear_provider_params);
-        assert!(params.clear_connection_ref);
+        assert_eq!(metadata.model.as_deref(), Some("gpt-test"));
+        assert_eq!(metadata.provider, Some(meerkat_core::Provider::OpenAI));
         assert_eq!(
-            params
-                .connection_ref
-                .as_ref()
-                .expect("connection_ref")
-                .binding
-                .as_str(),
-            "default_openai"
+            metadata.provider_params,
+            Some(meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Clear)
         );
+        let connection_ref = match metadata.connection_ref.expect("connection_ref") {
+            meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Set(connection_ref) => {
+                connection_ref
+            }
+            meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Clear => {
+                panic!("connection_ref should be set")
+            }
+        };
+        assert_eq!(connection_ref.binding.as_str(), "default_openai");
 
         let unknown = serde_json::json!({
             "mob_id": "m1",
             "agent_identity": "w1",
             "prompt": "continue",
-            "unexpected_override": true
+            "model": "legacy-split-model"
         });
         let err = serde_json::from_value::<MobTurnStartParams>(unknown)
-            .expect_err("unknown turn override should fail closed");
+            .expect_err("split turn override should fail closed");
         assert!(err.to_string().contains("unknown field"));
 
         let retired = serde_json::json!({

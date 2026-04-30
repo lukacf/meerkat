@@ -479,7 +479,11 @@ async fn deferred_inline_external_tools_accept_explicit_keep_alive_false_turn() 
             "params": {
                 "session_id": session_id,
                 "prompt": "Inspect the deferred inline callback tool surface.",
-                "keep_alive": false
+                "turn_metadata": {
+                    "keep_alive": {
+                        "action": "clear"
+                    }
+                }
             }
         }),
     )
@@ -1190,7 +1194,9 @@ async fn in_session_model_switch_via_turn_start() {
         "params": {
             "session_id": session_id,
             "prompt": "Follow up with new model",
-            "model": "claude-sonnet-4-5"
+            "turn_metadata": {
+                "model": "claude-sonnet-4-5"
+            }
         }
     });
     send_request(&mut writer, &turn_req).await;

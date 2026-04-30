@@ -148,11 +148,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                          The deployment log shows a new release was pushed 12 minutes ago."
                     .into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                skill_references: None,
-                flow_tool_overlay: None,
                 turn_metadata: None,
             },
         )
@@ -185,11 +181,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                          Summarize the full incident timeline and close it out."
                     .into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                skill_references: None,
-                flow_tool_overlay: None,
                 turn_metadata: None,
             },
         )

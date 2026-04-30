@@ -759,16 +759,62 @@ fn approval_service_from_persistence(
     }
 }
 
+/// Internal compatibility projection for legacy SessionRuntime paths that have
+/// not yet been fully retyped to consume `RuntimeTurnMetadata` directly.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct TurnOverrides {
+    keep_alive: Option<bool>,
+    model: Option<String>,
+    provider: Option<String>,
+    max_tokens: Option<u32>,
+    system_prompt: Option<String>,
+    output_schema: Option<serde_json::Value>,
+    structured_output_retries: Option<u32>,
+    provider_params: Option<serde_json::Value>,
+    clear_provider_params: bool,
+    connection_ref: Option<meerkat_core::ConnectionRef>,
+    clear_connection_ref: bool,
+}
+
+impl TurnOverrides {
+    fn is_empty(&self) -> bool {
+        self.keep_alive.is_none()
+            && self.model.is_none()
+            && self.provider.is_none()
+            && self.max_tokens.is_none()
+            && self.system_prompt.is_none()
+            && self.output_schema.is_none()
+            && self.structured_output_retries.is_none()
+            && self.provider_params.is_none()
+            && !self.clear_provider_params
+            && self.connection_ref.is_none()
+            && !self.clear_connection_ref
+    }
+}
+
 impl SessionRuntime {
     fn turn_keep_alive_policy(
         requested: Option<bool>,
-    ) -> Option<meerkat_core::lifecycle::run_primitive::KeepAlivePolicy> {
-        requested.and_then(|keep_alive| {
-            keep_alive.then(|| meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                ttl: std::time::Duration::from_secs(30),
-                policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-            })
-        })
+    ) -> Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy,
+        >,
+    > {
+        match requested {
+            Some(true) => Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                        ttl: std::time::Duration::from_secs(30),
+                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                    },
+                ),
+            ),
+            Some(false) => {
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+            }
+            None => None,
+        }
     }
 
     fn turn_additional_instructions(
@@ -791,7 +837,7 @@ impl SessionRuntime {
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
-        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        overrides: Option<&TurnOverrides>,
         provider_hint: Option<&str>,
     ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
         use meerkat_core::lifecycle::run_primitive::{
@@ -842,9 +888,9 @@ impl SessionRuntime {
         (!metadata.is_empty()).then_some(metadata)
     }
 
-    pub(crate) fn turn_overrides_from_metadata(
+    fn turn_overrides_from_metadata(
         metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-    ) -> Option<crate::handlers::turn::TurnOverrides> {
+    ) -> Option<TurnOverrides> {
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
         let metadata = metadata?;
@@ -862,8 +908,13 @@ impl SessionRuntime {
             Some(TurnMetadataOverride::Clear) => (None, true),
             None => (None, false),
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
-            keep_alive: metadata.keep_alive.as_ref().map(|_| true),
+        let overrides = TurnOverrides {
+            keep_alive: metadata.keep_alive.as_ref().map(|keep_alive| {
+                matches!(
+                    keep_alive,
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)
+                )
+            }),
             model: metadata.model.as_ref().map(ToString::to_string),
             provider: metadata
                 .provider
@@ -884,6 +935,113 @@ impl SessionRuntime {
         requested_keep_alive: bool,
     ) -> bool {
         requested_keep_alive || self.runtime_adapter.session_has_comms(session_id).await
+    }
+
+    #[cfg(feature = "comms")]
+    async fn persisted_session_has_comms_name(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RpcError> {
+        Ok(self
+            .load_persisted_session(session_id)
+            .await?
+            .and_then(|session| session.session_metadata())
+            .and_then(|metadata| metadata.comms_name)
+            .is_some_and(|name| !name.trim().is_empty()))
+    }
+
+    #[cfg(feature = "comms")]
+    async fn peer_ingress_enabled_for_keep_alive(
+        &self,
+        session_id: &SessionId,
+        requested_keep_alive: bool,
+        explicit_keep_alive_override: bool,
+    ) -> bool {
+        if explicit_keep_alive_override {
+            requested_keep_alive
+        } else {
+            self.preserve_existing_peer_ingress(session_id, requested_keep_alive)
+                .await
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    fn comms_runtime_for_peer_ingress(
+        peer_ingress_enabled: bool,
+        comms_rt: Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>>,
+    ) -> Option<std::sync::Arc<dyn meerkat_core::agent::CommsRuntime>> {
+        if peer_ingress_enabled { comms_rt } else { None }
+    }
+
+    #[cfg(feature = "comms")]
+    async fn apply_runtime_turn_keep_alive_override_before_validation(
+        &self,
+        session_id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<(), RpcError> {
+        if self
+            .apply_pending_keep_alive_override(session_id, keep_alive)
+            .await?
+        {
+            return Ok(());
+        }
+
+        let mut comms_rt = self.service.comms_runtime(session_id).await;
+        if keep_alive && comms_rt.is_none() {
+            let adapter_has_comms = self.runtime_adapter.session_has_comms(session_id).await;
+            let persisted_has_comms = self.persisted_session_has_comms_name(session_id).await?;
+
+            if !adapter_has_comms && !persisted_has_comms {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: "keep_alive requires a session created with comms_name".to_string(),
+                    data: None,
+                });
+            }
+        }
+
+        self.service
+            .apply_runtime_session_keep_alive(session_id, keep_alive)
+            .await
+            .map_err(session_error_to_rpc)?;
+
+        if keep_alive && comms_rt.is_none() && self.live_session_is_stale(session_id).await? {
+            let Some(stored_session) = self.load_persisted_session(session_id).await? else {
+                return Err(RpcError {
+                    code: error::SESSION_NOT_FOUND,
+                    message: format!("session not found: {session_id}"),
+                    data: None,
+                });
+            };
+            let create_request = self
+                .recovered_create_request(
+                    session_id,
+                    stored_session,
+                    SurfaceSessionRecoveryOverrides {
+                        keep_alive: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            self.service
+                .create_session(create_request)
+                .await
+                .map_err(session_error_to_rpc)?;
+            comms_rt = self.service.comms_runtime(session_id).await;
+        }
+
+        let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+        if !owner.is_mob_owned() {
+            let peer_ingress_enabled = self
+                .peer_ingress_enabled_for_keep_alive(session_id, keep_alive, true)
+                .await;
+            let comms_rt = Self::comms_runtime_for_peer_ingress(peer_ingress_enabled, comms_rt);
+            self.runtime_adapter
+                .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
+                .await;
+        }
+
+        Ok(())
     }
 
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
@@ -1175,7 +1333,7 @@ impl SessionRuntime {
 
     fn recovery_overrides_from_turn(
         &self,
-        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        overrides: Option<&TurnOverrides>,
         keep_alive: bool,
     ) -> Result<SurfaceSessionRecoveryOverrides, RpcError> {
         let output_schema = match overrides.and_then(|ov| ov.output_schema.clone()) {
@@ -1422,7 +1580,7 @@ impl SessionRuntime {
     async fn resolve_target_llm_identity(
         &self,
         current: &SessionLlmIdentity,
-        ov: &crate::handlers::turn::TurnOverrides,
+        ov: &TurnOverrides,
     ) -> Result<SessionLlmIdentity, RpcError> {
         if ov.provider.is_some() && ov.model.is_none() {
             return Err(RpcError {
@@ -1559,7 +1717,7 @@ impl SessionRuntime {
     async fn effective_llm_identity_for_turn(
         &self,
         session_id: &SessionId,
-        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        overrides: Option<&TurnOverrides>,
     ) -> Result<SessionLlmIdentity, RpcError> {
         let pending_identity = self
             .staged_sessions
@@ -1720,7 +1878,7 @@ impl SessionRuntime {
     async fn hot_swap_llm_client(
         &self,
         session_id: &SessionId,
-        ov: &crate::handlers::turn::TurnOverrides,
+        ov: &TurnOverrides,
     ) -> Result<(), RpcError> {
         let request = SessionLlmReconfigureRequest {
             model: ov.model.clone(),
@@ -2118,27 +2276,24 @@ impl SessionRuntime {
     ///
     /// This ensures all session-driving work flows through the single runtime
     /// authority (the RuntimeLoop → CoreExecutor pipeline).
-    #[allow(clippy::too_many_arguments, unused_variables)]
+    #[allow(unused_variables)]
     pub async fn start_turn_via_runtime(
         self: &Arc<Self>,
         session_id: &SessionId,
         prompt: ContentInput,
         mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        additional_instructions: Option<Vec<String>>,
-        overrides: Option<crate::handlers::turn::TurnOverrides>,
+        turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     ) -> Result<RunResult, RpcError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
         let mut prompt = prompt;
+        let turn_overrides = Self::turn_overrides_from_metadata(turn_metadata.as_ref());
         let effective_identity = self
-            .effective_llm_identity_for_turn(session_id, overrides.as_ref())
+            .effective_llm_identity_for_turn(session_id, turn_overrides.as_ref())
             .await?;
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
-
         if self.live_session_is_stale(session_id).await? {
             let _ = self.service.discard_live_session(session_id).await;
             self.runtime_adapter.unregister_session(session_id).await;
@@ -2162,40 +2317,6 @@ impl SessionRuntime {
             }
         }
 
-        // Reject build-only overrides that cannot be applied via runtime turn
-        // metadata. These fields only apply during pending→materialized
-        // promotion (handled by the legacy start_turn path). Silently
-        // dropping them would violate surface contract.
-        if let Some(ref ov) = overrides {
-            let rejected = [
-                ov.max_tokens.map(|_| "max_tokens"),
-                ov.system_prompt.as_ref().map(|_| "system_prompt"),
-                ov.output_schema.as_ref().map(|_| "output_schema"),
-                ov.structured_output_retries
-                    .map(|_| "structured_output_retries"),
-            ];
-            let rejected: Vec<&str> = rejected.into_iter().flatten().collect();
-            if !rejected.is_empty() {
-                return Err(RpcError {
-                    code: error::INVALID_PARAMS,
-                    message: format!(
-                        "Cannot override {} on a runtime-routed turn; \
-                         set these at session/create time or use a deferred session",
-                        rejected.join(", ")
-                    ),
-                    data: None,
-                });
-            }
-        }
-
-        let turn_metadata = Self::turn_metadata_from_overrides(
-            skill_references,
-            flow_tool_overlay,
-            additional_instructions,
-            overrides.as_ref(),
-            Some(effective_identity.provider.as_str()),
-        );
-
         let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
 
         self.ensure_runtime_executor(session_id).await?;
@@ -2203,7 +2324,7 @@ impl SessionRuntime {
         // Manage comms drain lifecycle based on keep_alive override.
         #[cfg(feature = "comms")]
         {
-            let keep_alive_override = overrides.as_ref().and_then(|ov| ov.keep_alive);
+            let keep_alive_override = turn_overrides.as_ref().and_then(|ov| ov.keep_alive);
             let pending_keep_alive_override_applied = if let Some(keep_alive) = keep_alive_override
             {
                 self.apply_pending_keep_alive_override(session_id, keep_alive)
@@ -2223,11 +2344,15 @@ impl SessionRuntime {
                 let comms_rt = self.service.comms_runtime(session_id).await;
                 if keep_alive && comms_rt.is_none() {
                     // Check if the runtime adapter already has comms configured
-                    // for this session (e.g., via enable_comms_drain). If so,
-                    // the session-service comms check is not authoritative.
+                    // for this session (e.g., via enable_comms_drain), or the
+                    // persisted session has a comms_name that recovery can use.
+                    // If so, the live session-service comms check is not
+                    // authoritative.
                     let adapter_has_comms =
                         self.runtime_adapter.session_has_comms(session_id).await;
-                    if !adapter_has_comms {
+                    let persisted_has_comms =
+                        self.persisted_session_has_comms_name(session_id).await?;
+                    if !adapter_has_comms && !persisted_has_comms {
                         return Err(RpcError {
                             code: error::INVALID_PARAMS,
                             message: "keep_alive requires a session created with comms_name"
@@ -2260,7 +2385,11 @@ impl SessionRuntime {
                     );
                 } else {
                     let peer_ingress_enabled = self
-                        .preserve_existing_peer_ingress(session_id, keep_alive)
+                        .peer_ingress_enabled_for_keep_alive(
+                            session_id,
+                            keep_alive,
+                            keep_alive_override.is_some(),
+                        )
                         .await;
                     // Preserve an already-active peer ingress channel for
                     // externally-enabled sessions even when the persisted
@@ -2268,7 +2397,9 @@ impl SessionRuntime {
                     // routing can accidentally tear down the persistent comms
                     // drain that autonomous peers rely on for between-turn
                     // responses.
-                    if comms_rt.is_some() || peer_ingress_enabled {
+                    if comms_rt.is_some() || peer_ingress_enabled || keep_alive_override.is_some() {
+                        let comms_rt =
+                            Self::comms_runtime_for_peer_ingress(peer_ingress_enabled, comms_rt);
                         self.runtime_adapter
                             .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
                             .await;
@@ -2401,7 +2532,6 @@ impl SessionRuntime {
             })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn apply_runtime_turn(
         &self,
         session_id: &SessionId,
@@ -2409,10 +2539,6 @@ impl SessionRuntime {
         primitive: &RunPrimitive,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-        _additional_instructions: Option<Vec<String>>,
-        overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<CoreApplyOutput, RpcError> {
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
             return Err(RpcError {
@@ -2454,8 +2580,19 @@ impl SessionRuntime {
                 .map_err(session_error_to_rpc)?;
         }
 
+        let turn_metadata = primitive.turn_metadata();
+        let turn_overrides = Self::turn_overrides_from_metadata(turn_metadata);
+        let service_turn_metadata = turn_metadata.cloned();
+        let skill_references = turn_metadata.and_then(|meta| meta.skill_references.clone());
+
+        #[cfg(feature = "comms")]
+        if let Some(keep_alive) = turn_overrides.as_ref().and_then(|ov| ov.keep_alive) {
+            self.apply_runtime_turn_keep_alive_override_before_validation(session_id, keep_alive)
+                .await?;
+        }
+
         let effective_identity = self
-            .effective_llm_identity_for_turn(session_id, overrides.as_ref())
+            .effective_llm_identity_for_turn(session_id, turn_overrides.as_ref())
             .await?;
         self.validate_prompt_video_input(&prompt, &effective_identity)
             .await?;
@@ -2493,7 +2630,7 @@ impl SessionRuntime {
         } else {
             None
         };
-        let keep_alive = overrides
+        let keep_alive = turn_overrides
             .as_ref()
             .and_then(|ov| ov.keep_alive)
             .or_else(|| {
@@ -2506,7 +2643,7 @@ impl SessionRuntime {
 
         if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
             // Hot-swap LLM client if model/provider overrides are present.
-            if let Some(ref ov) = overrides
+            if let Some(ref ov) = turn_overrides
                 && (ov.model.is_some()
                     || ov.provider.is_some()
                     || ov.provider_params.is_some()
@@ -2520,13 +2657,8 @@ impl SessionRuntime {
             let req = StartTurnRequest {
                 prompt: prompt.clone(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx.clone()),
-
-                skill_references: skill_references.clone(),
-                flow_tool_overlay: flow_tool_overlay.clone(),
-                turn_metadata: primitive.turn_metadata().cloned(),
+                turn_metadata: service_turn_metadata.clone(),
             };
 
             match self
@@ -2558,7 +2690,7 @@ impl SessionRuntime {
                 runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
             }
 
-            if let Some(ref ov) = overrides {
+            if let Some(ref ov) = turn_overrides {
                 if ov.provider.is_some() && ov.model.is_none() {
                     self.restore_pending_from_promoting(
                         session_id,
@@ -2695,8 +2827,19 @@ impl SessionRuntime {
                         if !owner.is_mob_owned() {
                             let comms_rt = self.service.comms_runtime(session_id).await;
                             let peer_ingress_enabled = self
-                                .preserve_existing_peer_ingress(session_id, build_config.keep_alive)
+                                .peer_ingress_enabled_for_keep_alive(
+                                    session_id,
+                                    build_config.keep_alive,
+                                    turn_overrides
+                                        .as_ref()
+                                        .and_then(|ov| ov.keep_alive)
+                                        .is_some(),
+                                )
                                 .await;
+                            let comms_rt = Self::comms_runtime_for_peer_ingress(
+                                peer_ingress_enabled,
+                                comms_rt,
+                            );
                             self.runtime_adapter
                                 .update_peer_ingress_context(
                                     session_id,
@@ -2748,13 +2891,8 @@ impl SessionRuntime {
                     StartTurnRequest {
                         prompt: runtime_prompt,
                         system_prompt: None,
-                        render_metadata: None,
-                        handling_mode: meerkat_core::types::HandlingMode::Queue,
                         event_tx: Some(event_tx),
-
-                        skill_references,
-                        flow_tool_overlay,
-                        turn_metadata: primitive.turn_metadata().cloned(),
+                        turn_metadata: service_turn_metadata.clone(),
                     },
                     match primitive {
                         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2777,7 +2915,7 @@ impl SessionRuntime {
                 data: None,
             })?;
         let recovery_overrides =
-            self.recovery_overrides_from_turn(overrides.as_ref(), keep_alive)?;
+            self.recovery_overrides_from_turn(turn_overrides.as_ref(), keep_alive)?;
         let create_request = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
@@ -2793,8 +2931,16 @@ impl SessionRuntime {
             if !owner.is_mob_owned() {
                 let comms_rt = self.service.comms_runtime(session_id).await;
                 let peer_ingress_enabled = self
-                    .preserve_existing_peer_ingress(session_id, keep_alive)
+                    .peer_ingress_enabled_for_keep_alive(
+                        session_id,
+                        keep_alive,
+                        turn_overrides
+                            .as_ref()
+                            .and_then(|ov| ov.keep_alive)
+                            .is_some(),
+                    )
                     .await;
+                let comms_rt = Self::comms_runtime_for_peer_ingress(peer_ingress_enabled, comms_rt);
                 self.runtime_adapter
                     .update_peer_ingress_context(session_id, peer_ingress_enabled, comms_rt)
                     .await;
@@ -2808,13 +2954,8 @@ impl SessionRuntime {
                 StartTurnRequest {
                     prompt,
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
-
-                    skill_references,
-                    flow_tool_overlay,
-                    turn_metadata: primitive.turn_metadata().cloned(),
+                    turn_metadata: service_turn_metadata,
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2959,7 +3100,7 @@ impl SessionRuntime {
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
-        overrides: Option<crate::handlers::turn::TurnOverrides>,
+        overrides: Option<TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
@@ -3218,15 +3359,27 @@ impl SessionRuntime {
                 .unwrap_or(false),
         };
 
+        let provider_hint = if overrides.as_ref().is_some_and(|ov| {
+            ov.provider_params.is_some() && ov.provider.is_none() && !ov.clear_provider_params
+        }) {
+            Some(self.current_materialized_llm_identity(session_id).await?)
+        } else {
+            None
+        };
+
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: Some(event_tx.clone()),
-            skill_references: skill_references.clone(),
-            flow_tool_overlay: flow_tool_overlay.clone(),
-            turn_metadata: None,
+            turn_metadata: Self::turn_metadata_from_overrides(
+                skill_references.clone(),
+                flow_tool_overlay.clone(),
+                additional_instructions.clone(),
+                overrides.as_ref(),
+                provider_hint
+                    .as_ref()
+                    .map(|identity| identity.provider.as_str()),
+            ),
         };
 
         if self.live_session_is_stale(session_id).await? {
@@ -3268,6 +3421,7 @@ impl SessionRuntime {
             {
                 let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
                 if !owner.is_mob_owned() {
+                    let comms_rt = Self::comms_runtime_for_peer_ingress(keep_alive, comms_rt);
                     self.runtime_adapter
                         .update_peer_ingress_context(session_id, keep_alive, comms_rt)
                         .await;
@@ -3355,7 +3509,7 @@ impl SessionRuntime {
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
-        overrides: Option<&crate::handlers::turn::TurnOverrides>,
+        overrides: Option<&TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         let loaded_session = self.load_persisted_session(session_id).await?;
 
@@ -6197,7 +6351,7 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("claude-opus-4-6".to_string()),
             ..Default::default()
         };
@@ -6226,7 +6380,7 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             ..Default::default()
         };
@@ -6257,7 +6411,7 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("anthropic".to_string()),
             ..Default::default()
@@ -6420,7 +6574,7 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
             ..Default::default()
         };
@@ -6460,7 +6614,7 @@ mod tests {
                 profile: None,
             }),
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             connection_ref: Some(meerkat_core::ConnectionRef {
                 realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
@@ -6508,7 +6662,7 @@ mod tests {
                 profile: None,
             }),
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             provider_params: Some(serde_json::json!({ "temperature": 0.1 })),
             ..Default::default()
         };
@@ -6536,7 +6690,7 @@ mod tests {
             provider_params: Some(serde_json::json!({ "temperature": 0.7 })),
             connection_ref: None,
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             clear_provider_params: true,
             ..Default::default()
         };
@@ -6565,7 +6719,7 @@ mod tests {
                 profile: None,
             }),
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             clear_connection_ref: true,
             ..Default::default()
         };
@@ -6589,7 +6743,7 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             connection_ref: Some(meerkat_core::ConnectionRef {
                 realm: meerkat_core::RealmId::parse("tenant_b").expect("valid realm"),
                 binding: meerkat_core::BindingId::parse("anthropic_vip").expect("valid binding"),
@@ -6619,7 +6773,7 @@ mod tests {
             provider_params: None,
             connection_ref: None,
         };
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
             clear_provider_params: true,
             ..Default::default()
@@ -7797,8 +7951,6 @@ mod tests {
     /// turn/start with keep_alive override on a materialized session is not rejected.
     #[tokio::test]
     async fn turn_start_with_keep_alive_override_accepted_on_materialized() {
-        use crate::handlers::turn::TurnOverrides;
-
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -7850,8 +8002,6 @@ mod tests {
     /// turn/start on a pending session with model override applies it.
     #[tokio::test]
     async fn turn_start_on_pending_session_with_model_override() {
-        use crate::handlers::turn::TurnOverrides;
-
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -7903,8 +8053,6 @@ mod tests {
 
     #[tokio::test]
     async fn turn_start_on_pending_session_rejects_provider_only_override() {
-        use crate::handlers::turn::TurnOverrides;
-
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -7941,8 +8089,6 @@ mod tests {
     /// turn/start on a materialized session allows model override (hot-swap).
     #[tokio::test]
     async fn turn_start_on_materialized_session_allows_model_override() {
-        use crate::handlers::turn::TurnOverrides;
-
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -7995,43 +8141,98 @@ mod tests {
         }
     }
 
-    /// StartTurnParams deserializes with all fields.
+    /// StartTurnParams deserializes with a single runtime metadata carrier.
     #[test]
-    fn turn_start_params_deserialize_with_all_fields() {
+    fn turn_start_params_deserialize_with_turn_metadata_carrier() {
         use crate::handlers::turn::StartTurnParams;
+        use meerkat_contracts::wire::runtime::WireTurnMetadataOverride;
 
         let json = serde_json::json!({
             "session_id": "test-id",
             "prompt": "hello",
-            "keep_alive": true,
-            "model": "claude-opus-4-6",
-            "provider": "anthropic",
-            "max_tokens": 4096,
-            "system_prompt": "You are helpful",
-            "output_schema": {"type": "object"},
-            "structured_output_retries": 3,
-            "provider_params": {"thinking": true},
-            "clear_provider_params": false,
-            "clear_connection_ref": true
+            "turn_metadata": {
+                "skill_references": [{
+                    "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                    "skill_name": "email-extractor"
+                }],
+                "additional_instructions": [
+                    { "kind": "user", "body": "stay concise" }
+                ],
+                "keep_alive": { "action": "clear" },
+                "model": "claude-opus-4-6",
+                "provider": "anthropic",
+                "provider_params": {
+                    "action": "set",
+                    "value": {
+                        "temperature": 0.2
+                    }
+                },
+                "connection_ref": { "action": "clear" }
+            }
         });
         let params: StartTurnParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.session_id, "test-id");
         assert_eq!(params.prompt, ContentInput::Text("hello".to_string()));
-        assert_eq!(params.keep_alive, Some(true));
-        assert_eq!(params.model.as_deref(), Some("claude-opus-4-6"));
-        assert_eq!(params.provider.as_deref(), Some("anthropic"));
-        assert_eq!(params.max_tokens, Some(4096));
-        assert_eq!(params.system_prompt.as_deref(), Some("You are helpful"));
-        assert!(params.output_schema.is_some());
-        assert_eq!(params.structured_output_retries, Some(3));
-        assert!(params.provider_params.is_some());
-        assert!(!params.clear_provider_params);
-        assert!(params.clear_connection_ref);
+        let metadata = params.turn_metadata.expect("turn metadata");
+        assert_eq!(metadata.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(metadata.provider, Some(meerkat_core::Provider::Anthropic));
+        assert_eq!(metadata.keep_alive, Some(WireTurnMetadataOverride::Clear));
+        assert_eq!(
+            metadata.connection_ref,
+            Some(WireTurnMetadataOverride::Clear)
+        );
+        assert!(metadata.skill_references.is_some());
+        assert!(matches!(
+            metadata.provider_params,
+            Some(WireTurnMetadataOverride::Set(_))
+        ));
+    }
+
+    #[test]
+    fn turn_start_params_reject_split_metadata_when_turn_metadata_is_present() {
+        use crate::handlers::turn::StartTurnParams;
+
+        let err = serde_json::from_value::<StartTurnParams>(serde_json::json!({
+            "session_id": "test-id",
+            "prompt": "hello",
+            "flow_tool_overlay": {
+                "tools": {
+                    "legacy_tool": { "visibility": "hidden" }
+                }
+            },
+            "additional_instructions": ["legacy instruction"],
+            "keep_alive": true,
+            "model": "legacy-model",
+            "provider_params": { "temperature": 0.9 },
+            "turn_metadata": {
+                "flow_tool_overlay": {
+                    "tools": {
+                        "metadata_tool": { "visibility": "visible" }
+                    }
+                },
+                "additional_instructions": [
+                    { "kind": "user", "body": "metadata instruction" }
+                ],
+                "model": "metadata-model",
+                "provider_params": {
+                    "action": "set",
+                    "value": { "temperature": 0.1 }
+                }
+            }
+        }))
+        .expect_err(
+            "split top-level turn metadata fields must not be accepted beside turn_metadata",
+        );
+
+        let message = err.to_string();
+        assert!(
+            message.contains("flow_tool_overlay") || message.contains("unknown field"),
+            "error should identify the split metadata field or unknown-field rejection: {message}"
+        );
     }
 
     #[test]
     fn runtime_turn_metadata_from_overrides_preserves_provider_params_set() {
-        use crate::handlers::turn::TurnOverrides;
         use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 
         let provider_params = serde_json::json!({
@@ -8064,8 +8265,6 @@ mod tests {
 
     #[test]
     fn runtime_turn_metadata_round_trips_provider_native_params_as_legacy_json() {
-        use crate::handlers::turn::TurnOverrides;
-
         let overrides = TurnOverrides {
             provider_params: Some(serde_json::json!({
                 "thinking": { "budget_tokens": 10_000 },
@@ -8109,8 +8308,6 @@ mod tests {
 
     #[test]
     fn recovery_overrides_from_turn_preserve_clear_and_connection_intent() {
-        use crate::handlers::turn::TurnOverrides;
-
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let connection_ref = test_connection_ref("dev", "default");
@@ -8301,7 +8498,7 @@ mod tests {
             .unwrap();
 
         // Hot-swap to an OpenAI model (does NOT support image_tool_results).
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
             ..Default::default()
@@ -8369,7 +8566,7 @@ mod tests {
             .unwrap();
 
         // Hot-swap to OpenAI (deny view_image).
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
             ..Default::default()
@@ -8389,7 +8586,7 @@ mod tests {
             .unwrap();
 
         // Hot-swap back to Anthropic (should clear the deny).
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("claude-sonnet-4-5".to_string()),
             provider: Some("anthropic".to_string()),
             ..Default::default()
@@ -8466,7 +8663,7 @@ mod tests {
             .expect("staging deny filter for datetime should succeed");
 
         // Hot-swap to OpenAI — should add view_image to the deny set, not replace it.
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
             ..Default::default()
@@ -8552,7 +8749,7 @@ mod tests {
             .expect("staging mixed capability and external denies should succeed");
 
         // Hot-swap to Anthropic — should clear only the capability-owned deny.
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("claude-sonnet-4-5".to_string()),
             ..Default::default()
         };
@@ -8613,7 +8810,7 @@ mod tests {
             .await
             .unwrap();
 
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             provider: Some("openai".to_string()),
             ..Default::default()
         };
@@ -8665,7 +8862,7 @@ mod tests {
         let provider_params = serde_json::json!({
             "thinking": { "budget_tokens": 10_000 }
         });
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             provider_params: Some(provider_params.clone()),
             ..Default::default()
         };
@@ -8735,7 +8932,7 @@ mod tests {
         let provider_params = serde_json::json!({
             "reasoning": { "effort": "medium" }
         });
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             model: Some("gpt-5.4".to_string()),
             provider: Some("openai".to_string()),
             provider_params: Some(provider_params.clone()),
@@ -8840,7 +9037,7 @@ mod tests {
             .await;
 
         let connection_ref = test_connection_ref("dev", "default");
-        let overrides = crate::handlers::turn::TurnOverrides {
+        let overrides = TurnOverrides {
             clear_provider_params: true,
             connection_ref: Some(connection_ref.clone()),
             ..Default::default()
@@ -8889,87 +9086,9 @@ mod tests {
         assert_eq!(stored_meta.connection_ref, Some(connection_ref));
     }
 
-    /// Regression: start_turn_via_runtime must reject build-only overrides
-    /// (max_tokens, system_prompt, output_schema, structured_output_retries)
-    /// that cannot be applied via RuntimeTurnMetadata. Before the fix these
-    /// were silently dropped.
-    #[tokio::test]
-    async fn runtime_turn_rejects_build_only_overrides() {
-        use crate::handlers::turn::TurnOverrides;
-
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
-
-        let session_id = runtime
-            .create_session(mock_build_config(), None, None)
-            .await
-            .unwrap();
-
-        for (field, overrides) in [
-            (
-                "max_tokens",
-                TurnOverrides {
-                    max_tokens: Some(1024),
-                    ..Default::default()
-                },
-            ),
-            (
-                "system_prompt",
-                TurnOverrides {
-                    system_prompt: Some("override".into()),
-                    ..Default::default()
-                },
-            ),
-            (
-                "output_schema",
-                TurnOverrides {
-                    output_schema: Some(serde_json::json!({"type": "object"})),
-                    ..Default::default()
-                },
-            ),
-            (
-                "structured_output_retries",
-                TurnOverrides {
-                    structured_output_retries: Some(5),
-                    ..Default::default()
-                },
-            ),
-        ] {
-            let (tx, _rx) = mpsc::channel(100);
-            let result = runtime
-                .start_turn_via_runtime(
-                    &session_id,
-                    "test".into(),
-                    tx,
-                    None,
-                    None,
-                    None,
-                    Some(overrides),
-                )
-                .await;
-            assert!(
-                result.is_err(),
-                "build-only override '{field}' must be rejected on runtime-routed turn"
-            );
-            let err = result.unwrap_err();
-            assert_eq!(
-                err.code,
-                error::INVALID_PARAMS,
-                "'{field}' rejection must use INVALID_PARAMS"
-            );
-            assert!(
-                err.message.contains(field),
-                "error message must mention '{field}': {}",
-                err.message
-            );
-        }
-    }
-
     #[cfg(feature = "comms")]
     #[tokio::test]
     async fn runtime_turn_keep_alive_override_on_pending_requires_comms_name() {
-        use crate::handlers::turn::TurnOverrides;
-
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
 
@@ -8984,11 +9103,15 @@ mod tests {
                 &session_id,
                 "test".into(),
                 tx,
-                None,
-                None,
-                None,
-                Some(TurnOverrides {
-                    keep_alive: Some(true),
+                Some(meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    keep_alive: Some(
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                                ttl: std::time::Duration::from_secs(30),
+                                policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                            },
+                        ),
+                    ),
                     ..Default::default()
                 }),
             )
@@ -9018,6 +9141,393 @@ mod tests {
             )
             .await
             .expect("staged session should remain promotable after rejected override");
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn turn_start_inherits_persisted_keep_alive_when_live_session_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let runtime = Arc::new(runtime);
+        let mut build = mock_build_config();
+        build.comms_name = Some("runtime-inherit-recovered-agent".to_string());
+        build.keep_alive = true;
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create session");
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize".into(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize keep_alive session");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(&session_id, "recover".into(), tx, None)
+            .await
+            .expect("turn/start should inherit persisted keep_alive during recovery");
+
+        let owner_after = runtime
+            .runtime_adapter
+            .peer_ingress_owner(&session_id)
+            .await;
+        assert!(
+            matches!(
+                owner_after,
+                meerkat_runtime::PeerIngressOwner::SessionOwned { .. }
+            ),
+            "inherited persisted keep_alive must attach peer ingress after recovery: {owner_after:?}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    fn runtime_keep_alive_set_primitive() -> RunPrimitive {
+        use meerkat_core::lifecycle::run_primitive::{
+            KeepAliveMode, KeepAlivePolicy, RuntimeTurnMetadata, StagedRunInput,
+            TurnMetadataOverride,
+        };
+
+        RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: Vec::new(),
+            context_appends: Vec::new(),
+            contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(30),
+                    policy: KeepAliveMode::Pinned,
+                })),
+                ..Default::default()
+            }),
+        })
+    }
+
+    #[cfg(feature = "comms")]
+    fn runtime_keep_alive_clear_primitive() -> RunPrimitive {
+        use meerkat_core::lifecycle::run_primitive::{
+            RuntimeTurnMetadata, StagedRunInput, TurnMetadataOverride,
+        };
+
+        RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: Vec::new(),
+            context_appends: Vec::new(),
+            contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                keep_alive: Some(TurnMetadataOverride::Clear),
+                ..Default::default()
+            }),
+        })
+    }
+
+    #[cfg(feature = "comms")]
+    async fn expect_runtime_keep_alive_set_before_video_validation_failure(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+        context: &str,
+    ) {
+        let primitive = runtime_keep_alive_set_primitive();
+        let (tx, _rx) = mpsc::channel(100);
+        let err = runtime
+            .apply_runtime_turn(
+                session_id,
+                RunId::new(),
+                &primitive,
+                inline_video_prompt(),
+                tx,
+            )
+            .await
+            .expect_err(context);
+
+        assert!(
+            err.message.contains("inline video input is not supported"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    async fn expect_runtime_keep_alive_clear_before_video_validation_failure(
+        runtime: &SessionRuntime,
+        session_id: &SessionId,
+        context: &str,
+    ) {
+        let primitive = runtime_keep_alive_clear_primitive();
+        let (tx, _rx) = mpsc::channel(100);
+        let err = runtime
+            .apply_runtime_turn(
+                session_id,
+                RunId::new(),
+                &primitive,
+                inline_video_prompt(),
+                tx,
+            )
+            .await
+            .expect_err(context);
+
+        assert!(
+            err.message.contains("inline video input is not supported"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn runtime_submitted_keep_alive_set_persists_before_live_turn_validation_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let mut build = mock_build_config();
+        build.comms_name = Some("runtime-submit-agent".to_string());
+        build.keep_alive = false;
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create session");
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize".into(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+
+        expect_runtime_keep_alive_set_before_video_validation_failure(
+            &runtime,
+            &session_id,
+            "inline video validation should fail after runtime admission",
+        )
+        .await;
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("session should persist");
+        let metadata = stored.session_metadata().expect("session metadata");
+        assert!(
+            metadata.keep_alive,
+            "runtime-submitted keep_alive Set must persist before live turn validation failure"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn runtime_submitted_keep_alive_set_persists_before_staged_turn_validation_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let mut build = mock_build_config();
+        build.comms_name = Some("runtime-submit-staged-agent".to_string());
+        build.keep_alive = false;
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create staged session");
+
+        expect_runtime_keep_alive_set_before_video_validation_failure(
+            &runtime,
+            &session_id,
+            "inline video validation should fail after staged runtime admission",
+        )
+        .await;
+
+        assert!(
+            runtime.pending_session_exists(&session_id).await,
+            "failed validation must leave the session staged"
+        );
+
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize after validation failure".into(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("staged session should remain promotable");
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("session should persist after materialization");
+        let metadata = stored.session_metadata().expect("session metadata");
+        assert!(
+            metadata.keep_alive,
+            "runtime-submitted keep_alive Set must persist through staged validation failure"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn runtime_submitted_keep_alive_set_persists_before_missing_live_turn_validation_failure()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let mut build = mock_build_config();
+        build.comms_name = Some("runtime-submit-recovered-agent".to_string());
+        build.keep_alive = false;
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create session");
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize".into(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        expect_runtime_keep_alive_set_before_video_validation_failure(
+            &runtime,
+            &session_id,
+            "inline video validation should fail after missing-live runtime admission",
+        )
+        .await;
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("session should persist");
+        let metadata = stored.session_metadata().expect("session metadata");
+        assert!(
+            metadata.keep_alive,
+            "runtime-submitted keep_alive Set must persist before missing-live validation failure"
+        );
+        let owner_after = runtime
+            .runtime_adapter
+            .peer_ingress_owner(&session_id)
+            .await;
+        assert!(
+            matches!(
+                owner_after,
+                meerkat_runtime::PeerIngressOwner::SessionOwned { .. }
+            ),
+            "runtime-submitted keep_alive Set must recover and attach peer ingress before missing-live validation failure: {owner_after:?}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn runtime_submitted_keep_alive_clear_disables_ingress_before_validation_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let mut build = mock_build_config();
+        build.comms_name = Some("runtime-submit-clear-agent".to_string());
+        build.keep_alive = true;
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create session");
+        let (tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize".into(),
+                tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session");
+
+        let comms_rt = runtime
+            .comms_runtime(&session_id)
+            .await
+            .expect("keep_alive test session should have comms runtime");
+        runtime
+            .runtime_adapter
+            .update_peer_ingress_context(&session_id, true, Some(comms_rt))
+            .await;
+        let owner_before = runtime
+            .runtime_adapter
+            .peer_ingress_owner(&session_id)
+            .await;
+        assert!(
+            matches!(
+                owner_before,
+                meerkat_runtime::PeerIngressOwner::SessionOwned { .. }
+            ),
+            "materialized keep_alive session should own peer ingress before clear: {owner_before:?}"
+        );
+
+        expect_runtime_keep_alive_clear_before_video_validation_failure(
+            &runtime,
+            &session_id,
+            "inline video validation should fail after runtime clear admission",
+        )
+        .await;
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session")
+            .expect("session should persist");
+        let metadata = stored.session_metadata().expect("session metadata");
+        assert!(
+            !metadata.keep_alive,
+            "runtime-submitted keep_alive Clear must persist before validation failure"
+        );
+        let owner_after = runtime
+            .runtime_adapter
+            .peer_ingress_owner(&session_id)
+            .await;
+        assert!(
+            matches!(owner_after, meerkat_runtime::PeerIngressOwner::Unattached),
+            "runtime-submitted keep_alive Clear must detach peer ingress before validation failure: {owner_after:?}"
+        );
     }
 
     /// W2-G regression: once a mob has claimed peer-ingress ownership on a

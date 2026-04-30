@@ -123,6 +123,18 @@ impl SessionAgent for FactoryAgent {
         self.agent.pending_skill_references = refs;
     }
 
+    fn stage_turn_system_context(
+        &mut self,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.stage_turn_system_context(appends);
+        Ok(())
+    }
+
+    fn clear_turn_system_context(&mut self) {
+        self.agent.clear_turn_system_context();
+    }
+
     fn set_flow_tool_overlay(
         &mut self,
         overlay: Option<TurnToolOverlay>,

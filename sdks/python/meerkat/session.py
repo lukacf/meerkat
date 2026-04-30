@@ -128,11 +128,10 @@ class Session:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
-        max_tokens: int | None = None,
-        system_prompt: str | None = None,
-        output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        clear_provider_params: bool | None = None,
+        connection_ref: dict[str, str] | None = None,
+        clear_connection_ref: bool | None = None,
     ) -> RunResult:
         """Run another turn on this session (non-streaming).
 
@@ -148,11 +147,10 @@ class Session:
             keep_alive=keep_alive,
             model=model,
             provider=provider,
-            max_tokens=max_tokens,
-            system_prompt=system_prompt,
-            output_schema=output_schema,
-            structured_output_retries=structured_output_retries,
             provider_params=provider_params,
+            clear_provider_params=clear_provider_params,
+            connection_ref=connection_ref,
+            clear_connection_ref=clear_connection_ref,
         )
         self._last_result = result
         return result
@@ -167,11 +165,10 @@ class Session:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
-        max_tokens: int | None = None,
-        system_prompt: str | None = None,
-        output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        clear_provider_params: bool | None = None,
+        connection_ref: dict[str, str] | None = None,
+        clear_connection_ref: bool | None = None,
     ) -> EventStream:
         """Run another turn on this session with streaming events.
 
@@ -193,11 +190,10 @@ class Session:
             keep_alive=keep_alive,
             model=model,
             provider=provider,
-            max_tokens=max_tokens,
-            system_prompt=system_prompt,
-            output_schema=output_schema,
-            structured_output_retries=structured_output_retries,
             provider_params=provider_params,
+            clear_provider_params=clear_provider_params,
+            connection_ref=connection_ref,
+            clear_connection_ref=clear_connection_ref,
             _session=self,
         )
 
@@ -363,11 +359,10 @@ class DeferredSession:
         keep_alive: bool | None = None,
         model: str | None = None,
         provider: str | None = None,
-        max_tokens: int | None = None,
-        system_prompt: str | None = None,
-        output_schema: dict[str, Any] | None = None,
-        structured_output_retries: int | None = None,
         provider_params: dict[str, Any] | None = None,
+        clear_provider_params: bool | None = None,
+        connection_ref: dict[str, str] | None = None,
+        clear_connection_ref: bool | None = None,
     ) -> RunResult:
         """Run the first turn on this deferred session.
 
@@ -383,11 +378,10 @@ class DeferredSession:
             keep_alive=keep_alive,
             model=model,
             provider=provider,
-            max_tokens=max_tokens,
-            system_prompt=system_prompt,
-            output_schema=output_schema,
-            structured_output_retries=structured_output_retries,
             provider_params=provider_params,
+            clear_provider_params=clear_provider_params,
+            connection_ref=connection_ref,
+            clear_connection_ref=clear_connection_ref,
         )
 
     async def interrupt(self) -> None:

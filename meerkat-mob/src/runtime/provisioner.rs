@@ -798,20 +798,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         let req = StartTurnRequest {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
-            render_metadata: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.render_metadata.clone()),
-            handling_mode: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.handling_mode)
-                .unwrap_or(meerkat_core::types::HandlingMode::Queue),
             event_tx: queued_context.map(|context| context.event_tx),
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 
@@ -1149,14 +1136,7 @@ impl MobProvisioner for SessionBackend {
             self.ops_adapter
                 .report_member_progress(member_ref, "turn dispatched")
                 .await?;
-            let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: Some(req.handling_mode),
-                keep_alive: None,
-                skill_references: req.skill_references.clone(),
-                flow_tool_overlay: req.flow_tool_overlay.clone(),
-                render_metadata: req.render_metadata.clone(),
-                ..Default::default()
-            };
+            let turn_metadata = req.turn_metadata.clone();
             let prompt = req.prompt.clone();
             let input = Input::Prompt(PromptInput {
                 header: InputHeader {
@@ -1175,7 +1155,7 @@ impl MobProvisioner for SessionBackend {
                 } else {
                     None
                 },
-                turn_metadata: Some(turn_metadata),
+                turn_metadata,
             });
             return self
                 .execute_runtime_input(&session_id, input, req.event_tx)
@@ -1203,16 +1183,7 @@ impl MobProvisioner for SessionBackend {
                 req.prompt.clone(),
                 &run_id.to_string(),
                 0,
-                Some(
-                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        handling_mode: Some(req.handling_mode),
-                        keep_alive: None,
-                        skill_references: req.skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
-                        render_metadata: req.render_metadata.clone(),
-                        ..Default::default()
-                    },
-                ),
+                req.turn_metadata.clone(),
             );
             return self
                 .admit_runtime_input(&session_id, input, req.event_tx)
@@ -1903,7 +1874,11 @@ impl MobProvisioner for MultiBackendProvisioner {
                         protocol_version: authority.protocol_version,
                         input_id: Uuid::now_v7().to_string(),
                         content: req.prompt.clone(),
-                        handling_mode: req.handling_mode,
+                        handling_mode: req
+                            .turn_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.handling_mode)
+                            .unwrap_or_default(),
                     },
                 );
                 let response: super::bridge_protocol::BridgeDeliveryResponse = self

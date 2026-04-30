@@ -362,12 +362,13 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                         StartTurnRequest {
                             prompt: message,
                             system_prompt: None,
-                            render_metadata: None,
-                            handling_mode: meerkat_core::types::HandlingMode::Queue,
                             event_tx: Some(event_tx),
-                            skill_references: None,
-                            flow_tool_overlay,
-                            turn_metadata: None,
+                            turn_metadata: flow_tool_overlay.map(|overlay| {
+                                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                    flow_tool_overlay: Some(overlay),
+                                    ..Default::default()
+                                }
+                            }),
                         },
                     )
                     .await

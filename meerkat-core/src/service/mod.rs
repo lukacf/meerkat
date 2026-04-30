@@ -12,9 +12,7 @@ use crate::session::SystemContextStageError;
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{
-    ContentInput, HandlingMode, Message, RenderMetadata, RunResult, SessionId, ToolDef, Usage,
-};
+use crate::types::{ContentInput, Message, RenderMetadata, RunResult, SessionId, ToolDef, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
     SessionLlmIdentity, ToolCategoryOverride,
@@ -721,6 +719,26 @@ impl std::fmt::Debug for SessionBuildOptions {
 }
 
 /// Request to start a new turn on an existing session.
+///
+/// Runtime-owned turn policy must travel through `turn_metadata`; callers
+/// cannot provide parallel service-level carriers that diverge from it.
+///
+/// ```compile_fail
+/// use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+/// use meerkat_core::service::StartTurnRequest;
+/// use meerkat_core::types::{ContentInput, HandlingMode};
+///
+/// let _ = StartTurnRequest {
+///     prompt: ContentInput::Text("hello".to_string()),
+///     system_prompt: None,
+///     render_metadata: None,
+///     handling_mode: HandlingMode::Steer,
+///     event_tx: None,
+///     skill_references: None,
+///     flow_tool_overlay: None,
+///     turn_metadata: Some(RuntimeTurnMetadata::default()),
+/// };
+/// ```
 #[derive(Debug)]
 pub struct StartTurnRequest {
     /// User prompt for this turn (text or multimodal).
@@ -730,21 +748,8 @@ pub struct StartTurnRequest {
     /// This is only supported before the session has any conversation history.
     /// Materialized sessions with existing messages must reject it.
     pub system_prompt: Option<String>,
-    /// Optional normalized rendering metadata for this turn prompt.
-    pub render_metadata: Option<RenderMetadata>,
-    /// Handling mode for this turn's ordinary content-bearing work.
-    ///
-    /// This is a **runtime-owned semantic**: the runtime routes Queue/Steer
-    /// before calling the executor. The session service passes this through
-    /// to the `SessionAgent` but does not act on it. Non-Queue handling
-    /// only works correctly on runtime-backed surfaces.
-    pub handling_mode: HandlingMode,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Canonical SkillKeys to resolve and inject for this turn.
-    pub skill_references: Option<Vec<crate::skills::SkillKey>>,
-    /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
-    pub flow_tool_overlay: Option<TurnToolOverlay>,
     /// Canonical runtime-authored metadata for this turn.
     ///
     /// Runtime-backed callers populate this once at the machine boundary and

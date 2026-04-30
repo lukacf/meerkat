@@ -17,7 +17,7 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
 };
 use meerkat_core::service::{SessionError, SessionService, StartTurnRequest};
-use meerkat_core::types::{HandlingMode, SessionId};
+use meerkat_core::types::SessionId;
 use meerkat_core::{ConfigRuntime, EventEnvelope, PendingSystemContextAppend};
 use meerkat_mcp::McpRouterAdapter;
 use meerkat_runtime::completion::CompletionHandle;
@@ -471,6 +471,20 @@ fn pending_system_context_appends(
         .collect()
 }
 
+async fn apply_turn_context_appends(
+    context: &McpRuntimeIngressContext,
+    session_id: &SessionId,
+    appends: Option<&Vec<PendingSystemContextAppend>>,
+) -> Result<(), SessionError> {
+    if let Some(appends) = appends {
+        context
+            .service
+            .apply_runtime_system_context_for_turn(session_id, appends.clone())
+            .await?;
+    }
+    Ok(())
+}
+
 async fn apply_runtime_turn(
     context: &McpRuntimeIngressContext,
     state: &Arc<McpRuntimeSessionState>,
@@ -484,28 +498,50 @@ async fn apply_runtime_turn(
         )));
     }
 
+    // Context-only staged primitives may land directly as runtime
+    // system-context appends, but terminal peer responses carry a typed apply
+    // intent that requires a requester reaction turn.
     if primitive.is_context_only_apply_without_turn() {
         let RunPrimitive::StagedInput(staged) = primitive else {
-            unreachable!("context-only apply helper only matches staged inputs");
+            unreachable!("context-only apply without turn only matches staged primitives");
         };
-        return context
+        let appends = pending_system_context_appends(&staged.context_appends);
+        return match context
             .service
             .apply_runtime_context_appends(
                 session_id,
-                run_id,
-                pending_system_context_appends(&staged.context_appends),
+                run_id.clone(),
+                appends.clone(),
                 staged.contributing_input_ids.clone(),
             )
-            .await;
+            .await
+        {
+            Ok(output) => Ok(output),
+            Err(SessionError::NotFound { .. }) => {
+                Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
+                    .await
+                    .map(|_| ())?;
+                context
+                    .service
+                    .apply_runtime_context_appends(
+                        session_id,
+                        run_id,
+                        appends,
+                        staged.contributing_input_ids.clone(),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        };
     }
 
-    let terminal_context_appends = if primitive.is_peer_response_terminal_context_and_run() {
+    let turn_context_appends = if primitive.is_peer_response_terminal_context_and_run() {
         let RunPrimitive::StagedInput(staged) = primitive else {
-            unreachable!("terminal peer-response apply helper only matches staged inputs");
+            unreachable!("terminal peer-response apply intent only matches staged primitives");
         };
-        pending_system_context_appends(&staged.context_appends)
+        Some(pending_system_context_appends(&staged.context_appends))
     } else {
-        Vec::new()
+        None
     };
 
     let prompt = primitive.extract_content_input();
@@ -521,70 +557,39 @@ async fn apply_runtime_turn(
     let turn_request = StartTurnRequest {
         prompt: prompt.clone(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: event_tx.clone(),
-        skill_references: primitive
-            .turn_metadata()
-            .and_then(|meta| meta.skill_references.clone()),
-        flow_tool_overlay: primitive
-            .turn_metadata()
-            .and_then(|meta| meta.flow_tool_overlay.clone()),
         turn_metadata: primitive.turn_metadata().cloned(),
     };
 
-    if !terminal_context_appends.is_empty() {
-        match context
-            .service
-            .apply_runtime_system_context_for_turn(session_id, terminal_context_appends.clone())
-            .await
-        {
-            Ok(()) => {}
-            Err(SessionError::NotFound { .. }) => {
-                Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
-                    .await
-                    .map(|_| ())?;
-                context
-                    .service
-                    .apply_runtime_system_context_for_turn(session_id, terminal_context_appends)
-                    .await?;
-                return context
-                    .service
-                    .apply_runtime_turn_outcome(
-                        session_id,
-                        run_id,
-                        turn_request,
-                        boundary,
-                        contributing_input_ids,
-                    )
-                    .await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    match context
-        .service
-        .apply_runtime_turn(
-            session_id,
-            run_id.clone(),
-            turn_request,
-            boundary,
-            contributing_input_ids.clone(),
-        )
-        .await
+    let live_result = match apply_turn_context_appends(
+        context,
+        session_id,
+        turn_context_appends.as_ref(),
+    )
+    .await
     {
+        Ok(()) => {
+            context
+                .service
+                .apply_runtime_turn(
+                    session_id,
+                    run_id.clone(),
+                    turn_request,
+                    boundary,
+                    contributing_input_ids.clone(),
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
+
+    match live_result {
         Ok(output) => Ok(output),
         Err(SessionError::NotFound { .. }) => {
             Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
                 .await
                 .map(|_| ())?;
-            if !terminal_context_appends.is_empty() {
-                context
-                    .service
-                    .apply_runtime_system_context_for_turn(session_id, terminal_context_appends)
-                    .await?;
-            }
+            apply_turn_context_appends(context, session_id, turn_context_appends.as_ref()).await?;
             context
                 .service
                 .apply_runtime_turn_outcome(
@@ -593,15 +598,7 @@ async fn apply_runtime_turn(
                     StartTurnRequest {
                         prompt,
                         system_prompt: None,
-                        render_metadata: None,
-                        handling_mode: HandlingMode::Queue,
                         event_tx,
-                        skill_references: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.skill_references.clone()),
-                        flow_tool_overlay: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.flow_tool_overlay.clone()),
                         turn_metadata: primitive.turn_metadata().cloned(),
                     },
                     boundary,

@@ -3715,11 +3715,7 @@ mod tests {
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
                     turn_metadata: None,
                 },
             )
@@ -3901,11 +3897,7 @@ mod tests {
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
                     turn_metadata: None,
                 },
             )
@@ -5372,11 +5364,7 @@ mod tests {
             StartTurnRequest {
                 prompt: "test".into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
                 turn_metadata: None,
             },
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,

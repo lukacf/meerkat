@@ -80,13 +80,9 @@ pub struct SessionSnapshot {
 enum SessionCommand {
     StartTurn {
         prompt: meerkat_core::types::ContentInput,
-        render_metadata: Option<meerkat_core::types::RenderMetadata>,
-        handling_mode: meerkat_core::types::HandlingMode,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<Result<RunResult, meerkat_core::error::AgentError>>,
-        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-        flow_tool_overlay: Option<TurnToolOverlay>,
-        execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     },
     ReplaceClient {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
@@ -306,7 +302,7 @@ pub trait SessionAgent: Send {
     /// the runtime routes Queue/Steer BEFORE calling the executor, so by
     /// the time this method runs the routing decision is already made.
     /// These parameters are present on the trait because the session task
-    /// forwards them from `StartTurnRequest`, but implementations should
+    /// derives them from `RuntimeTurnMetadata`, but implementations should
     /// not act on them — the runtime is the canonical owner.
     ///
     /// The default rejects non-Queue handling_mode and non-None render_metadata
@@ -347,6 +343,17 @@ pub trait SessionAgent: Send {
 
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
+
+    /// Stage transient system context for the next LLM request only.
+    fn stage_turn_system_context(
+        &mut self,
+        _appends: Vec<PendingSystemContextAppend>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
+    /// Clear transient system context staged for the current turn.
+    fn clear_turn_system_context(&mut self) {}
 
     /// Apply or clear a per-turn flow tool overlay.
     fn set_flow_tool_overlay(
@@ -1647,16 +1654,17 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
         // Run the first turn
         let (result_tx, result_rx) = oneshot::channel();
+        let eager_turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            render_metadata: req.render_metadata,
+            skill_references: req.skill_references,
+            ..Default::default()
+        };
         if command_tx
             .send(SessionCommand::StartTurn {
                 prompt,
-                render_metadata: req.render_metadata,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: caller_event_tx,
                 result_tx,
-                skill_references: req.skill_references,
-                flow_tool_overlay: None,
-                execution_kind: None, // non-runtime substrate-direct path
+                turn_metadata: (!eager_turn_metadata.is_empty()).then_some(eager_turn_metadata),
             })
             .await
             .is_err()
@@ -1750,41 +1758,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 })?;
             }
 
-            let metadata = req.turn_metadata;
-            let render_metadata = req.render_metadata.or_else(|| {
-                metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.render_metadata.clone())
-            });
-            let handling_mode = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.handling_mode)
-                .unwrap_or(req.handling_mode);
-            let skill_references = req.skill_references.or_else(|| {
-                metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.skill_references.clone())
-            });
-            let flow_tool_overlay = req.flow_tool_overlay.or_else(|| {
-                metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.flow_tool_overlay.clone())
-            });
-            let execution_kind = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.execution_kind);
-
             handle
                 .command_tx
                 .send(SessionCommand::StartTurn {
                     prompt,
-                    render_metadata,
-                    handling_mode,
                     event_tx: req.event_tx,
                     result_tx,
-                    skill_references,
-                    flow_tool_overlay,
-                    execution_kind,
+                    turn_metadata: req.turn_metadata,
                 })
                 .await
                 .map_err(|_| {
@@ -2395,6 +2375,43 @@ fn merge_content_inputs(
     }
 }
 
+fn turn_instruction_kind_label(
+    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind,
+) -> &'static str {
+    match kind {
+        meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User => "user",
+        meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System => "system",
+        meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host => "host",
+    }
+}
+
+fn turn_additional_instruction_appends(
+    additional_instructions: Option<Vec<meerkat_core::lifecycle::run_primitive::TurnInstruction>>,
+) -> Vec<PendingSystemContextAppend> {
+    let Some(additional_instructions) = additional_instructions else {
+        return Vec::new();
+    };
+    let accepted_at = SystemTime::now();
+    additional_instructions
+        .into_iter()
+        .filter_map(|instruction| {
+            let body = instruction.body.trim();
+            if body.is_empty() {
+                return None;
+            }
+            let kind = turn_instruction_kind_label(instruction.kind);
+            Some(PendingSystemContextAppend {
+                text: format!("[Runtime Turn Instruction]\nkind: {kind}\n\n{body}"),
+                source: Some(format!(
+                    "runtime_turn_metadata.additional_instructions.{kind}"
+                )),
+                idempotency_key: None,
+                accepted_at,
+            })
+        })
+        .collect()
+}
+
 fn restore_deferred_turn_inputs(
     deferred_turn_state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
     restore_first_turn_pending: bool,
@@ -2472,14 +2489,19 @@ async fn session_task<A: SessionAgent>(
             }
             SessionCommand::StartTurn {
                 prompt,
-                render_metadata,
-                handling_mode,
                 event_tx,
                 result_tx,
-                skill_references,
-                flow_tool_overlay,
-                execution_kind,
+                turn_metadata,
             } => {
+                let metadata = turn_metadata.unwrap_or_default();
+                let render_metadata = metadata.render_metadata;
+                let handling_mode = metadata.handling_mode.unwrap_or_default();
+                let skill_references = metadata.skill_references;
+                let flow_tool_overlay = metadata.flow_tool_overlay;
+                let additional_instructions = metadata.additional_instructions;
+                let keep_alive = metadata.keep_alive;
+                let execution_kind = metadata.execution_kind;
+
                 let current_phase = lock_turn_admission(&control.turn_admission).phase();
                 if current_phase == TurnAdmissionPhase::ShuttingDown {
                     let _ = result_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
@@ -2526,6 +2548,8 @@ async fn session_task<A: SessionAgent>(
                     let _ = result_tx.send(Err(meerkat_core::error::AgentError::NoPendingBoundary));
                     continue;
                 }
+                let turn_instruction_appends =
+                    turn_additional_instruction_appends(additional_instructions);
 
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
@@ -2540,6 +2564,18 @@ async fn session_task<A: SessionAgent>(
                     continue;
                 }
                 if let Err(error) = agent.apply_pending_tool_results(flattened_tool_results) {
+                    let _ = agent.set_flow_tool_overlay(None);
+                    restore_deferred_turn_inputs(
+                        &deferred_turn_state,
+                        restore_first_turn_pending,
+                        pending_initial_prompt,
+                        pending_tool_results,
+                    );
+                    abort_admitted_turn(&control);
+                    let _ = result_tx.send(Err(error));
+                    continue;
+                }
+                if let Err(error) = agent.stage_turn_system_context(turn_instruction_appends) {
                     let _ = agent.set_flow_tool_overlay(None);
                     restore_deferred_turn_inputs(
                         &deferred_turn_state,
@@ -2575,6 +2611,15 @@ async fn session_task<A: SessionAgent>(
                             )));
                         continue;
                     }
+                }
+                match keep_alive {
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)) => {
+                        agent.update_keep_alive(true);
+                    }
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+                        agent.update_keep_alive(false);
+                    }
+                    None => {}
                 }
                 let mut event_stream_open = true;
 
@@ -2649,6 +2694,7 @@ async fn session_task<A: SessionAgent>(
                     };
                     drop(run_fut);
                     if interrupted {
+                        agent.clear_turn_system_context();
                         agent.cancel();
                     }
 
@@ -2701,6 +2747,7 @@ async fn session_task<A: SessionAgent>(
                 } else {
                     result
                 };
+                agent.clear_turn_system_context();
                 let finalize = {
                     let mut slot = lock_turn_admission(&control.turn_admission);
                     slot.finalize()
@@ -2899,7 +2946,7 @@ mod inline_video_admission_tests {
         DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
         StartTurnRequest,
     };
-    use meerkat_core::types::{ContentBlock, HandlingMode, VideoData};
+    use meerkat_core::types::{ContentBlock, VideoData};
     use std::sync::{Arc, Mutex};
 
     fn identity(provider: Provider, model: &str) -> SessionLlmIdentity {
@@ -3091,11 +3138,7 @@ mod inline_video_admission_tests {
         StartTurnRequest {
             prompt,
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: HandlingMode::Queue,
             event_tx: None,
-            skill_references: None,
-            flow_tool_overlay: None,
             turn_metadata: None,
         }
     }

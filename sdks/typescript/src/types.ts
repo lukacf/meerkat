@@ -237,11 +237,10 @@ export interface TurnOptions {
   readonly keepAlive?: boolean;
   readonly model?: string;
   readonly provider?: string;
-  readonly maxTokens?: number;
-  readonly systemPrompt?: string;
-  readonly outputSchema?: Record<string, unknown>;
-  readonly structuredOutputRetries?: number;
   readonly providerParams?: Record<string, unknown>;
+  readonly clearProviderParams?: boolean;
+  readonly connectionRef?: WireConnectionRef;
+  readonly clearConnectionRef?: boolean;
 }
 
 export interface EventEnvelope<T = unknown> {
@@ -369,26 +368,15 @@ export interface MobSpawnManyResultEntry {
   readonly error?: string;
 }
 
-type MobTurnStartWireOptions = Omit<
-  MobTurnStartParams,
-  "mob_id" | "agent_identity" | "prompt"
->;
+type MobTurnStartMetadata = NonNullable<MobTurnStartParams["turn_metadata"]>;
 
-export interface MobTurnStartOptions {
-  readonly skillRefs?: SkillRef[];
-  readonly flowToolOverlay?: TurnToolOverlay;
-  readonly additionalInstructions?: MobTurnStartWireOptions["additional_instructions"];
-  readonly keepAlive?: MobTurnStartWireOptions["keep_alive"];
-  readonly model?: MobTurnStartWireOptions["model"];
-  readonly provider?: MobTurnStartWireOptions["provider"];
-  readonly maxTokens?: MobTurnStartWireOptions["max_tokens"];
-  readonly systemPrompt?: MobTurnStartWireOptions["system_prompt"];
-  readonly outputSchema?: MobTurnStartWireOptions["output_schema"];
-  readonly structuredOutputRetries?: MobTurnStartWireOptions["structured_output_retries"];
-  readonly providerParams?: MobTurnStartWireOptions["provider_params"];
-  readonly clearProviderParams?: MobTurnStartWireOptions["clear_provider_params"];
-  readonly connectionRef?: MobTurnStartWireOptions["connection_ref"];
-  readonly clearConnectionRef?: MobTurnStartWireOptions["clear_connection_ref"];
+export interface MobTurnStartOptions extends TurnOptions {
+  readonly additionalInstructions?: string[];
+  readonly keepAlive?: boolean;
+  readonly model?: string;
+  readonly provider?: string;
+  readonly providerParams?: Record<string, unknown>;
+  readonly connectionRef?: WireConnectionRef;
 }
 
 export interface MobEventsOptions {

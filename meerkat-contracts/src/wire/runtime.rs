@@ -453,8 +453,6 @@ pub struct SessionAcceptInputParams {
     pub primitive: WireRunPrimitive,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 // -----------------------------------------------------------------------
@@ -1264,7 +1262,7 @@ pub struct WireRuntimeTurnMetadata {
     pub connection_ref:
         Option<WireTurnMetadataOverride<crate::wire::connection::WireConnectionRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<WireKeepAlivePolicy>,
+    pub keep_alive: Option<WireTurnMetadataOverride<WireKeepAlivePolicy>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<crate::wire::mob::WireRenderMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1292,7 +1290,7 @@ struct WireRuntimeTurnMetadataFields {
     #[serde(default)]
     connection_ref: Option<WireTurnMetadataOverride<crate::wire::connection::WireConnectionRef>>,
     #[serde(default)]
-    keep_alive: Option<WireKeepAlivePolicy>,
+    keep_alive: Option<WireTurnMetadataOverride<WireKeepAlivePolicy>>,
     #[serde(default)]
     render_metadata: Option<crate::wire::mob::WireRenderMetadata>,
     #[serde(default)]

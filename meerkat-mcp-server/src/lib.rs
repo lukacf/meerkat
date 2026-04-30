@@ -1066,6 +1066,58 @@ impl From<TurnToolOverlayInput> for meerkat_core::service::TurnToolOverlay {
     }
 }
 
+const MCP_TURN_KEEP_ALIVE_TTL_SECS: u64 = 30;
+
+fn resume_turn_keep_alive_policy(
+    requested: Option<bool>,
+) -> Option<
+    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
+        meerkat_core::lifecycle::run_primitive::KeepAlivePolicy,
+    >,
+> {
+    match requested {
+        Some(true) => Some(
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(MCP_TURN_KEEP_ALIVE_TTL_SECS),
+                    policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                },
+            ),
+        ),
+        Some(false) => Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
+        None => None,
+    }
+}
+
+fn resume_turn_metadata(
+    skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+    flow_tool_overlay: Option<TurnToolOverlayInput>,
+    additional_instructions: Option<Vec<String>>,
+    keep_alive: Option<bool>,
+) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    let additional_instructions = additional_instructions.and_then(|instructions| {
+        let instructions = instructions
+            .into_iter()
+            .filter(|body| !body.trim().is_empty())
+            .map(
+                |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                    body,
+                },
+            )
+            .collect::<Vec<_>>();
+        (!instructions.is_empty()).then_some(instructions)
+    });
+    let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        skill_references,
+        flow_tool_overlay: flow_tool_overlay.map(Into::into),
+        additional_instructions,
+        keep_alive: resume_turn_keep_alive_policy(keep_alive),
+        ..Default::default()
+    };
+    (!metadata.is_empty()).then_some(metadata)
+}
+
 /// Tool result provided by the MCP client
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ToolResultInput {
@@ -2944,6 +2996,12 @@ async fn handle_meerkat_resume(
         input.skill_references.clone(),
     )
     .map_err(ToolCallError::invalid_params)?;
+    let turn_metadata = resume_turn_metadata(
+        skill_references.clone(),
+        input.flow_tool_overlay.clone(),
+        input.additional_instructions.clone(),
+        keep_alive_override,
+    );
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -3017,7 +3075,7 @@ async fn handle_meerkat_resume(
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
         app_context: None,
-        additional_instructions: input.additional_instructions.clone(),
+        additional_instructions: None,
         shell_env: None,
         resume_override_mask: ResumeOverrideMask {
             model: input.model.is_some(),
@@ -3038,22 +3096,32 @@ async fn handle_meerkat_resume(
         input.enable_mob,
     ));
 
+    let make_turn_req = || StartTurnRequest {
+        prompt: prompt.clone().into(),
+        system_prompt: None,
+        event_tx: event_tx.clone(),
+        turn_metadata: turn_metadata.clone(),
+    };
+
     let result = if needs_rebuild {
         let req = CreateSessionRequest {
             model,
-            prompt: prompt.into(),
+            prompt: prompt.clone().into(),
             render_metadata: None,
             system_prompt: input.system_prompt.clone(),
             max_tokens,
-            event_tx: event_tx.clone(),
+            event_tx: None,
 
-            skill_references,
-            initial_turn: InitialTurnPolicy::RunImmediately,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: None,
         };
-        state.service.create_session(req).await
+        match state.service.create_session(req).await {
+            Ok(_) => state.service.start_turn(&session_id, make_turn_req()).await,
+            Err(error) => Err(error),
+        }
     } else {
         if keep_alive_override.is_some() {
             let comms_rt = state.service.comms_runtime(&session_id).await;
@@ -3063,13 +3131,20 @@ async fn handle_meerkat_resume(
                     "keep_alive requires a session created with comms_name",
                 ));
             }
-            state
-                .service
-                .update_session_keep_alive(&session_id, keep_alive)
-                .await
-                .map_err(|e| {
-                    ToolCallError::internal(format!("failed to persist keep_alive: {e}"))
-                })?;
+            if let Some(explicit_keep_alive) = keep_alive_override {
+                match state
+                    .service
+                    .apply_runtime_session_keep_alive(&session_id, explicit_keep_alive)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(error) => {
+                        return Err(ToolCallError::internal(format!(
+                            "failed to persist keep_alive: {error}"
+                        )));
+                    }
+                }
+            }
             state
                 .runtime_adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
@@ -3077,36 +3152,28 @@ async fn handle_meerkat_resume(
         }
         // Try start_turn on the live session first (it may still be alive
         // from a prior meerkat_run in the same MCP server process).
-        let turn_req = StartTurnRequest {
-            prompt: prompt.clone().into(),
-            system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
-            event_tx: event_tx.clone(),
-
-            skill_references: skill_references.clone(),
-            flow_tool_overlay: input.flow_tool_overlay.clone().map(Into::into),
-            turn_metadata: None,
-        };
-        match state.service.start_turn(&session_id, turn_req).await {
+        match state.service.start_turn(&session_id, make_turn_req()).await {
             Ok(run_result) => Ok(run_result),
             Err(SessionError::NotFound { .. }) => {
                 let req = CreateSessionRequest {
                     model,
-                    prompt: prompt.into(),
+                    prompt: prompt.clone().into(),
                     render_metadata: None,
                     system_prompt: input.system_prompt.clone(),
                     max_tokens,
-                    event_tx: event_tx.clone(),
+                    event_tx: None,
 
-                    skill_references,
-                    initial_turn: InitialTurnPolicy::RunImmediately,
+                    skill_references: None,
+                    initial_turn: InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
                     labels: None,
                 };
 
-                state.service.create_session(req).await
+                match state.service.create_session(req).await {
+                    Ok(_) => state.service.start_turn(&session_id, make_turn_req()).await,
+                    Err(error) => Err(error),
+                }
             }
             Err(other) => Err(other),
         }
@@ -3336,6 +3403,48 @@ mod tests {
         let payload = std::fs::read_to_string(path).expect("hook override fixture must exist");
         serde_json::from_str::<HookRunOverrides>(&payload)
             .expect("hook override fixture must deserialize")
+    }
+
+    #[test]
+    fn resume_turn_metadata_carries_flow_and_additional_instructions() {
+        let metadata = resume_turn_metadata(
+            None,
+            Some(TurnToolOverlayInput {
+                allowed_tools: Some(vec!["lookup".to_string()]),
+                blocked_tools: None,
+            }),
+            Some(vec![
+                "apply the resume instruction".to_string(),
+                "   ".to_string(),
+            ]),
+            Some(true),
+        )
+        .expect("metadata should be populated");
+
+        let flow_tool_overlay = metadata.flow_tool_overlay.expect("flow overlay");
+        assert_eq!(
+            flow_tool_overlay.allowed_tools,
+            Some(vec!["lookup".to_string()])
+        );
+
+        let instructions = metadata.additional_instructions.expect("instructions");
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0].kind,
+            meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User
+        );
+        assert_eq!(instructions[0].body, "apply the resume instruction");
+
+        let keep_alive = metadata.keep_alive.expect("keep-alive policy");
+        let meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(keep_alive) =
+            keep_alive
+        else {
+            panic!("keep-alive true must become a set policy");
+        };
+        assert_eq!(
+            keep_alive.policy,
+            meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned
+        );
     }
 
     #[test]

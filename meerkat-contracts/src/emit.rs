@@ -587,7 +587,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                         }),
                     ),
                     ("labels", labels),
-                    ("additional_instructions", string_array.clone()),
+                    ("additional_instructions", string_array),
                     ("app_context", json_value.clone()),
                     (
                         "shell_env",
@@ -602,30 +602,12 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         );
         components.insert(
             "RestContinueSessionRequest".to_string(),
-            object_schema(
+            closed_object_schema(
                 vec![
                     ("session_id", string_schema()),
                     ("prompt", content_input),
-                    ("system_prompt", string_schema()),
-                    ("output_schema", json_value.clone()),
-                    ("structured_output_retries", integer_schema()),
-                    ("keep_alive", nullable(bool_schema())),
-                    ("comms_name", string_schema()),
-                    ("peer_meta", json_value.clone()),
                     ("verbose", bool_schema()),
-                    ("model", string_schema()),
-                    ("provider", string_schema()),
-                    ("max_tokens", integer_schema()),
-                    ("hooks_override", json_value.clone()),
-                    (
-                        "skill_refs",
-                        serde_json::json!({
-                            "type": "array",
-                            "items": json_value
-                        }),
-                    ),
-                    ("flow_tool_overlay", json_value.clone()),
-                    ("additional_instructions", string_array),
+                    ("turn_metadata", schema_ref("WireRuntimeTurnMetadata")),
                 ],
                 vec!["session_id", "prompt"],
             ),
@@ -1491,7 +1473,7 @@ mod tests {
     }
 
     #[test]
-    fn emitted_mob_turn_start_params_expose_typed_prompt_and_known_overrides() {
+    fn emitted_mob_turn_start_params_expose_single_turn_metadata_carrier() {
         let output_dir = temp_output_dir("mob-turn-start-typed");
         emit_all_schemas(&output_dir).expect("emit schemas");
 
@@ -1509,7 +1491,11 @@ mod tests {
             Some(&serde_json::Value::Bool(true)),
             "mob/turn_start prompt must use the canonical content input schema"
         );
-        for field in [
+        assert!(
+            properties.contains_key("turn_metadata"),
+            "mob/turn_start params must expose the single turn_metadata carrier"
+        );
+        for split_field in [
             "skill_refs",
             "flow_tool_overlay",
             "additional_instructions",
@@ -1526,8 +1512,8 @@ mod tests {
             "clear_connection_ref",
         ] {
             assert!(
-                properties.contains_key(field),
-                "mob/turn_start params missing explicit turn override field {field}"
+                !properties.contains_key(split_field),
+                "mob/turn_start params must not expose split turn metadata field {split_field}"
             );
         }
         assert_eq!(
@@ -1787,6 +1773,60 @@ mod tests {
                     "{name} advertises {field}={contract_name}, but no emitted schema exports that contract"
                 );
             }
+        }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_rest_continue_session_request_exposes_single_turn_metadata_carrier() {
+        let output_dir = temp_output_dir("rest-continue-turn-metadata");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let rest: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rest-openapi.json")).unwrap())
+                .unwrap();
+        let request = rest
+            .pointer("/components/schemas/RestContinueSessionRequest")
+            .expect("RestContinueSessionRequest schema must be emitted");
+        let properties = request
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("RestContinueSessionRequest schema must expose properties");
+        assert!(
+            properties.contains_key("turn_metadata"),
+            "REST continue must expose the single turn_metadata carrier"
+        );
+        assert_eq!(
+            properties
+                .get("turn_metadata")
+                .and_then(|schema| schema.get("$ref")),
+            Some(&serde_json::Value::String(
+                "#/components/schemas/WireRuntimeTurnMetadata".to_string()
+            )),
+            "REST continue must expose typed runtime turn metadata"
+        );
+        assert_eq!(
+            request.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "REST continue schema must reject split or unknown top-level turn metadata fields"
+        );
+        for split_field in [
+            "skill_refs",
+            "flow_tool_overlay",
+            "additional_instructions",
+            "keep_alive",
+            "model",
+            "provider",
+            "max_tokens",
+            "system_prompt",
+            "output_schema",
+            "structured_output_retries",
+        ] {
+            assert!(
+                !properties.contains_key(split_field),
+                "REST continue must not expose split turn metadata field {split_field}"
+            );
         }
 
         fs::remove_dir_all(&output_dir).unwrap();

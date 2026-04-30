@@ -169,10 +169,6 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   keepAlive: true,
   model: "gpt-test",
   provider: "openai",
-  maxTokens: 128,
-  systemPrompt: "system",
-  outputSchema: { type: "object" },
-  structuredOutputRetries: 2,
   providerParams: { temperature: 0.2 },
   clearProviderParams: true,
   connectionRef: { realm: "dev", binding: "default_openai" },
@@ -185,21 +181,7 @@ const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
   unexpectedOverride: true,
 };
 
-type MobTurnStartSupportedWireOptionKeys =
-  | "additional_instructions"
-  | "clear_connection_ref"
-  | "clear_provider_params"
-  | "connection_ref"
-  | "flow_tool_overlay"
-  | "keep_alive"
-  | "max_tokens"
-  | "model"
-  | "output_schema"
-  | "provider"
-  | "provider_params"
-  | "skill_refs"
-  | "structured_output_retries"
-  | "system_prompt";
+type MobTurnStartSupportedWireOptionKeys = "turn_metadata";
 type MobTurnStartUncoveredWireOptionKeys = Exclude<
   keyof Omit<MobTurnStartParams, "mob_id" | "agent_identity" | "prompt">,
   MobTurnStartSupportedWireOptionKeys
@@ -417,8 +399,10 @@ const generatedMobTurnStart: MobTurnStartParams = {
   mob_id: "mob-1",
   agent_identity: "worker-1",
   prompt: [{ type: "text", text: "continue" }],
-  model: "gpt-test",
-  clear_provider_params: true,
+  turn_metadata: {
+    model: "gpt-test",
+    provider_params: { action: "clear" },
+  },
 };
 
 void generatedMobTurnStart;

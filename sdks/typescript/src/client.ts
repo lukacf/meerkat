@@ -193,6 +193,153 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
+type RuntimeTurnMetadataOptions = Pick<
+  TurnOptions,
+  | "skillRefs"
+  | "flowToolOverlay"
+  | "additionalInstructions"
+  | "keepAlive"
+  | "model"
+  | "provider"
+  | "providerParams"
+  | "clearProviderParams"
+  | "connectionRef"
+  | "clearConnectionRef"
+>;
+
+type RuntimeTurnMetadataPayload = NonNullable<MobTurnStartParams["turn_metadata"]>;
+
+function turnKeepAliveOverride(
+  keepAlive: boolean | undefined,
+): Record<string, unknown> | undefined {
+  if (keepAlive === undefined) return undefined;
+  if (!keepAlive) return { action: "clear" };
+  return {
+    action: "set",
+    value: {
+      policy: "pinned",
+      ttl_secs: 30,
+    },
+  };
+}
+
+function runtimeProviderPayload(provider: string | undefined): string | undefined {
+  if (provider === undefined) return undefined;
+  if (provider === "open_a_i" || provider === "open_ai") return "openai";
+  if (["anthropic", "openai", "gemini", "self_hosted", "other"].includes(provider)) {
+    return provider;
+  }
+  return "other";
+}
+
+function providerParamsNamespace(provider: string | undefined): string {
+  if (provider === "open_a_i" || provider === "open_ai" || provider === "openai") return "openai";
+  return provider ?? "unknown";
+}
+
+function isJsonNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isJsonU32(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function runtimeProviderParamsPayload(
+  providerParams: Record<string, unknown>,
+  provider: string | undefined,
+): Record<string, unknown> {
+  if (Object.prototype.hasOwnProperty.call(providerParams, "provider_tag")) {
+    return providerParams;
+  }
+
+  const metadata: Record<string, unknown> = {};
+  const remaining: Record<string, unknown> = {};
+  const isOpenAiProvider = providerParamsNamespace(provider) === "openai";
+
+  for (const [key, value] of Object.entries(providerParams)) {
+    if (["temperature", "top_p", "topP"].includes(key) && isJsonNumber(value)) {
+      metadata[key === "topP" ? "top_p" : key] = value;
+    } else if (
+      (key === "max_output_tokens" || key === "maxOutputTokens") &&
+      isJsonU32(value)
+    ) {
+      metadata.max_output_tokens = value;
+    } else if (
+      key === "reasoning" &&
+      !isOpenAiProvider &&
+      (value === "emit" || value === "silent" || value === "off")
+    ) {
+      metadata.reasoning = value;
+    } else if (
+      (key === "thinking_budget_tokens" || key === "thinkingBudgetTokens") &&
+      isJsonU32(value)
+    ) {
+      metadata.thinking_budget_tokens = value;
+    } else {
+      remaining[key] = value;
+    }
+  }
+
+  if (Object.keys(remaining).length > 0) {
+    metadata.provider_tag = {
+      provider: "unknown",
+      bag: {
+        namespace: providerParamsNamespace(provider),
+        key: "provider_params",
+        body: JSON.stringify(remaining),
+      },
+    };
+  }
+
+  return metadata;
+}
+
+function runtimeTurnMetadataPayload(
+  options?: RuntimeTurnMetadataOptions,
+): RuntimeTurnMetadataPayload | undefined {
+  if (!options) return undefined;
+  const metadata: RuntimeTurnMetadataPayload = {};
+  const wireRefs = skillRefsToWire(options.skillRefs);
+  if (wireRefs) {
+    metadata.skill_references = wireRefs;
+  }
+  if (options.flowToolOverlay) {
+    metadata.flow_tool_overlay = {
+      allowed_tools: options.flowToolOverlay.allowedTools
+        ? [...options.flowToolOverlay.allowedTools]
+        : undefined,
+      blocked_tools: options.flowToolOverlay.blockedTools
+        ? [...options.flowToolOverlay.blockedTools]
+        : undefined,
+    };
+  }
+  if (options.additionalInstructions != null) {
+    metadata.additional_instructions = options.additionalInstructions.map((body) => ({
+      kind: "user",
+      body,
+    }));
+  }
+  const keepAlive = turnKeepAliveOverride(options.keepAlive);
+  if (keepAlive) metadata.keep_alive = keepAlive;
+  setIfDefined(metadata, "model", options.model);
+  setIfDefined(metadata, "provider", runtimeProviderPayload(options.provider));
+  if (options.clearProviderParams) {
+    metadata.provider_params = { action: "clear" };
+  } else if (options.providerParams != null) {
+    metadata.provider_params = {
+      action: "set",
+      value: runtimeProviderParamsPayload(options.providerParams, options.provider),
+    };
+  }
+  if (options.clearConnectionRef) {
+    metadata.connection_ref = { action: "clear" };
+  } else if (options.connectionRef != null) {
+    metadata.connection_ref = { action: "set", value: options.connectionRef };
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
 function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     mob_id: mobId,
@@ -245,28 +392,10 @@ function mobTurnStartPayload(
       ? prompt
       : prompt.map((block) => ({ ...block })) as MobTurnStartParams["prompt"],
   };
-  const wireRefs = skillRefsToWire(options?.skillRefs);
-  if (wireRefs) {
-    payload.skill_refs = wireRefs as MobTurnStartParams["skill_refs"];
+  const turnMetadata = runtimeTurnMetadataPayload(options);
+  if (turnMetadata) {
+    payload.turn_metadata = turnMetadata;
   }
-  if (options?.flowToolOverlay) {
-    payload.flow_tool_overlay = {
-      allowed_tools: options.flowToolOverlay.allowedTools,
-      blocked_tools: options.flowToolOverlay.blockedTools,
-    } as MobTurnStartParams["flow_tool_overlay"];
-  }
-  setIfDefined(payload, "additional_instructions", options?.additionalInstructions);
-  setIfDefined(payload, "keep_alive", options?.keepAlive);
-  setIfDefined(payload, "model", options?.model);
-  setIfDefined(payload, "provider", options?.provider);
-  setIfDefined(payload, "max_tokens", options?.maxTokens);
-  setIfDefined(payload, "system_prompt", options?.systemPrompt);
-  setIfDefined(payload, "output_schema", options?.outputSchema);
-  setIfDefined(payload, "structured_output_retries", options?.structuredOutputRetries);
-  setIfDefined(payload, "provider_params", options?.providerParams);
-  setIfDefined(payload, "clear_provider_params", options?.clearProviderParams);
-  setIfDefined(payload, "connection_ref", options?.connectionRef);
-  setIfDefined(payload, "clear_connection_ref", options?.clearConnectionRef);
   return payload;
 }
 
@@ -1821,29 +1950,8 @@ export class MeerkatClient {
     options?: TurnOptions,
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
-    const wireRefs = skillRefsToWire(options?.skillRefs);
-    if (wireRefs) {
-      params.skill_refs = wireRefs;
-    }
-    if (options?.flowToolOverlay) {
-      params.flow_tool_overlay = {
-        allowed_tools: options.flowToolOverlay.allowedTools,
-        blocked_tools: options.flowToolOverlay.blockedTools,
-      };
-    }
-    if (options?.additionalInstructions != null) {
-      params.additional_instructions = options.additionalInstructions;
-    }
-    if (options?.keepAlive != null) params.keep_alive = options.keepAlive;
-    if (options?.model) params.model = options.model;
-    if (options?.provider) params.provider = options.provider;
-    if (options?.maxTokens) params.max_tokens = options.maxTokens;
-    if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
-    if (options?.outputSchema) params.output_schema = options.outputSchema;
-    if (options?.structuredOutputRetries != null) {
-      params.structured_output_retries = options.structuredOutputRetries;
-    }
-    if (options?.providerParams) params.provider_params = options.providerParams;
+    const turnMetadata = runtimeTurnMetadataPayload(options);
+    if (turnMetadata) params.turn_metadata = turnMetadata;
     const raw = await this.request("turn/start", params);
     return MeerkatClient.parseRunResult(raw);
   }
@@ -1867,29 +1975,8 @@ export class MeerkatClient {
 
     const responsePromise = this.registerRequest(requestId);
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
-    const wireRefs = skillRefsToWire(options?.skillRefs);
-    if (wireRefs) {
-      params.skill_refs = wireRefs;
-    }
-    if (options?.flowToolOverlay) {
-      params.flow_tool_overlay = {
-        allowed_tools: options.flowToolOverlay.allowedTools,
-        blocked_tools: options.flowToolOverlay.blockedTools,
-      };
-    }
-    if (options?.additionalInstructions != null) {
-      params.additional_instructions = options.additionalInstructions;
-    }
-    if (options?.keepAlive != null) params.keep_alive = options.keepAlive;
-    if (options?.model) params.model = options.model;
-    if (options?.provider) params.provider = options.provider;
-    if (options?.maxTokens) params.max_tokens = options.maxTokens;
-    if (options?.systemPrompt) params.system_prompt = options.systemPrompt;
-    if (options?.outputSchema) params.output_schema = options.outputSchema;
-    if (options?.structuredOutputRetries != null) {
-      params.structured_output_retries = options.structuredOutputRetries;
-    }
-    if (options?.providerParams) params.provider_params = options.providerParams;
+    const turnMetadata = runtimeTurnMetadataPayload(options);
+    if (turnMetadata) params.turn_metadata = turnMetadata;
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "turn/start", params };
     this.process.stdin!.write(JSON.stringify(rpcRequest) + "\n");

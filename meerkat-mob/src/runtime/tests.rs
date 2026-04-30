@@ -1086,10 +1086,14 @@ impl SessionService for MockSessionService {
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
+        let flow_tool_overlay = req
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.flow_tool_overlay.clone());
         self.flow_turn_overlays
             .write()
             .await
-            .push((id.clone(), req.flow_tool_overlay.clone()));
+            .push((id.clone(), flow_tool_overlay));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
@@ -7638,11 +7642,7 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
             StartTurnRequest {
                 prompt: "non-flow turn".to_string().into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
                 turn_metadata: None,
             },
         )
@@ -19443,7 +19443,11 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .entry(session_id.clone())
             .or_default()
-            .push(req.render_metadata.clone());
+            .push(
+                req.turn_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.render_metadata.clone()),
+            );
 
         if let Some(notifier) = self
             .keep_alive_notifiers

@@ -1958,14 +1958,8 @@ impl MobActor {
                             meerkat_core::service::StartTurnRequest {
                                 prompt: message.into(),
                                 system_prompt: None,
-                                render_metadata: None,
-                                handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
-
-                                skill_references: None,
-                                flow_tool_overlay: None,
                                 turn_metadata: None,
-
                             },
                         )
                         .await
@@ -9151,12 +9145,14 @@ impl MobActor {
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt: content,
                     system_prompt: None,
-                    render_metadata,
-                    handling_mode,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    turn_metadata: None,
+                    turn_metadata: Some(
+                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                            handling_mode: Some(handling_mode),
+                            render_metadata,
+                            ..Default::default()
+                        },
+                    ),
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
                 Ok(())

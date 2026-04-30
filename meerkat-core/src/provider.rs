@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Anthropic,
+    #[serde(rename = "openai")]
     OpenAI,
     Gemini,
     SelfHosted,
@@ -66,4 +67,21 @@ impl Provider {
         Provider::Gemini,
         Provider::SelfHosted,
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Provider;
+
+    #[test]
+    fn openai_provider_uses_public_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&Provider::OpenAI).expect("serialize provider"),
+            "\"openai\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Provider>("\"openai\"").expect("deserialize provider"),
+            Provider::OpenAI
+        );
+    }
 }

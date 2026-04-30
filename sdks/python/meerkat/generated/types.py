@@ -589,20 +589,7 @@ class MobTurnStartParams:
     agent_identity: str
     mob_id: str
     prompt: WireContentInput
-    additional_instructions: Optional[list[str]] = None
-    clear_connection_ref: Optional[bool] = None
-    clear_provider_params: Optional[bool] = None
-    connection_ref: Optional[WireConnectionRef] = None
-    flow_tool_overlay: Optional[dict[str, Any]] = None
-    keep_alive: Optional[bool] = None
-    max_tokens: Optional[int] = None
-    model: Optional[str] = None
-    output_schema: Optional[Any] = None
-    provider: Optional[str] = None
-    provider_params: Optional[Any] = None
-    skill_refs: Optional[list[dict[str, Any]]] = None
-    structured_output_retries: Optional[int] = None
-    system_prompt: Optional[str] = None
+    turn_metadata: Optional[dict[str, Any]] = None
 
 
 @dataclass

@@ -544,6 +544,16 @@ where
         Arc::clone(&self.system_context_state)
     }
 
+    /// Stage transient system context for the next LLM request only.
+    pub fn stage_turn_system_context(&mut self, appends: Vec<PendingSystemContextAppend>) {
+        self.pending_turn_system_context.extend(appends);
+    }
+
+    /// Clear transient system context staged for the current turn.
+    pub fn clear_turn_system_context(&mut self) {
+        self.pending_turn_system_context.clear();
+    }
+
     /// Clone the current session with the latest shared system-context state merged into metadata.
     pub fn session_with_system_context_state(&self) -> Session {
         let mut session = self.session.clone();
@@ -605,6 +615,12 @@ where
 
         self.sync_system_context_state_to_session();
         pending
+    }
+
+    pub(crate) fn take_pending_turn_system_context_boundary(
+        &mut self,
+    ) -> Vec<PendingSystemContextAppend> {
+        std::mem::take(&mut self.pending_turn_system_context)
     }
 
     pub(crate) fn llm_messages_with_runtime_system_context(
@@ -934,17 +950,20 @@ where
             .run_started_hooks(&run_prompt_input, event_tx.as_ref())
             .await
         {
+            self.pending_turn_system_context.clear();
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             return Err(err);
         }
 
         match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
+                self.clear_turn_system_context();
                 if !self.run_completed_hooks_applied
                     && let Err(err) = self
                         .run_completed_hooks(&mut result, event_tx.as_ref())
                         .await
                 {
+                    self.pending_turn_system_context.clear();
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
                     return Err(err);
                 }
@@ -954,6 +973,7 @@ where
                 Ok(result)
             }
             Err(err) => {
+                self.pending_turn_system_context.clear();
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
                 Err(err)
             }
@@ -980,6 +1000,8 @@ where
         });
 
         let Some(prompt) = pending_prompt else {
+            self.pending_skill_references = None;
+            self.pending_turn_system_context.clear();
             return Err(AgentError::ConfigError(
                 "run_pending requires a pending user or tool-results continuation boundary in the session".to_string(),
             ));
@@ -998,6 +1020,16 @@ where
         self.extraction_state.reset();
         self.run_completed_hooks_applied = false;
 
+        let skill_text = self.apply_skill_ref(String::new()).await;
+        if !skill_text.is_empty() {
+            self.stage_turn_system_context(vec![PendingSystemContextAppend {
+                text: skill_text,
+                source: Some("runtime_turn_metadata.skill_references".to_string()),
+                idempotency_key: None,
+                accepted_at: crate::time_compat::SystemTime::now(),
+            }]);
+        }
+
         self.emit_run_started_event(ContentInput::Text(prompt.clone()), event_tx.as_ref())
             .await;
 
@@ -1005,17 +1037,20 @@ where
             .run_started_hooks(&ContentInput::Text(prompt.clone()), event_tx.as_ref())
             .await
         {
+            self.pending_turn_system_context.clear();
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             return Err(err);
         }
 
         match self.run_loop(event_tx.clone()).await {
             Ok(mut result) => {
+                self.clear_turn_system_context();
                 if !self.run_completed_hooks_applied
                     && let Err(err) = self
                         .run_completed_hooks(&mut result, event_tx.as_ref())
                         .await
                 {
+                    self.pending_turn_system_context.clear();
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
                     return Err(err);
                 }
@@ -1025,6 +1060,7 @@ where
                 Ok(result)
             }
             Err(err) => {
+                self.pending_turn_system_context.clear();
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
                 Err(err)
             }
@@ -1034,6 +1070,8 @@ where
     /// Cancel the current run
     pub fn cancel(&mut self) {
         use crate::turn_execution_authority::TurnExecutionInput;
+
+        self.clear_turn_system_context();
 
         let snapshot = self
             .turn_state_handle

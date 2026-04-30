@@ -79,12 +79,52 @@ from meerkat.events import (
     UnknownEvent,
     parse_event,
 )
+from meerkat.client import _runtime_turn_metadata
 from meerkat.generated.types import (
     RealtimeCapabilities as GeneratedRealtimeCapabilities,
     RealtimeChannelOpenFrame as GeneratedRealtimeChannelOpenFrame,
     RealtimeOpenInfo as GeneratedRealtimeOpenInfo,
     RuntimeStateResult as GeneratedRuntimeStateResult,
 )
+
+
+def test_runtime_turn_metadata_provider_params_are_schema_valid():
+    openai_meta = _runtime_turn_metadata(
+        provider="openai",
+        provider_params={
+            "temperature": 0.2,
+            "reasoning": {"effort": "medium"},
+            "foo": "bar",
+        },
+    )
+    assert openai_meta is not None
+    assert openai_meta["provider"] == "openai"
+    assert openai_meta["provider_params"] == {
+        "action": "set",
+        "value": {
+            "temperature": 0.2,
+            "provider_tag": {
+                "provider": "unknown",
+                "bag": {
+                    "namespace": "openai",
+                    "key": "provider_params",
+                    "body": "{\"reasoning\":{\"effort\":\"medium\"},\"foo\":\"bar\"}",
+                },
+            },
+        },
+    }
+
+    custom_meta = _runtime_turn_metadata(
+        provider="openai-compatible",
+        provider_params={"foo": "bar"},
+    )
+    assert custom_meta is not None
+    assert custom_meta["provider"] == "other"
+    assert custom_meta["provider_params"]["value"]["provider_tag"]["bag"] == {
+        "namespace": "openai-compatible",
+        "key": "provider_params",
+        "body": "{\"foo\":\"bar\"}",
+    }
 
 
 def test_contract_version():
@@ -192,11 +232,16 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         mob_id="mob-1",
         agent_identity="worker-1",
         prompt=[{"type": "text", "text": "continue"}],
-        model="gpt-test",
-        clear_provider_params=True,
+        turn_metadata={
+            "model": "gpt-test",
+            "provider_params": {"action": "clear"},
+        },
     )
     assert turn.prompt == [{"type": "text", "text": "continue"}]
-    assert turn.model == "gpt-test"
+    assert turn.turn_metadata == {
+        "model": "gpt-test",
+        "provider_params": {"action": "clear"},
+    }
 
     result = GeneratedMobSpawnResult(
         mob_id="mob-1",
@@ -1498,11 +1543,8 @@ async def test_session_turn_and_stream_support_full_turn_overrides():
         keep_alive=True,
         model="claude-sonnet-4-6",
         provider="anthropic",
-        max_tokens=512,
-        system_prompt="System",
-        output_schema={"type": "object"},
-        structured_output_retries=3,
         provider_params={"reasoning_effort": "low"},
+        connection_ref={"realm": "dev", "binding": "default_anthropic"},
     )
     assert result.text == "ok"
 
@@ -1512,11 +1554,8 @@ async def test_session_turn_and_stream_support_full_turn_overrides():
         keep_alive=False,
         model="gpt-5.4",
         provider="openai",
-        max_tokens=256,
-        system_prompt="Stream system",
-        output_schema={"type": "object"},
-        structured_output_retries=2,
         provider_params={"foo": "bar"},
+        clear_provider_params=True,
     )
     assert stream_handle == "stream-handle"
     assert session_calls[0][0] == "turn"
@@ -1616,12 +1655,11 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         keep_alive=True,
         model="gpt-test",
         provider="openai",
-        max_tokens=128,
-        system_prompt="system",
-        output_schema={"type": "object"},
-        structured_output_retries=2,
-        provider_params={"temperature": 0.2},
-        clear_provider_params=True,
+        provider_params={
+            "temperature": 0.2,
+            "reasoning": {"effort": "medium"},
+            "foo": "bar",
+        },
         connection_ref={"realm": "dev", "binding": "default_openai"},
         clear_connection_ref=True,
     )
@@ -1633,28 +1671,40 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
                 "mob_id": "mob-1",
                 "agent_identity": "worker-1",
                 "prompt": [{"type": "text", "text": "continue"}],
-                "skill_refs": [
-                    {
-                        "source_uuid": "00000000-0000-4000-8000-000000000001",
-                        "skill_name": "read",
-                    }
-                ],
-                "flow_tool_overlay": {
-                    "allowed_tools": ["read"],
-                    "blocked_tools": [],
+                "turn_metadata": {
+                    "skill_references": [
+                        {
+                            "source_uuid": "00000000-0000-4000-8000-000000000001",
+                            "skill_name": "read",
+                        }
+                    ],
+                    "flow_tool_overlay": {
+                        "allowed_tools": ["read"],
+                        "blocked_tools": [],
+                    },
+                    "additional_instructions": [{"kind": "user", "body": "stay concise"}],
+                    "keep_alive": {
+                        "action": "set",
+                        "value": {"policy": "pinned", "ttl_secs": 30},
+                    },
+                    "model": "gpt-test",
+                    "provider": "openai",
+                    "provider_params": {
+                        "action": "set",
+                        "value": {
+                            "temperature": 0.2,
+                            "provider_tag": {
+                                "provider": "unknown",
+                                "bag": {
+                                    "namespace": "openai",
+                                    "key": "provider_params",
+                                    "body": "{\"reasoning\":{\"effort\":\"medium\"},\"foo\":\"bar\"}",
+                                },
+                            },
+                        },
+                    },
+                    "connection_ref": {"action": "clear"},
                 },
-                "additional_instructions": ["stay concise"],
-                "keep_alive": True,
-                "model": "gpt-test",
-                "provider": "openai",
-                "max_tokens": 128,
-                "system_prompt": "system",
-                "output_schema": {"type": "object"},
-                "structured_output_retries": 2,
-                "provider_params": {"temperature": 0.2},
-                "clear_provider_params": True,
-                "connection_ref": {"realm": "dev", "binding": "default_openai"},
-                "clear_connection_ref": True,
             },
         )
     ]

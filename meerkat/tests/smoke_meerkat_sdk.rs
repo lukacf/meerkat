@@ -1217,12 +1217,7 @@ mod scenario_09_session_service {
         let turn_req = StartTurnRequest {
             prompt: "What did I just say to you?".to_string().into(),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
-
-            skill_references: None,
-            flow_tool_overlay: None,
             turn_metadata: None,
         };
 
@@ -1690,11 +1685,7 @@ mod scenario_22_runtime_host_comms {
             let turn_req = StartTurnRequest {
                 prompt: prompt.into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
                 turn_metadata: None,
             };
 
@@ -1805,10 +1796,14 @@ mod scenario_22_runtime_host_comms {
             "You are Agent A. Wait for messages.".to_string(),
             Some(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    keep_alive: Some(meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                        ttl: std::time::Duration::from_secs(60),
-                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
-                    }),
+                    keep_alive: Some(
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                                ttl: std::time::Duration::from_secs(60),
+                                policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
+                            },
+                        ),
+                    ),
                     ..Default::default()
                 },
             ),

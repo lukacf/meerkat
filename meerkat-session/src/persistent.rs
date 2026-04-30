@@ -626,7 +626,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
             .ok()
             .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive));
-        self.inner.update_session_keep_alive(id, keep_alive).await?;
+        match self.inner.update_session_keep_alive(id, keep_alive).await {
+            Ok(()) => {}
+            Err(SessionError::NotFound { .. }) => {
+                let Some(mut session) = self.load_authoritative_session_base(id).await? else {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                };
+                self.reject_if_archived_session(id, &session)
+                    .await
+                    .map_err(control_error_into_session_error)?;
+                let Some(mut metadata) = session.session_metadata() else {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "session {id} is missing session metadata for runtime keep_alive update"
+                    ))));
+                };
+                metadata.keep_alive = keep_alive;
+                session.set_session_metadata(metadata).map_err(|err| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to serialize runtime keep_alive metadata for session {id}: {err}"
+                    )))
+                })?;
+                self.save_normalized_session(session).await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
         match self.persist_full_session(id).await {
             Ok(_) => Ok(()),
             Err(error) => {
@@ -3579,11 +3603,7 @@ mod tests {
         StartTurnRequest {
             prompt: prompt.to_string().into(),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
-            skill_references: None,
-            flow_tool_overlay: None,
             turn_metadata: None,
         }
     }
@@ -3595,11 +3615,7 @@ mod tests {
         StartTurnRequest {
             prompt: prompt.to_string().into(),
             system_prompt: system_prompt.map(str::to_string),
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
-            skill_references: None,
-            flow_tool_overlay: None,
             turn_metadata: None,
         }
     }
@@ -6474,6 +6490,48 @@ mod tests {
         assert!(
             meta.keep_alive,
             "persisted keep_alive should be true after update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_keep_alive_update_persists_without_live_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create session");
+        let id = created.session_id;
+
+        service
+            .apply_runtime_session_keep_alive(&id, true)
+            .await
+            .expect("runtime keep_alive enable should persist");
+        service
+            .discard_live_session(&id)
+            .await
+            .expect("discard live session");
+
+        service
+            .apply_runtime_session_keep_alive(&id, false)
+            .await
+            .expect("runtime keep_alive disable should persist without live session");
+
+        let persisted = store.load(&id).await.unwrap().unwrap();
+        let meta = persisted.session_metadata().expect("metadata present");
+        assert!(
+            !meta.keep_alive,
+            "explicit runtime keep_alive=false must update the authoritative snapshot without a live session"
         );
     }
 

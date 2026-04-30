@@ -931,6 +931,13 @@ where
     /// Skill references to resolve and inject for the next turn.
     /// Set by surfaces before calling `run()`, consumed on run start.
     pub pending_skill_references: Option<Vec<crate::skills::SkillKey>>,
+    /// Transient system-context appends for the next LLM request only.
+    ///
+    /// Unlike `system_context_state`, this is never persisted into the
+    /// canonical session. Runtime turn metadata uses this for turn-scoped
+    /// instructions that must affect pending continuations without becoming
+    /// durable session context.
+    pub(crate) pending_turn_system_context: Vec<crate::session::PendingSystemContextAppend>,
     /// Per-interaction event tap for streaming events to subscribers.
     pub(crate) event_tap: crate::event_tap::EventTap,
     /// Shared control state for runtime system-context appends.

@@ -3,10 +3,10 @@
 //! Wave B (V8): the input-acceptance RPC method has a typed request shape.
 //!
 //! The ad-hoc raw-JSON ingress is gone; callers construct a
-//! `SessionAcceptInputParams { session_id, primitive, idempotency_key,
-//! turn_metadata }` where `primitive: WireRunPrimitive` carries the typed
-//! payload. This test round-trips the three primitive variants and asserts
-//! that turn metadata + idempotency round-trip intact.
+//! `SessionAcceptInputParams { session_id, primitive, idempotency_key }`
+//! where `primitive: WireRunPrimitive` carries the typed payload. This test
+//! round-trips the three primitive variants and asserts that staged turn
+//! metadata + idempotency round-trip intact.
 
 use meerkat_contracts::wire::runtime::{
     SessionAcceptInputParams, WireConversationAppend, WireConversationAppendRole,
@@ -22,7 +22,6 @@ fn immediate_append_round_trip() {
             blocks: Vec::new(),
         }),
         idempotency_key: Some("key-1".into()),
-        turn_metadata: None,
     };
     let json = serde_json::to_string(&params).expect("serialize");
     assert!(json.contains("\"kind\":\"immediate_append\""));
@@ -40,7 +39,6 @@ fn immediate_context_append_round_trip() {
             blocks: Vec::new(),
         }),
         idempotency_key: None,
-        turn_metadata: None,
     };
     let json = serde_json::to_string(&params).expect("serialize");
     assert!(json.contains("\"kind\":\"immediate_context_append\""));
@@ -65,7 +63,6 @@ fn staged_input_round_trip_with_turn_metadata() {
         session_id: "session-staged".into(),
         primitive: WireRunPrimitive::StagedInput(staged),
         idempotency_key: Some("once".into()),
-        turn_metadata: Some(WireRuntimeTurnMetadata::default()),
     };
     let json = serde_json::to_string(&params).expect("serialize");
     assert!(json.contains("\"kind\":\"staged_input\""));

@@ -6,7 +6,6 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive,
 };
 use meerkat_core::service::SessionService;
-use meerkat_core::types::HandlingMode;
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
 
@@ -180,13 +179,7 @@ fn start_turn_request_from_primitive(
     Ok(meerkat_core::service::StartTurnRequest {
         prompt: primitive.extract_content_input(),
         system_prompt: None,
-        render_metadata: metadata.and_then(|metadata| metadata.render_metadata.clone()),
-        handling_mode: metadata
-            .and_then(|metadata| metadata.handling_mode)
-            .unwrap_or(HandlingMode::Queue),
         event_tx: None,
-        skill_references: metadata.and_then(|metadata| metadata.skill_references.clone()),
-        flow_tool_overlay: metadata.and_then(|metadata| metadata.flow_tool_overlay.clone()),
         turn_metadata: metadata.cloned(),
     })
 }
@@ -290,6 +283,45 @@ fn ensure_materialized_session_id_matches(
         expected: expected.clone(),
         actual: actual.clone(),
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+mod unit_tests {
+    use super::*;
+    use meerkat_core::lifecycle::run_primitive::{
+        PeerResponseTerminalApplyIntent, RuntimeTurnMetadata,
+    };
+
+    #[test]
+    fn peer_terminal_context_and_run_is_not_context_only_append() {
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                appends: Vec::new(),
+                context_appends: vec![
+                    meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
+                        key: "peer_response_terminal:peer:req".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "peer result".to_string(),
+                        },
+                    },
+                ],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    ),
+                    peer_response_terminal_apply_intent: Some(
+                        PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                    ),
+                    ..Default::default()
+                }),
+            });
+
+        assert!(primitive.is_peer_response_terminal_context_and_run());
+        assert!(!primitive.is_context_only_apply_without_turn());
+    }
 }
 
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]

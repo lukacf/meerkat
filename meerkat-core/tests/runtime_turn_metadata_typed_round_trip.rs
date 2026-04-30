@@ -57,10 +57,10 @@ fn sample_metadata() -> RuntimeTurnMetadata {
                 .expect("valid binding"),
             profile: None,
         })),
-        keep_alive: Some(KeepAlivePolicy {
+        keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
             policy: KeepAliveMode::Pinned,
-        }),
+        })),
         render_metadata: Some(RenderMetadata {
             class: RenderClass::ExternalEvent,
             salience: RenderSalience::Urgent,
@@ -422,17 +422,17 @@ fn merge_refuses_connection_ref_set_and_clear() {
 #[test]
 fn merge_scalar_conflict_refuses_keep_alive() {
     let mut left = RuntimeTurnMetadata {
-        keep_alive: Some(KeepAlivePolicy {
+        keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
             ttl: Duration::from_secs(10),
             policy: KeepAliveMode::Pinned,
-        }),
+        })),
         ..Default::default()
     };
     let right = RuntimeTurnMetadata {
-        keep_alive: Some(KeepAlivePolicy {
+        keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
             ttl: Duration::from_secs(60),
             policy: KeepAliveMode::PolicyDriven,
-        }),
+        })),
         ..Default::default()
     };
     let err = left.merge(right).expect_err("conflict expected");

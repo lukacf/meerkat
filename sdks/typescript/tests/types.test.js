@@ -930,7 +930,7 @@ describe("Session wrappers", () => {
         usage: { input_tokens: 1, output_tokens: 1 },
       };
     };
-    client.process = { stdin: { write: () => {} } };
+    client.process = { stdin: { write: (line) => calls.push(JSON.parse(line)) } };
     client.registerRequest = async () => ({
       session_id: "s1",
       text: "ok",
@@ -943,28 +943,54 @@ describe("Session wrappers", () => {
       additionalInstructions: ["a"],
       keepAlive: true,
       model: "m",
-      provider: "p",
-      maxTokens: 42,
-      systemPrompt: "sys",
-      outputSchema: { type: "object" },
-      structuredOutputRetries: 3,
-      providerParams: { x: 1 },
+      provider: "openai",
+      providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
+      connectionRef: { realm: "dev", binding: "default_openai" },
     });
     client._startTurnStreaming("s1", "hello", {
       additionalInstructions: ["a"],
       keepAlive: true,
       model: "m",
-      provider: "p",
-      maxTokens: 42,
-      systemPrompt: "sys",
-      outputSchema: { type: "object" },
-      structuredOutputRetries: 3,
-      providerParams: { x: 1 },
+      provider: "openai-compatible",
+      providerParams: { foo: "bar" },
+      connectionRef: { realm: "dev", binding: "default_openai" },
     });
 
     assert.equal(calls[0].method, "turn/start");
-    assert.equal(calls[0].params.additional_instructions[0], "a");
-    assert.equal(calls[0].params.keep_alive, true);
+    assert.equal(calls[0].params.turn_metadata.additional_instructions[0].body, "a");
+    assert.deepEqual(calls[0].params.turn_metadata.keep_alive, {
+      action: "set",
+      value: { policy: "pinned", ttl_secs: 30 },
+    });
+    assert.equal(calls[0].params.turn_metadata.provider, "openai");
+    assert.deepEqual(calls[0].params.turn_metadata.provider_params, {
+      action: "set",
+      value: {
+        temperature: 0.2,
+        provider_tag: {
+          provider: "unknown",
+          bag: {
+            namespace: "openai",
+            key: "provider_params",
+            body: "{\"reasoning\":{\"effort\":\"medium\"},\"foo\":\"bar\"}",
+          },
+        },
+      },
+    });
+    assert.equal(calls[1].params.turn_metadata.provider, "other");
+    assert.deepEqual(calls[1].params.turn_metadata.provider_params, {
+      action: "set",
+      value: {
+        provider_tag: {
+          provider: "unknown",
+          bag: {
+            namespace: "openai-compatible",
+            key: "provider_params",
+            body: "{\"foo\":\"bar\"}",
+          },
+        },
+      },
+    });
   });
 });
 
@@ -1533,12 +1559,7 @@ describe("Parity wrappers", () => {
         keepAlive: true,
         model: "gpt-test",
         provider: "openai",
-        maxTokens: 128,
-        systemPrompt: "system",
-        outputSchema: { type: "object" },
-        structuredOutputRetries: 2,
-        providerParams: { temperature: 0.2 },
-        clearProviderParams: true,
+        providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
         connectionRef: { realm: "dev", binding: "default_openai" },
         clearConnectionRef: true,
       },
@@ -1610,25 +1631,37 @@ describe("Parity wrappers", () => {
       mob_id: "mob-1",
       agent_identity: "worker-1",
       prompt: [{ type: "text", text: "continue" }],
-      skill_refs: [
-        {
-          source_uuid: "00000000-0000-4000-8000-000000000001",
-          skill_name: "read",
+      turn_metadata: {
+        skill_references: [
+          {
+            source_uuid: "00000000-0000-4000-8000-000000000001",
+            skill_name: "read",
+          },
+        ],
+        flow_tool_overlay: { allowed_tools: ["read"], blocked_tools: [] },
+        additional_instructions: [{ kind: "user", body: "stay concise" }],
+        keep_alive: {
+          action: "set",
+          value: { policy: "pinned", ttl_secs: 30 },
         },
-      ],
-      flow_tool_overlay: { allowed_tools: ["read"], blocked_tools: [] },
-      additional_instructions: ["stay concise"],
-      keep_alive: true,
-      model: "gpt-test",
-      provider: "openai",
-      max_tokens: 128,
-      system_prompt: "system",
-      output_schema: { type: "object" },
-      structured_output_retries: 2,
-      provider_params: { temperature: 0.2 },
-      clear_provider_params: true,
-      connection_ref: { realm: "dev", binding: "default_openai" },
-      clear_connection_ref: true,
+        model: "gpt-test",
+        provider: "openai",
+        provider_params: {
+          action: "set",
+          value: {
+            temperature: 0.2,
+            provider_tag: {
+              provider: "unknown",
+              bag: {
+                namespace: "openai",
+                key: "provider_params",
+                body: "{\"reasoning\":{\"effort\":\"medium\"},\"foo\":\"bar\"}",
+              },
+            },
+          },
+        },
+        connection_ref: { action: "clear" },
+      },
     });
     assert.equal(calls[4].params.after_cursor, 10);
     assert.equal(calls[4].params.limit, 5);
@@ -1647,6 +1680,8 @@ describe("Parity wrappers", () => {
 
     assert.match(helperSource, /\): MobTurnStartParams \{/);
     assert.match(helperSource, /const payload: MobTurnStartParams = \{/);
+    assert.match(helperSource, /payload\.turn_metadata = turnMetadata/);
+    assert.doesNotMatch(helperSource, /payload\.skill_refs/);
     assert.doesNotMatch(helperSource, /Record<string, unknown>/);
   });
 

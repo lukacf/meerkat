@@ -1344,9 +1344,12 @@ pub struct RuntimeTurnMetadata {
     /// resolve against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
-    /// Keep-alive policy for materialized resources for this turn.
+    /// Keep-alive override for materialized resources for this turn.
+    ///
+    /// `None` means inherit the stored session value, `Set(policy)` enables
+    /// keep-alive for this turn, and `Clear` explicitly disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_alive: Option<KeepAlivePolicy>,
+    pub keep_alive: Option<TurnMetadataOverride<KeepAlivePolicy>>,
     /// Optional normalized rendering metadata for this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<RenderMetadata>,
@@ -1383,7 +1386,7 @@ struct RuntimeTurnMetadataFields {
     #[serde(default)]
     connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
     #[serde(default)]
-    keep_alive: Option<KeepAlivePolicy>,
+    keep_alive: Option<TurnMetadataOverride<KeepAlivePolicy>>,
     #[serde(default)]
     render_metadata: Option<RenderMetadata>,
     #[serde(default)]
@@ -1485,7 +1488,7 @@ impl RuntimeTurnMetadata {
             other.connection_ref,
             "connection_ref",
         )?;
-        merge_scalar(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
+        merge_override(&mut self.keep_alive, other.keep_alive, "keep_alive")?;
         merge_scalar(
             &mut self.render_metadata,
             other.render_metadata,
@@ -2139,10 +2142,10 @@ mod tests {
             context_appends: vec![],
             contributing_input_ids: vec![InputId::new()],
             turn_metadata: Some(RuntimeTurnMetadata {
-                keep_alive: Some(KeepAlivePolicy {
+                keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
                     ttl: std::time::Duration::from_secs(30),
                     policy: KeepAliveMode::Pinned,
-                }),
+                })),
                 ..Default::default()
             }),
         };

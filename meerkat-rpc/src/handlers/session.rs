@@ -450,17 +450,19 @@ pub async fn handle_create(
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
         let prompt_for_turn = params.prompt.clone();
-        let skill_refs_for_turn = skill_refs.clone();
+        let turn_metadata_for_turn = skill_refs.clone().map(|skill_references| {
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                skill_references: Some(skill_references),
+                ..Default::default()
+            }
+        });
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
                 .start_turn_via_runtime(
                     &sid_for_turn,
                     prompt_for_turn,
                     event_tx_for_turn,
-                    skill_refs_for_turn,
-                    None,
-                    None,
-                    None,
+                    turn_metadata_for_turn,
                 )
                 .await
             {
@@ -496,10 +498,12 @@ pub async fn handle_create(
                 &session_id,
                 params.prompt,
                 mcp_event_tx,
-                skill_refs,
-                None,
-                None,
-                None,
+                skill_refs.map(|skill_references| {
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        skill_references: Some(skill_references),
+                        ..Default::default()
+                    }
+                }),
             )
             .await
         {

@@ -66,6 +66,9 @@ class _MockClient:
         output_schema=None,
         structured_output_retries=None,
         provider_params=None,
+        clear_provider_params=None,
+        connection_ref=None,
+        clear_connection_ref=None,
     ):
         self._calls.append({
             "session_id": session_id,
@@ -81,6 +84,9 @@ class _MockClient:
             "output_schema": output_schema,
             "structured_output_retries": structured_output_retries,
             "provider_params": provider_params,
+            "clear_provider_params": clear_provider_params,
+            "connection_ref": connection_ref,
+            "clear_connection_ref": clear_connection_ref,
         })
         return RunResult(
             session_id=session_id,

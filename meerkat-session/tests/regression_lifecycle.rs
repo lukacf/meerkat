@@ -14,10 +14,11 @@ use meerkat_core::ops::OperationId;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextStatus, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, SessionError, SessionQuery, SessionService,
-    SessionServiceControlExt, StartTurnRequest, TurnToolOverlay,
+    SessionServiceControlExt, StageToolResultsRequest, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, Usage,
+    HandlingMode, RenderClass, RenderMetadata, RenderSalience, RunResult, SessionId, ToolResult,
+    Usage,
 };
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::PersistentSessionService;
@@ -48,12 +49,17 @@ struct MockAgent {
 struct RecordedTurnMetadata {
     handling_mode: HandlingMode,
     render_metadata: Option<RenderMetadata>,
+    prompt_text: String,
+    turn_instruction_texts: Vec<String>,
+    ran_pending: bool,
 }
 
 struct RecordingTurnAgent {
     session_id: SessionId,
     recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
+    keep_alive_updates: Arc<std::sync::Mutex<Vec<bool>>>,
     system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+    staged_turn_context: Vec<meerkat_core::PendingSystemContextAppend>,
 }
 
 struct SnapshotAgent {
@@ -62,6 +68,19 @@ struct SnapshotAgent {
     tool_scope_snapshot: meerkat_core::ToolScopeSnapshot,
     external_tool_surface_snapshot: Option<meerkat_core::ExternalToolSurfaceSnapshot>,
     system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+}
+
+fn turn_instruction_texts(appends: &[meerkat_core::PendingSystemContextAppend]) -> Vec<String> {
+    appends
+        .iter()
+        .filter(|append| {
+            append
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("runtime_turn_metadata."))
+        })
+        .map(|append| append.text.clone())
+        .collect()
 }
 
 #[async_trait]
@@ -392,6 +411,7 @@ impl SessionAgentBuilder for FailingMockAgentBuilder {
 
 struct RecordingTurnAgentBuilder {
     recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
+    keep_alive_updates: Arc<std::sync::Mutex<Vec<bool>>>,
 }
 
 #[async_trait]
@@ -406,7 +426,9 @@ impl SessionAgentBuilder for RecordingTurnAgentBuilder {
         Ok(RecordingTurnAgent {
             session_id: SessionId::new(),
             recorded: Arc::clone(&self.recorded),
+            keep_alive_updates: Arc::clone(&self.keep_alive_updates),
             system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
+            staged_turn_context: Vec::new(),
         })
     }
 }
@@ -432,18 +454,23 @@ impl SessionAgent for RecordingTurnAgent {
 
     async fn run_turn_with_events(
         &mut self,
-        _prompt: meerkat_core::types::ContentInput,
+        prompt: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
         _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        let turn_instruction_texts = turn_instruction_texts(&self.staged_turn_context);
+        self.staged_turn_context.clear();
         self.recorded
             .lock()
             .expect("recorded-turn lock poisoned")
             .push(RecordedTurnMetadata {
                 handling_mode,
                 render_metadata,
+                prompt_text: prompt.text_content(),
+                turn_instruction_texts,
+                ran_pending: false,
             });
         Ok(RunResult {
             text: "recorded".to_string(),
@@ -457,7 +484,55 @@ impl SessionAgent for RecordingTurnAgent {
         })
     }
 
+    async fn run_pending_with_events(
+        &mut self,
+        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        let turn_instruction_texts = turn_instruction_texts(&self.staged_turn_context);
+        self.staged_turn_context.clear();
+        self.recorded
+            .lock()
+            .expect("recorded-turn lock poisoned")
+            .push(RecordedTurnMetadata {
+                handling_mode: HandlingMode::Queue,
+                render_metadata: None,
+                prompt_text: String::new(),
+                turn_instruction_texts,
+                ran_pending: true,
+            });
+        Ok(RunResult {
+            text: "recorded pending".to_string(),
+            session_id: self.session_id.clone(),
+            usage: Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        })
+    }
+
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
+
+    fn update_keep_alive(&mut self, keep_alive: bool) {
+        self.keep_alive_updates
+            .lock()
+            .expect("keep-alive updates lock poisoned")
+            .push(keep_alive);
+    }
+
+    fn stage_turn_system_context(
+        &mut self,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.staged_turn_context.extend(appends);
+        Ok(())
+    }
+
+    fn clear_turn_system_context(&mut self) {
+        self.staged_turn_context.clear();
+    }
 
     fn set_flow_tool_overlay(
         &mut self,
@@ -511,11 +586,242 @@ impl SessionAgent for RecordingTurnAgent {
     ) {
     }
 
+    fn apply_pending_tool_results(
+        &mut self,
+        _results: Vec<ToolResult>,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
+    }
+
     fn system_context_state(
         &self,
     ) -> Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>> {
         Arc::clone(&self.system_context_state)
     }
+}
+
+#[tokio::test]
+async fn start_turn_applies_runtime_turn_metadata_additional_instructions() {
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::<RecordedTurnMetadata>::new()));
+    let service = make_recording_service(Arc::clone(&recorded));
+    let created = service
+        .create_session(CreateSessionRequest {
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            ..create_req("record")
+        })
+        .await
+        .expect("create session");
+
+    service
+        .start_turn(
+            &created.session_id,
+            StartTurnRequest {
+                prompt: "base prompt".into(),
+                system_prompt: None,
+                event_tx: None,
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        additional_instructions: Some(vec![
+                            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System,
+                                body: "follow the first rule".to_string(),
+                            },
+                            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                                body: "use the host context".to_string(),
+                            },
+                        ]),
+                        ..Default::default()
+                    },
+                ),
+            },
+        )
+        .await
+        .expect("start turn");
+
+    {
+        let recorded = recorded.lock().expect("recorded-turn lock poisoned");
+        assert_eq!(recorded.len(), 1);
+        assert!(!recorded[0].ran_pending);
+        assert_eq!(recorded[0].prompt_text, "base prompt");
+        assert_eq!(
+            recorded[0].turn_instruction_texts,
+            vec![
+                "[Runtime Turn Instruction]\nkind: system\n\nfollow the first rule".to_string(),
+                "[Runtime Turn Instruction]\nkind: host\n\nuse the host context".to_string(),
+            ]
+        );
+    }
+    let exported = service
+        .export_session(&created.session_id)
+        .await
+        .expect("export session");
+    let system_context_state = exported.system_context_state().unwrap_or_default();
+    assert!(system_context_state.pending.is_empty());
+    assert!(system_context_state.applied.is_empty());
+}
+
+#[tokio::test]
+async fn start_turn_applies_runtime_turn_metadata_additional_instructions_to_pending_resume() {
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::<RecordedTurnMetadata>::new()));
+    let service = make_recording_service(Arc::clone(&recorded));
+    let created = service
+        .create_session(CreateSessionRequest {
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            ..create_req("record")
+        })
+        .await
+        .expect("create session");
+
+    service
+        .stage_tool_results(
+            &created.session_id,
+            StageToolResultsRequest {
+                results: vec![ToolResult::new(
+                    "tool-use-1".to_string(),
+                    "tool result".to_string(),
+                    false,
+                )],
+            },
+        )
+        .await
+        .expect("stage tool results");
+
+    service
+        .start_turn(
+            &created.session_id,
+            StartTurnRequest {
+                prompt: "".into(),
+                system_prompt: None,
+                event_tx: None,
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        additional_instructions: Some(vec![
+                            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                                body: "resume with this turn instruction".to_string(),
+                            },
+                        ]),
+                        ..Default::default()
+                    },
+                ),
+            },
+        )
+        .await
+        .expect("start pending turn");
+
+    {
+        let recorded = recorded.lock().expect("recorded-turn lock poisoned");
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].ran_pending);
+        assert_eq!(recorded[0].prompt_text, "");
+        assert_eq!(
+            recorded[0].turn_instruction_texts,
+            vec![
+                "[Runtime Turn Instruction]\nkind: user\n\nresume with this turn instruction"
+                    .to_string()
+            ]
+        );
+    }
+    let exported = service
+        .export_session(&created.session_id)
+        .await
+        .expect("export session");
+    let system_context_state = exported.system_context_state().unwrap_or_default();
+    assert!(system_context_state.pending.is_empty());
+    assert!(system_context_state.applied.is_empty());
+}
+
+#[tokio::test]
+async fn start_turn_applies_runtime_turn_metadata_keep_alive() {
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::<RecordedTurnMetadata>::new()));
+    let keep_alive_updates = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+    let service = make_recording_service_with_keep_alive(
+        Arc::clone(&recorded),
+        Arc::clone(&keep_alive_updates),
+    );
+    let created = service
+        .create_session(CreateSessionRequest {
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            ..create_req("record")
+        })
+        .await
+        .expect("create session");
+
+    service
+        .start_turn(
+            &created.session_id,
+            StartTurnRequest {
+                prompt: "keep this session alive".into(),
+                system_prompt: None,
+                event_tx: None,
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        keep_alive: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                                meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                                    ttl: std::time::Duration::from_secs(30),
+                                    policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                                },
+                            ),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            },
+        )
+        .await
+        .expect("start turn");
+
+    assert_eq!(
+        keep_alive_updates
+            .lock()
+            .expect("keep-alive updates lock poisoned")
+            .as_slice(),
+        &[true],
+        "keep_alive must be applied from RuntimeTurnMetadata"
+    );
+
+    let created = service
+        .create_session(CreateSessionRequest {
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            ..create_req("record")
+        })
+        .await
+        .expect("create second session");
+
+    service
+        .start_turn(
+            &created.session_id,
+            StartTurnRequest {
+                prompt: "do not keep this session alive".into(),
+                system_prompt: None,
+                event_tx: None,
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        keep_alive: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            },
+        )
+        .await
+        .expect("start turn with clear keep_alive");
+
+    assert_eq!(
+        keep_alive_updates
+            .lock()
+            .expect("keep-alive updates lock poisoned")
+            .as_slice(),
+        &[true, false],
+        "keep_alive Clear must be applied from RuntimeTurnMetadata"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -540,8 +846,19 @@ fn make_failing_service() -> Arc<EphemeralSessionService<FailingMockAgentBuilder
 fn make_recording_service(
     recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
 ) -> Arc<EphemeralSessionService<RecordingTurnAgentBuilder>> {
+    let keep_alive_updates = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+    make_recording_service_with_keep_alive(recorded, keep_alive_updates)
+}
+
+fn make_recording_service_with_keep_alive(
+    recorded: Arc<std::sync::Mutex<Vec<RecordedTurnMetadata>>>,
+    keep_alive_updates: Arc<std::sync::Mutex<Vec<bool>>>,
+) -> Arc<EphemeralSessionService<RecordingTurnAgentBuilder>> {
     Arc::new(EphemeralSessionService::new(
-        RecordingTurnAgentBuilder { recorded },
+        RecordingTurnAgentBuilder {
+            recorded,
+            keep_alive_updates,
+        },
         10,
     ))
 }
@@ -597,11 +914,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
         prompt: prompt.to_string().into(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: None,
-        skill_references: None,
-        flow_tool_overlay: None,
         turn_metadata: None,
     }
 }
@@ -1154,11 +1467,11 @@ async fn inject_context_duplicate_idempotent() {
 }
 
 // ---------------------------------------------------------------------------
-// 15. start_turn forwards handling/render metadata
+// 15. start_turn derives handling/render metadata from RuntimeTurnMetadata
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn start_turn_forwards_handling_mode_and_render_metadata() {
+async fn start_turn_uses_runtime_turn_metadata_for_handling_and_rendering() {
     let recorded = Arc::new(std::sync::Mutex::new(Vec::<RecordedTurnMetadata>::new()));
     let service = make_recording_service(Arc::clone(&recorded));
     let created = service
@@ -1172,15 +1485,17 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
             StartTurnRequest {
                 prompt: "steer me".into(),
                 system_prompt: None,
-                render_metadata: Some(RenderMetadata {
-                    class: RenderClass::ExternalEvent,
-                    salience: RenderSalience::Urgent,
-                }),
-                handling_mode: HandlingMode::Steer,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
-                turn_metadata: None,
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        handling_mode: Some(HandlingMode::Steer),
+                        render_metadata: Some(RenderMetadata {
+                            class: RenderClass::ExternalEvent,
+                            salience: RenderSalience::Urgent,
+                        }),
+                        ..Default::default()
+                    },
+                ),
             },
         )
         .await

@@ -434,23 +434,10 @@ export interface MobForceCancelResult {
 }
 
 export interface MobTurnStartParams {
-  additional_instructions?: string[];
   agent_identity: string;
-  clear_connection_ref?: boolean;
-  clear_provider_params?: boolean;
-  connection_ref?: WireConnectionRef;
-  flow_tool_overlay?: Record<string, unknown>;
-  keep_alive?: boolean;
-  max_tokens?: number;
   mob_id: string;
-  model?: string;
-  output_schema?: unknown;
   prompt: WireContentInput;
-  provider?: string;
-  provider_params?: unknown;
-  skill_refs?: Record<string, unknown>[];
-  structured_output_retries?: number;
-  system_prompt?: string;
+  turn_metadata?: Record<string, unknown>;
 }
 
 export interface MobMemberStatusResult {

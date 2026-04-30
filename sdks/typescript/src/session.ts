@@ -187,11 +187,10 @@ export interface DeferredTurnOptions {
   keepAlive?: TurnOptions["keepAlive"];
   model?: TurnOptions["model"];
   provider?: TurnOptions["provider"];
-  maxTokens?: TurnOptions["maxTokens"];
-  systemPrompt?: TurnOptions["systemPrompt"];
-  outputSchema?: TurnOptions["outputSchema"];
-  structuredOutputRetries?: TurnOptions["structuredOutputRetries"];
   providerParams?: TurnOptions["providerParams"];
+  clearProviderParams?: TurnOptions["clearProviderParams"];
+  connectionRef?: TurnOptions["connectionRef"];
+  clearConnectionRef?: TurnOptions["clearConnectionRef"];
 }
 
 /**

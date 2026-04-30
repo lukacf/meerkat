@@ -5898,101 +5898,23 @@
         "additionalProperties": false,
         "description": "Request payload for `mob/turn_start`.",
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "agent_identity": {
             "type": "string"
-          },
-          "clear_connection_ref": {
-            "default": false,
-            "type": "boolean"
-          },
-          "clear_provider_params": {
-            "default": false,
-            "type": "boolean"
-          },
-          "connection_ref": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WireConnectionRef"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "flow_tool_overlay": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TurnToolOverlay"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "keep_alive": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "max_tokens": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
           },
           "mob_id": {
             "type": "string"
           },
-          "model": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "output_schema": true,
           "prompt": {
             "$ref": "#/components/schemas/WireContentInput"
           },
-          "provider": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "provider_params": true,
-          "skill_refs": {
-            "items": {
-              "$ref": "#/components/schemas/SkillRef"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "structured_output_retries": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "system_prompt": {
-            "type": [
-              "string",
-              "null"
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -6907,7 +6829,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -8570,45 +8492,8 @@
         "type": "object"
       },
       "RestContinueSessionRequest": {
+        "additionalProperties": false,
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "comms_name": {
-            "type": "string"
-          },
-          "flow_tool_overlay": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "hooks_override": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "keep_alive": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "max_tokens": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "model": {
-            "type": "string"
-          },
-          "output_schema": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "peer_meta": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
           "prompt": {
             "oneOf": [
               {
@@ -8619,24 +8504,11 @@
               }
             ]
           },
-          "provider": {
-            "type": "string"
-          },
           "session_id": {
             "type": "string"
           },
-          "skill_refs": {
-            "items": {
-              "$ref": "#/components/schemas/JsonValue"
-            },
-            "type": "array"
-          },
-          "structured_output_retries": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "system_prompt": {
-            "type": "string"
+          "turn_metadata": {
+            "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
           },
           "verbose": {
             "type": "boolean"
@@ -13217,6 +13089,32 @@
         ],
         "type": "string"
       },
+      "WireKeepAliveMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::KeepAliveMode`].",
+        "enum": [
+          "pinned",
+          "policy_driven"
+        ],
+        "type": "string"
+      },
+      "WireKeepAlivePolicy": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::KeepAlivePolicy`].",
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/WireKeepAliveMode"
+          },
+          "ttl_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ttl_secs",
+          "policy"
+        ],
+        "type": "object"
+      },
       "WireLoginReady": {
         "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
         "properties": {
@@ -13687,6 +13585,13 @@
             "type": "string"
           }
         ]
+      },
+      "WirePeerResponseTerminalApplyIntent": {
+        "description": "Typed wire projection of\n[`meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent`].",
+        "enum": [
+          "append_context_and_run"
+        ],
+        "type": "string"
       },
       "WirePersistedInput": {
         "description": "Typed wire projection of the persisted input carrier.\n\nThe carrier is a structural discriminator. Untypeable provider-specific\nbody bytes should be projected via `StructuredProviderExtension` — a\ntyped opaque-bag newtype explicitly marked non-semantic.",
@@ -14561,6 +14466,14 @@
           }
         ]
       },
+      "WireRuntimeExecutionKind": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].",
+        "enum": [
+          "content_turn",
+          "resume_pending"
+        ],
+        "type": "string"
+      },
       "WireRuntimeState": {
         "description": "Public runtime state projection used by RPC surfaces.",
         "enum": [
@@ -14573,6 +14486,126 @@
           "destroyed"
         ],
         "type": "string"
+      },
+      "WireRuntimeTurnMetadata": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].\n\nThe per-turn seam between control plane and core is fully typed —\n`serde_json::Value` does not appear here.",
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "$ref": "#/components/schemas/WireTurnInstruction"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "connection_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTurnMetadataOverride2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeExecutionKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "flow_tool_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireHandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keep_alive": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTurnMetadataOverride3"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "peer_response_terminal_apply_intent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WirePeerResponseTerminalApplyIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireTurnMetadataOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "render_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRenderMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skill_references": {
+            "items": {
+              "$ref": "#/components/schemas/SkillKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireScopedModelOverride": {
         "properties": {
@@ -15390,6 +15423,130 @@
           "identity"
         ],
         "type": "object"
+      },
+      "WireTurnInstruction": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstruction`].",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/WireTurnInstructionKind"
+          }
+        },
+        "required": [
+          "kind",
+          "body"
+        ],
+        "type": "object"
+      },
+      "WireTurnInstructionKind": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstructionKind`].",
+        "enum": [
+          "user",
+          "system",
+          "host"
+        ],
+        "type": "string"
+      },
+      "WireTurnMetadataOverride": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/WireProviderParamsOverride"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnMetadataOverride2": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/WireConnectionRef"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnMetadataOverride3": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/WireKeepAlivePolicy"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireUsage": {
         "description": "Canonical token usage for wire protocol.",

@@ -444,6 +444,8 @@ impl GeneratedMachineKernel {
             }
         }
 
+        self.validate_state_fields(state, &helper_transition_id())?;
+
         let mut matches = Vec::new();
         for transition in &self.schema.transitions {
             if !transition.from.iter().any(|phase| phase == &state.phase) {
@@ -1914,6 +1916,62 @@ mod tests {
                 );
             }
             other => panic!("expected effect payload evaluation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_unknown_existing_state_before_transition_matching() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+        let mut invalid_state = initialized.next_state;
+        invalid_state.fields.insert(
+            field_id("op_statuses"),
+            KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("op-1".into()),
+                KernelValue::NamedVariant {
+                    enum_name: enum_type_id("OperationStatus"),
+                    variant: enum_variant_id("Launched"),
+                },
+            )])),
+        );
+        invalid_state.phase = phase_id("NoTransitionPhase");
+
+        let refusal = kernel
+            .transition(
+                &invalid_state,
+                &KernelInput {
+                    variant: input_id("RegisterOp"),
+                    fields: BTreeMap::from([
+                        (field_id("operation_id"), KernelValue::String("op-2".into())),
+                        (
+                            field_id("kind"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("OperationKind"),
+                                variant: enum_variant_id("BackgroundToolOp"),
+                            },
+                        ),
+                    ]),
+                },
+            )
+            .expect_err("invalid existing OperationStatus state must be rejected before matching");
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("op_statuses"),
+                    "state validation refusal should identify the bad field, got: {reason}"
+                );
+            }
+            other => panic!("expected state validation error, got {other:?}"),
         }
     }
 

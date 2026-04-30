@@ -251,14 +251,20 @@ fn rust_type_atom_string_enum_rejects_sanitized_variant_collisions() {
             ],
         },
     );
-    schema.validate().expect("schema validates");
 
-    let rendered = render_machine_kernel_module(&schema);
+    let error = schema
+        .validate()
+        .expect_err("schema validation rejects colliding string enum variants");
     assert!(
-        rendered.contains(
-            "compile_error!(\"string enum AtomStatus variants `waiting-for-peer` and `waiting_for_peer` sanitize to duplicate Rust identifier `waiting_for_peer`\");"
+        matches!(
+            error,
+            MachineSchemaError::InvalidStringEnumBinding { ref name, ref reason }
+                if name == "AtomStatus"
+                    && reason.contains("waiting-for-peer")
+                    && reason.contains("waiting_for_peer")
+                    && reason.contains("duplicate Rust identifier")
         ),
-        "string enum variants that sanitize to the same Rust identifier must be rejected:\n{rendered}"
+        "string enum variants that sanitize to the same Rust identifier must be rejected at schema validation, got: {error:?}"
     );
 }
 

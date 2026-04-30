@@ -4,8 +4,10 @@ impl MeerkatMachine {
     pub(super) async fn interrupt_current_run_inner(
         &self,
         session_id: &SessionId,
+        reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        self.hard_cancel_current_run(session_id, "mob interrupt")
+        let authority = crate::user_interrupt::UserInterruptAuthority::new();
+        self.hard_cancel_current_run_authorized(session_id, reason, authority)
             .await
     }
 

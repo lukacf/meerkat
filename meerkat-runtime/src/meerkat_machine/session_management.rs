@@ -685,10 +685,20 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
+        self.interrupt_current_run_with_reason(session_id, "session interrupt".to_string())
+            .await
+    }
+
+    pub(crate) async fn interrupt_current_run_with_reason(
+        &self,
+        session_id: &SessionId,
+        reason: String,
+    ) -> Result<(), RuntimeDriverError> {
         self.execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::InterruptCurrentRun {
                 session_id: session_id.clone(),
+                reason,
             },
         )
         .await

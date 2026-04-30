@@ -354,6 +354,7 @@ pub(crate) enum MeerkatMachineCommand {
     },
     InterruptCurrentRun {
         session_id: SessionId,
+        reason: String,
     },
     CancelAfterBoundary {
         session_id: SessionId,

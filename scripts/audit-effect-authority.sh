@@ -44,6 +44,23 @@ EOF
     exit 1
   fi
 
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/user_interrupt.rs" <<'EOF'
+impl Machine {
+    pub async fn hard_cancel_current_run(&self) {
+        let authority = UserInterruptAuthority::new();
+        self.hard_cancel_current_run_authorized(authority).await;
+    }
+}
+EOF
+  if "$0" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: public hard-cancel authority fixture passed" >&2
+    exit 1
+  fi
+
   echo "audit-effect-authority self-test passed"
   exit 0
 fi
@@ -96,6 +113,15 @@ while IFS= read -r peer_file; do
   fi
 done < <(cd "$root" && rg --files 2>/dev/null | rg '(^|/)peer_admission[^/]*\.rs$|(^|/)peer_admission/' || true)
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
+
+if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
+  public_interrupt_bypass="$(rg -n 'self\.hard_cancel_current_run_authorized\(|UserInterruptAuthority::new\(\)' \
+    "$root/meerkat-runtime/src/user_interrupt.rs" 2>/dev/null || true)"
+  report_matches "public user-interrupt API must route through the command/DSL path" "$public_interrupt_bypass"
+fi
+
+authority_mints="$(run_rg 'UserInterruptAuthority::new\(\)' --glob '!meerkat-runtime/src/meerkat_machine/runtime_control.rs')"
+report_matches "UserInterruptAuthority may only be minted by the command-owned interrupt path" "$authority_mints"
 
 report_matches "direct RuntimeEffect constructor helpers are forbidden" \
   "$(run_rg 'RuntimeEffect::(cancel_after_boundary|stop_runtime_executor)\b')"

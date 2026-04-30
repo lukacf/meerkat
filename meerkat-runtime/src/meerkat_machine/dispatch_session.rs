@@ -252,7 +252,7 @@ impl MeerkatMachine {
                 let _ = previous_dsl_state;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
-            MeerkatMachineCommand::InterruptCurrentRun { session_id } => {
+            MeerkatMachineCommand::InterruptCurrentRun { session_id, reason } => {
                 // Guard: DestroyedShapeInvariant — no mutation on destroyed sessions.
                 if matches!(
                     self.existing_session_runtime_state(&session_id).await,
@@ -284,7 +284,7 @@ impl MeerkatMachine {
                         return Err(RuntimeDriverError::NotReady { state });
                     }
                 };
-                if let Err(err) = self.interrupt_current_run_inner(&session_id).await {
+                if let Err(err) = self.interrupt_current_run_inner(&session_id, reason).await {
                     self.restore_session_dsl_state(&session_id, previous_dsl_state)
                         .await;
                     return Err(err);

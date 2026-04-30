@@ -17464,6 +17464,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::InterruptCurrentRun => {
             MeerkatMachineCommand::InterruptCurrentRun {
                 session_id: fixture.session_id.clone(),
+                reason: "runtime parity probe interrupt".to_string(),
             }
         }
         RuntimeParityProbeInput::CancelAfterBoundary => {

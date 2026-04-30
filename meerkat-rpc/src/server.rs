@@ -12,6 +12,7 @@ use meerkat::surface::{
     RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestSemantics,
     noop_request_action,
 };
+use meerkat_contracts::rpc_request_lifecycle;
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -468,10 +469,10 @@ fn request_lifecycle_error_response(
 }
 
 fn request_semantics(request: &RpcRequest) -> SurfaceRequestSemantics {
-    SurfaceRequestSemantics::for_rpc_request(
+    SurfaceRequestSemantics::from(rpc_request_lifecycle(
         request.method.as_str(),
         request.params.as_deref().map(|params| params.get()),
-    )
+    ))
 }
 
 /// Start the RPC server on stdin/stdout.

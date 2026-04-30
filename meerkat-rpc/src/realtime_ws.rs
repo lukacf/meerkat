@@ -1239,7 +1239,10 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             if let Err(error) = state
                                                                 .runtime
                                                                 .runtime_adapter()
-                                                                .interrupt_current_run(&session_id)
+                                                                .hard_cancel_current_run(
+                                                                    &session_id,
+                                                                    "realtime channel interrupt",
+                                                                )
                                                                 .await
                                                             {
                                                                 let _ = send_server_frame(

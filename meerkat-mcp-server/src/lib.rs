@@ -4438,18 +4438,15 @@ mod tests {
             read_payload["state"]["session_id"]
         );
 
-        let interrupt_err = Box::pin(handle_tools_call(
+        let interrupted = Box::pin(handle_tools_call(
             &state,
             "meerkat_interrupt",
             &json!({ "session_id": read_payload["session_id"] }),
         ))
         .await
-        .expect_err("interrupt should fail for non-running persisted session");
-        assert!(
-            interrupt_err
-                .message
-                .contains("Failed to interrupt session")
-        );
+        .expect("interrupt should no-op for non-running persisted session");
+        let interrupted_payload = unwrap_payload(interrupted);
+        assert_eq!(interrupted_payload["interrupted"], true);
 
         let archived = Box::pin(handle_tools_call(
             &state,

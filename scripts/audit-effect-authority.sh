@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+self_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+
 if [[ "${1:-}" == "--self-test" ]]; then
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
@@ -11,7 +13,7 @@ fn bad(machine: &Machine) {
     let _ = machine.hard_cancel_current_run(&session_id, "bad");
 }
 EOF
-  if "$0" "$tmpdir" >/dev/null 2>&1; then
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: peer hard-cancel fixture passed" >&2
     exit 1
   fi
@@ -25,7 +27,7 @@ fn bad() {
     let _ = RuntimeEffect::cancel_after_boundary("bad");
 }
 EOF
-  if "$0" "$tmpdir" >/dev/null 2>&1; then
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: direct RuntimeEffect constructor fixture passed" >&2
     exit 1
   fi
@@ -39,8 +41,25 @@ fn bad(reason: String) {
     let _ = RuntimeEffectFact::CancelAfterBoundary { reason };
 }
 EOF
-  if "$0" "$tmpdir" >/dev/null 2>&1; then
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: runtime-shell fact literal fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/runtime_loop.rs" <<'EOF'
+fn bad(reason: String) {
+    let _ = MeerkatMachineEffect::RuntimeEffectFact {
+        kind: RuntimeEffectKind::CancelAfterBoundary,
+        reason,
+    };
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: generated runtime-effect fact fixture passed" >&2
     exit 1
   fi
 
@@ -56,7 +75,7 @@ impl Machine {
     }
 }
 EOF
-  if "$0" "$tmpdir" >/dev/null 2>&1; then
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: public hard-cancel authority fixture passed" >&2
     exit 1
   fi
@@ -80,7 +99,7 @@ impl Machine {
     async fn interrupt_handle_for(&self) {}
 }
 EOF
-  if "$0" "$tmpdir" >/dev/null 2>&1; then
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: public hard-cancel live-handle fixture passed" >&2
     exit 1
   fi
@@ -94,10 +113,29 @@ async fn public_interrupt(service: Service, session_id: SessionId) {
     let _ = service.interrupt(&session_id).await;
 }
 EOF
-  if "$0" "$tmpdir" >/dev/null 2>&1; then
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: public surface interrupt fixture passed" >&2
     exit 1
   fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-rpc/src"
+  cat >"$tmpdir/meerkat-rpc/src/realtime_ws.rs" <<'EOF'
+async fn public_interrupt(adapter: Adapter, session_id: SessionId) {
+    let _ = adapter.interrupt_current_run(&session_id).await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: public interrupt_current_run fixture passed" >&2
+    exit 1
+  fi
+
+  (cd /tmp && "$self_script" >/dev/null 2>&1) || {
+    echo "audit-effect-authority self-test failed: absolute script invocation outside repo failed" >&2
+    exit 1
+  }
 
   echo "audit-effect-authority self-test passed"
   exit 0
@@ -105,7 +143,8 @@ fi
 
 root="${1:-}"
 if [[ -z "$root" ]]; then
-  root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  root="$(cd "$script_dir/.." && pwd)"
 fi
 
 failures=0
@@ -227,11 +266,12 @@ for surface_file in \
   "$root/meerkat-mcp-server/src/lib.rs" \
   "$root/meerkat-rpc/src/handlers/session.rs" \
   "$root/meerkat-rpc/src/handlers/turn.rs" \
+  "$root/meerkat-rpc/src/realtime_ws.rs" \
   "$root/meerkat-cli/src/main.rs"
 do
   if [[ -f "$surface_file" ]]; then
     found="$(strip_core_executor_interrupt_impls "$surface_file" \
-      | rg -n '\b(runtime|service|svc|session_service|cancel_svc|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(' 2>/dev/null || true)"
+      | rg -n '\b(runtime|service|svc|session_service|cancel_svc|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run\(' 2>/dev/null || true)"
     if [[ -n "$found" ]]; then
       public_interrupt_bypasses+="$surface_file"$'\n'"$found"$'\n'
     fi
@@ -248,12 +288,46 @@ report_matches "RuntimeEffect associated constructors must go through from_fact"
 
 fact_literals=""
 if [[ -d "$root/meerkat-runtime/src" ]]; then
-  fact_literals="$(rg -n 'RuntimeEffectFact::(CancelAfterBoundary|StopRuntimeExecutor)' \
-    "$root/meerkat-runtime/src" \
-    --glob '!effect.rs' \
-    --glob '!generated/**' \
-    --glob '!*tests.rs' \
-    --glob '!tests/**' 2>/dev/null || true)"
+  while IFS= read -r runtime_file; do
+    [[ -z "$runtime_file" ]] && continue
+    runtime_path="$root/$runtime_file"
+    found="$(awk '
+      function brace_delta(line, opened, closed, copy) {
+        copy = line
+        opened = gsub(/\{/, "{", copy)
+        copy = line
+        closed = gsub(/\}/, "}", copy)
+        return opened - closed
+      }
+      /^[[:space:]]*#\[cfg\(test\)\]/ {
+        pending_test_attr = 1
+        next
+      }
+      pending_test_attr && /^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{/ {
+        in_test = 1
+        pending_test_attr = 0
+        depth = brace_delta($0)
+        next
+      }
+      pending_test_attr {
+        pending_test_attr = 0
+      }
+      in_test {
+        depth += brace_delta($0)
+        if (depth <= 0) {
+          in_test = 0
+          depth = 0
+        }
+        next
+      }
+      { print }
+    ' "$runtime_path" \
+      | rg -n 'RuntimeEffectFact::(CancelAfterBoundary|StopRuntimeExecutor)|MeerkatMachineEffect::RuntimeEffectFact|RuntimeEffectKind::(CancelAfterBoundary|StopRuntimeExecutor)' 2>/dev/null || true)"
+    if [[ -n "$found" ]]; then
+      fact_literals+="$runtime_path"$'\n'"$found"$'\n'
+    fi
+  done < <(cd "$root" && rg --files meerkat-runtime/src 2>/dev/null \
+    | rg -v '(^|/)generated/|(^|/)effect\.rs$|(^|/)tests/|tests\.rs$' || true)
 fi
 report_matches "runtime shell files must not construct RuntimeEffectFact literals" "$fact_literals"
 

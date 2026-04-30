@@ -791,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_runtime_executor_cancel_surfaces_no_active_run() {
+    async fn persistent_runtime_executor_interrupt_noops_without_active_run() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
         let result = Box::pin(materialize_session(
@@ -818,7 +818,7 @@ mod tests {
             .expect("interrupt handle")
             .hard_cancel_current_run("test cancel".to_string())
             .await
-            .expect_err("cancel without an active run must surface the interrupt error");
+            .expect("interrupt without an active run is a no-op");
 
         service
             .discard_live_session(&result.session_id)

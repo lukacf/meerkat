@@ -132,6 +132,14 @@ impl RuntimeAuthLeaseHandle {
         Self::new()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn oauth_flow_bootstrap_state() -> auth_dsl::AuthMachineState {
+        auth_dsl::AuthMachineState {
+            lifecycle_phase: auth_dsl::AuthLifecyclePhase::ReauthRequired,
+            ..Default::default()
+        }
+    }
+
     fn apply(
         &self,
         lease_key: &LeaseKey,
@@ -200,27 +208,41 @@ impl RuntimeAuthLeaseHandle {
         create_if_missing: bool,
     ) -> Result<(), DslTransitionError> {
         let lease_key = LeaseKey::from_connection_ref(target);
+        let action = Self::audit_action_for(&input);
         let mut guard = self
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = if create_if_missing {
-            guard.authorities.entry(lease_key.clone()).or_insert_with(|| {
-                auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState::default())
-            })
-        } else {
-            match guard.authorities.get_mut(&lease_key) {
-                Some(m) => m,
-                None => {
-                    return Err(DslTransitionError::new(
-                        context,
-                        format!("no auth machine registered for lease_key `{lease_key}`"),
-                    ));
+        let (from_phase, to_phase) = {
+            let entry = if create_if_missing {
+                guard
+                    .authorities
+                    .entry(lease_key.clone())
+                    .or_insert_with(|| {
+                        auth_dsl::AuthMachineAuthority::from_state(
+                            Self::oauth_flow_bootstrap_state(),
+                        )
+                    })
+            } else {
+                match guard.authorities.get_mut(&lease_key) {
+                    Some(m) => m,
+                    None => {
+                        return Err(DslTransitionError::new(
+                            context,
+                            format!("no auth machine registered for lease_key `{lease_key}`"),
+                        ));
+                    }
                 }
-            }
+            };
+            let from_phase = map_phase(entry.state.lifecycle_phase);
+            auth_dsl::AuthMachineMutator::apply(entry, input)
+                .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+            let to_phase = map_phase(entry.state.lifecycle_phase);
+            (from_phase, to_phase)
         };
-        auth_dsl::AuthMachineMutator::apply(entry, input)
-            .map_err(|err| DslTransitionError::new(context, format!("{err}")))?;
+        let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
+        *generation = generation.saturating_add(1);
+        emit_audit(&lease_key, action, from_phase, to_phase);
         Ok(())
     }
 

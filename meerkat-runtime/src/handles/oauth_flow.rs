@@ -389,6 +389,8 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
 mod tests {
     use std::sync::Arc;
 
+    use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+
     use super::*;
 
     fn target() -> ConnectionRef {
@@ -397,6 +399,108 @@ mod tests {
             binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
             profile: None,
         }
+    }
+
+    fn alternate_target() -> ConnectionRef {
+        ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+            binding: meerkat_core::BindingId::parse("secondary_openai").expect("valid binding"),
+            profile: None,
+        }
+    }
+
+    fn snapshot_phase(
+        lifecycle: &RuntimeAuthLeaseHandle,
+        target: &ConnectionRef,
+    ) -> Option<AuthLeasePhase> {
+        lifecycle
+            .snapshot(&LeaseKey::from_connection_ref(target))
+            .phase
+    }
+
+    #[test]
+    fn browser_flow_only_machine_stays_reauth_required_until_credentials_commit() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::ReauthRequired)
+        );
+
+        authority
+            .verify(&state, &target, provider, redirect_uri)
+            .expect("browser flow verifies");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::ReauthRequired)
+        );
+
+        authority
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("browser flow consumes");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::ReauthRequired)
+        );
+    }
+
+    #[test]
+    fn global_browser_expiry_preserves_reauth_required_phase() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
+            Duration::from_millis(1),
+            lifecycle.clone(),
+        );
+        let target = target();
+        let other_target = alternate_target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+
+        let expired_state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier-old".to_string(),
+            )
+            .expect("browser flow admitted");
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::ReauthRequired)
+        );
+        std::thread::sleep(Duration::from_millis(10));
+
+        authority
+            .start(
+                other_target,
+                provider,
+                redirect_uri.to_string(),
+                "verifier-new".to_string(),
+            )
+            .expect("new browser flow admitted after pruning expired flow");
+
+        assert!(
+            !lifecycle.has_oauth_browser_flow_for_test(&target, &expired_state),
+            "passive registry expiry must remove stale AuthMachine browser membership"
+        );
+        assert_eq!(
+            snapshot_phase(&lifecycle, &target),
+            Some(AuthLeasePhase::ReauthRequired),
+            "global OAuth expiry cleanup must not change credential lifecycle truth"
+        );
     }
 
     #[test]

@@ -1731,6 +1731,7 @@ rust_test(
         "src/comms_drain.rs",
         "src/handles/peer_comms.rs",
         "src/meerkat_machine/dispatch_ingress.rs",
+        "src/meerkat_machine/mod.rs",
     ],
     srcs = [
         "tests/turn_content_shape_contract.rs",
@@ -1759,6 +1760,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
+        "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
         "//meerkat-core:meerkat_core",

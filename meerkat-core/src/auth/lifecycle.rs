@@ -8,12 +8,56 @@
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock, Weak},
+};
+
 use super::status::AuthStatusPhase;
 use super::token_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
 use crate::connection::ConnectionRef;
 use crate::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+type LoginLifecycleLockMap = parking_lot::Mutex<HashMap<LeaseKey, Weak<tokio::sync::Mutex<()>>>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+static LOGIN_LIFECYCLE_LOCKS: OnceLock<LoginLifecycleLockMap> = OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn login_lifecycle_locks() -> &'static LoginLifecycleLockMap {
+    LOGIN_LIFECYCLE_LOCKS.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+/// Process-local guard that serializes credential commit, terminal OAuth
+/// consume, and compensating rollback for one auth binding.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct AuthLoginLifecycleGuard {
+    _lease_key: LeaseKey,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn acquire_auth_login_lifecycle_guard(lease_key: &LeaseKey) -> AuthLoginLifecycleGuard {
+    let lock = {
+        let mut locks = login_lifecycle_locks().lock();
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(lease_key).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(lease_key.clone(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    AuthLoginLifecycleGuard {
+        _lease_key: lease_key.clone(),
+        _guard: lock.lock_owned().await,
+    }
+}
 
 pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
     tokens
@@ -111,7 +155,14 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
     Ok(())
 }
 
-fn restore_token_lifecycle_snapshot(
+/// Restore an AuthMachine lease projection from a previously captured
+/// snapshot.
+///
+/// Callers that need to compensate a token write after a later step fails can
+/// use this with the token snapshot captured before the write. If the previous
+/// snapshot had no credential-backed active phase, callers should release the
+/// current lease instead.
+pub fn restore_token_lifecycle_snapshot(
     handle: &dyn AuthLeaseHandle,
     lease_key: &LeaseKey,
     snapshot: &AuthLeaseSnapshot,
@@ -124,10 +175,12 @@ fn restore_token_lifecycle_snapshot(
         return Ok(());
     }
 
-    let expires_at = snapshot
+    let Some(expires_at) = snapshot
         .expires_at
         .or_else(|| previous.map(persisted_token_expires_at_epoch_secs))
-        .unwrap_or(u64::MAX);
+    else {
+        return Ok(());
+    };
     handle.acquire_lease(lease_key, expires_at)?;
     match phase {
         AuthLeasePhase::Valid => Ok(()),

@@ -301,8 +301,10 @@ pub use auth::{
     TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
     lease_snapshot_expires_at_datetime, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,
-    publish_token_lifecycle_released,
+    publish_token_lifecycle_released, restore_token_lifecycle_snapshot,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use auth::{AuthLoginLifecycleGuard, acquire_auth_login_lifecycle_guard};
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,
     ConnectionRef, ConnectionTargetError, CredentialSourceSpec, IdentityError, ProfileId,

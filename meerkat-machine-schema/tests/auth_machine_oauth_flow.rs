@@ -51,7 +51,7 @@ fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
 #[test]
 fn auth_machine_routes_oauth_flow_lifecycle_transitions() {
     let schema = dsl_auth_machine();
-    for transition_prefix in [
+    let transition_prefixes = [
         "AdmitOAuthBrowserFlow",
         "VerifyOAuthBrowserFlow",
         "ConsumeOAuthBrowserFlow",
@@ -62,13 +62,47 @@ fn auth_machine_routes_oauth_flow_lifecycle_transitions() {
         "FinishOAuthDevicePoll",
         "ConsumeOAuthDeviceFlow",
         "ExpireOAuthDeviceFlow",
-    ] {
+    ];
+    for transition_prefix in transition_prefixes {
         assert!(
             schema
                 .transitions
                 .iter()
                 .any(|transition| transition.name.as_str().starts_with(transition_prefix)),
             "AuthMachine must route OAuth lifecycle transition `{transition_prefix}`"
+        );
+    }
+}
+
+#[test]
+fn auth_machine_oauth_flow_lifecycle_transitions_preserve_credential_phase() {
+    let schema = dsl_auth_machine();
+    for transition in schema.transitions.iter().filter(|transition| {
+        [
+            "AdmitOAuthBrowserFlow",
+            "VerifyOAuthBrowserFlow",
+            "ConsumeOAuthBrowserFlow",
+            "ExpireOAuthBrowserFlow",
+            "AdmitOAuthDeviceFlow",
+            "VerifyOAuthDeviceFlow",
+            "BeginOAuthDevicePoll",
+            "FinishOAuthDevicePoll",
+            "ConsumeOAuthDeviceFlow",
+            "ExpireOAuthDeviceFlow",
+        ]
+        .iter()
+        .any(|prefix| transition.name.as_str().starts_with(prefix))
+    }) {
+        assert_eq!(
+            transition.from.len(),
+            1,
+            "{} should be expanded to one source phase",
+            transition.name
+        );
+        assert_eq!(
+            &transition.to, &transition.from[0],
+            "{} must preserve credential lifecycle phase",
+            transition.name
         );
     }
 }

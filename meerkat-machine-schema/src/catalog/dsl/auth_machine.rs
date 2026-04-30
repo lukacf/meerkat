@@ -187,6 +187,11 @@ macro_rules! auth_catalog_machine_dsl {
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
             }
 
+            // `per_phase` expands each OAuth flow transition into one
+            // transition per listed phase and rewrites the target to that same
+            // phase. The syntactic `to Valid` below is therefore only a grammar
+            // placeholder; OAuth membership changes must not manufacture a
+            // credential-valid lease.
             transition AdmitOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
                 on input AdmitOAuthBrowserFlow { flow_id }

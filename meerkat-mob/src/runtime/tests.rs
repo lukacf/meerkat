@@ -4662,7 +4662,7 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         });
         let tools = Arc::new(OverlayProbeDispatcher::new());
         let store = Arc::new(OverlayProbeSessionStore);
-        let agent = builder.build(client, tools, store).await;
+        let agent = builder.build_standalone(client, tools, store).await;
 
         Ok(OverlayProbeSessionAgent { agent })
     }

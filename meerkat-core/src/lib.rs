@@ -78,10 +78,10 @@ pub mod types;
 
 // Re-export main types at crate root
 pub use agent::{
-    Agent, AgentBuilder, AgentExecutionSnapshot, AgentLlmClient, AgentRunner, AgentSessionStore,
-    AgentToolDispatcher, BindOutcome, CommsCapabilityError, CommsRuntime, DispatcherCapabilities,
-    ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
-    should_compose_tool_catalog_control_plane,
+    Agent, AgentBuilder, AgentExecutionSnapshot, AgentFactoryBuildToken, AgentLlmClient,
+    AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome, CommsCapabilityError,
+    CommsRuntime, DispatcherCapabilities, ExternalToolUpdate, FilteredToolDispatcher,
+    LlmStreamResult, select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,

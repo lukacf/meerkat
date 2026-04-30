@@ -1333,7 +1333,7 @@ mod scenario_10_memory {
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ))
-            .build(llm_adapter, memory_tools, store_adapter)
+            .build_standalone(llm_adapter, memory_tools, store_adapter)
             .await;
 
         // Turn 1: Distinctive content

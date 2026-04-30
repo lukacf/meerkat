@@ -65,6 +65,25 @@ pub struct AgentBuilder {
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
 }
 
+/// Typed authority for the canonical [`AgentBuilder`] factory entrypoint.
+///
+/// The public unqualified `AgentBuilder::build(client, tools, store)` seam was
+/// too easy for production-facing code to call directly, bypassing
+/// `AgentFactory` policy composition. Factory-owned construction now enters
+/// core through `build_with_factory_policy`; intentionally standalone tests and
+/// embeddings must use the explicit `build_standalone` name.
+#[derive(Clone, Copy, Debug)]
+pub struct AgentFactoryBuildToken {
+    _private: (),
+}
+
+impl AgentFactoryBuildToken {
+    #[doc(hidden)]
+    pub fn new_unchecked_for_canonical_factory() -> Self {
+        Self { _private: () }
+    }
+}
+
 impl AgentBuilder {
     /// Create a new agent builder with default config
     pub fn new() -> Self {
@@ -212,8 +231,42 @@ impl AgentBuilder {
         self
     }
 
-    /// Build the agent
-    pub async fn build<C, T, S>(
+    /// Build the agent through the canonical factory policy seam.
+    pub async fn build_with_factory_policy<C, T, S>(
+        self,
+        _authority: AgentFactoryBuildToken,
+        client: Arc<C>,
+        tools: Arc<T>,
+        store: Arc<S>,
+    ) -> Agent<C, T, S>
+    where
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
+    {
+        self.build_inner(client, tools, store).await
+    }
+
+    /// Build a standalone low-level agent without facade/factory policy.
+    ///
+    /// This is an explicit escape hatch for core tests and embeddings that own
+    /// every loop primitive themselves. Production-facing Meerkat surfaces
+    /// should route through `AgentFactory::build_agent`.
+    pub async fn build_standalone<C, T, S>(
+        self,
+        client: Arc<C>,
+        tools: Arc<T>,
+        store: Arc<S>,
+    ) -> Agent<C, T, S>
+    where
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
+    {
+        self.build_inner(client, tools, store).await
+    }
+
+    async fn build_inner<C, T, S>(
         self,
         client: Arc<C>,
         tools: Arc<T>,
@@ -680,7 +733,7 @@ mod tests {
 
         let agent = AgentBuilder::new()
             .system_prompt("Custom system prompt")
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         // Check that the system prompt was applied
@@ -712,7 +765,7 @@ mod tests {
         let agent = AgentBuilder::new()
             .resume_session(existing_session)
             .system_prompt("Updated system prompt")
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         // Check that the system prompt was UPDATED
@@ -754,7 +807,7 @@ mod tests {
         let agent = AgentBuilder::new()
             .resume_session(existing_session)
             // Note: no .system_prompt() call
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         // Original system prompt should be preserved
@@ -922,7 +975,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .with_event_tap(tap)
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
         agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
 
@@ -958,7 +1011,7 @@ mod tests {
 
         let agent = AgentBuilder::new()
             .with_completion_feed(feed)
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         assert_eq!(
@@ -974,7 +1027,9 @@ mod tests {
         let tools = Arc::new(MockTools);
         let store = Arc::new(MockStore);
 
-        let agent = AgentBuilder::new().build(client, tools, store).await;
+        let agent = AgentBuilder::new()
+            .build_standalone(client, tools, store)
+            .await;
 
         assert_eq!(agent.applied_cursor, 0);
     }

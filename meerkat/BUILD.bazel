@@ -167,6 +167,90 @@ rust_test(
 )
 
 rust_test(
+    name = "agent_builder_policy_canary_test",
+    aliases = aliases(
+        package_name = "meerkat",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "agent_builder_policy_canary",
+    crate_root = "tests/agent_builder_policy_canary.rs",
+    crate_features = [
+        "anthropic",
+        "comms",
+        "gemini",
+        "integration-real-tests",
+        "jsonl-store",
+        "mcp",
+        "memory-store",
+        "openai",
+        "openai-realtime",
+        "schedule",
+        "session-compaction",
+        "session-store",
+        "skills",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
+    ],
+    srcs = [
+        "tests/agent_builder_policy_canary.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "agent_builder_policy_canary",
+        "CARGO_MANIFEST_DIR": "./meerkat",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [
+        ":package_runfiles",
+        "//meerkat-comms:package_runfiles",
+        "//meerkat-core:package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-anthropic:meerkat_anthropic",
+        "//meerkat-client:meerkat_client",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-gemini:meerkat_gemini",
+        "//meerkat-hooks:meerkat_hooks",
+        "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-mcp:meerkat_mcp",
+        "//meerkat-memory:meerkat_memory",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-openai:meerkat_openai",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-skills:meerkat_skills",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+    ] + all_crate_deps(
+        package_name = "meerkat",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "agent_factory_connection_ref_test",
     aliases = aliases(
         package_name = "meerkat",
@@ -1408,6 +1492,7 @@ rust_test(
 test_suite(
     name = "fast_tests",
     tests = [
+        ":agent_builder_policy_canary_test",
         ":agent_factory_connection_ref_test",
         ":embedded_skill_registration_test",
         ":factory_build_agent_test",

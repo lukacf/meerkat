@@ -269,7 +269,7 @@ async fn build_agent(
             meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new(),
         ))
         .with_hook_engine(Arc::new(hooks))
-        .build(client, tools, store)
+        .build_standalone(client, tools, store)
         .await
 }
 

@@ -42,9 +42,9 @@ use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::SessionMeta;
 use meerkat_core::{
-    Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    BlobStore, BudgetLimits, Config, ConnectionRef, CredentialSourceSpec, HookRunOverrides,
-    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
+    Agent, AgentBuilder, AgentEvent, AgentFactoryBuildToken, AgentLlmClient, AgentSessionStore,
+    AgentToolDispatcher, BlobStore, BudgetLimits, Config, ConnectionRef, CredentialSourceSpec,
+    HookRunOverrides, ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
     SessionLlmIdentity, SessionMetadata, SessionTooling, ToolCategoryOverride,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
@@ -347,8 +347,9 @@ pub struct AgentBuildConfig {
     pub runtime_build_mode: meerkat_core::RuntimeBuildMode,
     /// Pre-resolved metadata entries to inject into the session before agent build.
     ///
-    /// These are set on the session's internal metadata map before `AgentBuilder::build()`
-    /// runs, so they are available for early-stage recovery (e.g. inherited tool filter).
+    /// These are set on the session's internal metadata map before the core
+    /// `AgentBuilder` factory-policy seam runs, so they are available for
+    /// early-stage recovery (e.g. inherited tool filter).
     /// Entries here take precedence over any resumed session metadata for the same key.
     pub initial_metadata_entries: std::collections::BTreeMap<String, serde_json::Value>,
 }
@@ -1669,7 +1670,7 @@ impl AgentFactory {
     ///
     /// When set, `build_agent()` uses this store instead of the feature-flag-based
     /// default (jsonl, memory, or ephemeral). The store is wrapped in `StoreAdapter`
-    /// and passed to `AgentBuilder::build()`.
+    /// and passed to the core `AgentBuilder` factory-policy seam.
     pub fn session_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.custom_store = Some(store);
         self
@@ -3798,7 +3799,14 @@ impl AgentFactory {
         }
 
         // 13. Build agent
-        let mut agent = builder.build(llm_adapter, tools, store_adapter).await;
+        let mut agent = builder
+            .build_with_factory_policy(
+                AgentFactoryBuildToken::new_unchecked_for_canonical_factory(),
+                llm_adapter,
+                tools,
+                store_adapter,
+            )
+            .await;
 
         if let Some(provider) = hoisted_control_visibility_provider {
             provider.set_scope(agent.tool_scope().clone());

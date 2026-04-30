@@ -725,7 +725,7 @@ async fn core_agentbuilder_remains_explicit_standalone_escape_hatch() {
         .with_turn_state_handle(Arc::new(
             meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
         ))
-        .build(llm_adapter, tools, store_adapter)
+        .build_standalone(llm_adapter, tools, store_adapter)
         .await;
 
     assert!(

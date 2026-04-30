@@ -3822,7 +3822,7 @@ mod tests {
         C: AgentLlmClient + ?Sized + 'static,
     {
         with_test_turn_state_handle(AgentBuilder::new())
-            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
             .await
     }
 
@@ -3832,7 +3832,7 @@ mod tests {
         let compactor = Arc::new(TrackingCompactor::new(Some(1)));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .compactor(compactor.clone())
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         agent.run("first".into()).await.unwrap();
@@ -3857,7 +3857,7 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .compactor(compactor)
             .memory_store(memory_store.clone())
-            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         agent.run("first".into()).await.unwrap();
@@ -3893,7 +3893,7 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .compactor(compactor)
             .memory_store(memory_store.clone())
-            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         agent.run("first".into()).await.unwrap();
@@ -3946,7 +3946,7 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .compactor(compactor)
             .memory_store(memory_store.clone())
-            .build(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         agent.run("first".into()).await.unwrap();
@@ -4012,7 +4012,7 @@ mod tests {
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_hook_engine(Arc::new(RewriteRunCompletedHook))
-            .build(
+            .build_standalone(
                 Arc::new(StaticLlmClient),
                 Arc::new(NoTools),
                 Arc::new(NoopStore),
@@ -4079,7 +4079,7 @@ mod tests {
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
             .with_hook_engine(Arc::new(DenyRunCompletedHook))
-            .build(
+            .build_standalone(
                 Arc::new(StaticLlmClient),
                 Arc::new(NoTools),
                 Arc::new(NoopStore),
@@ -4188,7 +4188,7 @@ mod tests {
             )
             .with_hook_engine(Arc::new(DenyTurnBoundaryHook))
             .with_comms_runtime(comms)
-            .build(
+            .build_standalone(
                 Arc::new(StaticLlmClient),
                 Arc::new(NoTools),
                 Arc::new(NoopStore),
@@ -4322,7 +4322,7 @@ mod tests {
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_hook_engine(Arc::new(DenyPostLlmHook))
-            .build(
+            .build_standalone(
                 Arc::new(StaticLlmClient),
                 Arc::new(NoTools),
                 Arc::new(NoopStore),
@@ -4369,7 +4369,7 @@ mod tests {
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_event_tap(tap)
-            .build(
+            .build_standalone(
                 Arc::new(StaticLlmClient),
                 Arc::new(NoTools),
                 Arc::new(NoopStore),
@@ -4401,7 +4401,7 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .provider_params(serde_json::json!({"old": true}))
             .provider_tool_defaults(serde_json::json!({"stale_tool": {"type": "old"}}))
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);
 
@@ -4452,7 +4452,7 @@ mod tests {
         let skill_runtime = Arc::new(crate::skills::SkillRuntime::new(skill_engine.clone()));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .with_skill_engine(skill_runtime)
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         agent.pending_skill_references = Some(vec![SkillKey {
@@ -4510,7 +4510,7 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
             .with_blob_store(blob_store.clone())
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);
 
@@ -4535,7 +4535,7 @@ mod tests {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client.clone(), tools.clone(), Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
         agent
@@ -4575,7 +4575,7 @@ mod tests {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client, tools.clone(), Arc::new(NoopStore))
+            .build_standalone(client, tools.clone(), Arc::new(NoopStore))
             .await;
 
         let outcome = agent
@@ -4597,7 +4597,7 @@ mod tests {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client, tools.clone(), Arc::new(NoopStore))
+            .build_standalone(client, tools.clone(), Arc::new(NoopStore))
             .await;
         agent
             .stage_external_tool_filter(ToolFilter::Deny(
@@ -4649,7 +4649,7 @@ mod tests {
         let client = Arc::new(StaticLlmClient);
         let tools = Arc::new(DeferredLoadDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client, tools, Arc::new(NoopStore))
+            .build_standalone(client, tools, Arc::new(NoopStore))
             .await;
 
         let outcome = agent
@@ -4724,7 +4724,7 @@ mod tests {
             .with_hook_engine(Arc::new(RecordingPostToolHook {
                 calls: Arc::clone(&calls),
             }))
-            .build(client.clone(), tools.clone(), Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
         agent
@@ -4937,7 +4937,7 @@ mod tests {
                 crate::lifecycle::RuntimeExecutionKind::ContentTurn,
             )
             .with_hook_engine(Arc::new(DenyPostToolHook))
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5047,7 +5047,7 @@ mod tests {
         });
         let tools = Arc::new(ImageEffectDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client, tools, Arc::new(NoopStore))
+            .build_standalone(client, tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5102,7 +5102,7 @@ mod tests {
         let client = Arc::new(ControlPlaneVisibilityClient::new());
         let tools = Arc::new(PlaneAwareToolDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client.clone(), tools.clone(), Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools.clone(), Arc::new(NoopStore))
             .await;
 
         agent
@@ -5139,7 +5139,7 @@ mod tests {
         let client = Arc::new(DeferredLoadVisibilityClient::new());
         let tools = Arc::new(DeferredLoadDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5164,7 +5164,7 @@ mod tests {
         let client = Arc::new(DeferredLoadVisibilityClient::new());
         let tools = Arc::new(DeferredLoadDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client, tools, Arc::new(NoopStore))
+            .build_standalone(client, tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5231,7 +5231,7 @@ mod tests {
         let client = Arc::new(VisibilityRecordingLlmClient::new());
         let tools = Arc::new(DeferredWithoutControlDispatcher::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5256,7 +5256,7 @@ mod tests {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent
             .stage_external_tool_filter(ToolFilter::Deny(
@@ -5303,7 +5303,7 @@ mod tests {
         let client = Arc::new(SingleTurnVisibilityClient::new());
         let tools = Arc::new(FullToolDispatcher::new(&["visible", "secret"]));
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent
             .stage_external_tool_filter(ToolFilter::Deny(
@@ -5370,7 +5370,7 @@ mod tests {
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5396,7 +5396,7 @@ mod tests {
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5434,7 +5434,7 @@ mod tests {
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .resume_session(session)
-            .build(client.clone(), tools, Arc::new(NoopStore))
+            .build_standalone(client.clone(), tools, Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(2);
 
@@ -5669,7 +5669,7 @@ mod tests {
                 multiplier: 2.0,
                 call_timeout: None,
             })
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         let result = agent.run("test".to_string().into()).await;
@@ -5716,7 +5716,7 @@ mod tests {
                 multiplier: 2.0,
                 call_timeout: None,
             })
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         // Set a 100ms time budget — the 30s rate-limit floor will be
@@ -5827,7 +5827,7 @@ mod tests {
 
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .output_schema(schema)
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         let result = agent.run("What is the answer?".to_string().into()).await;
@@ -5871,7 +5871,7 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .output_schema(schema)
             .structured_output_retries(2)
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         let result = agent.run("Get the name".to_string().into()).await;
@@ -5916,7 +5916,7 @@ mod tests {
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
             .output_schema(schema)
             .structured_output_retries(2)
-            .build(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
+            .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
 
         let result = agent.run("Count items".to_string().into()).await;

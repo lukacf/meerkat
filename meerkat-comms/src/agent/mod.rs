@@ -18,13 +18,9 @@ pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use meerkat_core::budget::BudgetLimits;
 use meerkat_core::error::AgentError;
-use meerkat_core::retry::RetryPolicy;
-use meerkat_core::session::Session;
 use meerkat_core::types::RunResult;
-use meerkat_core::{Agent, AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
-use std::sync::Arc;
+use meerkat_core::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use tokio::sync::watch;
 
 /// Agent wrapper that integrates comms inbox.
@@ -133,91 +129,4 @@ fn format_inbox_messages(messages: &[CommsMessage]) -> String {
         .map(types::CommsMessage::to_user_message_text)
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-pub struct CommsAgentBuilder {
-    model: Option<String>,
-    system_prompt: Option<String>,
-    max_tokens_per_turn: Option<u32>,
-    budget_limits: Option<BudgetLimits>,
-    retry_policy: Option<RetryPolicy>,
-    session: Option<Session>,
-}
-
-impl CommsAgentBuilder {
-    pub fn new() -> Self {
-        Self {
-            model: None,
-            system_prompt: None,
-            max_tokens_per_turn: None,
-            budget_limits: None,
-            retry_policy: None,
-            session: None,
-        }
-    }
-    pub fn model(mut self, m: impl Into<String>) -> Self {
-        self.model = Some(m.into());
-        self
-    }
-    pub fn system_prompt(mut self, p: impl Into<String>) -> Self {
-        self.system_prompt = Some(p.into());
-        self
-    }
-    pub fn max_tokens_per_turn(mut self, t: u32) -> Self {
-        self.max_tokens_per_turn = Some(t);
-        self
-    }
-    pub fn budget(mut self, l: BudgetLimits) -> Self {
-        self.budget_limits = Some(l);
-        self
-    }
-    pub fn retry_policy(mut self, p: RetryPolicy) -> Self {
-        self.retry_policy = Some(p);
-        self
-    }
-    pub fn resume_session(mut self, s: Session) -> Self {
-        self.session = Some(s);
-        self
-    }
-
-    pub async fn build<C, T, S>(
-        self,
-        client: Arc<C>,
-        tools: Arc<T>,
-        store: Arc<S>,
-        comms_manager: CommsManager,
-    ) -> CommsAgent<C, T, S>
-    where
-        C: AgentLlmClient + 'static,
-        T: AgentToolDispatcher + 'static,
-        S: AgentSessionStore + 'static,
-    {
-        let mut builder = AgentBuilder::new();
-        if let Some(m) = self.model {
-            builder = builder.model(m);
-        }
-        if let Some(p) = self.system_prompt {
-            builder = builder.system_prompt(p);
-        }
-        if let Some(t) = self.max_tokens_per_turn {
-            builder = builder.max_tokens_per_turn(t);
-        }
-        if let Some(l) = self.budget_limits {
-            builder = builder.budget(l);
-        }
-        if let Some(p) = self.retry_policy {
-            builder = builder.retry_policy(p);
-        }
-        if let Some(s) = self.session {
-            builder = builder.resume_session(s);
-        }
-        let agent = builder.build(client, tools, store).await;
-        CommsAgent::new(agent, comms_manager)
-    }
-}
-
-impl Default for CommsAgentBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
 }

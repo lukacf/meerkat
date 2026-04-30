@@ -266,8 +266,28 @@ impl ToolVisibilityOwner for LocalToolVisibilityOwner {
 
     fn replace_visibility_state(
         &self,
-        visibility_state: SessionToolVisibilityState,
+        mut visibility_state: SessionToolVisibilityState,
     ) -> Result<(), ToolScopeApplyError> {
+        let deferred_names = deferred_authority_names_for_visibility_state(&visibility_state);
+        if !deferred_names.is_empty() {
+            let canonical_authorities = {
+                let catalog = self
+                    .deferred_authority_catalog
+                    .read()
+                    .map_err(|_| ToolScopeApplyError::LockPoisoned)?;
+                canonical_deferred_authorities_for_names(
+                    &deferred_names,
+                    &visibility_state.requested_witnesses,
+                    &catalog,
+                )
+                .map_err(|err| ToolScopeApplyError::Owner {
+                    message: format!("invalid deferred visibility authority: {err}"),
+                })?
+            };
+            visibility_state
+                .requested_witnesses
+                .extend(canonical_authorities);
+        }
         let mut state = self
             .state
             .write()
@@ -331,17 +351,14 @@ impl ToolVisibilityOwner for LocalToolVisibilityOwner {
             .collect();
         let mut combined_witnesses = state.requested_witnesses.clone();
         combined_witnesses.extend(authorities);
-        let missing = missing_visibility_witness_names(&extended, &combined_witnesses);
-        if !missing.is_empty() {
-            return Err(ToolScopeStageError::MissingWitnesses { names: missing });
-        }
-        {
+        let canonical_authorities = {
             let catalog = self
                 .deferred_authority_catalog
                 .read()
                 .map_err(|_| ToolScopeStageError::LockPoisoned)?;
-            validate_deferred_authorities_for_names(&extended, &combined_witnesses, &catalog)?;
-        }
+            canonical_deferred_authorities_for_names(&extended, &combined_witnesses, &catalog)?
+        };
+        combined_witnesses.extend(canonical_authorities);
         let revision = ToolScopeRevision(self.next_revision.fetch_add(1, Ordering::SeqCst) + 1);
         state.staged_requested_deferred_names = extended;
         state.requested_witnesses = combined_witnesses;
@@ -1045,11 +1062,16 @@ impl ToolScope {
             &state.base_tools,
             &state.deferred_tool_names,
         );
-        validate_deferred_authorities_for_names(&extended, &combined_witnesses, &catalog)?;
+        let canonical_authorities =
+            canonical_deferred_authorities_for_names(&extended, &combined_witnesses, &catalog)?;
+        let requested_canonical_authorities = canonical_authorities
+            .into_iter()
+            .filter(|(name, _)| names.contains(name.as_str()))
+            .collect();
         drop(state);
 
         self.visibility_owner
-            .request_deferred_tools(authorities.clone())
+            .request_deferred_tools(requested_canonical_authorities)
     }
 
     #[cfg(test)]
@@ -1202,6 +1224,16 @@ fn deferred_authority_catalog_for_base_tools(
         .collect()
 }
 
+fn deferred_authority_names_for_visibility_state(
+    visibility_state: &SessionToolVisibilityState,
+) -> BTreeSet<String> {
+    visibility_state
+        .active_requested_deferred_names
+        .union(&visibility_state.staged_requested_deferred_names)
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn validate_deferred_authorities_for_names(
     names: &BTreeSet<String>,
     witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
@@ -1234,6 +1266,24 @@ pub(crate) fn validate_deferred_authorities_for_names(
     invalid.sort_unstable();
     invalid.dedup();
     Err(ToolScopeStageError::InvalidWitnesses { names: invalid })
+}
+
+fn canonical_deferred_authorities_for_names(
+    names: &BTreeSet<String>,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    authority_catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Result<std::collections::BTreeMap<String, ToolVisibilityWitness>, ToolScopeStageError> {
+    validate_deferred_authorities_for_names(names, witnesses, authority_catalog)?;
+    let mut authorities = std::collections::BTreeMap::new();
+    for name in names {
+        let Some(witness) = authority_catalog.get(name.as_str()) else {
+            return Err(ToolScopeStageError::InvalidWitnesses {
+                names: vec![name.clone()],
+            });
+        };
+        authorities.insert(name.clone(), witness.clone());
+    }
+    Ok(authorities)
 }
 
 fn durable_filter_names(state: &SessionToolVisibilityState) -> ToolNameSet {
@@ -1741,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_requested_witness_does_not_admit_deferred_tool() {
+    fn local_visibility_replace_rejects_empty_deferred_authority() {
         let requested = tool_with_provenance("deferred", "owner-a");
         let scope = ToolScope::new_with_projection_names(
             vec![Arc::clone(&requested)].into(),
@@ -1749,7 +1799,7 @@ mod tests {
             raw_set(&["deferred"]),
         );
 
-        scope
+        let err = scope
             .set_visibility_state(crate::SessionToolVisibilityState {
                 active_requested_deferred_names: ["deferred".to_string()].into_iter().collect(),
                 staged_requested_deferred_names: ["deferred".to_string()].into_iter().collect(),
@@ -1761,11 +1811,62 @@ mod tests {
                 .collect(),
                 ..Default::default()
             })
-            .expect("visibility state should install for regression test");
+            .expect_err("local replacement must reject empty deferred-tool authority");
 
         assert!(
-            scope.visible_tool_names().unwrap().is_empty(),
-            "a name with an empty witness must not admit a deferred tool"
+            err.to_string().contains("deferred"),
+            "rejection should name the missing deferred authority: {err}"
+        );
+        assert!(
+            scope
+                .visibility_state()
+                .unwrap()
+                .active_requested_deferred_names
+                .is_empty(),
+            "failed local replacement must not install active deferred names"
+        );
+    }
+
+    #[test]
+    fn local_visibility_replace_rejects_mismatched_deferred_authority() {
+        let requested = tool_with_provenance("deferred", "owner-a");
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&requested)].into(),
+            HashSet::new(),
+            raw_set(&["deferred"]),
+        );
+
+        let err = scope
+            .set_visibility_state(crate::SessionToolVisibilityState {
+                active_requested_deferred_names: ["deferred".to_string()].into_iter().collect(),
+                staged_requested_deferred_names: ["deferred".to_string()].into_iter().collect(),
+                requested_witnesses: [(
+                    "deferred".to_string(),
+                    crate::ToolVisibilityWitness {
+                        stable_owner_key: Some("callback:owner-b".to_string()),
+                        last_seen_provenance: Some(ToolProvenance {
+                            kind: ToolSourceKind::Callback,
+                            source_id: "owner-b".into(),
+                        }),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })
+            .expect_err("local replacement must reject forged deferred-tool authority");
+
+        assert!(
+            err.to_string().contains("deferred"),
+            "rejection should name the mismatched deferred authority: {err}"
+        );
+        assert!(
+            scope
+                .visibility_state()
+                .unwrap()
+                .staged_requested_deferred_names
+                .is_empty(),
+            "failed local replacement must not install staged deferred names"
         );
     }
 

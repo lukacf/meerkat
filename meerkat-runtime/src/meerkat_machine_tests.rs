@@ -13217,6 +13217,53 @@ async fn replace_visibility_state_rejects_deferred_names_with_empty_authority() 
 }
 
 #[tokio::test]
+async fn replace_visibility_state_rejects_deferred_authority_mismatched_with_visible_catalog() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should prepare");
+    let catalog_tool = runtime_deferred_tool("deferred_tool", "catalog");
+    seed_deferred_tool_authority_catalog(&bindings, vec![catalog_tool], &["deferred_tool"]);
+    let replacement = meerkat_core::SessionToolVisibilityState {
+        active_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        staged_requested_deferred_names: ["deferred_tool".to_string()].into_iter().collect(),
+        requested_witnesses: [(
+            "deferred_tool".to_string(),
+            meerkat_core::ToolVisibilityWitness {
+                stable_owner_key: Some("callback:forged".to_string()),
+                last_seen_provenance: Some(callback_tool_provenance("forged")),
+            },
+        )]
+        .into_iter()
+        .collect(),
+        active_revision: 1,
+        staged_revision: 1,
+        ..Default::default()
+    };
+
+    let err = bindings
+        .tool_visibility_owner
+        .replace_visibility_state(replacement)
+        .expect_err("replacement must reject forged deferred provenance authority");
+
+    assert!(
+        err.to_string().contains("deferred_tool"),
+        "rejection should name the mismatched deferred authority: {err}"
+    );
+    let state = bindings
+        .tool_visibility_owner
+        .visibility_state()
+        .expect("owner state should still be readable");
+    assert!(
+        state.active_requested_deferred_names.is_empty()
+            && state.staged_requested_deferred_names.is_empty(),
+        "failed replacement must not install deferred routing names"
+    );
+}
+
+#[tokio::test]
 async fn publish_committed_visible_set_rejects_unknown_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

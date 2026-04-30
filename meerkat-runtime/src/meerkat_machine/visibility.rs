@@ -134,38 +134,27 @@ impl MachineToolVisibilityOwner {
         Ok(())
     }
 
-    pub(super) fn validate_deferred_authorities_for_visibility_state(
+    pub(super) fn canonical_deferred_authorities_for_visibility_state(
         &self,
         visibility_state: &SessionToolVisibilityState,
-    ) -> Result<(), ToolScopeStageError> {
+    ) -> Result<std::collections::BTreeMap<String, ToolVisibilityWitness>, ToolScopeStageError>
+    {
         let names = deferred_authority_names_for_visibility_state(visibility_state);
         if names.is_empty() {
-            return Ok(());
+            return Ok(Default::default());
         }
-        let missing =
-            missing_visibility_witness_names(&names, &visibility_state.requested_witnesses);
-        if !missing.is_empty() {
-            return Err(ToolScopeStageError::MissingWitnesses { names: missing });
-        }
-        let invalid = {
-            let authority_catalog =
-                self.deferred_authority_catalog
-                    .read()
-                    .map_err(|_| ToolScopeStageError::Owner {
-                        message: "machine visibility deferred authority catalog lock poisoned"
-                            .to_string(),
-                    })?;
-            invalid_deferred_authority_names(
-                &names,
-                &visibility_state.requested_witnesses,
-                &authority_catalog,
-            )
-        };
-        if invalid.is_empty() {
-            Ok(())
-        } else {
-            Err(ToolScopeStageError::InvalidWitnesses { names: invalid })
-        }
+        let authority_catalog =
+            self.deferred_authority_catalog
+                .read()
+                .map_err(|_| ToolScopeStageError::Owner {
+                    message: "machine visibility deferred authority catalog lock poisoned"
+                        .to_string(),
+                })?;
+        canonical_deferred_authorities_for_names(
+            &names,
+            &visibility_state.requested_witnesses,
+            &authority_catalog,
+        )
     }
 }
 
@@ -236,6 +225,31 @@ fn invalid_deferred_authority_names(
     invalid
 }
 
+fn canonical_deferred_authorities_for_names(
+    names: &std::collections::BTreeSet<String>,
+    witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+    authority_catalog: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
+) -> Result<std::collections::BTreeMap<String, ToolVisibilityWitness>, ToolScopeStageError> {
+    let missing = missing_visibility_witness_names(names, witnesses);
+    if !missing.is_empty() {
+        return Err(ToolScopeStageError::MissingWitnesses { names: missing });
+    }
+    let invalid = invalid_deferred_authority_names(names, witnesses, authority_catalog);
+    if !invalid.is_empty() {
+        return Err(ToolScopeStageError::InvalidWitnesses { names: invalid });
+    }
+    let mut authorities = std::collections::BTreeMap::new();
+    for name in names {
+        let Some(witness) = authority_catalog.get(name.as_str()) else {
+            return Err(ToolScopeStageError::InvalidWitnesses {
+                names: vec![name.clone()],
+            });
+        };
+        authorities.insert(name.clone(), witness.clone());
+    }
+    Ok(authorities)
+}
+
 fn dsl_witnesses(
     witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
 ) -> std::collections::BTreeMap<String, super::dsl::ToolVisibilityWitness> {
@@ -262,19 +276,23 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn replace_visibility_state(
         &self,
-        visibility_state: SessionToolVisibilityState,
+        mut visibility_state: SessionToolVisibilityState,
     ) -> Result<(), ToolScopeApplyError> {
-        self.validate_deferred_authorities_for_visibility_state(&visibility_state)
+        let deferred_authorities = self
+            .canonical_deferred_authorities_for_visibility_state(&visibility_state)
             .map_err(|err| ToolScopeApplyError::Owner {
                 message: format!("invalid deferred visibility authority: {err}"),
             })?;
+        visibility_state
+            .requested_witnesses
+            .extend(deferred_authorities.clone());
         let active_deferred_authorities = dsl_witnesses(&authority_witnesses_for_names(
             &visibility_state.active_requested_deferred_names,
-            &visibility_state.requested_witnesses,
+            &deferred_authorities,
         ));
         let staged_deferred_authorities = dsl_witnesses(&authority_witnesses_for_names(
             &visibility_state.staged_requested_deferred_names,
-            &visibility_state.requested_witnesses,
+            &deferred_authorities,
         ));
         // Sync the DSL monotonic counter up to the externally-installed
         // revisions before we overwrite the owner-held state. The DSL
@@ -409,7 +427,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         // `request_deferred_tools` extends the staged set and carries the
         // authority map through the DSL input so deferred admission is
         // authority-visible, not a shell-only name projection.
-        let (extended, combined_witnesses): (
+        let (extended, mut combined_witnesses): (
             std::collections::BTreeSet<String>,
             std::collections::BTreeMap<String, ToolVisibilityWitness>,
         ) = {
@@ -430,7 +448,7 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
         if !missing.is_empty() {
             return Err(ToolScopeStageError::MissingWitnesses { names: missing });
         }
-        let invalid = {
+        let staged_authorities = {
             let authority_catalog =
                 self.deferred_authority_catalog
                     .read()
@@ -438,12 +456,13 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
                         message: "machine visibility deferred authority catalog lock poisoned"
                             .to_string(),
                     })?;
-            invalid_deferred_authority_names(&extended, &combined_witnesses, &authority_catalog)
+            canonical_deferred_authorities_for_names(
+                &extended,
+                &combined_witnesses,
+                &authority_catalog,
+            )?
         };
-        if !invalid.is_empty() {
-            return Err(ToolScopeStageError::InvalidWitnesses { names: invalid });
-        }
-        let staged_authorities = authority_witnesses_for_names(&extended, &combined_witnesses);
+        combined_witnesses.extend(staged_authorities.clone());
         let dsl_witnesses = dsl_witnesses(&staged_authorities);
         let revision = self.mint_revision_via_dsl(
             super::dsl::MeerkatMachineInput::RequestDeferredTools {

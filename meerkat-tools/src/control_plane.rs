@@ -527,7 +527,7 @@ mod tests {
     use meerkat_core::types::ToolProvenance;
     use serde_json::json;
     use serde_json::value::RawValue;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     struct ExactCatalogDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -565,6 +565,60 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct LegacyVisibilityOwner {
+        state: SessionToolVisibilityState,
+    }
+
+    impl meerkat_core::ToolVisibilityOwner for LegacyVisibilityOwner {
+        fn visibility_state(
+            &self,
+        ) -> Result<SessionToolVisibilityState, meerkat_core::ToolScopeApplyError> {
+            Ok(self.state.clone())
+        }
+
+        fn replace_visibility_state(
+            &self,
+            _visibility_state: SessionToolVisibilityState,
+        ) -> Result<(), meerkat_core::ToolScopeApplyError> {
+            Ok(())
+        }
+
+        fn stage_persistent_filter(
+            &self,
+            _filter: ToolFilter,
+            _witnesses: BTreeMap<String, ToolVisibilityWitness>,
+        ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
+            Err(meerkat_core::ToolScopeStageError::Owner {
+                message: "legacy visibility fixture is read-only".to_string(),
+            })
+        }
+
+        fn stage_requested_deferred_names(
+            &self,
+            _names: BTreeSet<String>,
+        ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
+            Err(meerkat_core::ToolScopeStageError::Owner {
+                message: "legacy visibility fixture is read-only".to_string(),
+            })
+        }
+
+        fn request_deferred_tools(
+            &self,
+            _authorities: BTreeMap<String, ToolVisibilityWitness>,
+        ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
+            Err(meerkat_core::ToolScopeStageError::Owner {
+                message: "legacy visibility fixture is read-only".to_string(),
+            })
+        }
+
+        fn boundary_applied(
+            &self,
+        ) -> Result<SessionToolVisibilityState, meerkat_core::ToolScopeApplyError> {
+            Ok(self.state.clone())
+        }
+    }
+
     fn session_tool(name: &str, description: &str) -> Arc<ToolDef> {
         Arc::new(ToolDef {
             name: name.into(),
@@ -594,6 +648,22 @@ mod tests {
             name,
             args: raw,
         }
+    }
+
+    fn legacy_visibility_scope(
+        tools: Vec<Arc<ToolDef>>,
+        deferred_names: &[&str],
+        state: SessionToolVisibilityState,
+    ) -> ToolScope {
+        ToolScope::new_with_visibility_owner(
+            tools.into(),
+            std::collections::HashSet::new(),
+            deferred_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            Arc::new(LegacyVisibilityOwner { state }),
+        )
     }
 
     #[tokio::test]
@@ -740,7 +810,11 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = ToolScope::new(Arc::from([]));
+        let scope = ToolScope::new_with_projection_names(
+            vec![Arc::clone(&deferred), Arc::clone(&inline)].into(),
+            std::collections::HashSet::new(),
+            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+        );
         scope
             .set_visibility_state(SessionToolVisibilityState {
                 staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
@@ -814,19 +888,16 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = ToolScope::new_with_projection_names(
-            vec![Arc::clone(&deferred)].into(),
-            std::collections::HashSet::new(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
-        );
-        scope
-            .set_visibility_state(SessionToolVisibilityState {
+        let scope = legacy_visibility_scope(
+            vec![Arc::clone(&deferred)],
+            &["deferred_mcp_tool"],
+            SessionToolVisibilityState {
                 staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
                     .into_iter()
                     .collect(),
                 ..Default::default()
-            })
-            .unwrap();
+            },
+        );
         visibility_provider.set_scope(scope);
 
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
@@ -883,13 +954,10 @@ mod tests {
             may_require_control_plane: false,
         });
         let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
-        let scope = ToolScope::new_with_projection_names(
-            vec![Arc::clone(&deferred)].into(),
-            std::collections::HashSet::new(),
-            ["deferred_mcp_tool".to_string()].into_iter().collect(),
-        );
-        scope
-            .set_visibility_state(SessionToolVisibilityState {
+        let scope = legacy_visibility_scope(
+            vec![Arc::clone(&deferred)],
+            &["deferred_mcp_tool"],
+            SessionToolVisibilityState {
                 staged_requested_deferred_names: ["deferred_mcp_tool".to_string()]
                     .into_iter()
                     .collect(),
@@ -903,8 +971,8 @@ mod tests {
                 .into_iter()
                 .collect(),
                 ..Default::default()
-            })
-            .unwrap();
+            },
+        );
         visibility_provider.set_scope(scope);
 
         let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);

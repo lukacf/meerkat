@@ -666,8 +666,8 @@ impl MeerkatMachine {
                             .tool_visibility_owner,
                     )
                 };
-                owner
-                    .validate_deferred_authorities_for_visibility_state(&visibility_state)
+                let deferred_authorities = owner
+                    .canonical_deferred_authorities_for_visibility_state(&visibility_state)
                     .map_err(|err| RuntimeDriverError::ValidationFailed {
                         reason: err.to_string(),
                     })?;
@@ -702,11 +702,11 @@ impl MeerkatMachine {
                                 .clone(),
                             active_deferred_authorities: visibility_authorities_for_names(
                                 &visibility_state.active_requested_deferred_names,
-                                &visibility_state.requested_witnesses,
+                                &deferred_authorities,
                             ),
                             staged_deferred_authorities: visibility_authorities_for_names(
                                 &visibility_state.staged_requested_deferred_names,
-                                &visibility_state.requested_witnesses,
+                                &deferred_authorities,
                             ),
                             active_visibility_revision: visibility_state.active_revision,
                             staged_visibility_revision: visibility_state.staged_revision,

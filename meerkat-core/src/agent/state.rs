@@ -2503,14 +2503,13 @@ mod tests {
     use tokio::sync::{Notify, mpsc};
 
     /// Attach an in-core phase-tracking `TurnStateHandle` to a raw
-    /// `AgentBuilder`.
+    /// `AgentBuilder` and explicitly stamp the test run as a content turn.
     ///
     /// Wave-A deleted the standalone in-core turn-state fallback
     /// (`LocalTurnExecutionState`); `Agent::runtime_turn_authority_snapshot`
     /// now requires a live handle on every run path. Tests that construct
-    /// a bare `AgentBuilder::new()` (wrapped here by this helper) must
-    /// thread a `TurnStateHandle` through the build or the agent loop
-    /// panics the first time it queries turn state.
+    /// a bare `AgentBuilder::new()` (wrapped here by this helper) must thread
+    /// both a `TurnStateHandle` and a runtime execution kind through the build.
     ///
     /// `meerkat-core` cannot borrow `RuntimeTurnStateHandle` from
     /// `meerkat-runtime` (circular dev-dep instantiates two copies of
@@ -2523,7 +2522,11 @@ mod tests {
     /// See #32 Class W1 — runtime_turn_authority missing handle.
     fn with_test_turn_state_handle(builder: AgentBuilder) -> AgentBuilder {
         use crate::agent::test_turn_state_handle::TestTurnStateHandle;
-        builder.with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
+        builder
+            .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
     }
 
     #[test]
@@ -4074,6 +4077,9 @@ mod tests {
             Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
         let mut agent = AgentBuilder::new()
             .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
             .with_hook_engine(Arc::new(DenyRunCompletedHook))
             .build(
                 Arc::new(StaticLlmClient),
@@ -4179,6 +4185,9 @@ mod tests {
             Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
         let mut agent = AgentBuilder::new()
             .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
             .with_hook_engine(Arc::new(DenyTurnBoundaryHook))
             .with_comms_runtime(comms)
             .build(
@@ -4926,6 +4935,9 @@ mod tests {
             Arc::new(crate::agent::test_turn_state_handle::TestTurnStateHandle::new());
         let mut agent = AgentBuilder::new()
             .with_turn_state_handle(turn_handle.clone())
+            .with_runtime_execution_kind_for_test(
+                crate::lifecycle::RuntimeExecutionKind::ContentTurn,
+            )
             .with_hook_engine(Arc::new(DenyPostToolHook))
             .build(client.clone(), tools, Arc::new(NoopStore))
             .await;

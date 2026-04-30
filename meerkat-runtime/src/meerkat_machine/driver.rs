@@ -841,12 +841,11 @@ pub(crate) fn machine_input_boundary(
 pub(crate) fn machine_input_execution_kind(
     driver: &DriverEntry,
     work_id: &InputId,
-) -> meerkat_core::lifecycle::RuntimeExecutionKind {
+) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
     driver
         .driver_ingress()
         .runtime_semantics(work_id)
         .map(|semantics| semantics.execution_kind)
-        .unwrap_or(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
 }
 
 pub(crate) fn machine_input_peer_response_terminal_apply_intent(
@@ -859,31 +858,29 @@ pub(crate) fn machine_input_peer_response_terminal_apply_intent(
         .and_then(|semantics| semantics.peer_response_terminal_apply_intent)
 }
 
+#[cfg(test)]
 pub(crate) fn machine_batch_execution_kind(
     driver: &DriverEntry,
     work_ids: &[InputId],
 ) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
-    if work_ids.is_empty() {
-        return None;
-    }
+    let mut semantics = machine_batch_runtime_semantics(driver, work_ids)?.into_iter();
+    let first = semantics.next()?.execution_kind;
 
-    if work_ids.iter().all(|id| {
-        machine_input_execution_kind(driver, id)
-            == meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
-    }) {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+    if semantics.all(|semantics| semantics.execution_kind == first) {
+        Some(first)
     } else {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        None
     }
 }
 
-pub(crate) fn machine_batch_peer_response_terminal_apply_intent(
+pub(crate) fn machine_batch_runtime_semantics(
     driver: &DriverEntry,
     work_ids: &[InputId],
-) -> Option<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent> {
+) -> Option<Vec<crate::ingress_types::RuntimeInputSemantics>> {
     work_ids
         .iter()
-        .find_map(|id| machine_input_peer_response_terminal_apply_intent(driver, id))
+        .map(|id| driver.driver_ingress().runtime_semantics(id))
+        .collect()
 }
 
 pub(crate) fn machine_batch_primitive_projections(
@@ -927,14 +924,16 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
             return Vec::new();
         }
         let target_boundary = machine_input_boundary(driver, first);
-        let target_execution_kind = machine_input_execution_kind(driver, first);
+        let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
+            return Vec::new();
+        };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
         return steer
             .iter()
             .take_while(|id| {
                 machine_input_boundary(driver, id) == target_boundary
-                    && machine_input_execution_kind(driver, id) == target_execution_kind
+                    && machine_input_execution_kind(driver, id) == Some(target_execution_kind)
                     && machine_input_peer_response_terminal_apply_intent(driver, id)
                         == target_peer_response_terminal_apply_intent
             })
@@ -956,7 +955,7 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
             .take_while(|id| {
                 !ingress.is_prompt(id)
                     && machine_input_execution_kind(driver, id)
-                        == meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
+                        == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
                     && machine_input_peer_response_terminal_apply_intent(driver, id)
                         == target_peer_response_terminal_apply_intent
             })
@@ -1679,6 +1678,25 @@ pub(crate) async fn machine_stop_runtime(
             Ok(())
         }
         DriverEntry::Persistent(d) => d.finalize_runtime_executor_exit().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine_batch_execution_kind_requires_admitted_semantics() {
+        let driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(
+            crate::identifiers::LogicalRuntimeId::new("test"),
+        ));
+        let unstamped_input = InputId::new();
+
+        assert_eq!(
+            machine_batch_execution_kind(&driver, &[unstamped_input]),
+            None,
+            "missing runtime semantics must not locally default to ContentTurn"
+        );
     }
 }
 

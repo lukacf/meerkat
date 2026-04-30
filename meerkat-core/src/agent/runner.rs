@@ -226,6 +226,17 @@ where
         self.runtime_execution_kind = execution_kind;
     }
 
+    fn require_runtime_execution_kind(&self) -> Result<(), AgentError> {
+        if self.turn_state_handle.is_some() && self.runtime_execution_kind.is_none() {
+            return Err(AgentError::InternalError(
+                "runtime_execution_kind not set: turn-state handle is attached but \
+                 the runtime did not stamp RuntimeTurnMetadata.execution_kind"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply accumulated session effects from tool dispatch.
     ///
     /// Called by the agent loop after each parallel tool batch completes.
@@ -878,22 +889,9 @@ where
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
+        self.require_runtime_execution_kind()?;
+
         // Reset state for new run (allows multi-turn on same agent).
-        //
-        // `run_inner` is the entry point for an ordinary content turn. Default
-        // the classification to `ContentTurn` unless the caller staged an
-        // explicit kind via `set_runtime_execution_kind` (e.g. a runtime-backed
-        // surface that propagates `RuntimeTurnMetadata.execution_kind` from a
-        // `StagedRunInput`). Preserving a previously-staged classification
-        // prevents the reset from silently wiping the caller's typed intent.
-        //
-        // `None` is no longer a valid post-reset state: `turn_state_handle`
-        // attaches pair `runtime_execution_kind` with every live-run path,
-        // and `runtime_turn_authority_snapshot` (state.rs) panics on an
-        // unclassified handle. See #32 W2 / PR #299 follow-up.
-        if self.runtime_execution_kind.is_none() {
-            self.runtime_execution_kind = Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn);
-        }
         self.extraction_state.reset();
         self.run_completed_hooks_applied = false;
 
@@ -985,16 +983,9 @@ where
             ));
         };
 
+        self.require_runtime_execution_kind()?;
+
         // Reset state for new run (allows multi-turn on same agent).
-        //
-        // `run_pending_inner` is the entry point for an explicit continuation
-        // that resumes pending work at a boundary. Default the classification
-        // to `ResumePending` unless the caller staged an explicit kind via
-        // `set_runtime_execution_kind`. See #32 W2 / PR #299 follow-up.
-        if self.runtime_execution_kind.is_none() {
-            self.runtime_execution_kind =
-                Some(crate::lifecycle::RuntimeExecutionKind::ResumePending);
-        }
         self.extraction_state.reset();
         self.run_completed_hooks_applied = false;
 

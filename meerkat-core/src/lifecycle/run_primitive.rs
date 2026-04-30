@@ -1352,8 +1352,9 @@ pub struct RuntimeTurnMetadata {
     pub render_metadata: Option<RenderMetadata>,
     /// Typed execution intent classified by the runtime layer.
     ///
-    /// `None` means the session layer should use its existing heuristic
-    /// (backward compat for non-runtime substrate-direct paths).
+    /// `None` is retained only for legacy/caller-owned metadata before runtime
+    /// admission. Runtime boundaries must stamp this field before applying a
+    /// turn; the session layer must not invent a runtime execution kind.
     /// `Some(ContentTurn)` forces `run_turn`.
     /// `Some(ResumePending)` forces `run_pending`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

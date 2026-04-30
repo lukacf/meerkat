@@ -25,7 +25,7 @@ impl MeerkatMachine {
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         match command {
             MeerkatMachineCommand::AcceptWithCompletion { session_id, input } => {
-                let (driver, completions, wake_tx, control_tx) = {
+                let (driver, completions, wake_tx, control_tx, control_handle) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
                         .get(&session_id)
@@ -37,6 +37,7 @@ impl MeerkatMachine {
                         entry.completions.clone(),
                         entry.wake_sender(),
                         entry.control_sender(),
+                        entry.control_handle(),
                     )
                 };
 
@@ -196,6 +197,21 @@ impl MeerkatMachine {
                     let _ = tx.try_send(
                         meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
                     );
+                }
+                if signal.should_interrupt_yielding()
+                    && let Some(control_handle) = control_handle
+                {
+                    let result = control_handle
+                        .control(
+                            meerkat_core::lifecycle::run_control::RunControlCommand::InterruptYielding,
+                        )
+                        .await;
+                    if let Err(err) = result {
+                        tracing::trace!(
+                            error = %err,
+                            "out-of-band InterruptYielding control was not applied"
+                        );
+                    }
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptWithCompletion {

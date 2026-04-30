@@ -237,6 +237,7 @@ struct RuntimeSessionEntry {
 struct RuntimeLoopAttachment {
     wake_tx: mpsc::Sender<()>,
     control_tx: mpsc::Sender<RunControlCommand>,
+    control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -297,11 +298,13 @@ impl RuntimeSessionEntry {
         &mut self,
         wake_tx: mpsc::Sender<()>,
         control_tx: mpsc::Sender<RunControlCommand>,
+        control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
         self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
             wake_tx,
             control_tx,
+            control_handle,
             _loop_handle: loop_handle,
         });
     }
@@ -333,6 +336,17 @@ impl RuntimeSessionEntry {
                 if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
             {
                 Some(attachment.control_tx.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+        match &self.phase {
+            RegistrationPhase::Active(attachment)
+                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+            {
+                attachment.control_handle.clone()
             }
             _ => None,
         }

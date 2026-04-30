@@ -887,7 +887,9 @@ impl SessionRuntime {
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
         let live = match self.service.export_live_session(session_id).await {
             Ok(session) => session,
-            Err(SessionError::NotFound { .. }) => return Ok(false),
+            Err(SessionError::NotFound { .. }) => {
+                return Ok(self.load_persisted_session(session_id).await?.is_some());
+            }
             Err(err) => return Err(session_error_to_rpc(err)),
         };
         let Some(stored) = self.load_persisted_session(session_id).await? else {
@@ -3234,6 +3236,7 @@ impl SessionRuntime {
                 skill_references,
                 flow_tool_overlay,
                 additional_instructions,
+                overrides.as_ref(),
             ))
             .await;
         }
@@ -3295,6 +3298,7 @@ impl SessionRuntime {
                     skill_references,
                     flow_tool_overlay,
                     additional_instructions,
+                    overrides.as_ref(),
                 ))
                 .await
             }
@@ -3349,6 +3353,7 @@ impl SessionRuntime {
         skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
+        overrides: Option<&crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RpcError> {
         let loaded_session = self.load_persisted_session(session_id).await?;
 
@@ -3367,7 +3372,7 @@ impl SessionRuntime {
             });
         }
 
-        let recovery_overrides = self.recovery_overrides_from_turn(None, keep_alive)?;
+        let recovery_overrides = self.recovery_overrides_from_turn(overrides, keep_alive)?;
         let create_request = self
             .recovered_create_request(session_id, session, recovery_overrides)
             .await?;
@@ -5002,6 +5007,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("try_recover_persisted_session");
@@ -5278,6 +5284,7 @@ mod tests {
                 "Recover".into(),
                 event_tx,
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -8706,6 +8713,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
         assert!(
@@ -8726,6 +8734,94 @@ mod tests {
             info.provider, "openai",
             "recovered provider must match hot-swap"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_live_recovery_applies_turn_clear_and_connection_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let mut build = mock_build_config();
+        build.provider_params = Some(serde_json::json!({
+            "thinking": { "budget_tokens": 10_000 }
+        }));
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "Hello".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("initial materialization");
+
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session before recovery");
+        runtime
+            .runtime_adapter
+            .unregister_session(&session_id)
+            .await;
+
+        let connection_ref = test_connection_ref("dev", "default");
+        let overrides = crate::handlers::turn::TurnOverrides {
+            clear_provider_params: true,
+            connection_ref: Some(connection_ref.clone()),
+            ..Default::default()
+        };
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "Recover with overrides".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(overrides),
+            )
+            .await
+            .expect("recovery turn should apply overrides");
+
+        let live = runtime
+            .service
+            .export_live_session(&session_id)
+            .await
+            .expect("live session after recovery");
+        let live_meta = live
+            .session_metadata()
+            .expect("live metadata after recovery");
+        assert_eq!(
+            live_meta.provider_params, None,
+            "clear_provider_params must survive missing-live recovery"
+        );
+        assert_eq!(
+            live_meta.connection_ref,
+            Some(connection_ref.clone()),
+            "connection_ref set must survive missing-live recovery"
+        );
+
+        let stored = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("load persisted session after recovery")
+            .expect("stored session should exist");
+        let stored_meta = stored
+            .session_metadata()
+            .expect("stored metadata after recovery");
+        assert_eq!(stored_meta.provider_params, None);
+        assert_eq!(stored_meta.connection_ref, Some(connection_ref));
     }
 
     /// Regression: start_turn_via_runtime must reject build-only overrides

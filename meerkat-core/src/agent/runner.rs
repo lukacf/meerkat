@@ -226,6 +226,10 @@ where
         self.runtime_execution_kind = execution_kind;
     }
 
+    fn clear_runtime_execution_kind(&mut self) {
+        self.runtime_execution_kind = None;
+    }
+
     fn require_runtime_execution_kind(&self) -> Result<(), AgentError> {
         if self.runtime_execution_kind_required && self.runtime_execution_kind.is_none() {
             return Err(AgentError::InternalError(
@@ -933,6 +937,7 @@ where
             .await
         {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
+            self.clear_runtime_execution_kind();
             return Err(err);
         }
 
@@ -944,15 +949,18 @@ where
                         .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
                     return Err(err);
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
                 self.checkpoint_current_session().await;
+                self.clear_runtime_execution_kind();
                 Ok(result)
             }
             Err(err) => {
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
+                self.clear_runtime_execution_kind();
                 Err(err)
             }
         }
@@ -978,6 +986,7 @@ where
         });
 
         let Some(prompt) = pending_prompt else {
+            self.clear_runtime_execution_kind();
             return Err(AgentError::ConfigError(
                 "run_pending requires a pending user or tool-results continuation boundary in the session".to_string(),
             ));
@@ -997,6 +1006,7 @@ where
             .await
         {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
+            self.clear_runtime_execution_kind();
             return Err(err);
         }
 
@@ -1008,15 +1018,18 @@ where
                         .await
                 {
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
                     return Err(err);
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
                 self.checkpoint_current_session().await;
+                self.clear_runtime_execution_kind();
                 Ok(result)
             }
             Err(err) => {
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
+                self.clear_runtime_execution_kind();
                 Err(err)
             }
         }

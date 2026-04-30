@@ -228,6 +228,8 @@ pub enum OAuthFlowError {
     CapacityExceeded { max_outstanding: usize },
     #[error("oauth device code poll is already in progress")]
     DevicePollInProgress,
+    #[error("oauth device code expiry is out of range")]
+    DeviceExpiryOutOfRange,
 }
 
 #[derive(Debug)]
@@ -493,11 +495,14 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
             });
         }
         let now = Instant::now();
+        let expires_at = now
+            .checked_add(expires_in)
+            .ok_or(OAuthFlowError::DeviceExpiryOutOfRange)?;
         let record = OAuthDeviceFlowRecord {
             provider,
             device_code: device_code.clone(),
             created_at: now,
-            expires_at: now + expires_in,
+            expires_at,
         };
         device_flows.insert(
             device_code,
@@ -907,6 +912,24 @@ mod tests {
             },
         );
 
+        assert!(matches!(
+            registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
+            Err(OAuthFlowError::Missing)
+        ));
+    }
+
+    #[test]
+    fn oauth_device_flow_rejects_unrepresentable_expiry() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let err = registry
+            .admit_device_code(
+                OAuthProviderIdentity::GoogleCodeAssist,
+                "device-code",
+                Duration::MAX,
+            )
+            .expect_err("unrepresentable device expiry should be rejected");
+
+        assert_eq!(err, OAuthFlowError::DeviceExpiryOutOfRange);
         assert!(matches!(
             registry.verify_device_code("device-code", OAuthProviderIdentity::GoogleCodeAssist),
             Err(OAuthFlowError::Missing)

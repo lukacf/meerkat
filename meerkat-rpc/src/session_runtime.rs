@@ -3488,6 +3488,24 @@ impl SessionRuntime {
         }
     }
 
+    /// Ask a running turn to break out at the next cooperative boundary.
+    ///
+    /// Unlike `interrupt`, this must not hard-cancel the current run. It is used
+    /// by runtime peer ingress so queued work can proceed after a wait/yield
+    /// boundary without aborting the in-flight turn.
+    pub async fn interrupt_yielding(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        // Pending sessions have no running turn.
+        if self.staged_sessions.contains(session_id).await {
+            return Ok(());
+        }
+
+        match self.service.cancel_after_boundary(session_id).await {
+            Ok(()) | Err(SessionError::NotRunning { .. }) => Ok(()),
+            Err(SessionError::Unsupported(_)) => Ok(()),
+            Err(e) => Err(session_error_to_rpc(e)),
+        }
+    }
+
     /// Append runtime system context to a pending, live, or persisted session.
     pub async fn append_system_context(
         &self,

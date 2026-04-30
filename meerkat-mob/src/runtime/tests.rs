@@ -18948,6 +18948,19 @@ impl SessionService for RealCommsSessionService {
         Ok(())
     }
 
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
+            return Ok(());
+        }
+        Err(SessionError::NotRunning { id: id.clone() })
+    }
+
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {
         let sessions = self.sessions.read().await;
         if !sessions.contains_key(id) {
@@ -19257,6 +19270,19 @@ impl SessionService for RuntimeBackedRealCommsSessionService {
             notifier.notify_waiters();
         }
         Ok(())
+    }
+
+    async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+        let sessions = self.sessions.read().await;
+        if !sessions.contains_key(id) {
+            return Err(SessionError::NotFound { id: id.clone() });
+        }
+        drop(sessions);
+        if let Some(notifier) = self.keep_alive_notifiers.read().await.get(id).cloned() {
+            notifier.notify_waiters();
+            return Ok(());
+        }
+        Err(SessionError::NotRunning { id: id.clone() })
     }
 
     async fn read(&self, id: &SessionId) -> Result<SessionView, SessionError> {

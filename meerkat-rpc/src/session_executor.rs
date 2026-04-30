@@ -79,15 +79,21 @@ struct SessionRuntimeControlHandle {
 #[async_trait::async_trait]
 impl CoreExecutorControl for SessionRuntimeControlHandle {
     async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
-                self.runtime
-                    .interrupt(&self.session_id)
-                    .await
-                    .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
-            }
-            _ => Ok(()),
+        if command.should_interrupt_current_run() {
+            return self
+                .runtime
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message));
         }
+        if matches!(command, RunControlCommand::InterruptYielding) {
+            return self
+                .runtime
+                .interrupt_yielding(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message));
+        }
+        Ok(())
     }
 }
 
@@ -101,15 +107,25 @@ struct MobRpcRuntimeControlHandle {
 #[async_trait::async_trait]
 impl CoreExecutorControl for MobRpcRuntimeControlHandle {
     async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
-                self.session_service
-                    .interrupt(&self.session_id)
-                    .await
-                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
-            }
-            _ => Ok(()),
+        if command.should_interrupt_current_run() {
+            return self
+                .session_service
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
         }
+        if matches!(command, RunControlCommand::InterruptYielding) {
+            return self
+                .session_service
+                .cancel_after_boundary(&self.session_id)
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()));
+        }
+        Ok(())
     }
 }
 
@@ -230,12 +246,16 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
-            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
-                self.runtime
-                    .interrupt(&self.session_id)
-                    .await
-                    .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
-            }
+            command if command.should_interrupt_current_run() => self
+                .runtime
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message)),
+            RunControlCommand::InterruptYielding => self
+                .runtime
+                .interrupt_yielding(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.message)),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self.runtime.discard_live_session(&self.session_id).await;
                 self.runtime
@@ -344,12 +364,20 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
-            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
-                self.session_service
-                    .interrupt(&self.session_id)
-                    .await
-                    .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))
-            }
+            command if command.should_interrupt_current_run() => self
+                .session_service
+                .interrupt(&self.session_id)
+                .await
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string())),
+            RunControlCommand::InterruptYielding => self
+                .session_service
+                .cancel_after_boundary(&self.session_id)
+                .await
+                .or_else(|err| match err {
+                    SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                    err => Err(err),
+                })
+                .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string())),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .session_service

@@ -1374,9 +1374,7 @@ pub(crate) fn machine_build_recovered_ingress_entry(
         Some(policy) => policy.decision.clone(),
         None => crate::policy_table::DefaultPolicyTable::resolve(persisted_input, true),
     };
-    let runtime_semantics = state
-        .runtime_semantics
-        .or_else(|| recovered_runtime_semantics_from_turn_metadata(persisted_input, &policy))?;
+    let runtime_semantics = state.runtime_semantics?;
     let handling_mode = state
         .policy
         .as_ref()
@@ -1393,27 +1391,6 @@ pub(crate) fn machine_build_recovered_ingress_entry(
         is_prompt: matches!(persisted_input, crate::input::Input::Prompt(_)),
         policy,
     })
-}
-
-fn recovered_runtime_semantics_from_turn_metadata(
-    input: &Input,
-    policy: &crate::policy::PolicyDecision,
-) -> Option<crate::ingress_types::RuntimeInputSemantics> {
-    let metadata = match input {
-        Input::Prompt(prompt) => prompt.turn_metadata.as_ref(),
-        Input::FlowStep(flow_step) => flow_step.turn_metadata.as_ref(),
-        Input::Peer(_) | Input::ExternalEvent(_) | Input::Continuation(_) | Input::Operation(_) => {
-            None
-        }
-    }?;
-    let execution_kind = metadata.execution_kind?;
-    Some(
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_execution_kind(
-            policy,
-            execution_kind,
-            metadata.peer_response_terminal_apply_intent,
-        ),
-    )
 }
 
 fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
@@ -2260,39 +2237,6 @@ mod recovery_tests {
         assert!(
             machine_build_recovered_ingress_entry(&state).is_none(),
             "recovery must not derive execution kind from payload/policy when the durable runtime semantics stamp is missing"
-        );
-    }
-
-    #[test]
-    fn recovered_ingress_entry_accepts_durable_turn_metadata_execution_stamp() {
-        let input = Input::Prompt(crate::input::PromptInput::new(
-            "queued prompt",
-            Some(
-                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    execution_kind: Some(
-                        meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
-                    ),
-                    ..Default::default()
-                },
-            ),
-        ));
-        let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
-        state.persisted_input = Some(input);
-        state.policy = Some(crate::input_state::PolicySnapshot {
-            version: crate::policy_table::DEFAULT_POLICY_VERSION,
-            decision: policy(ApplyMode::StageRunBoundary),
-        });
-
-        let entry = machine_build_recovered_ingress_entry(&state)
-            .expect("durable turn metadata execution stamp should recover");
-
-        assert_eq!(
-            entry.runtime_semantics.execution_kind,
-            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
-        );
-        assert_eq!(
-            entry.runtime_semantics.boundary,
-            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint
         );
     }
 

@@ -1332,6 +1332,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await
                 } else {
+                    if let Err(discard_error) = self.discard_live_session(id).await {
+                        tracing::warn!(
+                            session_id = %id,
+                            error = %discard_error,
+                            "failed to discard live session after failed runtime turn"
+                        );
+                    }
                     Err(error)
                 }
             }
@@ -2686,6 +2693,7 @@ mod tests {
     struct DummyAgent {
         session: Arc<std::sync::Mutex<Session>>,
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
+        run_failure: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -2695,6 +2703,9 @@ mod tests {
             prompt: meerkat_core::types::ContentInput,
             _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
         ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            if let Some(message) = self.run_failure.clone() {
+                return Err(meerkat_core::error::AgentError::InternalError(message));
+            }
             let session_id = self.session_id();
             let result = {
                 let mut session = match self.session.lock() {
@@ -3037,6 +3048,7 @@ mod tests {
             Ok(DummyAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: None,
             })
         }
     }
@@ -3062,7 +3074,33 @@ mod tests {
                 inner: DummyAgent {
                     session: Arc::new(std::sync::Mutex::new(session)),
                     system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                    run_failure: None,
                 },
+            })
+        }
+    }
+
+    struct FailingRunBuilder;
+
+    #[async_trait::async_trait]
+    impl SessionAgentBuilder for FailingRunBuilder {
+        type Agent = DummyAgent;
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            let session = req
+                .build
+                .as_ref()
+                .and_then(|build| build.resume_session.clone())
+                .unwrap_or_default();
+            let system_context_state = session.system_context_state().unwrap_or_default();
+            Ok(DummyAgent {
+                session: Arc::new(std::sync::Mutex::new(session)),
+                system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: Some("synthetic run failure".to_string()),
             })
         }
     }
@@ -3100,6 +3138,7 @@ mod tests {
             Ok(DummyAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: None,
             })
         }
     }
@@ -3302,6 +3341,7 @@ mod tests {
             Ok(DummyAgent {
                 session: Arc::new(std::sync::Mutex::new(session)),
                 system_context_state: Arc::new(std::sync::Mutex::new(system_context_state)),
+                run_failure: None,
             })
         }
     }
@@ -3945,6 +3985,79 @@ mod tests {
             output.terminal,
             Some(CoreApplyTerminal::NoPendingBoundary)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_failed_runtime_turn_discards_live_pre_turn_context() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            FailingRunBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store),
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+
+        let mut req = start_turn_request("runtime failed turn");
+        req.pre_turn_context_appends = vec![PendingSystemContextAppend {
+            text: "failed-turn context must not leak".to_string(),
+            source: Some("peer_response_terminal:test:req".to_string()),
+            idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+            accepted_at: meerkat_core::time_compat::SystemTime::now(),
+        }];
+        req.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            },
+        );
+
+        let error = service
+            .apply_runtime_turn(
+                &created.session_id,
+                RunId::new(),
+                req,
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("synthetic run failure should propagate");
+
+        assert!(
+            error.to_string().contains("synthetic run failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !service
+                .has_live_session(&created.session_id)
+                .await
+                .expect("live-session status should succeed"),
+            "failed runtime turn must discard the live session carrying uncommitted pre-turn context"
+        );
+
+        let authoritative = service
+            .load_authoritative_session(&created.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("created session should remain durable");
+        assert!(
+            authoritative
+                .system_context_state()
+                .is_none_or(|state| state.applied.is_empty()),
+            "failed pre-turn context must not be committed to durable session state"
+        );
+        assert!(
+            authoritative.messages().iter().all(|message| {
+                !format!("{message:?}").contains("failed-turn context must not leak")
+            }),
+            "failed pre-turn context must not be committed into durable messages"
+        );
     }
 
     #[tokio::test]

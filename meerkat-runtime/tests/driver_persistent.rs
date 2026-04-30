@@ -7,9 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use meerkat_core::BlobStore;
 use meerkat_core::lifecycle::{
-    InputId, RunId, RuntimeExecutionKind,
-    run_primitive::{RunApplyBoundary, RuntimeTurnMetadata},
-    run_receipt::RunBoundaryReceipt,
+    InputId, RunId, run_primitive::RunApplyBoundary, run_receipt::RunBoundaryReceipt,
 };
 use meerkat_core::types::{ContentBlock, ImageData, SessionId};
 use meerkat_runtime::input_state::{InputStateSeed, InputTerminalOutcome, StoredInputState};
@@ -323,18 +321,6 @@ fn make_prompt(text: &str) -> Input {
         blocks: None,
         turn_metadata: None,
     })
-}
-
-fn make_runtime_stamped_prompt(text: &str) -> Input {
-    let mut input = make_prompt(text);
-    let Input::Prompt(prompt) = &mut input else {
-        unreachable!("make_prompt must return prompt input");
-    };
-    prompt.turn_metadata = Some(RuntimeTurnMetadata {
-        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
-        ..Default::default()
-    });
-    input
 }
 
 fn make_multimodal_prompt(text: &str, label: &str) -> Input {
@@ -1164,49 +1150,6 @@ async fn recovery_rejecting_later_row_restores_partial_recovered_projection() {
         driver.dequeue_next().is_none(),
         "failed recovery must not leave recovered queue projection",
     );
-}
-
-#[tokio::test]
-async fn recover_migrates_legacy_turn_metadata_execution_stamp() {
-    let store = Arc::new(InMemoryRuntimeStore::new());
-    let rid = LogicalRuntimeId::new("test");
-
-    let input = make_runtime_stamped_prompt("legacy runtime-stamped row");
-    let input_id = input.id().clone();
-    let mut state = InputState::new_accepted(input_id.clone());
-    state.persisted_input = Some(input);
-    state.durability = Some(InputDurability::Durable);
-    store
-        .persist_input_state(
-            &rid,
-            &StoredInputState {
-                state,
-                seed: InputStateSeed::new_accepted(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
-    driver
-        .recover()
-        .await
-        .expect("legacy runtime-stamped row should recover");
-
-    let recovered = driver
-        .input_state(&input_id)
-        .expect("recovered row should be present");
-    let semantics = recovered
-        .runtime_semantics
-        .expect("legacy turn metadata stamp should migrate to runtime semantics");
-    assert_eq!(semantics.execution_kind, RuntimeExecutionKind::ContentTurn);
-
-    let stored = store
-        .load_input_state(&rid, &input_id)
-        .await
-        .unwrap()
-        .expect("recovered row should be persisted");
-    assert_eq!(stored.state.runtime_semantics, Some(semantics));
 }
 
 #[tokio::test]

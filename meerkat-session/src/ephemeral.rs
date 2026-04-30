@@ -2599,16 +2599,6 @@ async fn session_task<A: SessionAgent>(
                     continue;
                 }
 
-                if !pre_turn_context_appends.is_empty() {
-                    apply_runtime_system_context_and_publish(
-                        &mut agent,
-                        &pre_turn_context_appends,
-                        &control,
-                        &mut next_seq,
-                        &source_id,
-                    );
-                }
-
                 agent.set_skill_references(skill_references);
                 if let Err(error) = agent.set_flow_tool_overlay(flow_tool_overlay) {
                     restore_deferred_turn_inputs(
@@ -2657,6 +2647,15 @@ async fn session_task<A: SessionAgent>(
                             )));
                         continue;
                     }
+                }
+                if !pre_turn_context_appends.is_empty() {
+                    apply_runtime_system_context_and_publish(
+                        &mut agent,
+                        &pre_turn_context_appends,
+                        &control,
+                        &mut next_seq,
+                        &source_id,
+                    );
                 }
                 let mut event_stream_open = true;
 
@@ -2964,6 +2963,7 @@ mod runtime_turn_metadata_tests {
         observed_skill_references: Arc<Mutex<Vec<Option<Vec<SkillKey>>>>>,
         observed_context_texts: Arc<Mutex<Vec<String>>>,
         run_context_counts: Arc<Mutex<Vec<usize>>>,
+        fail_flow_overlay_set: bool,
     }
 
     struct MetadataProbeAgent {
@@ -2971,6 +2971,7 @@ mod runtime_turn_metadata_tests {
         observed_skill_references: Arc<Mutex<Vec<Option<Vec<SkillKey>>>>>,
         observed_context_texts: Arc<Mutex<Vec<String>>>,
         run_context_counts: Arc<Mutex<Vec<usize>>>,
+        fail_flow_overlay_set: bool,
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
     }
 
@@ -2989,6 +2990,7 @@ mod runtime_turn_metadata_tests {
                 observed_skill_references: Arc::clone(&self.observed_skill_references),
                 observed_context_texts: Arc::clone(&self.observed_context_texts),
                 run_context_counts: Arc::clone(&self.run_context_counts),
+                fail_flow_overlay_set: self.fail_flow_overlay_set,
                 system_context_state: Arc::new(std::sync::Mutex::new(Default::default())),
             })
         }
@@ -3032,8 +3034,13 @@ mod runtime_turn_metadata_tests {
 
         fn set_flow_tool_overlay(
             &mut self,
-            _overlay: Option<TurnToolOverlay>,
+            overlay: Option<TurnToolOverlay>,
         ) -> Result<(), AgentError> {
+            if self.fail_flow_overlay_set && overlay.is_some() {
+                return Err(AgentError::ConfigError(
+                    "synthetic flow overlay failure".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -3091,6 +3098,7 @@ mod runtime_turn_metadata_tests {
                 observed_skill_references: Arc::clone(&observed_skill_references),
                 observed_context_texts,
                 run_context_counts,
+                fail_flow_overlay_set: false,
             },
             1,
         );
@@ -3139,6 +3147,7 @@ mod runtime_turn_metadata_tests {
                 observed_skill_references,
                 observed_context_texts: Arc::clone(&observed_context_texts),
                 run_context_counts: Arc::clone(&run_context_counts),
+                fail_flow_overlay_set: false,
             },
             1,
         );
@@ -3198,6 +3207,87 @@ mod runtime_turn_metadata_tests {
                 .expect("run context counts lock poisoned"),
             vec![1],
             "pre-turn context must be applied before the agent run starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_turn_does_not_apply_pre_turn_context_when_setup_fails() {
+        let observed_skill_references = Arc::new(Mutex::new(Vec::new()));
+        let observed_context_texts = Arc::new(Mutex::new(Vec::new()));
+        let run_context_counts = Arc::new(Mutex::new(Vec::new()));
+        let service = EphemeralSessionService::new(
+            MetadataProbeBuilder {
+                observed_skill_references,
+                observed_context_texts: Arc::clone(&observed_context_texts),
+                run_context_counts: Arc::clone(&run_context_counts),
+                fail_flow_overlay_set: true,
+            },
+            1,
+        );
+
+        let result = service
+            .create_session(CreateSessionRequest {
+                model: "metadata-probe-model".to_string(),
+                prompt: ContentInput::Text("defer".to_string()),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions::default()),
+                labels: None,
+            })
+            .await
+            .expect("deferred session should create");
+
+        let error = service
+            .start_turn(
+                &result.session_id,
+                StartTurnRequest {
+                    prompt: ContentInput::Text("reaction".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    handling_mode: meerkat_core::types::HandlingMode::Queue,
+                    event_tx: None,
+                    skill_references: None,
+                    flow_tool_overlay: Some(TurnToolOverlay {
+                        allowed_tools: Some(vec!["flow_tool".to_string()]),
+                        blocked_tools: None,
+                    }),
+                    pre_turn_context_appends: vec![PendingSystemContextAppend {
+                        text: "must not leak before setup succeeds".to_string(),
+                        source: Some("peer_response_terminal:test:req".to_string()),
+                        idempotency_key: Some("peer_response_terminal:test:req".to_string()),
+                        accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                    }],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .expect_err("flow overlay setup should fail");
+
+        assert!(
+            error.to_string().contains("synthetic flow overlay failure"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            observed_context_texts
+                .lock()
+                .expect("observed context texts lock poisoned")
+                .is_empty(),
+            "pre-turn context must not be visible when setup fails before run"
+        );
+        assert!(
+            run_context_counts
+                .lock()
+                .expect("run context counts lock poisoned")
+                .is_empty(),
+            "agent run must not start after setup failure"
         );
     }
 }

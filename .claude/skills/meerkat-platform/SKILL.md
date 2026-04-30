@@ -628,17 +628,19 @@ Key types: `PersistedOpsSnapshot`, `EpochCursorState`, `EpochCursorSnapshot`. Re
 
 ### Skills
 
-Skill loading is runtime-root aware. Workspace realms use project `.rkat/skills`; non-workspace realms use realm runtime roots.
+Skill loading is runtime-root aware. Workspace realms can discover project `.rkat/skills`; non-workspace realms use realm runtime roots and configured repositories.
 
-**Skill introspection** surfaces are available on all surfaces:
+Canonical skill identity is `SkillKey { source_uuid, skill_name }`. `preload_skills` carries plain `SkillKey` objects; API `skill_refs` carries tagged `SkillRef` objects (`kind: "structured"`, `source_uuid`, `skill_name`). Do not describe slash-delimited skill IDs as a public wire format.
 
-- CLI: `rkat skill list [--json]`, `rkat skill inspect <id> [--source <name>] [--json]`
-- RPC: `skills/list`, `skills/inspect`
-- REST: `GET /skills`, `GET /skills/{id}`
-- MCP: `meerkat_skills` tool (`action: "list"` / `"inspect"`)
+**Skill introspection** surfaces:
+
+- CLI: `rkat skill list [--json]`, `rkat skill inspect <skill-name> --source-uuid <uuid> [--json]`
+- RPC: `skills/list`
+- REST: `GET /skills`
+- MCP: `meerkat_skills` tool (`action: "list"`)
 - Rust SDK: `SkillRuntime::list_all_with_provenance()`, `SkillRuntime::load_from_source()`
 
-Introspection returns both active and shadowed skills with their source provenance, enabling debugging of skill resolution order.
+Introspection returns typed keys plus source provenance. Shadowing is by full `SkillKey`, not by `skill_name` alone. Agent-facing skill tools (`browse_skills`, `load_skill`, resource tools, function invocation) also use `source_uuid` + `skill_name`.
 
 ### Hooks
 

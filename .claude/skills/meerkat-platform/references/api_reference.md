@@ -61,7 +61,7 @@ rkat comms send <SESSION-ID> --json <JSON>        # (comms feature)
 rkat comms peers <SESSION-ID>                     # (comms feature)
 rkat realm current|list|show
 rkat skill list [--json]
-rkat skill inspect <ID> [--source <SOURCE>] [--json]
+rkat skill inspect <skill-name> --source-uuid <uuid> [--json]
 rkat models [--json]
 rkat mob create|list|status|spawn|retire|respawn|wire|unwire|turn|stop|resume|complete|flows|run-flow|flow-status|events|destroy|pack|inspect|validate|deploy|web
 rkat config get|set|patch ...
@@ -136,7 +136,6 @@ Core endpoints:
 - `POST /sessions/{id}/event` — (legacy) push external event
 - `POST /requests/{request_id}/cancel` — cancel uncommitted in-flight work when `X-Meerkat-Request-Id` is supplied
 - `GET /skills` — list skills with provenance
-- `GET /skills/{id}` — inspect a skill's full body
 - `GET /health`
 - `GET /models/catalog` — curated model catalog with provider profiles
 - `GET /capabilities`
@@ -201,7 +200,6 @@ Core methods:
 - `config/set`
 - `config/patch`
 - `skills/list` — list skills with provenance (active + shadowed)
-- `skills/inspect` — inspect a skill's full body by ID
 - `models/catalog` — curated model catalog with provider profiles
 - `capabilities/get`
 - `mcp/add` — stage live MCP server add for a session
@@ -252,7 +250,7 @@ Core tools:
 - `meerkat_config` — get/set/patch config
 - `meerkat_capabilities` — list runtime capabilities
 - `meerkat_models_catalog` — curated model catalog with provider profiles
-- `meerkat_skills` — list (`action: "list"`) or inspect (`action: "inspect"`, `skill_id: "..."`) skills
+- `meerkat_skills` — list skills (`action: "list"`)
 - `meerkat_mcp_add` — stage live MCP server add
 - `meerkat_mcp_remove` — stage live MCP server remove
 - `meerkat_mcp_reload` — stage live MCP server reload
@@ -439,7 +437,7 @@ let mut agent = factory.build_agent(build, &config).await?;
 
 `AgentBuildConfig` also carries:
 - `silent_comms_intents: Vec<String>` — intents injected silently (no LLM turn)
-- `preload_skills: Option<Vec<SkillId>>` — skills to inject at session creation
+- `preload_skills: Option<Vec<SkillKey>>` — skills to inject at session creation
 - `runtime_build_mode: RuntimeBuildMode` — required, determines ops lifecycle ownership
 
 ### Runtime build mode

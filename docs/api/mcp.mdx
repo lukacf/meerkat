@@ -47,7 +47,7 @@ second surface-local execution loop.
 | `meerkat_config` | Get or update server config |
 | `meerkat_capabilities` | Query runtime capabilities |
 | `meerkat_models_catalog` | List available models with provider profiles and capabilities |
-| `meerkat_skills` | List or inspect available skills |
+| `meerkat_skills` | List available skills |
 | `meerkat_schedule_*` tools | Agent-facing schedule create/get/list/update/pause/resume/delete/occurrences tools |
 | `meerkat_mcp_add` | Stage a live MCP server addition on an active session |
 | `meerkat_mcp_remove` | Stage a live MCP server removal on an active session |
@@ -694,53 +694,40 @@ No parameters required. The catalog is resolved from built-in model metadata plu
 
 ### meerkat_skills
 
-List or inspect available skills with provenance information.
+List available skills with provenance information.
 
 <CodeGroup>
 ```json List all skills
 { "action": "list" }
 ```
 
-```json Inspect a specific skill
-{
-  "action": "inspect",
-  "skill_id": "task-workflow"
-}
-```
-
 ```json List response
 {
   "skills": [
     {
-      "id": "task-workflow",
+      "key": {
+        "source_uuid": "00000000-0000-4b11-8111-000000000001",
+        "skill_name": "task-workflow"
+      },
       "name": "Task Workflow",
       "description": "How to use task tools",
       "scope": "builtin",
-      "source": "embedded",
+      "source": {
+        "source_uuid": "00000000-0000-4b11-8111-000000000001",
+        "display_name": "embedded",
+        "transport_kind": "embedded",
+        "fingerprint": "embedded:inventory",
+        "status": "active"
+      },
       "is_active": true
     }
   ]
 }
 ```
-
-```json Inspect response
-{
-  "id": "task-workflow",
-  "name": "Task Workflow",
-  "description": "How to use task tools",
-  "scope": "builtin",
-  "source": "embedded",
-  "body": "# Task Workflow\n\nUse task_create to..."
-}
-```
 </CodeGroup>
 
 <ParamField body="action" type="string" required>
-  `"list"` to list all skills, `"inspect"` to inspect a specific skill.
-</ParamField>
-
-<ParamField body="skill_id" type="string">
-  Skill ID to inspect (required when `action` is `"inspect"`).
+  `"list"` to list all skills.
 </ParamField>
 
 The list response includes both active and shadowed skills. Shadowed skills have `is_active: false` and a `shadowed_by` field indicating which source has precedence.

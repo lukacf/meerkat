@@ -249,11 +249,14 @@ See the [hooks guide](/guides/hooks) for usage details.
 
 | Type | Purpose |
 |------|---------|
-| `SkillId` | Newtype skill identifier |
+| `SourceUuid` | Stable source identity |
+| `SkillName` | Lowercase dash-separated skill slug |
+| `SkillKey` | Canonical skill identifier: `source_uuid` + `skill_name` |
+| `SkillRef` | Tagged per-turn skill reference (`kind: "structured"`) |
 | `SkillScope` | `Builtin`, `Project`, `User` |
-| `SkillDescriptor` | Skill metadata (id, name, description, required capabilities) |
+| `SkillDescriptor` | Skill metadata (key, name, description, required capabilities, source name) |
 | `SkillDocument` | Loaded skill with body content |
-| `SkillError` | `NotFound`, `CapabilityUnavailable`, `Ambiguous`, `Load`, `Parse`, `SourceUuidCollision`, `SourceUuidMutationWithoutLineage`, `MissingSkillRemaps`, `RemapWithoutLineage`, `InvalidLegacySkillRefFormat`, `UnknownSkillAlias`, `RemapCycle` |
+| `SkillError` | `NotFound`, `CapabilityUnavailable`, `Load`, `Parse`, `SourceUuidCollision`, `SourceUuidMutationWithoutLineage`, `MissingSkillRemaps`, `RemapWithoutLineage`, `UnknownSkillAlias`, `RemapCycle` |
 
 See the [skills guide](/guides/skills) for usage details.
 

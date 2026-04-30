@@ -620,7 +620,7 @@ Returns the same result shape as `session/create`. Fails with error code `-32001
 </ParamField>
 
 <ParamField body="skill_refs" type="object[] | null">
-  Structured skill references to resolve and inject for this turn.
+  Tagged structured skill references to resolve and inject for this turn. Each entry uses `{"kind":"structured","source_uuid":"...","skill_name":"..."}`.
 </ParamField>
 
 ### turn/interrupt
@@ -832,14 +832,7 @@ List all skills with provenance information, including active and shadowed entri
           "fingerprint": "repo-7cc66f36fd9db1a1",
           "status": "active"
         },
-        "is_active": false,
-        "shadowed_by": {
-          "source_uuid": "00000000-0000-4b11-8111-000000000001",
-          "display_name": "embedded",
-          "transport_kind": "embedded",
-          "fingerprint": "embedded:inventory",
-          "status": "active"
-        }
+        "is_active": true
       }
     ]
   }

@@ -8,31 +8,92 @@ Use this page when you need exact skill-system vocabulary rather than a task wal
 
 ## Core identity model
 
-- `SkillKey { source_uuid, skill_name }`
-- `SkillRef`
-- source precedence and shadowing
+- `SourceUuid` is the stable source identity. Builtins use `00000000-0000-4b11-8111-000000000001`; conventional project-local `.rkat/skills` uses `00000000-0000-4b11-8111-000000000002`.
+- `SkillName` is a lowercase dash-separated slug (`[a-z0-9-]`, no leading/trailing dash, no `--`).
+- `SkillKey { source_uuid, skill_name }` is the canonical skill identity across runtime, RPC, REST, SDK, CLI, and tool surfaces.
+- `SkillRef` is the wire wrapper for per-turn refs. It currently has one tagged form:
 
-## Source transport families
+```json
+{
+  "kind": "structured",
+  "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+  "skill_name": "email-extractor"
+}
+```
 
-- filesystem
-- git
-- HTTP
-- stdio
-- embedded
+`preload_skills` carries plain `SkillKey` objects; `skill_refs` carries tagged `SkillRef` objects. Legacy string refs are rejected.
+
+## Source Identity
+
+Each source has a `SourceIdentityRecord`:
+
+- `source_uuid`
+- `display_name`
+- `transport_kind`: `embedded`, `filesystem`, `git`, `http`, or `stdio`
+- `fingerprint`
+- `status`: `active`, `disabled`, or `retired`
+
+The source identity registry applies lifecycle checks before load. Disabled or retired sources fail resolution. Source UUID rotations, renames, splits, and merges are represented with lineage events plus `SkillKeyRemap` entries where the event needs per-skill coverage.
+
+Shadowing is keyed by the full `SkillKey`, not by `skill_name` alone. Two sources can both contain `email-extractor`; they are distinct skills unless their `source_uuid` is also the same.
+
+## Source Transports
+
+| Transport | Configuration shape | Notes |
+|-----------|---------------------|-------|
+| Embedded | component crate registration | Builtin skills registered through inventory. |
+| Filesystem | `type = "filesystem"`, `path = "..."` | Recursively discovers directories containing `SKILL.md`. |
+| Git | `type = "git"`, `url`, `git_ref`, `ref_type` | Uses local cache and refresh TTL for branch refs. |
+| HTTP | `type = "http"`, `url`, auth fields | Requires the HTTP skills feature. |
+| Stdio | `type = "stdio"`, `command`, `args` | External skill source process. |
 
 ## Activation paths
 
-- preload at session creation
-- per-turn `skill_refs`
-- legacy slash-reference compatibility
+- **Preload at session creation**: `preload_skills: SkillKey[]`; content is resolved into the system prompt before the first turn.
+- **First-turn or per-turn injection**: `skill_refs: SkillRef[]`; content is injected for that turn.
+- **CLI preload convenience**: `rkat run --skill <skill-name>` resolves a runtime-local slug to a builtin-source key.
+
+There is no slash-delimited public wire format. Use typed keys.
 
 ## Discovery tools
 
-- `browse_skills`
-- `load_skill`
-- `skill_list_resources`
-- `skill_read_resource`
-- `skill_invoke_function`
+Agent-facing discovery tools use typed key fields:
+
+| Tool | Key fields | Purpose |
+|------|------------|---------|
+| `browse_skills` | optional `source_uuid` filter | List active skills, optionally filtered by source UUID or search query. |
+| `load_skill` | `source_uuid`, `skill_name` | Load a skill's full instructions into the conversation. |
+| `skill_list_resources` | `source_uuid`, `skill_name` | List skill-owned resources/artifacts. |
+| `skill_read_resource` | `source_uuid`, `skill_name`, resource path | Read a specific skill-owned resource. |
+| `skill_invoke_function` | `source_uuid`, `skill_name`, function name, arguments | Invoke a skill-defined structured function. |
+
+## Rendering
+
+Flat inventory renders full key IDs:
+
+```xml
+<available_skills>
+  <skill id="00000000-0000-4b11-8111-000000000001/task-workflow">
+    <description>How to use task tools</description>
+  </skill>
+</available_skills>
+```
+
+Collection mode groups by `source_uuid` and instructs the agent to use `browse_skills` and `load_skill`. Injection blocks are size-limited to 32 KiB and rendered as `<skill id="source_uuid/skill_name">...</skill>`.
+
+## Public Introspection
+
+Current public introspection list surfaces:
+
+| Surface | Operation |
+|---------|-----------|
+| CLI | `rkat skill list [--json]` |
+| CLI inspect | `rkat skill inspect <skill-name> --source-uuid <uuid> [--json]` |
+| RPC | `skills/list` |
+| REST | `GET /skills` |
+| MCP | `meerkat_skills` with `action: "list"` |
+
+List responses include `key`, `source`, `is_active`, and optional `shadowed_by` provenance.
 
 ## See also
 

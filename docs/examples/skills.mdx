@@ -11,7 +11,7 @@ Recommended progression on this page:
 1. discover skills
 2. inspect a skill
 3. preload skills for a session
-4. inject typed skills at session start if you need explicit canonical references
+4. inject typed skills for the first turn if you do not want a session-level preload
 5. inject skills for one specific turn
 </Note>
 
@@ -55,14 +55,16 @@ Discover all skills from every source (project, user, filesystem, git, HTTP, std
     ```python
     skills = await client.list_skills()
     for s in skills:
-        print(f"{s.id}: {s.name} (source={s.source})")
+        key = s["key"]
+        print(f"{key['source_uuid']}/{key['skill_name']}: {s['name']}")
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const skills = await client.listSkills();
     for (const s of skills) {
-      console.log(`${s.id}: ${s.name} (source=${s.source})`);
+      const key = s.key as { source_uuid: string; skill_name: string };
+      console.log(`${key.source_uuid}/${key.skill_name}: ${s.name}`);
     }
     ```
   </Tab>
@@ -72,7 +74,7 @@ Discover all skills from every source (project, user, filesystem, git, HTTP, std
         .list_all_with_provenance(&SkillFilter::default())
         .await?;
     for entry in &entries {
-        println!("{}: active={}", entry.descriptor.id, entry.is_active);
+        println!("{}: active={}", entry.descriptor.key, entry.is_active);
     }
     ```
   </Tab>
@@ -80,43 +82,29 @@ Discover all skills from every source (project, user, filesystem, git, HTTP, std
 
 ## Inspect a skill
 
-View the full body and metadata of a specific skill. Use `--source` to inspect a shadowed version.
+View the full body and metadata of a specific skill by canonical key.
 
 <Tabs>
   <Tab title="CLI">
     ```bash
     # Inspect the active version
-    rkat skill inspect task-workflow
+    rkat skill inspect task-workflow \
+      --source-uuid 00000000-0000-4b11-8111-000000000001
 
-    # Inspect a shadowed version from a specific source
-    rkat skill inspect task-workflow --source company --json
-    ```
-  </Tab>
-  <Tab title="REST">
-    ```bash
-    # Active version
-    curl http://127.0.0.1:8080/skills/task-workflow
-
-    # From a specific source
-    curl http://127.0.0.1:8080/skills/task-workflow?source=company
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    {
-      "name": "meerkat_skills",
-      "arguments": {
-        "action": "inspect",
-        "skill_id": "task-workflow",
-        "source": "company"
-      }
-    }
+    # JSON output
+    rkat skill inspect task-workflow \
+      --source-uuid 00000000-0000-4b11-8111-000000000001 \
+      --json
     ```
   </Tab>
   <Tab title="Rust">
     ```rust
+    let key = SkillKey::new(
+        SourceUuid::parse("00000000-0000-4b11-8111-000000000001")?,
+        SkillName::parse("task-workflow")?,
+    );
     let doc = skill_runtime
-        .load_from_source(&"task-workflow".into(), Some("company"))
+        .load_from_source(&key, Some("00000000-0000-4b11-8111-000000000001"))
         .await?;
     println!("{}", doc.body);
     ```
@@ -144,7 +132,16 @@ Use this when the skill should shape the whole session from the start.
       "method": "session/create",
       "params": {
         "prompt": "Extract emails",
-        "preload_skills": ["email-extractor", "markdown-formatter"]
+        "preload_skills": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "email-extractor"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }
     }
     ```
@@ -155,7 +152,16 @@ Use this when the skill should shape the whole session from the start.
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Extract emails",
-        "preload_skills": ["email-extractor", "markdown-formatter"]
+        "preload_skills": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "email-extractor"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }'
     ```
   </Tab>
@@ -165,23 +171,52 @@ Use this when the skill should shape the whole session from the start.
       "name": "meerkat_run",
       "arguments": {
         "prompt": "Extract emails",
-        "preload_skills": ["email-extractor", "markdown-formatter"]
+        "preload_skills": [
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "email-extractor"
+          },
+          {
+            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+            "skill_name": "markdown-formatter"
+          }
+        ]
       }
     }
     ```
   </Tab>
   <Tab title="Python">
     ```python
+    from meerkat import SkillKey
+
     result = await client.create_session(
         "Extract emails",
-        preload_skills=["email-extractor", "markdown-formatter"],
+        preload_skills=[
+            SkillKey(
+                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                skill_name="email-extractor",
+            ),
+            SkillKey(
+                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                skill_name="markdown-formatter",
+            ),
+        ],
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const result = await client.createSession("Extract emails", {
-      preloadSkills: ["email-extractor", "markdown-formatter"],
+      preloadSkills: [
+        {
+          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+          skillName: "email-extractor",
+        },
+        {
+          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+          skillName: "markdown-formatter",
+        },
+      ],
     });
     ```
   </Tab>
@@ -189,8 +224,14 @@ Use this when the skill should shape the whole session from the start.
     ```rust
     let build_opts = SessionBuildOptions {
         preload_skills: Some(vec![
-            "email-extractor".into(),
-            "markdown-formatter".into(),
+            SkillKey::new(
+                SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                SkillName::parse("email-extractor")?,
+            ),
+            SkillKey::new(
+                SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                SkillName::parse("markdown-formatter")?,
+            ),
         ]),
         ..Default::default()
     };
@@ -198,9 +239,9 @@ Use this when the skill should shape the whole session from the start.
   </Tab>
 </Tabs>
 
-## Typed session-start injection
+## First-turn skill injection
 
-Use this when you want explicit canonical `SkillKey` references at session start rather than preload-by-id behavior.
+Use `skill_refs` when the skill should be injected for the first turn rather than preloaded into the session system prompt.
 
 <Tabs>
   <Tab title="JSON-RPC">
@@ -212,10 +253,12 @@ Use this when you want explicit canonical `SkillKey` references at session start
         "prompt": "Extract emails",
         "skill_refs": [
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "email-extractor"
           },
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "markdown-formatter"
           }
@@ -232,10 +275,12 @@ Use this when you want explicit canonical `SkillKey` references at session start
         "prompt": "Extract emails",
         "skill_refs": [
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "email-extractor"
           },
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "markdown-formatter"
           }
@@ -251,10 +296,12 @@ Use this when you want explicit canonical `SkillKey` references at session start
         "prompt": "Extract emails",
         "skill_refs": [
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "email-extractor"
           },
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "markdown-formatter"
           }
@@ -265,6 +312,8 @@ Use this when you want explicit canonical `SkillKey` references at session start
   </Tab>
   <Tab title="Python">
     ```python
+    from meerkat import SkillKey
+
     result = await client.create_session(
         "Extract emails",
         skill_refs=[
@@ -325,122 +374,6 @@ Use this when you want explicit canonical `SkillKey` references at session start
   </Tab>
 </Tabs>
 
-## Preload skills
-
-Preloaded skills are resolved and injected into the system prompt before the first turn runs. They use the same structured skill keys as per-turn skill injection.
-
-<Tabs>
-  <Tab title="CLI">
-    ```bash
-    rkat run "Help me deploy" --skill deployment-guide --skill shell-patterns
-    ```
-  </Tab>
-  <Tab title="JSON-RPC">
-    ```json
-    {
-      "jsonrpc": "2.0", "id": 1,
-      "method": "session/create",
-      "params": {
-        "prompt": "Help me deploy",
-        "preload_skills": [
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "deployment-guide"
-          },
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "shell-patterns"
-          }
-        ]
-      }
-    }
-    ```
-  </Tab>
-  <Tab title="REST">
-    ```bash
-    curl -X POST http://127.0.0.1:8080/sessions \
-      -H "Content-Type: application/json" \
-      -d '{
-        "prompt": "Help me deploy",
-        "preload_skills": [
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "deployment-guide"
-          },
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "shell-patterns"
-          }
-        ]
-      }'
-    ```
-  </Tab>
-  <Tab title="MCP">
-    ```json
-    {
-      "name": "meerkat_run",
-      "arguments": {
-        "prompt": "Help me deploy",
-        "preload_skills": [
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "deployment-guide"
-          },
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "shell-patterns"
-          }
-        ]
-      }
-    }
-    ```
-  </Tab>
-  <Tab title="Python">
-    ```python
-    result = await client.create_session(
-        "Help me deploy",
-        preload_skills=[
-            SkillKey(
-                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
-                skill_name="deployment-guide",
-            ),
-            SkillKey(
-                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
-                skill_name="shell-patterns",
-            ),
-        ],
-    )
-    ```
-  </Tab>
-  <Tab title="TypeScript">
-    ```typescript
-    const result = await client.createSession("Help me deploy", {
-      preloadSkills: [
-        {
-          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-          skillName: "deployment-guide",
-        },
-        {
-          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-          skillName: "shell-patterns",
-        },
-      ],
-    });
-    ```
-  </Tab>
-  <Tab title="Rust">
-    ```rust
-    let build_opts = SessionBuildOptions {
-        preload_skills: Some(vec![
-            "deployment-guide".into(),
-            "shell-patterns".into(),
-        ]),
-        ..Default::default()
-    };
-    ```
-  </Tab>
-</Tabs>
-
 ## Per-turn skill injection
 
 Inject skills into a specific turn on an existing session. The skill content is added to the context for that turn only. On the CLI, `--skill` remains the preload-style runtime-local path; the typed per-turn surface is `skill_refs`.
@@ -462,6 +395,7 @@ Inject skills into a specific turn on an existing session. The skill content is 
         "prompt": "Now format the output",
         "skill_refs": [
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "markdown-formatter"
           }
@@ -478,6 +412,7 @@ Inject skills into a specific turn on an existing session. The skill content is 
         "prompt": "Now format the output",
         "skill_refs": [
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "markdown-formatter"
           }
@@ -494,6 +429,7 @@ Inject skills into a specific turn on an existing session. The skill content is 
         "prompt": "Now format the output",
         "skill_refs": [
           {
+            "kind": "structured",
             "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
             "skill_name": "markdown-formatter"
           }
@@ -504,6 +440,8 @@ Inject skills into a specific turn on an existing session. The skill content is 
   </Tab>
   <Tab title="Python">
     ```python
+    from meerkat import SkillKey
+
     result = await session.turn(
         "Now format the output",
         skill_refs=[

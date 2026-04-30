@@ -4,7 +4,7 @@ description: "Domain-specific knowledge injection via markdown documents with YA
 icon: "graduation-cap"
 ---
 
-Skills inject domain-specific knowledge into the agent's context. A skill is a markdown document with YAML frontmatter that gets included in the system prompt or per-turn context when its required capabilities are available.
+Skills inject domain-specific knowledge into the agent's context. A skill is a `SKILL.md` document with YAML frontmatter, addressed at runtime by `SkillKey { source_uuid, skill_name }`, and included in the system prompt or per-turn context when its required capabilities are available.
 
 <Note>
 This page is the task-first guide. For the low-level runtime vocabulary and identity model, see [Skills reference](/reference/skills-reference).
@@ -16,22 +16,22 @@ Use this guide when you want to:
 
 - create or configure skill sources
 - preload or inject skills into sessions
+- understand `SkillKey` identity and source provenance
 - understand when to use `preload_skills` vs `skill_refs`
 
 ## Skill sources
 
-Skills are discovered from multiple sources, in precedence order:
+Skills are discovered from multiple source transports:
 
-1. **Project/runtime root** (`<runtime-root>/.rkat/skills/`) — highest precedence
-2. **User** (`~/.rkat/skills/`)
-3. **Configured filesystem sources**
-4. **Git repositories** — cloned to local cache, refreshed on TTL
-5. **HTTP endpoints** — fetched from remote skill servers
-6. **Stdio sources**
-7. **Embedded** (builtin skills from component crates)
+- **Embedded** builtin skills from component crates
+- **Project/runtime root** (`<context-root>/.rkat/skills/`) when a context root is active
+- **Configured filesystem sources**
+- **Git repositories** cloned to local cache and refreshed on TTL
+- **HTTP endpoints** fetched from remote skill servers
+- **Stdio sources**
 
 <Note>
-A project skill with the same ID as a builtin skill overrides the builtin (first-source-wins).
+The canonical identity is the pair of `source_uuid` and `skill_name`. Two sources can both provide `task-workflow` without colliding because their source UUIDs differ. First-source-wins shadowing applies only when the same full `SkillKey` appears more than once.
 </Note>
 
 ### Git sources
@@ -101,9 +101,9 @@ When running background jobs...
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | `String` | Yes | Canonical lowercase slug name for the skill |
+| `name` | `String` | Yes | Canonical lowercase slug name for the skill. For filesystem skills, this must match the containing directory. |
 | `description` | `String` | Yes | One-line description |
-| `requires_capabilities` | `Vec<String>` | No (default `[]`) | Capability IDs that must be available |
+| `requires_capabilities` | `Vec<String>` | No (default `[]`) | Lowercase capability IDs that must be available |
 
 The frontmatter is delimited by `---` markers. The body (everything after the closing `---`) is stored as the skill's `body` field.
 
@@ -114,17 +114,20 @@ Skills are filtered by their `requires_capabilities` field before being shown or
 - A skill is included only if **all** its required capabilities are available in the current build/config.
 - A skill with an empty `requires_capabilities` list is always available.
 
-## Skill resolution
+## Skill identity and resolution
 
-The resolver supports two reference formats:
+Every runtime skill reference resolves to:
 
-1. **Slash-prefix ID**: `/skill-id` -- current slash activation path.
+```json
+{
+  "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+  "skill_name": "email-extractor"
+}
+```
 
-Resolution mode:
+The source identity registry applies source lifecycle gates and lineage/remap rules before load. Disabled or retired sources fail resolution; configured source rotations, renames, splits, and merges require explicit lineage and per-skill remap entries where needed.
 
-| Mode | Behavior |
-|------|----------|
-| `Explicit` | Only explicit `/skill-id` matches |
+Legacy slash-delimited strings are no longer accepted by wire `skill_refs`. Some local CLI paths still accept a bare skill slug as a convenience, but API and tool surfaces should use structured keys.
 
 ## Rendering
 
@@ -136,10 +139,10 @@ The renderer produces two output formats:
 
     ```xml
     <available_skills>
-      <skill id="task-workflow">
+      <skill id="00000000-0000-4b11-8111-000000000001/task-workflow">
         <description>How to use task_create/task_update/task_list for structured work tracking</description>
       </skill>
-      <skill id="shell-patterns">
+      <skill id="00000000-0000-4b11-8111-000000000001/shell-patterns">
         <description>Background job patterns with shell and job management tools</description>
       </skill>
     </available_skills>
@@ -149,11 +152,11 @@ The renderer produces two output formats:
 
     ```xml
     <available_skills mode="collections">
-      <collection path="extraction" count="8">Entity extraction skills</collection>
-      <collection path="formatting" count="3">Output formatting skills</collection>
+      <collection source="00000000-0000-4b11-8111-000000000001" count="8">Embedded skills</collection>
+      <collection source="dc256086-0d2f-4f61-a307-320d4148107f" count="3">Company skills</collection>
 
-      Use the browse_skills tool to list skills in a collection or search.
-      Use the load_skill tool or /collection/skill-name to activate a skill.
+      Use the browse_skills tool to list skills in a source or search.
+      Use the load_skill tool to activate a skill by SkillKey.
     </available_skills>
     ```
 
@@ -163,7 +166,7 @@ The renderer produces two output formats:
     Wraps the skill body in XML-style tags for per-turn injection:
 
     ```xml
-    <skill id="shell-patterns">
+    <skill id="00000000-0000-4b11-8111-000000000001/shell-patterns">
     # Shell Patterns
 
     When running background jobs...
@@ -249,19 +252,19 @@ In collection mode (when there are more than 12 skills), the system prompt shows
 
 Skills can be activated in three ways:
 
-### 1. Legacy slash reference compatibility
+### 1. CLI preload convenience
 
-Some host surfaces still accept legacy slash references as boundary compatibility input:
+The CLI `--skill` option accepts local skill slugs and materializes builtin-source `SkillKey` values for preload:
 
+```bash
+rkat run "Extract emails" --skill email-extractor
 ```
-/extraction/email Extract the sender from this email
-```
 
-Treat this as compatibility behavior rather than the primary model. The recommended current path is explicit `skill_refs`, because the canonical runtime identity for a skill is `SkillKey { source_uuid, skill_name }`.
+Use typed keys for API and tool surfaces.
 
 ### 2. Programmatic typed `skill_refs` (per-turn, recommended)
 
-Pass `skill_refs` in the API request to resolve and inject skills for a specific turn:
+Pass tagged `skill_refs` in API requests to resolve and inject skills for a specific turn:
 
 ```json
 {
@@ -271,6 +274,7 @@ Pass `skill_refs` in the API request to resolve and inject skills for a specific
     "prompt": "Extract emails from this text",
     "skill_refs": [
       {
+        "kind": "structured",
         "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
         "skill_name": "email-extractor"
       }
@@ -279,7 +283,7 @@ Pass `skill_refs` in the API request to resolve and inject skills for a specific
 }
 ```
 
-Legacy `skill_references` strings are retired; use structured `skill_refs`.
+Legacy `skill_references` strings are retired and rejected; use structured `skill_refs`.
 
 ### 3. Preloading at session creation
 
@@ -315,45 +319,47 @@ Skill introspection lets you see all skills — including shadowed ones — with
 | Surface | Method | Description |
 |---------|--------|-------------|
 | CLI | `rkat skill list [--json]` | List all skills with provenance |
-| CLI | `rkat skill inspect <id> [--source <name>] [--json]` | Inspect a skill's full body |
+| CLI | `rkat skill inspect <skill-name> --source-uuid <uuid> [--json]` | Inspect a skill's full body |
 | RPC | `skills/list` | List skills with provenance |
 | REST | `GET /skills` | List skills |
-| REST | `GET /skills/{id}` | Inspect a skill |
-| MCP | `meerkat_skills` tool (`action: "list"` / `"inspect"`) | List or inspect |
+| MCP | `meerkat_skills` tool (`action: "list"`) | List skills |
 | Rust SDK | `SkillRuntime::list_all_with_provenance()` | Programmatic access |
-| Rust SDK | `SkillRuntime::load_from_source()` | Load from specific source |
+| Rust SDK | `SkillRuntime::load_from_source()` | Load a typed key from a specific source UUID |
 
 ### Shadowing
 
-When multiple sources provide a skill with the same ID, the first source wins (project > user > git > http > embedded). Introspection shows both the active skill and the shadowed entries:
+When multiple sources provide the same full `SkillKey`, the first source in the runtime composite wins. Introspection shows both the active skill and the shadowed entries. The common case is that matching `skill_name` values from different sources remain separate active skills because their `source_uuid` values differ:
 
 ```json
 [
   {
-    "id": "task-workflow",
-    "name": "Custom Task Workflow",
-    "scope": "project",
-    "source": "company",
+    "key": {
+      "source_uuid": "00000000-0000-4b11-8111-000000000001",
+      "skill_name": "task-workflow"
+    },
+    "name": "Task Workflow",
+    "scope": "builtin",
     "is_active": true
   },
   {
-    "id": "task-workflow",
-    "name": "Task Workflow",
-    "scope": "builtin",
-    "source": "embedded",
-    "is_active": false,
-    "shadowed_by": "company"
+    "key": {
+      "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+      "skill_name": "task-workflow"
+    },
+    "name": "Custom Task Workflow",
+    "scope": "project",
+    "is_active": true
   }
 ]
 ```
 
-Use `--source <name>` (CLI) or the `source` parameter (RPC/SDK) to load the body of a shadowed skill directly, bypassing first-wins resolution.
+Use a full `SkillKey` (`skill_name` plus `source_uuid`) when inspecting or loading a specific source.
 
 ### Rust SDK
 
 ```rust
 use meerkat::{AgentFactory, SkillRuntime, SkillFilter};
-use meerkat_core::Config;
+use meerkat_core::{Config, skills::{SkillKey, SkillName, SourceUuid}};
 
 let config = Config::load().await?;
 let factory = AgentFactory::new(store_path);
@@ -363,11 +369,20 @@ if let Some(runtime) = factory.build_skill_runtime(&config).await? {
     // List all skills with provenance
     let entries = runtime.list_all_with_provenance(&SkillFilter::default()).await?;
     for entry in &entries {
-        println!("{}: active={}, source={}", entry.descriptor.id, entry.is_active, entry.descriptor.source_name);
+        println!(
+            "{}: active={}, source={}",
+            entry.descriptor.key,
+            entry.is_active,
+            entry.descriptor.source_name,
+        );
     }
 
     // Load a specific skill's body (bypassing first-wins)
-    let doc = runtime.load_from_source(&"task-workflow".into(), Some("company")).await?;
+    let key = SkillKey::new(
+        SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+        SkillName::parse("task-workflow")?,
+    );
+    let doc = runtime.load_from_source(&key, Some("dc256086-0d2f-4f61-a307-320d4148107f")).await?;
     println!("{}", doc.body);
 }
 ```

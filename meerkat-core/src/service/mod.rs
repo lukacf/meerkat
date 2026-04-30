@@ -582,6 +582,7 @@ pub struct ResumeOverrideMask {
     pub max_tokens: bool,
     pub structured_output_retries: bool,
     pub provider_params: bool,
+    pub connection_ref: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
     pub override_memory: bool,

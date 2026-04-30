@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{
+    ConversationContextAppend, CoreRenderable, RunPrimitive,
+};
 use meerkat_core::service::SessionService;
 use meerkat_core::types::HandlingMode;
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
@@ -146,38 +148,28 @@ impl PersistentRuntimeExecutor {
 }
 
 fn pending_system_context_appends(
-    primitive: &RunPrimitive,
-) -> Option<Vec<meerkat_core::PendingSystemContextAppend>> {
-    let RunPrimitive::StagedInput(staged) = primitive else {
-        return None;
-    };
-    if !staged.appends.is_empty() || staged.context_appends.is_empty() {
-        return None;
-    }
-
-    Some(
-        staged
-            .context_appends
-            .iter()
-            .map(|append| meerkat_core::PendingSystemContextAppend {
-                text: match &append.content {
-                    CoreRenderable::Text { text } => text.clone(),
-                    CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-                    CoreRenderable::Json { value } => {
-                        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-                    }
-                    CoreRenderable::Reference { uri, label } => match label {
-                        Some(label) => format!("{label}: {uri}"),
-                        None => uri.clone(),
-                    },
-                    _ => String::new(),
+    appends: &[ConversationContextAppend],
+) -> Vec<meerkat_core::PendingSystemContextAppend> {
+    appends
+        .iter()
+        .map(|append| meerkat_core::PendingSystemContextAppend {
+            text: match &append.content {
+                CoreRenderable::Text { text } => text.clone(),
+                CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+                CoreRenderable::Json { value } => {
+                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+                }
+                CoreRenderable::Reference { uri, label } => match label {
+                    Some(label) => format!("{label}: {uri}"),
+                    None => uri.clone(),
                 },
-                source: Some(append.key.clone()),
-                idempotency_key: Some(append.key.clone()),
-                accepted_at: meerkat_core::time_compat::SystemTime::now(),
-            })
-            .collect(),
-    )
+                _ => String::new(),
+            },
+            source: Some(append.key.clone()),
+            idempotency_key: Some(append.key.clone()),
+            accepted_at: meerkat_core::time_compat::SystemTime::now(),
+        })
+        .collect()
 }
 
 fn start_turn_request_from_primitive(
@@ -206,20 +198,44 @@ impl CoreExecutor for PersistentRuntimeExecutor {
         run_id: meerkat_core::lifecycle::RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        if let Some(appends) = pending_system_context_appends(&primitive) {
+        if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+            return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                reason.to_string(),
+            ));
+        }
+
+        if primitive.is_context_only_apply_without_turn() {
+            let RunPrimitive::StagedInput(staged) = &primitive else {
+                unreachable!("context-only apply without turn only matches staged primitives");
+            };
             return self
                 .service
                 .apply_runtime_context_appends_with_boundary(
                     &self.session_id,
                     run_id,
-                    appends,
-                    primitive.apply_boundary(),
-                    primitive.contributing_input_ids().to_vec(),
+                    pending_system_context_appends(&staged.context_appends),
+                    staged.boundary,
+                    staged.contributing_input_ids.clone(),
                 )
                 .await
-                .map_err(|error| CoreExecutorError::ApplyFailed {
-                    reason: error.to_string(),
+                .map_err(|error| {
+                    CoreExecutorError::apply_failed_runtime_context(error.to_string())
                 });
+        }
+
+        if primitive.is_peer_response_terminal_context_and_run() {
+            let RunPrimitive::StagedInput(staged) = &primitive else {
+                unreachable!("terminal peer-response apply intent only matches staged primitives");
+            };
+            self.service
+                .apply_runtime_system_context_for_turn(
+                    &self.session_id,
+                    pending_system_context_appends(&staged.context_appends),
+                )
+                .await
+                .map_err(|error| {
+                    CoreExecutorError::apply_failed_runtime_context(error.to_string())
+                })?;
         }
 
         let boundary = primitive.apply_boundary();
@@ -234,9 +250,7 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 contributing_input_ids,
             )
             .await
-            .map_err(|error| CoreExecutorError::ApplyFailed {
-                reason: error.to_string(),
-            })
+            .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -245,24 +259,18 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                 .service
                 .interrupt(&self.session_id)
                 .await
-                .map_err(|error| CoreExecutorError::ControlFailed {
-                    reason: error.to_string(),
-                }),
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
             RunControlCommand::CancelAfterBoundary { .. } => self
                 .service
                 .cancel_after_boundary(&self.session_id)
                 .await
-                .map_err(|error| CoreExecutorError::ControlFailed {
-                    reason: error.to_string(),
-                }),
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self.service.discard_live_session(&self.session_id).await;
                 self.adapter.unregister_session(&self.session_id).await;
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(error) => Err(CoreExecutorError::ControlFailed {
-                        reason: error.to_string(),
-                    }),
+                    Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
                 }
             }
             _ => Ok(()),
@@ -883,6 +891,168 @@ mod tests {
                 assert_eq!(usage, meerkat_core::types::Usage::default());
             }
             other => panic!("expected run_completed, got {other:?}"),
+        }
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_runs_terminal_peer_response_context_and_run() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, PeerResponseTerminalApplyIntent, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let output = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    appends: Vec::new(),
+                    context_appends: vec![ConversationContextAppend {
+                        key: "peer_response_terminal:analyst-rt:req-456".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".to_string(),
+                        },
+                    }],
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        peer_response_terminal_apply_intent: Some(
+                            PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                        ),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+            .expect("terminal peer response should run requester reaction turn");
+
+        match output.terminal {
+            Some(CoreApplyTerminal::RunResult(run_result)) => {
+                assert_eq!(run_result.text, "ok");
+                assert_eq!(run_result.session_id, result.session_id);
+            }
+            other => panic!("expected terminal peer response run result, got {other:?}"),
+        }
+
+        let exported = service
+            .export_live_session(&result.session_id)
+            .await
+            .expect("export live session after terminal peer response");
+        let system_context = exported
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert!(
+            system_context.contains("peer_response_terminal:analyst-rt:req-456"),
+            "terminal peer response source must be applied before reaction turn: {system_context}"
+        );
+        assert!(
+            system_context.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done"),
+            "terminal peer response context must be applied before reaction turn: {system_context}"
+        );
+
+        service
+            .discard_live_session(&result.session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_rejects_malformed_terminal_peer_response_intent() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, PeerResponseTerminalApplyIntent, RunApplyBoundary,
+            RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let result = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions::default()),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize session");
+
+        let mut executor = PersistentRuntimeExecutor::new(
+            Arc::clone(&service),
+            Arc::clone(&adapter),
+            result.session_id.clone(),
+        );
+        let error = executor
+            .apply(
+                RunId::new(),
+                RunPrimitive::StagedInput(StagedRunInput {
+                    boundary: RunApplyBoundary::Immediate,
+                    appends: Vec::new(),
+                    context_appends: vec![ConversationContextAppend {
+                        key: "peer_response_terminal:analyst-rt:req-invalid".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] invalid".to_string(),
+                        },
+                    }],
+                    contributing_input_ids: vec![InputId::new()],
+                    turn_metadata: Some(RuntimeTurnMetadata {
+                        execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                        peer_response_terminal_apply_intent: Some(
+                            PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                        ),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+            .expect_err("malformed terminal peer-response intent must be rejected");
+
+        match error {
+            CoreExecutorError::ApplyFailed { cause } => assert!(
+                cause.message().contains("requires RunStart boundary"),
+                "unexpected rejection reason: {cause}"
+            ),
+            other => panic!("expected ApplyFailed, got {other:?}"),
         }
 
         service

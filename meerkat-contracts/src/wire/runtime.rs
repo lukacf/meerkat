@@ -1,5 +1,6 @@
 //! Runtime and input RPC wire contracts.
 
+use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Serialize};
 
 use crate::wire::session::WireContentBlock;
@@ -637,6 +638,252 @@ impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::Reaso
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireAnthropicThinkingConfig {
+    Adaptive,
+    Enabled { budget_tokens: u32 },
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig>
+    for WireAnthropicThinkingConfig
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig as Core;
+        match value {
+            Core::Adaptive => Self::Adaptive,
+            Core::Enabled { budget_tokens } => Self::Enabled { budget_tokens },
+        }
+    }
+}
+
+impl From<WireAnthropicThinkingConfig>
+    for meerkat_core::lifecycle::run_primitive::AnthropicThinkingConfig
+{
+    fn from(value: WireAnthropicThinkingConfig) -> Self {
+        match value {
+            WireAnthropicThinkingConfig::Adaptive => Self::Adaptive,
+            WireAnthropicThinkingConfig::Enabled { budget_tokens } => {
+                Self::Enabled { budget_tokens }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAnthropicEffort {
+    Low,
+    Medium,
+    High,
+    Max,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicEffort> for WireAnthropicEffort {
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicEffort) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicEffort as Core;
+        match value {
+            Core::Low => Self::Low,
+            Core::Medium => Self::Medium,
+            Core::High => Self::High,
+            Core::Max => Self::Max,
+            Core::XHigh => Self::XHigh,
+        }
+    }
+}
+
+impl From<WireAnthropicEffort> for meerkat_core::lifecycle::run_primitive::AnthropicEffort {
+    fn from(value: WireAnthropicEffort) -> Self {
+        match value {
+            WireAnthropicEffort::Low => Self::Low,
+            WireAnthropicEffort::Medium => Self::Medium,
+            WireAnthropicEffort::High => Self::High,
+            WireAnthropicEffort::Max => Self::Max,
+            WireAnthropicEffort::XHigh => Self::XHigh,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireAnthropicInferenceGeo {
+    Us,
+    Global,
+    Other { region: String },
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo>
+    for WireAnthropicInferenceGeo
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo as Core;
+        match value {
+            Core::Us => Self::Us,
+            Core::Global => Self::Global,
+            Core::Other { region } => Self::Other { region },
+        }
+    }
+}
+
+impl From<WireAnthropicInferenceGeo>
+    for meerkat_core::lifecycle::run_primitive::AnthropicInferenceGeo
+{
+    fn from(value: WireAnthropicInferenceGeo) -> Self {
+        match value {
+            WireAnthropicInferenceGeo::Us => Self::Us,
+            WireAnthropicInferenceGeo::Global => Self::Global,
+            WireAnthropicInferenceGeo::Other { region } => Self::Other { region },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireAnthropicCompactionConfig {
+    Auto,
+    Custom { edit: serde_json::Value },
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig>
+    for WireAnthropicCompactionConfig
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig) -> Self {
+        use meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig as Core;
+        match value {
+            Core::Auto => Self::Auto,
+            Core::Custom { edit } => Self::Custom {
+                edit: edit.as_value(),
+            },
+        }
+    }
+}
+
+impl From<WireAnthropicCompactionConfig>
+    for meerkat_core::lifecycle::run_primitive::AnthropicCompactionConfig
+{
+    fn from(value: WireAnthropicCompactionConfig) -> Self {
+        use meerkat_core::lifecycle::run_primitive::OpaqueProviderBody;
+        match value {
+            WireAnthropicCompactionConfig::Auto => Self::Auto,
+            WireAnthropicCompactionConfig::Custom { edit } => Self::Custom {
+                edit: OpaqueProviderBody::from_value(&edit),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAnthropicContextWindow {
+    OneMegabyte,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::AnthropicContextWindow>
+    for WireAnthropicContextWindow
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::AnthropicContextWindow) -> Self {
+        match value {
+            meerkat_core::lifecycle::run_primitive::AnthropicContextWindow::OneMegabyte => {
+                Self::OneMegabyte
+            }
+        }
+    }
+}
+
+impl From<WireAnthropicContextWindow>
+    for meerkat_core::lifecycle::run_primitive::AnthropicContextWindow
+{
+    fn from(value: WireAnthropicContextWindow) -> Self {
+        match value {
+            WireAnthropicContextWindow::OneMegabyte => Self::OneMegabyte,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireGeminiThinkingLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel> for WireGeminiThinkingLevel {
+    fn from(value: meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel) -> Self {
+        use meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel as Core;
+        match value {
+            Core::Minimal => Self::Minimal,
+            Core::Low => Self::Low,
+            Core::Medium => Self::Medium,
+            Core::High => Self::High,
+        }
+    }
+}
+
+impl From<WireGeminiThinkingLevel> for meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel {
+    fn from(value: WireGeminiThinkingLevel) -> Self {
+        match value {
+            WireGeminiThinkingLevel::Minimal => Self::Minimal,
+            WireGeminiThinkingLevel::Low => Self::Low,
+            WireGeminiThinkingLevel::Medium => Self::Medium,
+            WireGeminiThinkingLevel::High => Self::High,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireGeminiThinkingConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_thoughts: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<WireGeminiThinkingLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::GeminiThinkingConfig>
+    for WireGeminiThinkingConfig
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::GeminiThinkingConfig) -> Self {
+        Self {
+            include_thoughts: value.include_thoughts,
+            thinking_level: value.thinking_level.map(Into::into),
+            thinking_budget: value.thinking_budget,
+        }
+    }
+}
+
+impl From<WireGeminiThinkingConfig>
+    for meerkat_core::lifecycle::run_primitive::GeminiThinkingConfig
+{
+    fn from(value: WireGeminiThinkingConfig) -> Self {
+        Self {
+            include_thoughts: value.include_thoughts,
+            thinking_level: value.thinking_level.map(Into::into),
+            thinking_budget: value.thinking_budget,
+        }
+    }
+}
+
+fn deserialize_present_json_value_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -644,13 +891,89 @@ impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::Reaso
 pub enum WireProviderTag {
     Anthropic {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<WireAnthropicThinkingConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_budget_tokens: Option<u32>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        web_search: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_k: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<WireAnthropicEffort>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<meerkat_core::OutputSchema>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inference_geo: Option<WireAnthropicInferenceGeo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<WireAnthropicCompactionConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<WireAnthropicContextWindow>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_temperature_override: Option<bool>,
     },
     OpenAi {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<WireReasoningEffort>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frequency_penalty: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presence_penalty: Option<f32>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        web_search: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<meerkat_core::OutputSchema>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        reasoning: Option<serde_json::Value>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        chat_template_kwargs: Option<serde_json::Value>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        thinking: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_temperature_override: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supports_reasoning_override: Option<bool>,
     },
     Gemini {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<WireGeminiThinkingConfig>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_budget: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_level: Option<WireGeminiThinkingLevel>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_k: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_p: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<meerkat_core::OutputSchema>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_json_value_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        google_search: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         candidate_count: Option<u32>,
     },
@@ -665,12 +988,38 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
         use meerkat_core::lifecycle::run_primitive::ProviderTag as Core;
         match value {
             Core::Anthropic(t) => Self::Anthropic {
+                thinking: t.thinking.map(Into::into),
                 thinking_budget_tokens: t.thinking_budget_tokens,
+                web_search: t.web_search.map(|v| v.as_value()),
+                top_k: t.top_k,
+                effort: t.effort.map(Into::into),
+                structured_output: t.structured_output,
+                inference_geo: t.inference_geo.map(Into::into),
+                compaction: t.compaction.map(Into::into),
+                context: t.context.map(Into::into),
+                supports_temperature_override: t.supports_temperature_override,
             },
             Core::OpenAi(t) => Self::OpenAi {
                 reasoning_effort: t.reasoning_effort.map(Into::into),
+                seed: t.seed,
+                frequency_penalty: t.frequency_penalty,
+                presence_penalty: t.presence_penalty,
+                web_search: t.web_search.map(|v| v.as_value()),
+                structured_output: t.structured_output,
+                reasoning: t.reasoning.map(|v| v.as_value()),
+                chat_template_kwargs: t.chat_template_kwargs.map(|v| v.as_value()),
+                thinking: t.thinking.map(|v| v.as_value()),
+                supports_temperature_override: t.supports_temperature_override,
+                supports_reasoning_override: t.supports_reasoning_override,
             },
             Core::Gemini(t) => Self::Gemini {
+                thinking: t.thinking.map(Into::into),
+                thinking_budget: t.thinking_budget,
+                thinking_level: t.thinking_level.map(Into::into),
+                top_k: t.top_k,
+                top_p: t.top_p,
+                structured_output: t.structured_output,
+                google_search: t.google_search.map(|v| v.as_value()),
                 candidate_count: t.candidate_count,
             },
             Core::Unknown { bag } => Self::Unknown { bag },
@@ -681,22 +1030,76 @@ impl From<meerkat_core::lifecycle::run_primitive::ProviderTag> for WireProviderT
 impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderTag {
     fn from(value: WireProviderTag) -> Self {
         use meerkat_core::lifecycle::run_primitive::{
-            AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag,
+            AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiProviderTag,
         };
         match value {
             WireProviderTag::Anthropic {
+                thinking,
                 thinking_budget_tokens,
+                web_search,
+                top_k,
+                effort,
+                structured_output,
+                inference_geo,
+                compaction,
+                context,
+                supports_temperature_override,
             } => Self::Anthropic(AnthropicProviderTag {
+                thinking: thinking.map(Into::into),
                 thinking_budget_tokens,
-                ..Default::default()
+                web_search: web_search.map(|v| OpaqueProviderBody::from_value(&v)),
+                top_k,
+                effort: effort.map(Into::into),
+                structured_output,
+                inference_geo: inference_geo.map(Into::into),
+                compaction: compaction.map(Into::into),
+                context: context.map(Into::into),
+                supports_temperature_override,
             }),
-            WireProviderTag::OpenAi { reasoning_effort } => Self::OpenAi(OpenAiProviderTag {
+            WireProviderTag::OpenAi {
+                reasoning_effort,
+                seed,
+                frequency_penalty,
+                presence_penalty,
+                web_search,
+                structured_output,
+                reasoning,
+                chat_template_kwargs,
+                thinking,
+                supports_temperature_override,
+                supports_reasoning_override,
+            } => Self::OpenAi(OpenAiProviderTag {
                 reasoning_effort: reasoning_effort.map(Into::into),
-                ..Default::default()
+                seed,
+                frequency_penalty,
+                presence_penalty,
+                web_search: web_search.map(|v| OpaqueProviderBody::from_value(&v)),
+                structured_output,
+                reasoning: reasoning.map(|v| OpaqueProviderBody::from_value(&v)),
+                chat_template_kwargs: chat_template_kwargs
+                    .map(|v| OpaqueProviderBody::from_value(&v)),
+                thinking: thinking.map(|v| OpaqueProviderBody::from_value(&v)),
+                supports_temperature_override,
+                supports_reasoning_override,
             }),
-            WireProviderTag::Gemini { candidate_count } => Self::Gemini(GeminiProviderTag {
+            WireProviderTag::Gemini {
+                thinking,
+                thinking_budget,
+                thinking_level,
+                top_k,
+                top_p,
+                structured_output,
+                google_search,
                 candidate_count,
-                ..Default::default()
+            } => Self::Gemini(GeminiProviderTag {
+                thinking: thinking.map(Into::into),
+                thinking_budget,
+                thinking_level: thinking_level.map(Into::into),
+                top_k,
+                top_p,
+                structured_output,
+                google_search: google_search.map(|v| OpaqueProviderBody::from_value(&v)),
+                candidate_count,
             }),
             WireProviderTag::Unknown { bag } => Self::Unknown { bag },
         }
@@ -751,11 +1154,96 @@ impl From<WireProviderParamsOverride>
     }
 }
 
+/// Wire tri-state override for per-turn runtime metadata fields.
+///
+/// `None` on the containing field means preserve, `Set` provides a new value,
+/// and `Clear` removes the durable value for this turn.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "action", content = "value", rename_all = "snake_case")]
+pub enum WireTurnMetadataOverride<T> {
+    Set(T),
+    Clear,
+}
+
+impl<'de, T> Deserialize<'de> for WireTurnMetadataOverride<T>
+where
+    T: DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        if let Some(object) = raw.as_object() {
+            let Some(action_value) = object.get("action") else {
+                return serde_json::from_value(raw)
+                    .map(Self::Set)
+                    .map_err(de::Error::custom);
+            };
+            let action = action_value.as_str().ok_or_else(|| {
+                de::Error::custom("turn metadata override action must be a string")
+            })?;
+            return match action {
+                "clear" => {
+                    if object.contains_key("value") {
+                        return Err(de::Error::custom("clear override cannot include value"));
+                    }
+                    Ok(Self::Clear)
+                }
+                "set" => {
+                    let value = object
+                        .get("value")
+                        .ok_or_else(|| de::Error::custom("set override is missing value"))?;
+                    serde_json::from_value(value.clone())
+                        .map(Self::Set)
+                        .map_err(de::Error::custom)
+                }
+                other => Err(de::Error::custom(format!(
+                    "unknown turn metadata override action `{other}`"
+                ))),
+            };
+        }
+
+        serde_json::from_value(raw)
+            .map(Self::Set)
+            .map_err(de::Error::custom)
+    }
+}
+
+impl<T, U> From<meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<T>>
+    for WireTurnMetadataOverride<U>
+where
+    U: From<T>,
+{
+    fn from(value: meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<T>) -> Self {
+        match value {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(value) => {
+                Self::Set(value.into())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => Self::Clear,
+        }
+    }
+}
+
+impl<T, U> From<WireTurnMetadataOverride<T>>
+    for meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<U>
+where
+    U: From<T>,
+{
+    fn from(value: WireTurnMetadataOverride<T>) -> Self {
+        match value {
+            WireTurnMetadataOverride::Set(value) => Self::Set(value.into()),
+            WireTurnMetadataOverride::Clear => Self::Clear,
+        }
+    }
+}
+
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].
 ///
 /// The per-turn seam between control plane and core is fully typed —
 /// `serde_json::Value` does not appear here.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -771,13 +1259,10 @@ pub struct WireRuntimeTurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<meerkat_core::Provider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<WireProviderParamsOverride>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_provider_params: bool,
+    pub provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<crate::wire::connection::WireConnectionRef>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_connection_ref: bool,
+    pub connection_ref:
+        Option<WireTurnMetadataOverride<crate::wire::connection::WireConnectionRef>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<WireKeepAlivePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -786,6 +1271,81 @@ pub struct WireRuntimeTurnMetadata {
     pub execution_kind: Option<WireRuntimeExecutionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_response_terminal_apply_intent: Option<WirePeerResponseTerminalApplyIntent>,
+}
+
+#[derive(Deserialize)]
+struct WireRuntimeTurnMetadataFields {
+    #[serde(default)]
+    handling_mode: Option<crate::wire::mob::WireHandlingMode>,
+    #[serde(default)]
+    skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+    #[serde(default)]
+    flow_tool_overlay: Option<meerkat_core::TurnToolOverlay>,
+    #[serde(default)]
+    additional_instructions: Option<Vec<WireTurnInstruction>>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<meerkat_core::Provider>,
+    #[serde(default)]
+    provider_params: Option<WireTurnMetadataOverride<WireProviderParamsOverride>>,
+    #[serde(default)]
+    connection_ref: Option<WireTurnMetadataOverride<crate::wire::connection::WireConnectionRef>>,
+    #[serde(default)]
+    keep_alive: Option<WireKeepAlivePolicy>,
+    #[serde(default)]
+    render_metadata: Option<crate::wire::mob::WireRenderMetadata>,
+    #[serde(default)]
+    execution_kind: Option<WireRuntimeExecutionKind>,
+    #[serde(default)]
+    peer_response_terminal_apply_intent: Option<WirePeerResponseTerminalApplyIntent>,
+}
+
+impl<'de> Deserialize<'de> for WireRuntimeTurnMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut raw = serde_json::Value::deserialize(deserializer)?;
+        let (clear_provider_params, clear_connection_ref) =
+            if let Some(object) = raw.as_object_mut() {
+                (
+                    take_legacy_clear_bool(object, "clear_provider_params")?,
+                    take_legacy_clear_bool(object, "clear_connection_ref")?,
+                )
+            } else {
+                (false, false)
+            };
+        let fields: WireRuntimeTurnMetadataFields =
+            serde_json::from_value(raw).map_err(de::Error::custom)?;
+        let provider_params = legacy_wire_override_from_split_fields(
+            fields.provider_params,
+            clear_provider_params,
+            "provider_params",
+            "clear_provider_params",
+        )?;
+        let connection_ref = legacy_wire_override_from_split_fields(
+            fields.connection_ref,
+            clear_connection_ref,
+            "connection_ref",
+            "clear_connection_ref",
+        )?;
+
+        Ok(Self {
+            handling_mode: fields.handling_mode,
+            skill_references: fields.skill_references,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            model: fields.model,
+            provider: fields.provider,
+            provider_params,
+            connection_ref,
+            keep_alive: fields.keep_alive,
+            render_metadata: fields.render_metadata,
+            execution_kind: fields.execution_kind,
+            peer_response_terminal_apply_intent: fields.peer_response_terminal_apply_intent,
+        })
+    }
 }
 
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].
@@ -865,9 +1425,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> for WireR
             model: value.model.map(|m| m.as_str().to_string()),
             provider: value.provider,
             provider_params: value.provider_params.map(Into::into),
-            clear_provider_params: value.clear_provider_params,
             connection_ref: value.connection_ref.map(Into::into),
-            clear_connection_ref: value.clear_connection_ref,
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
@@ -891,9 +1449,7 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
             model: value.model.map(ModelId::new),
             provider: value.provider,
             provider_params: value.provider_params.map(Into::into),
-            clear_provider_params: value.clear_provider_params,
             connection_ref: value.connection_ref.map(Into::into),
-            clear_connection_ref: value.clear_connection_ref,
             keep_alive: value.keep_alive.map(Into::into),
             render_metadata: value.render_metadata.map(Into::into),
             execution_kind: value.execution_kind.map(Into::into),
@@ -904,6 +1460,37 @@ impl From<WireRuntimeTurnMetadata> for meerkat_core::lifecycle::run_primitive::R
     }
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
+fn legacy_wire_override_from_split_fields<T, E>(
+    set_value: Option<WireTurnMetadataOverride<T>>,
+    clear: bool,
+    set_field: &'static str,
+    clear_field: &'static str,
+) -> Result<Option<WireTurnMetadataOverride<T>>, E>
+where
+    E: de::Error,
+{
+    if clear && set_value.is_some() {
+        return Err(E::custom(format!(
+            "{clear_field} cannot be combined with {set_field}"
+        )));
+    }
+    if clear {
+        Ok(Some(WireTurnMetadataOverride::Clear))
+    } else {
+        Ok(set_value)
+    }
+}
+
+fn take_legacy_clear_bool<E>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<bool, E>
+where
+    E: de::Error,
+{
+    match object.remove(field) {
+        None => Ok(false),
+        Some(serde_json::Value::Bool(value)) => Ok(value),
+        Some(_) => Err(E::custom(format!("{field} must be a boolean"))),
+    }
 }

@@ -1702,9 +1702,7 @@ mod scenario_22_runtime_host_comms {
                 .service
                 .start_turn(&self.session_id, turn_req)
                 .await
-                .map_err(|e| CoreExecutorError::ApplyFailed {
-                    reason: e.to_string(),
-                })?;
+                .map_err(|e| CoreExecutorError::apply_failed_runtime_turn(e.to_string()))?;
 
             // Increment AFTER LLM call completes — proves the full round-trip
             self.turn_count.fetch_add(1, Ordering::Relaxed);
@@ -1715,8 +1713,8 @@ mod scenario_22_runtime_host_comms {
                 &result.text[..result.text.len().min(100)]
             );
 
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id: _run_id,
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -1724,10 +1722,9 @@ mod scenario_22_runtime_host_comms {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                terminal: None,
-                run_result: Some(result),
-            })
+                None,
+                result,
+            ))
         }
 
         async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {

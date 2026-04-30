@@ -677,7 +677,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
-                run_result: None,
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
             },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),

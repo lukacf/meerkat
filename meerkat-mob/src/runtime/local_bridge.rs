@@ -121,7 +121,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
                 source: InputOrigin::Peer {
                     peer_id: format!("local-bridge:{}", self.session_id),
                     display_identity: Some(format!("local-bridge:{}", self.session_id)),
-                    runtime_id: Some(LogicalRuntimeId::new(self.session_id.to_string())),
+                    runtime_id: Some(LogicalRuntimeId::for_session(&self.session_id)),
                 },
                 durability: InputDurability::Durable,
                 visibility: InputVisibility::default(),
@@ -248,10 +248,9 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
     }
 
     async fn destroy_member(&self) -> Result<BridgeDestroyResponse, MobError> {
-        use meerkat_runtime::identifiers::LogicalRuntimeId;
         use meerkat_runtime::traits::RuntimeControlPlane;
 
-        let runtime_id = LogicalRuntimeId::new(self.session_id.to_string());
+        let runtime_id = LogicalRuntimeId::for_session(&self.session_id);
         let report = RuntimeControlPlane::destroy(self.machine.as_ref(), &runtime_id)
             .await
             .map_err(|error| MobError::Internal(format!("local destroy_member failed: {error}")))?;

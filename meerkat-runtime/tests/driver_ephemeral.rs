@@ -411,7 +411,7 @@ async fn on_run_failed_rollbacks() {
                 wake_runtime: true,
                 notice_kind: "RunFailed",
             },
-            "LLM error".into(),
+            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("LLM error"),
             true,
         )
         .await
@@ -455,7 +455,7 @@ async fn on_run_failed_requests_wake_for_backlog() {
                 wake_runtime: true,
                 notice_kind: "RunFailed",
             },
-            "LLM error".into(),
+            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("LLM error"),
             true,
         )
         .await
@@ -585,7 +585,7 @@ async fn rollback_restores_queue_projection_order() {
                 wake_runtime: true,
                 notice_kind: "RunFailed",
             },
-            "rollback".into(),
+            meerkat_core::lifecycle::CoreApplyFailureCause::runtime_turn("rollback"),
             true,
         )
         .await
@@ -844,6 +844,26 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
     assert!(
         outcome.is_accepted(),
         "ResponseTerminal with handling_mode=Steer must be accepted"
+    );
+}
+
+#[tokio::test]
+async fn accept_peer_response_terminal_defers_context_projection_to_machine_batch() {
+    let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("test"));
+    let input = make_peer_terminal("done");
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    let meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } = outcome else {
+        panic!("expected terminal peer response to be accepted");
+    };
+
+    let projection = driver
+        .admitted_primitive_projection(&input_id)
+        .expect("accepted input should have primitive projection");
+    assert!(projection.append.is_none());
+    assert!(
+        projection.context_append.is_none(),
+        "terminal peer response context must be projected by the machine-selected runtime batch"
     );
 }
 

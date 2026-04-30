@@ -1440,7 +1440,6 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
         contributing_input_ids
     );
     assert!(output.session_snapshot.is_some());
-    assert!(output.run_result.is_none());
     let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = output.terminal else {
         return Err("expected callback pending terminal".to_string());
     };
@@ -1490,7 +1489,6 @@ async fn test_apply_runtime_turn_resume_pending_no_boundary_is_typed_terminal() 
         contributing_input_ids
     );
     assert!(output.session_snapshot.is_some());
-    assert!(output.run_result.is_none());
     assert!(matches!(
         output.terminal,
         Some(CoreApplyTerminal::NoPendingBoundary)

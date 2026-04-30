@@ -30,7 +30,8 @@ use tokio::net::TcpListener;
 
 use meerkat_auth_core::authorizers::{GoogleAuthAuthorizer, GoogleAuthChain};
 use meerkat_core::handles::{
-    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
+    AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError,
+    LeaseKey,
 };
 use meerkat_core::{BindingId, HttpAuthorizationRequest, HttpAuthorizer, ProfileId, RealmId};
 
@@ -137,6 +138,7 @@ enum LeaseEvent {
 struct RecordingAuthLeaseHandle {
     events: Mutex<Vec<LeaseEvent>>,
     snapshot: Mutex<AuthLeaseSnapshot>,
+    generation: Mutex<u64>,
     fail_action: Mutex<Option<&'static str>>,
 }
 
@@ -147,7 +149,9 @@ impl Default for RecordingAuthLeaseHandle {
             snapshot: Mutex::new(AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
+                generation: 0,
             }),
+            generation: Mutex::new(0),
             fail_action: Mutex::new(None),
         }
     }
@@ -184,6 +188,12 @@ impl RecordingAuthLeaseHandle {
         }
         Ok(())
     }
+
+    fn next_generation(&self) -> u64 {
+        let mut generation = self.generation.lock().unwrap();
+        *generation += 1;
+        *generation
+    }
 }
 
 impl AuthLeaseHandle for RecordingAuthLeaseHandle {
@@ -191,17 +201,19 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         &self,
         lease_key: &LeaseKey,
         expires_at: u64,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         self.maybe_fail("acquire_lease")?;
         self.events
             .lock()
             .unwrap()
             .push(LeaseEvent::Acquire(lease_key.clone(), expires_at));
+        let generation = self.next_generation();
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(expires_at),
+            generation,
         };
-        Ok(())
+        Ok(AuthLeaseTransition { generation })
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -210,7 +222,9 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             .lock()
             .unwrap()
             .push(LeaseEvent::MarkExpiring(lease_key.clone()));
-        self.snapshot.lock().unwrap().phase = Some(AuthLeasePhase::Expiring);
+        let mut snapshot = self.snapshot.lock().unwrap();
+        snapshot.phase = Some(AuthLeasePhase::Expiring);
+        snapshot.generation = self.next_generation();
         Ok(())
     }
 
@@ -220,7 +234,9 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             .lock()
             .unwrap()
             .push(LeaseEvent::BeginRefresh(lease_key.clone()));
-        self.snapshot.lock().unwrap().phase = Some(AuthLeasePhase::Refreshing);
+        let mut snapshot = self.snapshot.lock().unwrap();
+        snapshot.phase = Some(AuthLeasePhase::Refreshing);
+        snapshot.generation = self.next_generation();
         Ok(())
     }
 
@@ -229,7 +245,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         lease_key: &LeaseKey,
         new_expires_at: u64,
         _now: u64,
-    ) -> Result<(), DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         self.maybe_fail("complete_refresh")?;
         self.events
             .lock()
@@ -238,11 +254,13 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
                 lease_key.clone(),
                 new_expires_at,
             ));
+        let generation = self.next_generation();
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
             expires_at: Some(new_expires_at),
+            generation,
         };
-        Ok(())
+        Ok(AuthLeaseTransition { generation })
     }
 
     fn refresh_failed(
@@ -255,11 +273,13 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             .lock()
             .unwrap()
             .push(LeaseEvent::RefreshFailed(lease_key.clone(), permanent));
-        self.snapshot.lock().unwrap().phase = Some(if permanent {
+        let mut snapshot = self.snapshot.lock().unwrap();
+        snapshot.phase = Some(if permanent {
             AuthLeasePhase::ReauthRequired
         } else {
             AuthLeasePhase::Expiring
         });
+        snapshot.generation = self.next_generation();
         Ok(())
     }
 
@@ -269,7 +289,9 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             .lock()
             .unwrap()
             .push(LeaseEvent::MarkReauthRequired(lease_key.clone()));
-        self.snapshot.lock().unwrap().phase = Some(AuthLeasePhase::ReauthRequired);
+        let mut snapshot = self.snapshot.lock().unwrap();
+        snapshot.phase = Some(AuthLeasePhase::ReauthRequired);
+        snapshot.generation = self.next_generation();
         Ok(())
     }
 
@@ -282,6 +304,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         *self.snapshot.lock().unwrap() = AuthLeaseSnapshot {
             phase: None,
             expires_at: None,
+            generation: self.next_generation(),
         };
         Ok(())
     }
@@ -608,6 +631,60 @@ async fn cached_token_authorize_publishes_token_expiry_to_auth_lease_handle() {
     assert!(
         acquired[0].1 > Utc::now().timestamp().max(0) as u64,
         "published auth-machine expiry must reflect the fetched token"
+    );
+}
+
+#[tokio::test]
+async fn released_and_reacquired_auth_lease_invalidates_private_token_cache() {
+    let mock = start_mock("lease-reacquired-sa-token").await;
+    let tempdir = tempfile::tempdir().unwrap();
+    let sa_path = write_sa_key(tempdir.path(), &format!("{}/token", mock.base_url));
+    let env_lookup = {
+        let sa_path = sa_path.clone();
+        Arc::new(move |k: &str| {
+            if k == "GOOGLE_APPLICATION_CREDENTIALS" {
+                Some(sa_path.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        }) as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
+    };
+    let handle = Arc::new(RecordingAuthLeaseHandle::default());
+    let lease_key = LeaseKey::new(
+        RealmId::parse("dev").unwrap(),
+        BindingId::parse("gemini").unwrap(),
+        Some(ProfileId::parse("google_adc").unwrap()),
+    );
+    let lease_handle: Arc<dyn AuthLeaseHandle> = handle.clone();
+    let authorizer = GoogleAuthAuthorizer::with_env_lookup(GoogleAuthChain::Default, env_lookup)
+        .with_home_dir(tempdir.path())
+        .with_auth_lease_observer(lease_handle, lease_key.clone())
+        .with_token_url_override(format!("{}/token", mock.base_url));
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://x.googleapis.com/",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+    let expires_at = handle.acquired()[0].1;
+
+    handle.release_lease(&lease_key).unwrap();
+    handle.acquire_lease(&lease_key, expires_at).unwrap();
+
+    let mut headers = Vec::new();
+    let mut req = HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://x.googleapis.com/",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut req).await.unwrap();
+
+    assert_eq!(
+        mock.counter.load(Ordering::SeqCst),
+        2,
+        "a private cached token from a previous AuthMachine lease generation must not win when the lease is released and reacquired"
     );
 }
 

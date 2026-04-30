@@ -234,6 +234,31 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
         }
 
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: SessionDelta,
+        ) -> Result<(), RuntimeStoreError> {
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            tokio::task::spawn_blocking(move || {
+                let session = serde_json::from_slice::<meerkat_core::Session>(
+                    &session_delta.session_snapshot,
+                )
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                write_session_snapshot_in_txn(&tx, &session)
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                upsert_runtime_snapshot(&tx, &runtime_id, &session_delta.session_snapshot)?;
+                tx.commit()
+                    .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
         async fn atomic_apply(
             &self,
             runtime_id: &LogicalRuntimeId,
@@ -573,6 +598,18 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
             StoredInputState::new_accepted(InputId::new())
         }
 
+        fn receipt_row_count(store: &SqliteRuntimeStore) -> usize {
+            let conn = open_runtime_connection(store.path()).unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM runtime_boundary_receipts",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            usize::try_from(count).unwrap()
+        }
+
         #[tokio::test]
         async fn commit_session_boundary_roundtrip() {
             let (_dir, store) = temp_store();
@@ -601,6 +638,39 @@ CREATE TABLE IF NOT EXISTS runtime_ops_lifecycle (
                     .is_some()
             );
             assert_eq!(store.load_input_states(&runtime_id).await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn commit_session_snapshot_does_not_write_boundary_receipt() {
+            let (_dir, store) = temp_store();
+            let runtime_id = runtime_id();
+            let session = serde_json::to_vec(&meerkat_core::Session::new()).unwrap();
+
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SessionDelta {
+                        session_snapshot: session,
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                store
+                    .load_session_snapshot(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(receipt_row_count(&store), 0);
+            assert!(
+                store
+                    .load_input_states(&runtime_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         #[tokio::test]

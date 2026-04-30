@@ -538,8 +538,10 @@ pub struct OperationInput {
 
 /// Build the core-owned peer conversation projection for a runtime peer input.
 ///
-/// The runtime loop consumes this typed projection instead of reconstructing
-/// peer-response terminal render/context semantics from strings.
+/// Peer-response terminal context projection is deliberately excluded here:
+/// admission must not store it as pre-machine truth. Runtime-loop batch
+/// construction uses [`runtime_input_projection_for_machine_batch`] after the
+/// machine-selected input is dequeued.
 pub(crate) fn peer_projection_from_peer_input(
     peer: &PeerInput,
 ) -> Option<PeerConversationProjection> {
@@ -582,10 +584,7 @@ fn peer_projection_from_peer_input_with_id(
                 payload: peer.payload.clone(),
             })
         }
-        Some(PeerConvention::ResponseTerminal { .. }) => peer_response_terminal_fact(peer)
-            .ok()
-            .flatten()
-            .map(PeerConversationProjection::response_terminal),
+        Some(PeerConvention::ResponseTerminal { .. }) => None,
         None => None,
     }
 }
@@ -817,6 +816,21 @@ fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
     })
 }
 
+fn peer_response_terminal_context_append(
+    peer: &PeerInput,
+) -> Result<Option<ConversationContextAppend>, PeerResponseTerminalFactError> {
+    let Some(fact) = peer_response_terminal_fact(peer)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(ConversationContextAppend {
+        key: fact.context_key(),
+        content: CoreRenderable::Text {
+            text: fact.prompt_text(),
+        },
+    }))
+}
+
 pub(crate) fn runtime_input_projection(
     input: &Input,
 ) -> crate::ingress_types::RuntimeInputProjection {
@@ -824,6 +838,18 @@ pub(crate) fn runtime_input_projection(
         append: input_to_append(input),
         context_append: input_to_context_append(input),
     }
+}
+
+pub(crate) fn runtime_input_projection_for_machine_batch(
+    input: &Input,
+) -> crate::ingress_types::RuntimeInputProjection {
+    let mut projection = runtime_input_projection(input);
+    if let Input::Peer(peer) = input
+        && let Ok(Some(context_append)) = peer_response_terminal_context_append(peer)
+    {
+        projection.context_append = Some(context_append);
+    }
+    projection
 }
 
 #[cfg(test)]
@@ -925,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_response_terminal_context_uses_display_text_without_changing_canonical_key() {
+    fn peer_response_terminal_context_is_deferred_to_machine_batch_projection() {
         let route_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f2";
         let request_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f1";
         let mut header = make_header();
@@ -950,14 +976,17 @@ mod tests {
             panic!("expected peer input");
         };
         let expected_canonical_key = format!("peer_response_terminal:{route_id}:{request_id}");
-        assert_eq!(
-            peer_projection_from_peer_input(peer)
-                .and_then(|projection| projection.context_key())
-                .as_deref(),
-            Some(expected_canonical_key.as_str())
+        assert!(
+            peer_projection_from_peer_input(peer).is_none(),
+            "terminal peer response projection must not be built before machine batch selection"
         );
 
         let projection = runtime_input_projection(&input);
+        assert!(
+            projection.context_append.is_none(),
+            "admission projection must not store terminal peer response context"
+        );
+        let projection = runtime_input_projection_for_machine_batch(&input);
         let context = projection.context_append.expect("context append");
         assert_eq!(context.key, expected_canonical_key);
         let CoreRenderable::Text { text } = context.content else {

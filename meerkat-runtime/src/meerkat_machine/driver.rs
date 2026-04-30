@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunBoundaryReceipt, RunId};
 
 use crate::accept::{AcceptOutcome, ResolvedAdmission};
-use crate::driver::ephemeral::EphemeralRuntimeDriver;
+use crate::driver::ephemeral::{EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver};
 use crate::driver::persistent::PersistentRuntimeDriver;
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::ingress_types::ContentShape;
@@ -98,6 +98,16 @@ impl IngressView<'_> {
 pub(crate) enum DriverEntry {
     Ephemeral(EphemeralRuntimeDriver),
     Persistent(PersistentRuntimeDriver),
+}
+
+pub(crate) enum PreparedDestroyLifecycle {
+    Ephemeral(EphemeralDriverRollbackSnapshot),
+    Persistent(EphemeralDriverRollbackSnapshot),
+}
+
+pub(crate) struct PreparedDestroy {
+    pub(crate) report: DestroyReport,
+    pub(crate) lifecycle: PreparedDestroyLifecycle,
 }
 
 impl DriverEntry {
@@ -387,12 +397,13 @@ impl DriverEntry {
         run_id: RunId,
         contributing_input_ids: Vec<InputId>,
         replay_plan: crate::driver::ephemeral::ReplayQueuedContributorsPlan,
-        error: String,
+        terminal_error: &str,
+        runtime_apply_failure: Option<&CoreApplyFailureCause>,
         recoverable: bool,
     ) -> Result<(), RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(d) => {
-                let _ = (error, recoverable);
+                let _ = (terminal_error, runtime_apply_failure, recoverable);
                 d.machine_realize_run_failed(&run_id, &contributing_input_ids, &replay_plan)
             }
             DriverEntry::Persistent(d) => {
@@ -400,7 +411,8 @@ impl DriverEntry {
                     &run_id,
                     &contributing_input_ids,
                     &replay_plan,
-                    &error,
+                    terminal_error,
+                    runtime_apply_failure,
                     recoverable,
                 )
                 .await
@@ -453,15 +465,55 @@ impl DriverEntry {
         }
     }
 
-    pub(crate) async fn destroy(&mut self) -> Result<DestroyReport, RuntimeDriverError> {
+    pub(crate) fn prepare_destroy_lifecycle(&mut self) -> PreparedDestroy {
         match self {
             DriverEntry::Ephemeral(d) => {
+                let checkpoint = d.rollback_snapshot();
                 let abandoned = d.destroy_cleanup();
-                Ok(DestroyReport {
-                    inputs_abandoned: abandoned,
-                })
+                PreparedDestroy {
+                    report: DestroyReport {
+                        inputs_abandoned: abandoned,
+                    },
+                    lifecycle: PreparedDestroyLifecycle::Ephemeral(checkpoint),
+                }
             }
-            DriverEntry::Persistent(d) => d.destroy().await,
+            DriverEntry::Persistent(d) => {
+                let (checkpoint, report) = d.prepare_destroy_lifecycle();
+                PreparedDestroy {
+                    report,
+                    lifecycle: PreparedDestroyLifecycle::Persistent(checkpoint),
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn commit_prepared_destroy_lifecycle(
+        &mut self,
+        lifecycle: PreparedDestroyLifecycle,
+    ) -> Result<(), RuntimeDriverError> {
+        match (self, lifecycle) {
+            (DriverEntry::Ephemeral(_), PreparedDestroyLifecycle::Ephemeral(_)) => Ok(()),
+            (DriverEntry::Persistent(d), PreparedDestroyLifecycle::Persistent(checkpoint)) => {
+                d.commit_prepared_destroy_lifecycle(checkpoint).await
+            }
+            _ => Err(RuntimeDriverError::Internal(
+                "destroy lifecycle prepared for a different driver kind".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn rollback_prepared_destroy_lifecycle(
+        &mut self,
+        lifecycle: PreparedDestroyLifecycle,
+    ) {
+        match (self, lifecycle) {
+            (DriverEntry::Ephemeral(d), PreparedDestroyLifecycle::Ephemeral(checkpoint)) => {
+                d.restore_rollback_snapshot(checkpoint);
+            }
+            (DriverEntry::Persistent(d), PreparedDestroyLifecycle::Persistent(checkpoint)) => {
+                d.rollback_prepared_destroy_lifecycle(checkpoint);
+            }
+            _ => {}
         }
     }
 }
@@ -739,7 +791,8 @@ fn machine_apply_turn_run_completed(
 fn machine_apply_turn_run_failed(
     driver: &mut DriverEntry,
     run_id: &RunId,
-    error: String,
+    terminal_error: &str,
+    runtime_apply_failure: Option<&CoreApplyFailureCause>,
 ) -> Result<(), RuntimeDriverError> {
     let authority = driver.shared_dsl_authority();
     let mut auth = authority
@@ -755,7 +808,11 @@ fn machine_apply_turn_run_failed(
         &mut *auth,
         crate::meerkat_machine::dsl::MeerkatMachineInput::RunFailed {
             run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
-            error,
+            runtime_apply_failure_cause: runtime_apply_failure
+                .map(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from),
+            runtime_apply_failure_message: runtime_apply_failure
+                .map(|failure| failure.message().to_owned()),
+            error: terminal_error.to_owned(),
         },
     )
     .map(|_| ())
@@ -831,12 +888,25 @@ pub(crate) fn machine_batch_peer_response_terminal_apply_intent(
 
 pub(crate) fn machine_batch_primitive_projections(
     driver: &DriverEntry,
-    work_ids: &[InputId],
+    inputs: &[(InputId, Input)],
 ) -> Vec<crate::ingress_types::RuntimeInputProjection> {
     let ingress = driver.driver_ingress();
-    work_ids
+    inputs
         .iter()
-        .map(|id| ingress.primitive_projection(id).unwrap_or_default())
+        .map(|(id, input)| {
+            let projection = ingress.primitive_projection(id).unwrap_or_default();
+            if matches!(
+                input,
+                Input::Peer(crate::input::PeerInput {
+                    convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
+                    ..
+                })
+            ) {
+                crate::input::runtime_input_projection_for_machine_batch(input)
+            } else {
+                projection
+            }
+        })
         .collect()
 }
 
@@ -1036,6 +1106,7 @@ pub(crate) fn machine_validate_run_failed(
 pub(crate) async fn machine_normalize_recovered_input_state(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
+    stored_runtime_id: &LogicalRuntimeId,
     mut bundle: StoredInputState,
 ) -> Result<StoredInputState, RuntimeDriverError> {
     let applied_boundary_committed = if matches!(
@@ -1047,11 +1118,16 @@ pub(crate) async fn machine_normalize_recovered_input_state(
                 bundle.seed.last_run_id.clone(),
                 bundle.seed.last_boundary_sequence,
             ) {
-                (Some(run_id), Some(sequence)) => store
-                    .load_boundary_receipt(runtime_id, &run_id, sequence)
-                    .await
-                    .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-                    .is_some(),
+                (Some(run_id), Some(sequence)) => load_boundary_receipt_for_storage_aliases(
+                    store,
+                    runtime_id,
+                    stored_runtime_id == runtime_id,
+                    &run_id,
+                    sequence,
+                )
+                .await
+                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                .is_some(),
                 _ => false,
             },
         )
@@ -1062,6 +1138,95 @@ pub(crate) async fn machine_normalize_recovered_input_state(
     let _ = machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed);
 
     Ok(bundle)
+}
+
+pub(super) async fn load_boundary_receipt_for_storage_aliases(
+    store: &dyn crate::store::RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    canonical_miss_authoritative: bool,
+    run_id: &RunId,
+    sequence: u64,
+) -> Result<Option<RunBoundaryReceipt>, crate::store::RuntimeStoreError> {
+    let mut primary_alias_loaded = false;
+    for (candidate_index, candidate) in runtime_id
+        .storage_alias_candidates()
+        .into_iter()
+        .enumerate()
+    {
+        match store
+            .load_boundary_receipt(&candidate, run_id, sequence)
+            .await
+        {
+            Ok(Some(receipt)) => return Ok(Some(receipt)),
+            Ok(None) => {
+                if candidate_index == 0 && canonical_miss_authoritative {
+                    return Ok(None);
+                }
+                if candidate_index == 0 {
+                    primary_alias_loaded = true;
+                }
+            }
+            Err(_err)
+                if candidate_index > 0 && primary_alias_loaded && canonical_miss_authoritative =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(None)
+}
+
+async fn load_input_states_for_storage_aliases(
+    store: &dyn crate::store::RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+) -> Result<Vec<(LogicalRuntimeId, StoredInputState)>, crate::store::RuntimeStoreError> {
+    let mut merged: Vec<(usize, LogicalRuntimeId, StoredInputState)> = Vec::new();
+    let mut primary_alias_loaded = false;
+
+    for (candidate_index, candidate) in runtime_id
+        .storage_alias_candidates()
+        .into_iter()
+        .enumerate()
+    {
+        let states = match store.load_input_states(&candidate).await {
+            Ok(states) => {
+                if candidate_index == 0 {
+                    primary_alias_loaded = true;
+                }
+                states
+            }
+            Err(_err) if candidate_index > 0 && primary_alias_loaded => continue,
+            Err(err) => return Err(err),
+        };
+        for state in states {
+            let input_id = state.state.input_id.clone();
+            if let Some((existing_index, existing_runtime_id, existing_state)) = merged
+                .iter_mut()
+                .find(|(_, _, existing)| existing.state.input_id == input_id)
+            {
+                let candidate_updated_at = state.state.updated_at();
+                let existing_updated_at = existing_state.state.updated_at();
+                let should_replace = if candidate_index == *existing_index {
+                    candidate_updated_at > existing_updated_at
+                } else {
+                    candidate_index < *existing_index
+                };
+                if should_replace {
+                    *existing_index = candidate_index;
+                    *existing_runtime_id = candidate.clone();
+                    *existing_state = state;
+                }
+            } else {
+                merged.push((candidate_index, candidate.clone(), state));
+            }
+        }
+    }
+
+    Ok(merged
+        .into_iter()
+        .map(|(_, runtime_id, state)| (runtime_id, state))
+        .collect())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1380,15 +1545,15 @@ pub(crate) async fn machine_recover_persistent_driver(
     runtime_id: &LogicalRuntimeId,
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
-    let stored_states = store
-        .load_input_states(runtime_id)
-        .await
-        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?;
-
     let mut recovered_payloads = Vec::new();
 
-    for bundle in stored_states {
-        let bundle = machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
+    for (stored_runtime_id, bundle) in load_input_states_for_storage_aliases(store, runtime_id)
+        .await
+        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+    {
+        let bundle =
+            machine_normalize_recovered_input_state(store, runtime_id, &stored_runtime_id, bundle)
+                .await?;
 
         if driver.input_state(&bundle.state.input_id).is_none() {
             let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
@@ -1433,11 +1598,28 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
     }
 
-    if let Some(runtime_state) = store
-        .load_runtime_state(runtime_id)
-        .await
-        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+    let mut recovered_runtime_state = None;
+    let mut primary_runtime_state_loaded = false;
+    for (candidate_index, candidate) in runtime_id
+        .storage_alias_candidates()
+        .into_iter()
+        .enumerate()
     {
+        match store.load_runtime_state(&candidate).await {
+            Ok(state) => {
+                if candidate_index == 0 {
+                    primary_runtime_state_loaded = true;
+                }
+                recovered_runtime_state = state;
+            }
+            Err(_err) if candidate_index > 0 && primary_runtime_state_loaded => continue,
+            Err(err) => return Err(RuntimeDriverError::Internal(err.to_string())),
+        }
+        if recovered_runtime_state.is_some() {
+            break;
+        }
+    }
+    if let Some(runtime_state) = recovered_runtime_state {
         machine_realize_recovered_runtime_state(driver, runtime_state);
 
         if runtime_state.is_terminal() {
@@ -1508,20 +1690,12 @@ pub(crate) async fn machine_stop_runtime(
     }
 }
 
-pub(crate) async fn machine_destroy(
+pub(crate) fn machine_prepare_destroy(
     driver: &mut DriverEntry,
-) -> Result<DestroyReport, RuntimeDriverError> {
+) -> Result<PreparedDestroy, RuntimeDriverError> {
     match driver.runtime_state() {
-        RuntimeState::Initializing => {
-            return Err(RuntimeDriverError::Internal(
-                crate::runtime_state::RuntimeStateTransitionError {
-                    from: driver.runtime_state(),
-                    to: RuntimeState::Destroyed,
-                }
-                .to_string(),
-            ));
-        }
-        RuntimeState::Idle
+        RuntimeState::Initializing
+        | RuntimeState::Idle
         | RuntimeState::Attached
         | RuntimeState::Running
         | RuntimeState::Retired
@@ -1529,9 +1703,16 @@ pub(crate) async fn machine_destroy(
         | RuntimeState::Destroyed => {}
     }
 
-    let report = driver.destroy().await?;
+    Ok(driver.prepare_destroy_lifecycle())
+}
+
+pub(crate) async fn machine_commit_prepared_destroy(
+    driver: &mut DriverEntry,
+    lifecycle: PreparedDestroyLifecycle,
+) -> Result<(), RuntimeDriverError> {
+    driver.commit_prepared_destroy_lifecycle(lifecycle).await?;
     driver.sync_control_projection_from_dsl_authority();
-    Ok(report)
+    Ok(())
 }
 
 pub(crate) async fn machine_retire(
@@ -1768,7 +1949,24 @@ pub(crate) async fn commit_runtime_loop_run(
 pub(crate) async fn fail_runtime_loop_run(
     driver: &SharedDriver,
     run_id: RunId,
+    failure: CoreApplyFailureCause,
+) -> Result<(), RuntimeLoopRunFailError> {
+    fail_runtime_loop_run_inner(driver, run_id, failure.message().to_owned(), Some(failure)).await
+}
+
+pub(crate) async fn fail_machine_run_without_runtime_apply_cause(
+    driver: &SharedDriver,
+    run_id: RunId,
     error: String,
+) -> Result<(), RuntimeLoopRunFailError> {
+    fail_runtime_loop_run_inner(driver, run_id, error, None).await
+}
+
+async fn fail_runtime_loop_run_inner(
+    driver: &SharedDriver,
+    run_id: RunId,
+    terminal_error: String,
+    runtime_apply_failure: Option<CoreApplyFailureCause>,
 ) -> Result<(), RuntimeLoopRunFailError> {
     let mut driver = driver.lock().await;
     let next_phase =
@@ -1777,8 +1975,13 @@ pub(crate) async fn fail_runtime_loop_run(
     let staged_input_ids = machine_staged_contributors(&driver);
     machine_validate_run_failed(&driver, &staged_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
-    machine_apply_turn_run_failed(&mut driver, &failed_run_id, error.clone())
-        .map_err(RuntimeLoopRunFailError::Rejected)?;
+    machine_apply_turn_run_failed(
+        &mut driver,
+        &failed_run_id,
+        &terminal_error,
+        runtime_apply_failure.as_ref(),
+    )
+    .map_err(RuntimeLoopRunFailError::Rejected)?;
     let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
     machine_apply_run_return_projection(
         &mut driver,
@@ -1796,7 +1999,8 @@ pub(crate) async fn fail_runtime_loop_run(
             failed_run_id.clone(),
             staged_input_ids,
             replay_plan,
-            error,
+            &terminal_error,
+            runtime_apply_failure.as_ref(),
             true,
         )
         .await

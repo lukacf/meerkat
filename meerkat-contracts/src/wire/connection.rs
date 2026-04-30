@@ -320,9 +320,8 @@ pub struct WireAuthStatus {
     pub profile_id: String,
     pub provider: String,
     pub auth_method: String,
-    /// High-level health: "valid" / "expiring" / "expired" /
-    /// "reauth_required" / "refresh_failed" / "unknown".
-    pub state: String,
+    /// High-level health projected from typed auth-lease lifecycle truth.
+    pub state: meerkat_core::AuthStatusPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub expires_at: Option<DateTime<Utc>>,
@@ -515,7 +514,7 @@ pub struct WireAuthStatusDetail {
     pub profile_id: String,
     pub provider: String,
     pub auth_method: String,
-    pub state: String,
+    pub state: meerkat_core::AuthStatusPhase,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -642,7 +641,7 @@ mod tests {
             profile_id: "p".into(),
             provider: "openai".into(),
             auth_method: "managed_chatgpt_oauth".into(),
-            state: "valid".into(),
+            state: meerkat_core::AuthStatusPhase::Valid,
             expires_at: Some(chrono::Utc::now()),
             last_refresh_at: None,
             account_id: Some("acct_x".into()),

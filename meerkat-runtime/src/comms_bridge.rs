@@ -934,16 +934,20 @@ mod tests {
         } else {
             panic!("Expected PeerInput");
         }
-        let projection = crate::input::peer_projection(&input).expect("terminal projection");
+        let projection = crate::input::runtime_input_projection_for_machine_batch(&input);
+        let context = projection
+            .context_append
+            .expect("terminal machine-batch context projection");
         let expected_key = format!("peer_response_terminal:{route_id}:{in_reply_to}");
-        assert_eq!(
-            projection.context_key().as_deref(),
-            Some(expected_key.as_str())
-        );
+        assert_eq!(context.key, expected_key);
+        let meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } = context.content
+        else {
+            panic!("Expected terminal context text");
+        };
         assert!(
-            projection.prompt_text().contains("from Peer One"),
+            text.contains("from Peer One"),
             "terminal prompt should use display identity: {}",
-            projection.prompt_text()
+            text
         );
     }
 

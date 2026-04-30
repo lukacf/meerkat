@@ -2527,20 +2527,21 @@ mod tests {
             boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
             contributing_input_ids: Vec<meerkat_core::InputId>,
         ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-            <Self as SessionService>::start_turn(self, session_id, req).await?;
-            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    conversation_digest: None,
-                    message_count: 0,
-                    sequence: 0,
-                },
-                session_snapshot: None,
-                terminal: None,
-                run_result: None,
-            })
+            let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
+            Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    None,
+                    run_result,
+                ),
+            )
         }
     }
 

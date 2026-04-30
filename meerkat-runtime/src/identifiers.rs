@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use meerkat_core::types::SessionId;
+
 /// Unique identifier for a runtime event.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeEventId(pub Uuid);
@@ -33,8 +35,35 @@ impl std::fmt::Display for RuntimeEventId {
 pub struct LogicalRuntimeId(pub String);
 
 impl LogicalRuntimeId {
+    const SESSION_RUNTIME_PREFIX: &'static str = "rt:session:";
+
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
+    }
+
+    pub fn for_session(session_id: &SessionId) -> Self {
+        Self(format!("{}{session_id}", Self::SESSION_RUNTIME_PREFIX))
+    }
+
+    pub fn legacy_session_uuid_alias(session_id: &SessionId) -> Self {
+        Self(session_id.to_string())
+    }
+
+    pub fn legacy_session_uuid_storage_alias(&self) -> Option<Self> {
+        self.0
+            .strip_prefix(Self::SESSION_RUNTIME_PREFIX)
+            .map(Self::new)
+    }
+
+    pub fn storage_alias_candidates(&self) -> Vec<Self> {
+        let Some(legacy) = self.legacy_session_uuid_storage_alias() else {
+            return vec![self.clone()];
+        };
+        if legacy == *self {
+            vec![self.clone()]
+        } else {
+            vec![self.clone(), legacy]
+        }
     }
 }
 

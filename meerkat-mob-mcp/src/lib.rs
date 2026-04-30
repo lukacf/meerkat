@@ -1960,20 +1960,21 @@ impl MobSessionService for LocalSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        <Self as SessionService>::start_turn(self, session_id, req).await?;
-        Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-            receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-                run_id,
-                boundary,
-                contributing_input_ids,
-                conversation_digest: None,
-                message_count: 0,
-                sequence: 0,
-            },
-            session_snapshot: None,
-            terminal: None,
-            run_result: None,
-        })
+        let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
+        Ok(
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                None,
+                run_result,
+            ),
+        )
     }
 
     async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
@@ -1994,6 +1995,7 @@ trait Pipe: Sized {
         f(self)
     }
 }
+
 impl<T> Pipe for T {}
 
 pub struct MobMcpDispatcher {
@@ -3613,20 +3615,21 @@ mod tests {
             boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
             contributing_input_ids: Vec<meerkat_core::InputId>,
         ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-            <Self as SessionService>::start_turn(self, session_id, req).await?;
-            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
-                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    conversation_digest: None,
-                    message_count: 0,
-                    sequence: 0,
-                },
-                session_snapshot: None,
-                terminal: None,
-                run_result: None,
-            })
+            let run_result = <Self as SessionService>::start_turn(self, session_id, req).await?;
+            Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_run_result(
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    None,
+                    run_result,
+                ),
+            )
         }
     }
 
@@ -5344,7 +5347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_local_session_service_apply_runtime_turn_succeeds() {
+    async fn test_local_session_service_apply_runtime_turn_returns_start_turn_terminal_result() {
         let svc = LocalSessionService::new();
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
@@ -5384,5 +5387,15 @@ mod tests {
             result.is_ok(),
             "apply_runtime_turn must work for AutonomousHost: {result:?}"
         );
+        let output = result.expect("apply_runtime_turn");
+        match output.terminal {
+            Some(meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(
+                run_result,
+            )) => {
+                assert_eq!(run_result.text, "ok");
+                assert_eq!(run_result.session_id, created.session_id);
+            }
+            other => panic!("expected start_turn terminal run result, got {other:?}"),
+        }
     }
 }

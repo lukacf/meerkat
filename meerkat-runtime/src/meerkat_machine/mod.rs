@@ -120,13 +120,15 @@ type MeerkatMachineCommandFuture<'a> = Pin<
 
 pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, commit_runtime_loop_run,
-    fail_runtime_loop_run, machine_apply_run_return_projection, machine_batch_execution_kind,
+    fail_machine_run_without_runtime_apply_cause, fail_runtime_loop_run,
+    machine_apply_run_return_projection, machine_batch_execution_kind,
     machine_batch_peer_response_terminal_apply_intent, machine_batch_primitive_projections,
-    machine_begin_run, machine_destroy, machine_executor_attach_projection, machine_input_boundary,
-    machine_prepare_bindings_projection, machine_recover_ephemeral_driver,
-    machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
-    machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
-    machine_unregister_session_projection, prepare_runtime_loop_batch_start,
+    machine_begin_run, machine_commit_prepared_destroy, machine_executor_attach_projection,
+    machine_input_boundary, machine_prepare_bindings_projection, machine_prepare_destroy,
+    machine_recover_ephemeral_driver, machine_recover_persistent_driver,
+    machine_recycle_preserving_work, machine_reset, machine_retire,
+    machine_select_runtime_loop_batch, machine_stop_runtime, machine_unregister_session_projection,
+    prepare_runtime_loop_batch_start,
 };
 
 pub(crate) mod driver;
@@ -169,6 +171,8 @@ enum CommittedEffectDispatchFailure {
 
 /// Per-session state: driver + registration phase.
 struct RuntimeSessionEntry {
+    /// Canonical runtime control-plane identity for this registered session.
+    runtime_id: LogicalRuntimeId,
     /// Per-session mutation gate.
     ///
     /// Serializes same-session mutating commands across the full
@@ -237,6 +241,7 @@ struct RuntimeSessionEntry {
 struct RuntimeLoopAttachment {
     wake_tx: mpsc::Sender<()>,
     control_tx: mpsc::Sender<RunControlCommand>,
+    control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -297,11 +302,13 @@ impl RuntimeSessionEntry {
         &mut self,
         wake_tx: mpsc::Sender<()>,
         control_tx: mpsc::Sender<RunControlCommand>,
+        control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
         self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
             wake_tx,
             control_tx,
+            control_handle,
             _loop_handle: loop_handle,
         });
     }
@@ -333,6 +340,17 @@ impl RuntimeSessionEntry {
                 if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
             {
                 Some(attachment.control_tx.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+        match &self.phase {
+            RegistrationPhase::Active(attachment)
+                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+            {
+                attachment.control_handle.clone()
             }
             _ => None,
         }
@@ -427,6 +445,14 @@ impl MeerkatMachine {
         context: &str,
     ) -> Result<StagedSessionDslInput, String> {
         let authority = self.session_dsl_authority(session_id).await?;
+        Self::stage_dsl_transition_on_authority(&authority, input, context)
+    }
+
+    fn stage_dsl_transition_on_authority(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, String> {
         let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -457,27 +483,6 @@ impl MeerkatMachine {
             input,
             context,
             CommittedEffectDispatchFailure::RestorePreviousDslState,
-        )
-        .await
-    }
-
-    async fn apply_session_dsl_input_preserving_committed_state(
-        &self,
-        session_id: &SessionId,
-        input: dsl::MeerkatMachineInput,
-        context: &str,
-    ) -> Result<
-        (
-            Box<dsl::MeerkatMachineState>,
-            Vec<dsl::MeerkatMachineEffect>,
-        ),
-        String,
-    > {
-        self.apply_session_dsl_input_with_dispatch_failure(
-            session_id,
-            input,
-            context,
-            CommittedEffectDispatchFailure::PreserveCommittedDslState,
         )
         .await
     }
@@ -604,11 +609,18 @@ impl MeerkatMachine {
         state: Box<dsl::MeerkatMachineState>,
     ) {
         if let Ok(authority) = self.session_dsl_authority(session_id).await {
-            let mut authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *authority = dsl::MeerkatMachineAuthority::from_state(*state);
+            Self::restore_dsl_authority_state(&authority, state);
         }
+    }
+
+    fn restore_dsl_authority_state(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        state: Box<dsl::MeerkatMachineState>,
+    ) {
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *authority = dsl::MeerkatMachineAuthority::from_state(*state);
     }
 }
 
@@ -810,10 +822,9 @@ impl MeerkatMachine {
     /// Create a driver entry for a session.
     fn make_driver(
         &self,
-        session_id: &SessionId,
+        runtime_id: LogicalRuntimeId,
         dsl_authority: crate::driver::ephemeral::SharedIngressDslAuthority,
     ) -> DriverEntry {
-        let runtime_id = LogicalRuntimeId::new(session_id.to_string());
         let control_projection = Arc::new(StdRwLock::new(
             crate::driver::ephemeral::RuntimeControlProjection::default(),
         ));
@@ -844,57 +855,85 @@ impl MeerkatMachine {
     async fn recover_or_create_ops_state(
         &self,
         session_id: &SessionId,
+        runtime_id: &LogicalRuntimeId,
     ) -> (
         Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
         meerkat_core::RuntimeEpochId,
         Arc<meerkat_core::EpochCursorState>,
     ) {
         if let Some(ref store) = self.store {
-            let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
-            match store.load_ops_lifecycle(&runtime_id).await {
-                Ok(Some(snapshot)) => {
-                    let recovered_epoch = snapshot.epoch_id.clone();
-                    let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
-                        snapshot.cursors.agent_applied_cursor,
-                        snapshot.cursors.runtime_observed_seq,
-                        snapshot.cursors.runtime_last_injected_seq,
-                    );
-                    let recovered_ops_count = snapshot.completion_entries.len();
-                    let registry =
-                        crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
-                    tracing::info!(
-                        %session_id,
-                        epoch_id = %recovered_epoch,
-                        recovered_ops = recovered_ops_count,
-                        "ops lifecycle recovered from durable store (same epoch)"
-                    );
-                    (
-                        Arc::new(registry),
-                        recovered_epoch,
-                        Arc::new(recovered_cursors),
-                    )
-                }
-                Ok(None) => {
-                    tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
-                    (
-                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                        meerkat_core::RuntimeEpochId::new(),
-                        Arc::new(meerkat_core::EpochCursorState::new()),
-                    )
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        %session_id,
-                        error = %err,
-                        "failed to load ops lifecycle; epoch rotated"
-                    );
-                    (
-                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                        meerkat_core::RuntimeEpochId::new(),
-                        Arc::new(meerkat_core::EpochCursorState::new()),
-                    )
+            let legacy_alias = LogicalRuntimeId::legacy_session_uuid_alias(session_id);
+            let candidates = if &legacy_alias == runtime_id {
+                vec![runtime_id.clone()]
+            } else {
+                vec![runtime_id.clone(), legacy_alias]
+            };
+            let mut recovered: Option<(
+                LogicalRuntimeId,
+                crate::ops_lifecycle::PersistedOpsSnapshot,
+            )> = None;
+            for candidate in candidates {
+                match store.load_ops_lifecycle(&candidate).await {
+                    Ok(Some(snapshot)) => {
+                        if candidate == *runtime_id {
+                            recovered = Some((candidate, snapshot));
+                            break;
+                        }
+                        recovered = Some((candidate, snapshot));
+                    }
+                    Ok(None) => {}
+                    Err(err) if recovered.is_some() => {
+                        tracing::warn!(
+                            %session_id,
+                            %candidate,
+                            error = %err,
+                            "ignoring legacy ops lifecycle fallback error because canonical snapshot was already recovered"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            %session_id,
+                            %candidate,
+                            error = %err,
+                            "failed to load ops lifecycle; epoch rotated"
+                        );
+                        return (
+                            Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                            meerkat_core::RuntimeEpochId::new(),
+                            Arc::new(meerkat_core::EpochCursorState::new()),
+                        );
+                    }
                 }
             }
+            if let Some((candidate, snapshot)) = recovered {
+                let recovered_epoch = snapshot.epoch_id.clone();
+                let recovered_cursors = meerkat_core::EpochCursorState::from_recovered(
+                    snapshot.cursors.agent_applied_cursor,
+                    snapshot.cursors.runtime_observed_seq,
+                    snapshot.cursors.runtime_last_injected_seq,
+                );
+                let recovered_ops_count = snapshot.completion_entries.len();
+                let registry =
+                    crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::from_recovered(snapshot);
+                tracing::info!(
+                    %session_id,
+                    %candidate,
+                    epoch_id = %recovered_epoch,
+                    recovered_ops = recovered_ops_count,
+                    "ops lifecycle recovered from durable store (same epoch)"
+                );
+                return (
+                    Arc::new(registry),
+                    recovered_epoch,
+                    Arc::new(recovered_cursors),
+                );
+            }
+            tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
+            (
+                Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                meerkat_core::RuntimeEpochId::new(),
+                Arc::new(meerkat_core::EpochCursorState::new()),
+            )
         } else {
             (
                 Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),

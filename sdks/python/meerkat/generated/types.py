@@ -1788,7 +1788,7 @@ class WireAuthStatus:
     auth_method: str
     profile_id: str
     provider: str
-    state: str
+    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
     last_error: Optional[dict[str, Any]] = None
@@ -1808,7 +1808,7 @@ binding directly."""
     profile_id: str
     provider: str
     realm_id: str
-    state: str
+    state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
     last_refresh_at: Optional[str] = None

@@ -14,7 +14,9 @@ use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::event_injector::SubscribableInjector;
 #[cfg(feature = "runtime-adapter")]
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorControl, CoreExecutorError,
+};
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 #[cfg(feature = "runtime-adapter")]
@@ -669,6 +671,29 @@ impl MobSessionRuntimeExecutor {
 }
 
 #[cfg(feature = "runtime-adapter")]
+struct MobSessionRuntimeControlHandle {
+    session_service: Arc<dyn MobSessionService>,
+    bridge_session_id: SessionId,
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl CoreExecutorControl for MobSessionRuntimeControlHandle {
+    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        match command {
+            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
+                self.session_service
+                    .interrupt(&self.bridge_session_id)
+                    .await
+                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
 fn render_runtime_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -704,15 +729,22 @@ fn pending_system_context_appends_for_runtime_executor(
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
+    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
+        Some(Arc::new(MobSessionRuntimeControlHandle {
+            session_service: Arc::clone(&self.session_service),
+            bridge_session_id: self.bridge_session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: CoreRunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
         if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
-            return Err(CoreExecutorError::ApplyFailed {
-                reason: reason.to_string(),
-            });
+            return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                reason.to_string(),
+            ));
         }
 
         // Context-only staged primitives may land directly as runtime
@@ -732,9 +764,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     staged.contributing_input_ids.clone(),
                 )
                 .await
-                .map_err(|err| CoreExecutorError::ApplyFailed {
-                    reason: err.to_string(),
-                });
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
 
         if primitive.is_peer_response_terminal_context_and_run() {
@@ -747,9 +777,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     pending_system_context_appends_for_runtime_executor(&staged.context_appends),
                 )
                 .await
-                .map_err(|err| CoreExecutorError::ApplyFailed {
-                    reason: err.to_string(),
-                })?;
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
         }
 
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
@@ -789,20 +817,17 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 contributing_input_ids,
             )
             .await
-            .map_err(|err| CoreExecutorError::ApplyFailed {
-                reason: err.to_string(),
-            })
+            .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
         match command {
-            RunControlCommand::CancelCurrentRun { .. } => self
-                .session_service
-                .interrupt(&self.bridge_session_id)
-                .await
-                .map_err(|err| CoreExecutorError::ControlFailed {
-                    reason: err.to_string(),
-                }),
+            RunControlCommand::CancelCurrentRun { .. } | RunControlCommand::InterruptYielding => {
+                self.session_service
+                    .interrupt(&self.bridge_session_id)
+                    .await
+                    .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+            }
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 tracing::debug!(
                     bridge_session_id = %self.bridge_session_id,
@@ -833,9 +858,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 }
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::ControlFailed {
-                        reason: err.to_string(),
-                    }),
+                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
                 }
             }
             _ => Ok(()),

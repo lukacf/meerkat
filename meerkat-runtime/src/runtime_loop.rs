@@ -6,7 +6,7 @@
 //! and applies it via the `CoreExecutor` (which calls `SessionService::start_turn()`
 //! under the hood).
 
-use meerkat_core::lifecycle::core_executor::CoreApplyTerminal;
+use meerkat_core::lifecycle::core_executor::{CoreApplyFailureCause, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::{
     PeerResponseTerminalApplyIntent, RunApplyBoundary, RunPrimitive, StagedRunInput,
 };
@@ -14,7 +14,7 @@ use meerkat_core::lifecycle::{InputId, RunId};
 
 #[cfg(test)]
 use crate::input::input_prompt_text;
-use crate::input::{Input, runtime_input_projection};
+use crate::input::{Input, runtime_input_projection_for_machine_batch};
 use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
@@ -79,30 +79,24 @@ pub(crate) fn merge_batch_turn_metadata(
 fn resolve_completion_waiters(
     registry: &mut crate::completion::CompletionRegistry,
     input_ids: &[InputId],
-    run_result: Option<meerkat_core::types::RunResult>,
     terminal: Option<CoreApplyTerminal>,
 ) {
-    if let Some(CoreApplyTerminal::CallbackPending { tool_name, args }) = terminal {
-        for input_id in input_ids {
-            registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
-        }
-        return;
-    }
-
-    if let Some(result) = run_result {
-        for input_id in input_ids {
-            registry.resolve_completed(input_id, result.clone());
-        }
-        return;
-    }
-
     match terminal {
-        Some(CoreApplyTerminal::RunResult(_) | CoreApplyTerminal::NoPendingBoundary) | None => {
+        Some(CoreApplyTerminal::CallbackPending { tool_name, args }) => {
+            for input_id in input_ids {
+                registry.resolve_callback_pending(input_id, tool_name.clone(), args.clone());
+            }
+        }
+        Some(CoreApplyTerminal::RunResult(result)) => {
+            for input_id in input_ids {
+                registry.resolve_completed(input_id, result.clone());
+            }
+        }
+        Some(CoreApplyTerminal::NoPendingBoundary) | None => {
             for input_id in input_ids {
                 registry.resolve_without_result(input_id);
             }
         }
-        Some(CoreApplyTerminal::CallbackPending { .. }) => unreachable!(),
     }
 }
 
@@ -229,7 +223,7 @@ pub(crate) fn try_inputs_to_primitive_with_boundary(
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let projections = inputs
         .iter()
-        .map(|(_, input)| runtime_input_projection(input))
+        .map(|(_, input)| runtime_input_projection_for_machine_batch(input))
         .collect::<Vec<_>>();
     let peer_response_terminal_apply_intent =
         fallback_batch_peer_response_terminal_apply_intent(inputs, boundary);
@@ -669,7 +663,7 @@ async fn process_queue(
                     &staged_ids,
                 );
             let projections =
-                crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_ids);
+                crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_inputs);
             let primitive = try_projected_inputs_to_primitive_with_boundary(
                 &staged_inputs,
                 &projections,
@@ -704,7 +698,7 @@ async fn process_queue(
                         let _ = crate::meerkat_machine::fail_runtime_loop_run(
                             driver,
                             run_id,
-                            conflict.to_string(),
+                            CoreApplyFailureCause::primitive_rejected(conflict.to_string()),
                         )
                         .await;
                         return false;
@@ -717,7 +711,7 @@ async fn process_queue(
                     let _ = crate::meerkat_machine::fail_runtime_loop_run(
                         driver,
                         run_id,
-                        error.to_string(),
+                        CoreApplyFailureCause::executor_internal(error.to_string()),
                     )
                     .await;
                     return false;
@@ -733,7 +727,6 @@ async fn process_queue(
                         let meerkat_core::lifecycle::core_executor::CoreApplyOutput {
                             receipt,
                             session_snapshot,
-                            run_result,
                             terminal,
                         } = output;
                         drop(d);
@@ -758,17 +751,18 @@ async fn process_queue(
                         // Resolve completion waiters unconditionally
                         if let Some(completions) = completions.as_ref() {
                             let mut reg = completions.lock().await;
-                            resolve_completion_waiters(&mut reg, &input_ids, run_result, terminal);
+                            resolve_completion_waiters(&mut reg, &input_ids, terminal);
                         }
                     }
                     Err(e) => {
                         let error_msg = e.to_string();
+                        let failure = e.apply_failure_cause();
                         drop(d);
                         // RunFailed rolls back Staged → Queued and returns to Idle
                         if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
                             driver,
                             run_id,
-                            error_msg.clone(),
+                            failure.clone(),
                         )
                         .await
                         {
@@ -990,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn input_to_prompt_peer_response_terminal_is_runtime_owned_from_typed_payload() {
+    fn machine_batch_projection_peer_response_terminal_is_runtime_owned_from_typed_payload() {
         let input = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
@@ -1019,14 +1013,21 @@ mod tests {
             handling_mode: None,
         });
 
+        let projection = runtime_input_projection_for_machine_batch(&input);
+        let context = projection
+            .context_append
+            .expect("terminal peer response should project in machine batch");
+        let CoreRenderable::Text { text } = context.content else {
+            panic!("expected terminal context text");
+        };
         assert_eq!(
-            input_to_prompt(&input),
+            text,
             "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}."
         );
     }
 
     #[test]
-    fn input_to_prompt_peer_response_terminal_omits_payload_key_extraction() {
+    fn machine_batch_projection_peer_response_terminal_omits_payload_key_extraction() {
         // Regression: runtime must not reach into the peer response payload
         // to extract ad-hoc fields (request_intent, token, etc.) and bake
         // them into prompt text. The canonical projection is the typed
@@ -1060,7 +1061,13 @@ mod tests {
             handling_mode: None,
         });
 
-        let rendered = input_to_prompt(&input);
+        let projection = runtime_input_projection_for_machine_batch(&input);
+        let context = projection
+            .context_append
+            .expect("terminal peer response should project in machine batch");
+        let CoreRenderable::Text { text: rendered } = context.content else {
+            panic!("expected terminal context text");
+        };
         assert!(
             !rendered.contains("Authoritative result fields:"),
             "runtime must not emit scenario-specific authoritative-field hints: {rendered}"
@@ -1958,7 +1965,6 @@ mod tests {
         resolve_completion_waiters(
             &mut registry,
             std::slice::from_ref(&input_id),
-            None,
             Some(CoreApplyTerminal::CallbackPending {
                 tool_name: "external_mock".to_string(),
                 args: serde_json::json!({ "value": "browser" }),
@@ -1971,6 +1977,36 @@ mod tests {
                 assert_eq!(args, serde_json::json!({ "value": "browser" }));
             }
             other => panic!("Expected CallbackPending, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_completion_waiters_surfaces_terminal_run_result() {
+        let mut registry = crate::completion::CompletionRegistry::new();
+        let input_id = InputId::new();
+        let handle = registry.register(input_id.clone());
+        let run_result = meerkat_core::types::RunResult {
+            text: "terminal authority".to_string(),
+            session_id: SessionId::new(),
+            usage: meerkat_core::types::Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            structured_output: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+
+        resolve_completion_waiters(
+            &mut registry,
+            std::slice::from_ref(&input_id),
+            Some(CoreApplyTerminal::RunResult(run_result)),
+        );
+
+        match handle.wait().await {
+            crate::completion::CompletionOutcome::Completed(result) => {
+                assert_eq!(result.text, "terminal authority");
+            }
+            other => panic!("Expected Completed, got {other:?}"),
         }
     }
 

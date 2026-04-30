@@ -199,7 +199,8 @@ pub use interaction::{
     format_peer_response_projection, peer_lifecycle_subject, render_peer_ingress_admitted_text,
 };
 pub use lifecycle::{
-    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreExecutor,
+    ConversationAppend, ConversationAppendRole, ConversationContextAppend, CoreApplyFailureCause,
+    CoreApplyFailureCauseKind, CoreControlFailureCause, CoreControlFailureCauseKind, CoreExecutor,
     CoreExecutorError, CoreRenderable, InputId, RunApplyBoundary, RunBoundaryReceipt,
     RunControlCommand, RunEvent, RunId, RunPrimitive, StagedRunInput,
 };
@@ -268,9 +269,10 @@ pub use tool_catalog::{
 pub use tool_scope::{
     ComposedToolFilter, EXTERNAL_TOOL_FILTER_METADATA_KEY, ExternalToolSurfaceBaseState,
     ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
-    ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp, LocalToolVisibilityOwner, ToolFilter,
-    ToolScope, ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot,
+    ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceFailureCause,
+    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot,
+    ExternalToolSurfaceStagedOp, LocalToolVisibilityOwner, ToolFilter, ToolScope,
+    ToolScopeApplyError, ToolScopeHandle, ToolScopeRevision, ToolScopeSnapshot,
     ToolScopeStageError, ToolVisibilityOwner,
 };
 pub use turn_boundary::{TurnBoundaryHook, TurnBoundaryMessage};

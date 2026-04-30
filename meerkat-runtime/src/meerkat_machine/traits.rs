@@ -394,8 +394,8 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
 // ---------------------------------------------------------------------------
 
 impl MeerkatMachine {
-    pub(super) fn logical_runtime_id(session_id: &SessionId) -> LogicalRuntimeId {
-        LogicalRuntimeId::new(session_id.to_string())
+    pub(crate) fn logical_runtime_id(session_id: &SessionId) -> LogicalRuntimeId {
+        LogicalRuntimeId::for_session(session_id)
     }
 
     pub(super) fn post_admission_signal_from_effects(
@@ -459,19 +459,18 @@ impl MeerkatMachine {
         }
     }
 
-    /// Resolve a LogicalRuntimeId to a SessionId for internal lookup.
-    ///
-    /// The adapter uses `LogicalRuntimeId::new(session_id.to_string())` when
-    /// creating drivers, so runtime IDs are UUID strings that parse back to
-    /// SessionId.
-    pub(super) fn resolve_session_id(
+    /// Resolve a LogicalRuntimeId to a registered SessionId for internal lookup.
+    pub(super) async fn resolve_session_id(
+        &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<SessionId, RuntimeControlPlaneError> {
-        runtime_id
-            .0
-            .parse::<uuid::Uuid>()
-            .map(SessionId)
-            .map_err(|_| RuntimeControlPlaneError::NotFound(runtime_id.clone()))
+        let sessions = self.sessions.read().await;
+        sessions
+            .iter()
+            .find_map(|(session_id, entry)| {
+                (&entry.runtime_id == runtime_id).then(|| session_id.clone())
+            })
+            .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))
     }
 
     pub(super) async fn existing_session_runtime_state(
@@ -519,13 +518,13 @@ impl MeerkatMachine {
         ),
         RuntimeControlPlaneError,
     > {
-        let session_id = Self::resolve_session_id(runtime_id)?;
         let sessions = self.sessions.read().await;
-        let entry = sessions
-            .get(&session_id)
+        let (session_id, entry) = sessions
+            .iter()
+            .find(|(_, entry)| &entry.runtime_id == runtime_id)
             .ok_or_else(|| RuntimeControlPlaneError::NotFound(runtime_id.clone()))?;
         Ok((
-            session_id,
+            session_id.clone(),
             entry.driver.clone(),
             entry.completions.clone(),
             entry.wake_sender(),

@@ -3312,6 +3312,40 @@ impl std::fmt::Display for WorkOrigin {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum ExternalToolSurfaceFailureCause {
+    #[default]
+    PendingFailed,
+    SurfaceDraining,
+    SurfaceUnavailable,
+}
+impl ExternalToolSurfaceFailureCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PendingFailed => "PendingFailed",
+            Self::SurfaceDraining => "SurfaceDraining",
+            Self::SurfaceUnavailable => "SurfaceUnavailable",
+        }
+    }
+}
+impl std::fmt::Display for ExternalToolSurfaceFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressAdmittedKind {
     #[default]
     Message,
@@ -3556,6 +3590,48 @@ impl std::fmt::Display for PeerIngressResponseTerminality {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeApplyFailureCause {
+    #[default]
+    Unknown,
+    PrimitiveRejected,
+    RuntimeContextApply,
+    RuntimeTurn,
+    ExecutorStopped,
+    ExecutorControlFailed,
+    ExecutorInternal,
+}
+impl RuntimeApplyFailureCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::PrimitiveRejected => "PrimitiveRejected",
+            Self::RuntimeContextApply => "RuntimeContextApply",
+            Self::RuntimeTurn => "RuntimeTurn",
+            Self::ExecutorStopped => "ExecutorStopped",
+            Self::ExecutorControlFailed => "ExecutorControlFailed",
+            Self::ExecutorInternal => "ExecutorInternal",
+        }
+    }
+}
+impl std::fmt::Display for RuntimeApplyFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -3594,6 +3670,8 @@ pub struct State {
     pub boundary_count: u64,
     pub cancel_after_boundary: bool,
     pub terminal_outcome: Option<TurnTerminalOutcome>,
+    pub last_runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
+    pub last_runtime_apply_failure_message: Option<String>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
     pub llm_retry_attempt: u64,
@@ -4066,6 +4144,8 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RunFailed {
         pub run_id: RunId,
+        pub runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
+        pub runtime_apply_failure_message: Option<String>,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4294,7 +4374,7 @@ pub mod inputs {
         pub surface_id: String,
         pub pending_task_sequence: u64,
         pub staged_intent_sequence: u64,
-        pub reason: String,
+        pub cause: ExternalToolSurfaceFailureCause,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceCallStarted {
@@ -5392,6 +5472,7 @@ pub mod effects {
         pub surface_id: String,
         pub operation: ExternalToolSurfaceDeltaOperation,
         pub phase: ExternalToolSurfaceDeltaPhase,
+        pub cause: Option<ExternalToolSurfaceFailureCause>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CloseSurfaceConnection {
@@ -5400,7 +5481,7 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RejectSurfaceCall {
         pub surface_id: String,
-        pub reason: String,
+        pub cause: ExternalToolSurfaceFailureCause,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PublishSupervisorTrustEdge {
@@ -5773,6 +5854,7 @@ pub enum TransitionId {
     PublishCommittedVisibleSetRetired,
     PublishCommittedVisibleSetStopped,
     RetireRequestedFromIdle,
+    RetireAlreadyRetired,
     Reset,
     StopRuntimeExecutorUnbound,
     StopRuntimeExecutorAttached,
@@ -5782,6 +5864,7 @@ pub enum TransitionId {
     RuntimeExecutorExitedFromIdle,
     RuntimeExecutorExitedFromRetired,
     RuntimeExecutorExitedFromStopped,
+    DestroyInitializing,
     Destroy,
     RecoverInitializing,
     RecoverIdle,
@@ -6570,6 +6653,8 @@ pub fn initial_state() -> State {
         boundary_count: 0,
         cancel_after_boundary: false,
         terminal_outcome: None,
+        last_runtime_apply_failure_cause: None,
+        last_runtime_apply_failure_message: None,
         extraction_attempts: 0,
         max_extraction_retries: 0,
         llm_retry_attempt: 0,

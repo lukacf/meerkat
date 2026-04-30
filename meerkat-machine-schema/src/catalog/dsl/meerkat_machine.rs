@@ -806,6 +806,22 @@ pub enum TurnTerminalOutcome {
     StructuredOutputValidationFailed,
 }
 
+/// Typed classifier for failures surfaced by the runtime apply loop when a
+/// `CoreExecutor::apply` call fails and terminalizes the runtime turn.
+/// The companion `last_runtime_apply_failure_message` state field carries the
+/// human-readable projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeApplyFailureCause {
+    #[default]
+    Unknown,
+    PrimitiveRejected,
+    RuntimeContextApply,
+    RuntimeTurn,
+    ExecutorStopped,
+    ExecutorControlFailed,
+    ExecutorInternal,
+}
+
 /// Typed pre-run phase marker. Closed set: `idle`, `attached`, `retired`.
 /// Replaces the former literal-string `pre_run_phase` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -910,6 +926,17 @@ pub enum ExternalToolSurfaceDeltaPhase {
     Draining,
     Failed,
     Forced,
+}
+
+/// Typed failure cause for an external tool surface. Closed mirror of
+/// [`meerkat_core::tool_scope::ExternalToolSurfaceFailureCause`] — replaces
+/// the former literal-string pending-failure and call-rejection reason fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ExternalToolSurfaceFailureCause {
+    #[default]
+    PendingFailed,
+    SurfaceDraining,
+    SurfaceUnavailable,
 }
 
 /// Typed drain-exit reason. Closed mirror of
@@ -1291,6 +1318,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             boundary_count: u64,
             cancel_after_boundary: bool,
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
+            last_runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
+            last_runtime_apply_failure_message: Option<String>,
             extraction_attempts: u64,
             max_extraction_retries: u64,
             llm_retry_attempt: u64,
@@ -1624,6 +1653,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             boundary_count = 0,
             cancel_after_boundary = false,
             terminal_outcome = None,
+            last_runtime_apply_failure_cause = None,
+            last_runtime_apply_failure_message = None,
             extraction_attempts = 0,
             max_extraction_retries = 0,
             llm_retry_attempt = 0,
@@ -1908,7 +1939,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             TimeBudgetExceeded,
             ForceCancelNoRun,
             RunCompleted { run_id: RunId },
-            RunFailed { run_id: RunId, error: String },
+            RunFailed {
+                run_id: RunId,
+                runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
+                runtime_apply_failure_message: Option<String>,
+                error: String,
+            },
             RunCancelled { run_id: RunId },
             // Input lifecycle inputs
             RecoverInputLifecycle {
@@ -2010,7 +2046,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: String,
                 pending_task_sequence: u64,
                 staged_intent_sequence: u64,
-                reason: String,
+                cause: Enum<ExternalToolSurfaceFailureCause>,
             },
             SurfaceCallStarted { surface_id: String },
             SurfaceCallFinished { surface_id: String },
@@ -2326,9 +2362,10 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: String,
                 operation: Enum<ExternalToolSurfaceDeltaOperation>,
                 phase: Enum<ExternalToolSurfaceDeltaPhase>,
+                cause: Option<Enum<ExternalToolSurfaceFailureCause>>,
             },
             CloseSurfaceConnection { surface_id: String },
-            RejectSurfaceCall { surface_id: String, reason: String },
+            RejectSurfaceCall { surface_id: String, cause: Enum<ExternalToolSurfaceFailureCause> },
             PublishSupervisorTrustEdge {
                 peer_id: String,
                 name: String,
@@ -3604,6 +3641,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Retired
             emit RuntimeRetired { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
+        transition RetireAlreadyRetired {
+            on input Retire { session_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {}
+            to Retired
+        }
 
         // 15. Reset: from [Initializing, Idle, Attached, Retired] → Idle
         transition Reset {
@@ -3716,12 +3759,24 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Stopped
         }
 
-        // 17. Destroy: from all non-Destroyed → Destroyed
+        // 17. Destroy: from all non-Destroyed bound runtime phases → Destroyed.
+        transition DestroyInitializing {
+            on input Destroy { session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "runtime_is_bound" { self.active_runtime_id != None }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+                self.registration_phase = RegistrationPhase::Queuing;
+            }
+            to Destroyed
+            emit RuntimeDestroyed { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
         transition Destroy {
             on input Destroy { session_id }
             guard {
-                self.lifecycle_phase == Phase::Initializing
-                || self.lifecycle_phase == Phase::Idle
+                self.lifecycle_phase == Phase::Idle
                 || self.lifecycle_phase == Phase::Attached
                 || self.lifecycle_phase == Phase::Running
                 || self.lifecycle_phase == Phase::Retired
@@ -4960,6 +5015,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
@@ -4995,6 +5052,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
@@ -5029,6 +5088,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
                 self.llm_retry_attempt = 0;
@@ -5065,6 +5126,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5100,6 +5163,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5134,6 +5199,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5170,6 +5237,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5205,6 +5274,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5239,6 +5310,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.boundary_count = 0;
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
+                self.last_runtime_apply_failure_cause = None;
+                self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5641,12 +5714,14 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition RunFailed {
-            on input RunFailed { run_id, error }
+            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
+                self.last_runtime_apply_failure_cause = runtime_apply_failure_cause;
+                self.last_runtime_apply_failure_message = runtime_apply_failure_message;
             }
             to Running
         }
@@ -5803,6 +5878,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Add,
                 phase: ExternalToolSurfaceDeltaPhase::Pending,
+                cause: None,
             }
         }
         transition SurfaceApplyBoundaryAddRunning {
@@ -5846,6 +5922,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Add,
                 phase: ExternalToolSurfaceDeltaPhase::Pending,
+                cause: None,
             }
         }
         transition SurfaceApplyBoundaryReloadAttached {
@@ -5885,6 +5962,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Reload,
                 phase: ExternalToolSurfaceDeltaPhase::Pending,
+                cause: None,
             }
         }
         transition SurfaceApplyBoundaryReloadRunning {
@@ -5924,6 +6002,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Reload,
                 phase: ExternalToolSurfaceDeltaPhase::Pending,
+                cause: None,
             }
         }
         transition SurfaceApplyBoundaryRemoveDrainingAttached {
@@ -5961,6 +6040,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Remove,
                 phase: ExternalToolSurfaceDeltaPhase::Draining,
+                cause: None,
             }
         }
         transition SurfaceApplyBoundaryRemoveDrainingRunning {
@@ -5998,6 +6078,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Remove,
                 phase: ExternalToolSurfaceDeltaPhase::Draining,
+                cause: None,
             }
         }
         transition SurfaceApplyBoundaryRemoveNoopAttached {
@@ -6075,6 +6156,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Add,
                 phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
             }
         }
         transition SurfaceMarkPendingSucceededAddRunning {
@@ -6101,6 +6183,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Add,
                 phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
             }
         }
         transition SurfaceMarkPendingSucceededReloadAttached {
@@ -6127,6 +6210,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Reload,
                 phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
             }
         }
         transition SurfaceMarkPendingSucceededReloadRunning {
@@ -6153,11 +6237,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Reload,
                 phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
             }
         }
 
         transition SurfaceMarkPendingFailedAttached {
-            on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, reason }
+            on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, cause }
             guard { self.lifecycle_phase == Phase::Attached }
             guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
             guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
@@ -6172,10 +6257,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: self.surface_last_delta_operation.get(surface_id).get("value"),
                 phase: ExternalToolSurfaceDeltaPhase::Failed,
+                cause: Some(cause),
             }
         }
         transition SurfaceMarkPendingFailedRunning {
-            on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, reason }
+            on input SurfaceMarkPendingFailed { surface_id, pending_task_sequence, staged_intent_sequence, cause }
             guard { self.lifecycle_phase == Phase::Running }
             guard "pending_sequence_matches" { self.surface_pending_task_sequence.contains_key(surface_id) && self.surface_pending_task_sequence.get(surface_id).get("value") == pending_task_sequence }
             guard "pending_lineage_matches" { self.surface_pending_lineage_sequence.contains_key(surface_id) && self.surface_pending_lineage_sequence.get(surface_id).get("value") == staged_intent_sequence }
@@ -6190,6 +6276,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: self.surface_last_delta_operation.get(surface_id).get("value"),
                 phase: ExternalToolSurfaceDeltaPhase::Failed,
+                cause: Some(cause),
             }
         }
 
@@ -6217,7 +6304,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "surface_removing" { self.surface_base_state.contains_key(surface_id) && self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Removing }
             update {}
             to Attached
-            emit RejectSurfaceCall { surface_id: surface_id, reason: "surface_draining" }
+            emit RejectSurfaceCall { surface_id: surface_id, cause: ExternalToolSurfaceFailureCause::SurfaceDraining }
         }
         transition SurfaceCallStartedRejectRemovingRunning {
             on input SurfaceCallStarted { surface_id }
@@ -6225,7 +6312,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "surface_removing" { self.surface_base_state.contains_key(surface_id) && self.surface_base_state.get(surface_id).get("value") == ExternalToolSurfaceBaseState::Removing }
             update {}
             to Running
-            emit RejectSurfaceCall { surface_id: surface_id, reason: "surface_draining" }
+            emit RejectSurfaceCall { surface_id: surface_id, cause: ExternalToolSurfaceFailureCause::SurfaceDraining }
         }
         transition SurfaceCallStartedRejectUnavailableAttached {
             on input SurfaceCallStarted { surface_id }
@@ -6239,7 +6326,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Attached
-            emit RejectSurfaceCall { surface_id: surface_id, reason: "surface_unavailable" }
+            emit RejectSurfaceCall { surface_id: surface_id, cause: ExternalToolSurfaceFailureCause::SurfaceUnavailable }
         }
         transition SurfaceCallStartedRejectUnavailableRunning {
             on input SurfaceCallStarted { surface_id }
@@ -6253,7 +6340,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             update {}
             to Running
-            emit RejectSurfaceCall { surface_id: surface_id, reason: "surface_unavailable" }
+            emit RejectSurfaceCall { surface_id: surface_id, cause: ExternalToolSurfaceFailureCause::SurfaceUnavailable }
         }
 
         transition SurfaceCallFinishedAttached {
@@ -6318,6 +6405,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Remove,
                 phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
             }
         }
         transition SurfaceFinalizeRemovalCleanRunning {
@@ -6349,6 +6437,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Remove,
                 phase: ExternalToolSurfaceDeltaPhase::Applied,
+                cause: None,
             }
         }
 
@@ -6378,6 +6467,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Remove,
                 phase: ExternalToolSurfaceDeltaPhase::Forced,
+                cause: None,
             }
         }
         transition SurfaceFinalizeRemovalForcedRunning {
@@ -6406,6 +6496,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 surface_id: surface_id,
                 operation: ExternalToolSurfaceDeltaOperation::Remove,
                 phase: ExternalToolSurfaceDeltaPhase::Forced,
+                cause: None,
             }
         }
 

@@ -4,16 +4,11 @@
 //!
 //! The per-composition emission must expose:
 //!
-//! * a top-level `MeerkatMobSeamEffect` enum with one variant per
-//!   participant machine instance, each wrapping the producer machine's
-//!   generated `Effect` enum,
 //! * a `TypedRoutedInput` descriptor carrying typed `MachineInstanceId`,
-//!   `InputVariantId`, and `(FieldId, FieldId)` binding pairs, and
-//! * a `route_to_input(&MeerkatMobSeamEffect) -> Option<TypedRoutedInput>`
-//!   function whose match arms resolve each declared Input-kind route to
-//!   its typed consumer input,
-//! * a `TypedRoutedSignal` descriptor plus `route_to_signal(...)` for
-//!   Signal-kind routes.
+//!   `InputVariantId`, `RouteId`, and `(FieldId, FieldId)` binding pairs,
+//! * generated producer/effect/input/signal/field identity functions, and
+//! * `route_to_input(instance, variant)` / `route_to_signal(instance, variant)`
+//!   fact resolvers for Input-kind and Signal-kind routes.
 //!
 //! The shape is asserted via source-text matching. A full dispatcher
 //! integration test that actually invokes the emitted `route_to_input`
@@ -64,7 +59,7 @@ fn attach_stub_driver(
 }
 
 #[test]
-fn emitted_seam_module_declares_typed_routed_input_and_seam_effect_enum() {
+fn emitted_seam_module_declares_typed_routed_facts() {
     let schema = attach_stub_driver(meerkat_mob_seam_composition());
     let rendered = render_composition_driver(&schema).expect("seam composition emits");
 
@@ -72,7 +67,7 @@ fn emitted_seam_module_declares_typed_routed_input_and_seam_effect_enum() {
     // module cannot compile against typed newtypes.
     assert!(
         rendered.contains(
-            "use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineInstanceId, SignalVariantId};"
+            "use meerkat_machine_schema::identity::{CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId, RouteId, SignalVariantId};"
         ),
         "missing typed-identity imports:\n{rendered}"
     );
@@ -84,6 +79,7 @@ fn emitted_seam_module_declares_typed_routed_input_and_seam_effect_enum() {
         "missing TypedRoutedInput struct:\n{rendered}"
     );
     for field in [
+        "pub route_id: RouteId,",
         "pub instance_id: MachineInstanceId,",
         "pub variant: InputVariantId,",
         "pub bindings: Vec<(FieldId, FieldId)>,",
@@ -99,6 +95,7 @@ fn emitted_seam_module_declares_typed_routed_input_and_seam_effect_enum() {
         "missing TypedRoutedSignal struct:\n{rendered}"
     );
     for field in [
+        "pub route_id: RouteId,",
         "pub instance_id: MachineInstanceId,",
         "pub variant: SignalVariantId,",
         "pub bindings: Vec<(FieldId, FieldId)>,",
@@ -111,23 +108,33 @@ fn emitted_seam_module_declares_typed_routed_input_and_seam_effect_enum() {
 }
 
 #[test]
-fn emitted_seam_module_declares_seam_effect_enum_with_producer_variants() {
+fn emitted_seam_module_declares_generated_identity_modules() {
     let schema = attach_stub_driver(meerkat_mob_seam_composition());
     let rendered = render_composition_driver(&schema).expect("seam composition emits");
 
     assert!(
-        rendered.contains("pub enum MeerkatMobSeamEffect"),
-        "missing seam-effect enum:\n{rendered}"
-    );
-    // One variant per participant machine instance, wrapping the
-    // producer's generated `Effect` enum.
-    assert!(
-        rendered.contains("Meerkat(crate::generated::meerkat::Effect),"),
-        "missing Meerkat producer variant:\n{rendered}"
+        rendered.contains("pub struct ProducerFacts"),
+        "missing ProducerFacts struct:\n{rendered}"
     );
     assert!(
-        rendered.contains("Mob(crate::generated::mob::Effect),"),
-        "missing Mob producer variant:\n{rendered}"
+        rendered.contains("pub mod producers"),
+        "missing producer facts module:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod effects"),
+        "missing effect facts module:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod fields"),
+        "missing field facts module:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("pub enum MeerkatMobSeamEffect"),
+        "generated-shape seam effect mirror must not be emitted:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("crate::generated::mob::Effect"),
+        "emitted facts must not depend on generated-shape mob effects:\n{rendered}"
     );
 }
 
@@ -137,30 +144,31 @@ fn emitted_seam_module_declares_route_to_input_with_expected_signature() {
     let rendered = render_composition_driver(&schema).expect("seam composition emits");
 
     assert!(
-        rendered.contains(
-            "pub fn route_to_input(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedInput>"
-        ),
+        rendered.contains("pub fn route_to_input("),
         "missing route_to_input signature:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("producer_instance: &MachineInstanceId,"),
+        "route_to_input must accept a producer instance id:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("effect_variant: &EffectVariantId,"),
+        "route_to_input must accept an effect variant id:\n{rendered}"
     );
 }
 
 #[test]
 fn route_to_input_arm_for_request_runtime_binding_targets_prepare_bindings() {
-    // A hand-crafted Mob-producer `RequestRuntimeBinding` effect must
-    // route to `meerkat.PrepareBindings`. We can't invoke the emitted
-    // function without compiling it, so we assert the match arm's
-    // structure: the producer variant matches on
-    // `crate::generated::mob::Effect::RequestRuntimeBinding(_)` and the
-    // arm constructs a `TypedRoutedInput` targeting the
-    // `meerkat` instance + `PrepareBindings` variant, with the three
-    // field bindings declared on the route.
+    // A Mob-producer `RequestRuntimeBinding` variant must route to
+    // `meerkat.PrepareBindings`. The generated module exposes this as
+    // facts, without matching against a generated-shape payload enum.
     let schema = attach_stub_driver(meerkat_mob_seam_composition());
     let rendered = render_composition_driver(&schema).expect("seam composition emits");
 
-    let arm = "crate::generated::mob::Effect::RequestRuntimeBinding(_) => Some(TypedRoutedInput {";
+    let arm = "pub fn route_binding_request_reaches_meerkat() -> TypedRoutedInput";
     assert!(
         rendered.contains(arm),
-        "route_to_input must match on the Mob RequestRuntimeBinding variant:\n\
+        "route fact must be emitted for Mob RequestRuntimeBinding:\n\
          expected substring: `{arm}`\n\
          rendered:\n{rendered}"
     );
@@ -172,6 +180,10 @@ fn route_to_input_arm_for_request_runtime_binding_targets_prepare_bindings() {
     assert!(
         rendered.contains("InputVariantId::parse(\"PrepareBindings\")"),
         "route arm must target the PrepareBindings input variant:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("effects::mob::request_runtime_binding()"),
+        "route_to_input must resolve through the generated effect variant fact:\n{rendered}"
     );
     for (producer_field, consumer_field) in [
         ("agent_runtime_id", "agent_runtime_id"),
@@ -199,9 +211,7 @@ fn signal_kind_routes_are_emitted_through_route_to_signal() {
     let rendered = render_composition_driver(&schema).expect("seam composition emits");
 
     assert!(
-        rendered.contains(
-            "pub fn route_to_signal(effect: &MeerkatMobSeamEffect) -> Option<TypedRoutedSignal>"
-        ),
+        rendered.contains("pub fn route_to_signal("),
         "missing route_to_signal signature:\n{rendered}"
     );
     for signal_variant in [
@@ -218,6 +228,10 @@ fn signal_kind_routes_are_emitted_through_route_to_signal() {
             "signal-kind target `{signal_variant}` must appear in route_to_signal:\n{rendered}"
         );
     }
+    assert!(
+        rendered.contains("pub fn route_runtime_bound_reaches_mob() -> TypedRoutedSignal"),
+        "runtime-bound signal route fact must be emitted:\n{rendered}"
+    );
 }
 
 #[test]
@@ -228,6 +242,10 @@ fn emitted_seam_module_carries_generated_marker_and_source_pointer() {
     assert!(
         rendered.contains("@generated — composition module for `meerkat_mob_seam`"),
         "missing @generated marker:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("#![allow(clippy::expect_used)]"),
+        "generated seam facts should be lint-clean under workspace clippy denies:\n{rendered}"
     );
     assert!(
         rendered.contains("Source of truth: catalog::compositions::meerkat_mob_seam"),

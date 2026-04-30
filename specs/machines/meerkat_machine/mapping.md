@@ -391,6 +391,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RetireRequestedFromIdle`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`
+- `RetireAlreadyRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
 - `Reset`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `product_turn_streaming`
@@ -418,6 +421,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RuntimeExecutorExitedFromStopped`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`, `recycle_and_compaction`
+- `DestroyInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
 - `Destroy`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `session_registration_and_binding`

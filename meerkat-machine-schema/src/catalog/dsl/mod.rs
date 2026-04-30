@@ -85,7 +85,12 @@ trait RuntimeInternalInputVariant: Copy {
 }
 
 macro_rules! runtime_internal_inputs {
-    ($type_name:ident, $const_name:ident, [$($variant:ident),+ $(,)?]) => {
+    (
+        $type_name:ident,
+        $const_name:ident,
+        $variant_module:ident::$variant_type:ident,
+        [$($variant:ident),+ $(,)?]
+    ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum $type_name {
             $($variant),+
@@ -94,6 +99,14 @@ macro_rules! runtime_internal_inputs {
         const $const_name: &[$type_name] = &[
             $($type_name::$variant),+
         ];
+
+        impl $type_name {
+            fn input_variant(self) -> $variant_module::$variant_type {
+                match self {
+                    $(Self::$variant => $variant_module::$variant_type::$variant,)+
+                }
+            }
+        }
 
         impl RuntimeInternalInputVariant for $type_name {
             fn input_variant_id(self) -> InputVariantId {
@@ -539,6 +552,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
 runtime_internal_inputs!(
     MeerkatMachineRuntimeInternalInput,
     MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS,
+    meerkat_machine::MeerkatMachineInputVariant,
     [
         AbandonInput,
         AbortOp,
@@ -690,6 +704,15 @@ runtime_internal_inputs!(
     ]
 );
 
+pub fn meerkat_machine_runtime_internal_input_variants()
+-> Vec<meerkat_machine::MeerkatMachineInputVariant> {
+    MEERKAT_MACHINE_RUNTIME_INTERNAL_INPUTS
+        .iter()
+        .copied()
+        .map(MeerkatMachineRuntimeInternalInput::input_variant)
+        .collect()
+}
+
 pub fn dsl_mob_machine() -> MachineSchema {
     mob_machine_schema_metadata().attach_to(mob_machine::MobMachineState::schema())
 }
@@ -772,6 +795,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
 runtime_internal_inputs!(
     MobMachineRuntimeInternalInput,
     MOB_MACHINE_RUNTIME_INTERNAL_INPUTS,
+    mob_machine::MobMachineInputVariant,
     [
         AuthorizeFlowFrameReducerCommand,
         AuthorizeFlowRunReducerCommand,
@@ -794,6 +818,14 @@ runtime_internal_inputs!(
         SessionIngressDetachedForMobDestroy,
     ]
 );
+
+pub fn mob_machine_runtime_internal_input_variants() -> Vec<mob_machine::MobMachineInputVariant> {
+    MOB_MACHINE_RUNTIME_INTERNAL_INPUTS
+        .iter()
+        .copied()
+        .map(MobMachineRuntimeInternalInput::input_variant)
+        .collect()
+}
 
 pub fn dsl_schedule_lifecycle_machine() -> MachineSchema {
     schedule_lifecycle_schema_metadata()

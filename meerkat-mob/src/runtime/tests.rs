@@ -1552,7 +1552,6 @@ impl MobSessionService for MockSessionService {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
 
@@ -19444,7 +19443,6 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
 
@@ -20284,7 +20282,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         .expect("requester snapshot should exist");
 
     if requester_response_delivery.is_ok() {
-        assert_peer_response_terminal_consumed(&requester_snapshot, HandlingMode::Queue);
+        assert_peer_response_terminal_consumed(&requester_snapshot, HandlingMode::Steer);
     }
 
     tokio::time::timeout(Duration::from_secs(2), handle.stop())
@@ -20403,6 +20401,204 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         requester_context_baseline + 1,
         "duplicate terminal response should not append duplicate runtime system context"
     );
+}
+
+#[tokio::test]
+async fn test_default_peer_response_inherits_request_steer_while_requester_running() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let (handle, service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+
+    let sid_requester = handle
+        .spawn(
+            ProfileName::from("lead"),
+            MeerkatId::from("l-running-requester"),
+            None,
+        )
+        .await
+        .expect("spawn requester")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_responder = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-running-responder"),
+            None,
+        )
+        .await
+        .expect("spawn responder")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    handle
+        .wire(
+            AgentIdentity::from("l-running-requester"),
+            MeerkatId::from("w-running-responder"),
+        )
+        .await
+        .expect("wire requester↔responder");
+    handle
+        .wait_for_ready(Some(Duration::from_secs(2)))
+        .await
+        .expect("wait_for_ready should resolve");
+    handle
+        .wait_for_members_kickoff_complete(
+            &[
+                AgentIdentity::from("l-running-requester"),
+                AgentIdentity::from("w-running-responder"),
+            ],
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("kickoff should resolve before blocking turns");
+
+    let requester_prompt_baseline = service.applied_runtime_prompts(&sid_requester).await.len();
+    let requester_context_baseline = service
+        .applied_runtime_context_appends(&sid_requester)
+        .await
+        .len();
+    let responder_baseline = service.applied_runtime_prompts(&sid_responder).await.len();
+    service.set_keep_alive_turns_complete_immediately(false);
+
+    let requester_comms = service
+        .real_comms(&sid_requester)
+        .await
+        .expect("requester comms");
+    let responder_comms = service
+        .real_comms(&sid_responder)
+        .await
+        .expect("responder comms");
+
+    CoreCommsRuntime::send(
+        &*responder_comms,
+        CommsCommand::PeerMessage {
+            to: test_peer_route(
+                &*responder_comms,
+                &test_comms_name("lead", "l-running-requester"),
+            )
+            .await,
+            body: "body: keep requester busy".to_string(),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+        },
+    )
+    .await
+    .expect("busy message should send");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_requester).await;
+            if prompts
+                .iter()
+                .skip(requester_prompt_baseline)
+                .any(|prompt| prompt.text_content().contains("body: keep requester busy"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("requester should be in a running turn before the pong lands");
+
+    let request_receipt = CoreCommsRuntime::send(
+        &*requester_comms,
+        CommsCommand::PeerRequest {
+            to: test_peer_route(
+                &*requester_comms,
+                &test_comms_name("worker", "w-running-responder"),
+            )
+            .await,
+            intent: "ping".to_string(),
+            params: serde_json::json!({"message":"ping"}),
+            handling_mode: meerkat_core::types::HandlingMode::Steer,
+            stream: meerkat_core::InputStreamMode::ReserveInteraction,
+        },
+    )
+    .await
+    .expect("peer request should succeed");
+    let request_id = match request_receipt {
+        SendReceipt::PeerRequestSent { interaction_id, .. } => interaction_id,
+        other => panic!("expected PeerRequestSent receipt, got {other:?}"),
+    };
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let prompts = service.applied_runtime_prompts(&sid_responder).await;
+            if prompts.iter().skip(responder_baseline).any(|prompt| {
+                let text = prompt.text_content();
+                text.contains("[SYSTEM NOTICE][PEER_REQUEST]")
+                    && text.contains("Intent: ping")
+                    && text.contains(&format!("Request ID: {request_id}"))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("responder should receive the steer ping request");
+
+    CoreCommsRuntime::send(
+        &*responder_comms,
+        CommsCommand::PeerResponse {
+            to: test_peer_route(
+                &*responder_comms,
+                &test_comms_name("lead", "l-running-requester"),
+            )
+            .await,
+            in_reply_to: request_id,
+            status: meerkat_core::ResponseStatus::Completed,
+            result: serde_json::json!({"message":"pong"}),
+            handling_mode: None,
+        },
+    )
+    .await
+    .expect("default peer response should succeed");
+
+    let requester_delivery = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let appends = service
+                .applied_runtime_context_appends(&sid_requester)
+                .await;
+            if appends
+                .iter()
+                .skip(requester_context_baseline)
+                .any(|append| {
+                    append
+                        .text
+                        .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                        && append.text.contains(&format!("Request ID: {request_id}"))
+                        && append.text.contains("\"message\": \"pong\"")
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    if requester_delivery.is_err() {
+        let appends = service
+            .applied_runtime_context_appends(&sid_requester)
+            .await;
+        let snapshot = service
+            .runtime_adapter
+            .meerkat_machine_spine_snapshot(&sid_requester)
+            .await
+            .expect("requester snapshot should exist");
+        panic!(
+            "default response to a steer request should interrupt and reach requester; appends={appends:?} snapshot={snapshot:?}"
+        );
+    }
+
+    tokio::time::timeout(Duration::from_secs(2), handle.stop())
+        .await
+        .expect("stop timeout after running requester response assertion")
+        .expect("stop after running requester response assertion");
 }
 
 #[tokio::test]

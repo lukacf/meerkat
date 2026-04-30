@@ -478,15 +478,16 @@ async fn apply_runtime_turn(
     run_id: meerkat_core::lifecycle::RunId,
     primitive: &RunPrimitive,
 ) -> Result<CoreApplyOutput, SessionError> {
-    // Context-only staged primitive — no conversation appends, just context
-    // (e.g. peer_response_terminal). The runtime boundary for these is
-    // Steer-derived (RunCheckpoint), so the stricter `is_context_only_
-    // immediate` gate (boundary == Immediate) doesn't match. Relaxing to
-    // "no appends + has context_appends" is the correct trigger.
-    if let RunPrimitive::StagedInput(staged) = primitive
-        && staged.appends.is_empty()
-        && !staged.context_appends.is_empty()
-    {
+    if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+        return Err(SessionError::Agent(AgentError::InternalError(
+            reason.to_string(),
+        )));
+    }
+
+    if primitive.is_context_only_apply_without_turn() {
+        let RunPrimitive::StagedInput(staged) = primitive else {
+            unreachable!("context-only apply helper only matches staged inputs");
+        };
         return context
             .service
             .apply_runtime_context_appends(
@@ -497,6 +498,15 @@ async fn apply_runtime_turn(
             )
             .await;
     }
+
+    let terminal_context_appends = if primitive.is_peer_response_terminal_context_and_run() {
+        let RunPrimitive::StagedInput(staged) = primitive else {
+            unreachable!("terminal peer-response apply helper only matches staged inputs");
+        };
+        pending_system_context_appends(&staged.context_appends)
+    } else {
+        Vec::new()
+    };
 
     let prompt = primitive.extract_content_input();
     let boundary = primitive.apply_boundary();
@@ -523,6 +533,36 @@ async fn apply_runtime_turn(
         turn_metadata: primitive.turn_metadata().cloned(),
     };
 
+    if !terminal_context_appends.is_empty() {
+        match context
+            .service
+            .apply_runtime_system_context_for_turn(session_id, terminal_context_appends.clone())
+            .await
+        {
+            Ok(()) => {}
+            Err(SessionError::NotFound { .. }) => {
+                Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
+                    .await
+                    .map(|_| ())?;
+                context
+                    .service
+                    .apply_runtime_system_context_for_turn(session_id, terminal_context_appends)
+                    .await?;
+                return context
+                    .service
+                    .apply_runtime_turn_outcome(
+                        session_id,
+                        run_id,
+                        turn_request,
+                        boundary,
+                        contributing_input_ids,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
     match context
         .service
         .apply_runtime_turn(
@@ -539,6 +579,12 @@ async fn apply_runtime_turn(
             Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
                 .await
                 .map(|_| ())?;
+            if !terminal_context_appends.is_empty() {
+                context
+                    .service
+                    .apply_runtime_system_context_for_turn(session_id, terminal_context_appends)
+                    .await?;
+            }
             context
                 .service
                 .apply_runtime_turn_outcome(
@@ -582,9 +628,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             &primitive,
         ))
         .await
-        .map_err(|error| CoreExecutorError::ApplyFailed {
-            reason: error.to_string(),
-        })
+        .map_err(|error| CoreExecutorError::apply_failed_runtime_turn(error.to_string()))
     }
 
     async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -594,9 +638,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
                 .service
                 .interrupt(&self.session_id)
                 .await
-                .map_err(|error| CoreExecutorError::ControlFailed {
-                    reason: error.to_string(),
-                }),
+                .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string())),
             RunControlCommand::StopRuntimeExecutor { .. } => {
                 let discard_result = self
                     .context
@@ -606,12 +648,88 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
                 self.context.clear_session(&self.session_id).await;
                 match discard_result {
                     Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(error) => Err(CoreExecutorError::ControlFailed {
-                        reason: error.to_string(),
-                    }),
+                    Err(error) => Err(CoreExecutorError::control_failed_runtime(error.to_string())),
                 }
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat::surface::build_runtime_backed_service;
+    use meerkat::{AgentFactory, Config, PersistenceBundle};
+    use meerkat_client::TestClient;
+    use meerkat_core::lifecycle::run_primitive::{
+        PeerResponseTerminalApplyIntent, RunApplyBoundary, RuntimeExecutionKind,
+        RuntimeTurnMetadata, StagedRunInput,
+    };
+    use meerkat_core::lifecycle::{InputId, RunId};
+    use meerkat_core::{MemoryConfigStore, RealmId};
+    use meerkat_store::{JsonlStore, MemoryBlobStore};
+
+    async fn build_test_context(temp: &tempfile::TempDir) -> McpRuntimeIngressContext {
+        let session_store = Arc::new(JsonlStore::new(temp.path().join("sessions")));
+        session_store.init().await.expect("init jsonl store");
+        let session_store: Arc<dyn meerkat::SessionStore> = session_store;
+        let persistence =
+            PersistenceBundle::new(session_store, None, Arc::new(MemoryBlobStore::new()));
+
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(TestClient::default()));
+        let (service, runtime_adapter) = build_runtime_backed_service(builder, 4, persistence);
+        let config_store = Arc::new(MemoryConfigStore::new(Config::default()));
+
+        McpRuntimeIngressContext::new(McpRuntimeIngressResources {
+            service: Arc::new(service),
+            runtime_adapter,
+            config_runtime: Arc::new(ConfigRuntime::new(
+                config_store,
+                temp.path().join("config-state.json"),
+            )),
+            realm_id: RealmId::parse("mcp-runtime-test").expect("valid realm id"),
+            instance_id: None,
+            backend: "test".to_string(),
+            mcp_adapters: Arc::new(Mutex::new(HashMap::new())),
+            runtime_sessions: Arc::new(RwLock::new(HashMap::new())),
+        })
+    }
+
+    #[tokio::test]
+    async fn mcp_runtime_ingress_rejects_malformed_terminal_peer_response_intent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let state = Arc::new(McpRuntimeSessionState::default());
+        let session_id = SessionId::new();
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::Immediate,
+            appends: Vec::new(),
+            context_appends: vec![ConversationContextAppend {
+                key: "peer_response_terminal:analyst-rt:req-invalid".to_string(),
+                content: CoreRenderable::Text {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] invalid".to_string(),
+                },
+            }],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                peer_response_terminal_apply_intent: Some(
+                    PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                ),
+                ..Default::default()
+            }),
+        });
+
+        let error = apply_runtime_turn(&context, &state, &session_id, RunId::new(), &primitive)
+            .await
+            .expect_err("malformed terminal peer-response intent must be rejected");
+
+        assert!(
+            error.to_string().contains("requires RunStart boundary"),
+            "unexpected rejection reason: {error}"
+        );
     }
 }

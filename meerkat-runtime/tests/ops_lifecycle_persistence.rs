@@ -16,7 +16,8 @@ use meerkat_core::runtime_epoch::{EpochCursorState, RuntimeEpochId};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeStore; // needed for trait method calls
 use meerkat_runtime::{
-    OpsLifecyclePersistenceRequest, PersistedOpsSnapshot, RuntimeOpsLifecycleRegistry,
+    LogicalRuntimeId, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,
+    RuntimeOpsLifecycleRegistry,
 };
 
 fn bg_spec(name: &str) -> OperationSpec {
@@ -391,6 +392,8 @@ fn terminal_persistence_channel_closed_fails_terminal_transition() {
 struct FailingOpsLifecycleStore {
     inner: meerkat_runtime::InMemoryRuntimeStore,
     persist_calls: AtomicUsize,
+    fail_persist_ops: bool,
+    fail_ops_load_for: Option<LogicalRuntimeId>,
 }
 
 impl FailingOpsLifecycleStore {
@@ -398,6 +401,17 @@ impl FailingOpsLifecycleStore {
         Self {
             inner: meerkat_runtime::InMemoryRuntimeStore::new(),
             persist_calls: AtomicUsize::new(0),
+            fail_persist_ops: true,
+            fail_ops_load_for: None,
+        }
+    }
+
+    fn fail_ops_load_for(runtime_id: LogicalRuntimeId) -> Self {
+        Self {
+            inner: meerkat_runtime::InMemoryRuntimeStore::new(),
+            persist_calls: AtomicUsize::new(0),
+            fail_persist_ops: false,
+            fail_ops_load_for: Some(runtime_id),
         }
     }
 
@@ -427,6 +441,16 @@ impl RuntimeStore for FailingOpsLifecycleStore {
                 contributing_input_ids,
                 input_updates,
             )
+            .await
+    }
+
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: meerkat_runtime::SessionDelta,
+    ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
             .await
     }
 
@@ -527,19 +551,27 @@ impl RuntimeStore for FailingOpsLifecycleStore {
 
     async fn persist_ops_lifecycle(
         &self,
-        _runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
-        _snapshot: &PersistedOpsSnapshot,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        snapshot: &PersistedOpsSnapshot,
     ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
-        self.persist_calls.fetch_add(1, Ordering::SeqCst);
-        Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
-            "synthetic ops lifecycle persist failure".to_string(),
-        ))
+        if self.fail_persist_ops {
+            self.persist_calls.fetch_add(1, Ordering::SeqCst);
+            return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                "synthetic ops lifecycle persist failure".to_string(),
+            ));
+        }
+        self.inner.persist_ops_lifecycle(runtime_id, snapshot).await
     }
 
     async fn load_ops_lifecycle(
         &self,
         runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
     ) -> Result<Option<PersistedOpsSnapshot>, meerkat_runtime::RuntimeStoreError> {
+        if self.fail_ops_load_for.as_ref() == Some(runtime_id) {
+            return Err(meerkat_runtime::RuntimeStoreError::ReadFailed(
+                "synthetic legacy ops lifecycle load failure".to_string(),
+            ));
+        }
         self.inner.load_ops_lifecycle(runtime_id).await
     }
 }
@@ -606,7 +638,6 @@ impl CoreExecutor for NoopExecutor {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
     async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -659,7 +690,7 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
 
     let session_id = SessionId::new();
 
-    // Phase 1: Persist a snapshot manually.
+    // Phase 1: Persist a snapshot manually under the legacy raw UUID alias.
     let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
     let cursor_state = Arc::new(EpochCursorState::new());
     let epoch_id = RuntimeEpochId::new();
@@ -673,7 +704,8 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
         .unwrap();
 
     let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
-    let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id =
+        meerkat_runtime::identifiers::LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
     store
         .persist_ops_lifecycle(&runtime_id, &snapshot)
         .await
@@ -701,6 +733,102 @@ async fn cold_persistent_adapter_recovers_persisted_epoch() {
     assert_eq!(batch.entries[0].operation_id, op_id);
 }
 
+#[tokio::test]
+async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_over_more_advanced_legacy_alias() {
+    let store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let session_id = SessionId::new();
+    let canonical_epoch = RuntimeEpochId::new();
+    let canonical_registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
+    let canonical_snapshot =
+        canonical_registry.capture_persistence_snapshot(canonical_epoch, &EpochCursorState::new());
+    store
+        .persist_ops_lifecycle(
+            &LogicalRuntimeId::for_session(&session_id),
+            &canonical_snapshot,
+        )
+        .await
+        .unwrap();
+
+    let legacy_registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
+    let legacy_cursor_state = Arc::new(EpochCursorState::new());
+    let legacy_epoch = RuntimeEpochId::new();
+    let spec = bg_spec("legacy-advanced-recovery");
+    let op_id = spec.id.clone();
+    legacy_registry.register_operation(spec).unwrap();
+    legacy_registry.provisioning_succeeded(&op_id).unwrap();
+    legacy_registry
+        .complete_operation(&op_id, op_result(&op_id))
+        .unwrap();
+    let legacy_snapshot =
+        legacy_registry.capture_persistence_snapshot(legacy_epoch.clone(), &legacy_cursor_state);
+    store
+        .persist_ops_lifecycle(
+            &LogicalRuntimeId::legacy_session_uuid_alias(&session_id),
+            &legacy_snapshot,
+        )
+        .await
+        .unwrap();
+
+    let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>
+    );
+    adapter.register_session(session_id.clone()).await;
+
+    let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
+    assert_eq!(
+        bindings.epoch_id, canonical_snapshot.epoch_id,
+        "register_session must keep canonical ops lifecycle authority over legacy alias snapshots"
+    );
+    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let batch = feed.list_since(0);
+    assert!(
+        batch.entries.is_empty(),
+        "legacy completion entries must not be resurrected over canonical ops authority"
+    );
+}
+
+#[tokio::test]
+async fn cold_persistent_adapter_keeps_canonical_ops_snapshot_when_legacy_alias_load_fails() {
+    let session_id = SessionId::new();
+    let canonical_runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let legacy_runtime_id = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
+    let store = Arc::new(FailingOpsLifecycleStore::fail_ops_load_for(
+        legacy_runtime_id,
+    ));
+
+    let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
+    let cursor_state = Arc::new(EpochCursorState::new());
+    let canonical_epoch = RuntimeEpochId::new();
+    let spec = bg_spec("canonical-recovery-survives-legacy-error");
+    let op_id = spec.id.clone();
+    registry.register_operation(spec).unwrap();
+    registry.provisioning_succeeded(&op_id).unwrap();
+    registry
+        .complete_operation(&op_id, op_result(&op_id))
+        .unwrap();
+    let snapshot = registry.capture_persistence_snapshot(canonical_epoch.clone(), &cursor_state);
+    store
+        .inner
+        .persist_ops_lifecycle(&canonical_runtime_id, &snapshot)
+        .await
+        .unwrap();
+
+    let adapter = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>
+    );
+    adapter.register_session(session_id.clone()).await;
+
+    let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();
+    assert_eq!(
+        bindings.epoch_id, canonical_epoch,
+        "legacy ops alias load failure must not rotate away from a valid canonical snapshot"
+    );
+    let feed = bindings.ops_lifecycle.completion_feed().unwrap();
+    let batch = feed.list_since(0);
+    assert_eq!(batch.entries.len(), 1);
+    assert_eq!(batch.entries[0].operation_id, op_id);
+}
+
 /// Same test but via the ensure_session_with_executor cold path.
 #[tokio::test]
 async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
@@ -708,7 +836,7 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
 
     let session_id = SessionId::new();
 
-    // Persist a snapshot
+    // Persist a snapshot under the legacy raw UUID alias.
     let registry = meerkat_runtime::RuntimeOpsLifecycleRegistry::new();
     let cursor_state = Arc::new(EpochCursorState::new());
     let epoch_id = RuntimeEpochId::new();
@@ -722,7 +850,8 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
         .unwrap();
 
     let snapshot = registry.capture_persistence_snapshot(epoch_id.clone(), &cursor_state);
-    let runtime_id = meerkat_runtime::identifiers::LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id =
+        meerkat_runtime::identifiers::LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
     store
         .persist_ops_lifecycle(&runtime_id, &snapshot)
         .await

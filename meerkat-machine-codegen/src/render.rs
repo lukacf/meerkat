@@ -1720,6 +1720,15 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
                 "TimeBudgetExceeded",
                 "StructuredOutputValidationFailed",
             ],
+            "RuntimeApplyFailureCause" => vec![
+                "Unknown",
+                "PrimitiveRejected",
+                "RuntimeContextApply",
+                "RuntimeTurn",
+                "ExecutorStopped",
+                "ExecutorControlFailed",
+                "ExecutorInternal",
+            ],
             "PreRunPhase" => vec!["Idle", "Attached", "Retired"],
             "RuntimeNoticeKind" => vec!["Drain", "Reset", "Stop", "Exit", "Recover"],
             "TurnCancellationReason" => vec!["Observed"],
@@ -1738,6 +1747,9 @@ fn known_enum_variants(name: &str) -> Option<Vec<String>> {
             "ExternalToolSurfaceDeltaOperation" => vec!["None", "Add", "Remove", "Reload"],
             "ExternalToolSurfaceDeltaPhase" => {
                 vec!["None", "Pending", "Applied", "Draining", "Failed", "Forced"]
+            }
+            "ExternalToolSurfaceFailureCause" => {
+                vec!["PendingFailed", "SurfaceDraining", "SurfaceUnavailable"]
             }
             "DrainExitReason" => vec![
                 "IdleTimeout",

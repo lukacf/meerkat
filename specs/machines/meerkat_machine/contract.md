@@ -25,6 +25,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `boundary_count`: `u64`
 - `cancel_after_boundary`: `Bool`
 - `terminal_outcome`: `Option<TurnTerminalOutcome>`
+- `last_runtime_apply_failure_cause`: `Option<RuntimeApplyFailureCause>`
+- `last_runtime_apply_failure_message`: `Option<String>`
 - `extraction_attempts`: `u64`
 - `max_extraction_retries`: `u64`
 - `llm_retry_attempt`: `u64`
@@ -229,7 +231,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
-- `RunFailed`(run_id: RunId, error: String)
+- `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
@@ -275,7 +277,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SurfaceStageReload`(surface_id: String, now_ms: u64)
 - `SurfaceApplyBoundary`(surface_id: String, now_ms: u64, staged_intent_sequence: u64, applied_at_turn: u64)
 - `SurfaceMarkPendingSucceeded`(surface_id: String, pending_task_sequence: u64, staged_intent_sequence: u64)
-- `SurfaceMarkPendingFailed`(surface_id: String, pending_task_sequence: u64, staged_intent_sequence: u64, reason: String)
+- `SurfaceMarkPendingFailed`(surface_id: String, pending_task_sequence: u64, staged_intent_sequence: u64, cause: ExternalToolSurfaceFailureCause)
 - `SurfaceCallStarted`(surface_id: String)
 - `SurfaceCallFinished`(surface_id: String)
 - `SurfaceFinalizeRemovalClean`(surface_id: String)
@@ -416,9 +418,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SpawnDrainTask`
 - `ScheduleSurfaceCompletion`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, pending_task_sequence: u64, staged_intent_sequence: u64, applied_at_turn: u64)
 - `RefreshVisibleSurfaceSet`(snapshot_epoch: u64)
-- `EmitExternalToolDelta`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, phase: ExternalToolSurfaceDeltaPhase)
+- `EmitExternalToolDelta`(surface_id: String, operation: ExternalToolSurfaceDeltaOperation, phase: ExternalToolSurfaceDeltaPhase, cause: Option<ExternalToolSurfaceFailureCause>)
 - `CloseSurfaceConnection`(surface_id: String)
-- `RejectSurfaceCall`(surface_id: String, reason: String)
+- `RejectSurfaceCall`(surface_id: String, cause: ExternalToolSurfaceFailureCause)
 - `PublishSupervisorTrustEdge`(peer_id: String, name: String, address: String, signing_public_key: Option<String>, epoch: u64)
 - `RevokeSupervisorTrustEdge`(peer_id: String, epoch: u64)
 - `RealtimeIntentProjected`(present: Bool)
@@ -1463,6 +1465,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeRetired`
 - To: `Retired`
 
+### `RetireAlreadyRetired`
+- From: `Retired`
+- On: `Retire`(session_id)
+- To: `Retired`
+
 ### `Reset`
 - From: `Initializing`, `Idle`, `Attached`, `Retired`
 - On: `Reset`()
@@ -1516,8 +1523,16 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RuntimeExecutorExited`()
 - To: `Stopped`
 
+### `DestroyInitializing`
+- From: `Initializing`
+- On: `Destroy`(session_id)
+- Guards:
+  - `runtime_is_bound`
+- Emits: `RuntimeDestroyed`
+- To: `Destroyed`
+
 ### `Destroy`
-- From: `Initializing`, `Idle`, `Attached`, `Running`, `Retired`, `Stopped`
+- From: `Idle`, `Attached`, `Running`, `Retired`, `Stopped`
 - On: `Destroy`(session_id)
 - Emits: `RuntimeDestroyed`
 - To: `Destroyed`
@@ -2494,7 +2509,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RunFailed`
 - From: `Running`
-- On: `RunFailed`(run_id, error)
+- On: `RunFailed`(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, error)
 - Guards:
   - `run_matches_binding`
 - To: `Running`
@@ -2698,7 +2713,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SurfaceMarkPendingFailedAttached`
 - From: `Attached`
-- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, reason)
+- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, cause)
 - Guards:
   - `pending_sequence_matches`
   - `pending_lineage_matches`
@@ -2707,7 +2722,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `SurfaceMarkPendingFailedRunning`
 - From: `Running`
-- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, reason)
+- On: `SurfaceMarkPendingFailed`(surface_id, pending_task_sequence, staged_intent_sequence, cause)
 - Guards:
   - `pending_sequence_matches`
   - `pending_lineage_matches`

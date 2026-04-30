@@ -54,6 +54,10 @@ fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
     Arc::new(meerkat_store::MemoryBlobStore::new())
 }
 
+fn runtime_id_for_session(session_id: &SessionId) -> LogicalRuntimeId {
+    MeerkatMachine::logical_runtime_id(session_id)
+}
+
 #[derive(Default)]
 struct RecordingMeerkatSignalSurface {
     log: tokio::sync::Mutex<
@@ -316,6 +320,33 @@ async fn authoritative_dsl_apply_rolls_back_state_when_effect_dispatch_fails() {
 }
 
 #[tokio::test]
+async fn control_plane_runtime_id_is_not_raw_session_uuid_alias() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+
+    let runtime_id = runtime_id_for_session(&session_id);
+    let raw_session_alias = LogicalRuntimeId::legacy_session_uuid_alias(&session_id);
+    assert_ne!(
+        runtime_id, raw_session_alias,
+        "runtime control-plane identity must not be the raw session UUID alias"
+    );
+
+    let state = crate::traits::RuntimeControlPlane::runtime_state(&machine, &runtime_id)
+        .await
+        .expect("canonical runtime id should resolve registered session");
+    assert_eq!(state, RuntimeState::Idle);
+
+    let err = crate::traits::RuntimeControlPlane::runtime_state(&machine, &raw_session_alias)
+        .await
+        .expect_err("raw session UUID alias must not resolve as a runtime id");
+    assert!(matches!(
+        err,
+        crate::traits::RuntimeControlPlaneError::NotFound(_)
+    ));
+}
+
+#[tokio::test]
 async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatch_fails() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
@@ -325,7 +356,7 @@ async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatc
         .expect("prepare bindings before destroy");
     install_rejecting_meerkat_signal_dispatcher(&machine);
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let err = crate::traits::RuntimeControlPlane::destroy(&machine, &runtime_id)
         .await
         .expect_err("signal dispatch failure should surface");
@@ -351,7 +382,7 @@ async fn persistent_retire_keeps_committed_dsl_state_when_runtime_retired_signal
     machine.register_session(session_id.clone()).await;
     install_rejecting_meerkat_signal_dispatcher(&machine);
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let err = crate::traits::RuntimeControlPlane::retire(&machine, &runtime_id)
         .await
         .expect_err("signal dispatch failure should surface");
@@ -402,7 +433,7 @@ async fn prepare_bindings_dispatches_runtime_bound_after_shell_commit() {
     assert_eq!(log[0].1[0].0.as_str(), "agent_runtime_id");
     assert!(matches!(
         &log[0].1[0].1,
-        crate::composition::OwnedFieldValue::Str(value) if value == &session_id.to_string()
+        crate::composition::OwnedFieldValue::Str(value) if value == &runtime_id_for_session(&session_id).to_string()
     ));
 }
 
@@ -507,6 +538,114 @@ fn make_prompt(text: &str) -> Input {
         blocks: None,
         turn_metadata: None,
     })
+}
+
+#[tokio::test]
+async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
+    use meerkat_core::lifecycle::core_executor::CoreApplyFailureCause;
+
+    struct TypedFailingExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for TypedFailingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::ApplyFailed {
+                cause: CoreApplyFailureCause::runtime_context_apply(
+                    "context append failed before turn start",
+                ),
+            })
+        }
+
+        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(TypedFailingExecutor))
+        .await;
+
+    adapter
+        .accept_input(&session_id, make_prompt("typed apply failure"))
+        .await
+        .expect("input should be accepted");
+
+    let (cause, message) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let observed = {
+                let sessions = adapter.sessions.read().await;
+                let entry = sessions.get(&session_id).expect("session should exist");
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                authority
+                    .state
+                    .last_runtime_apply_failure_cause
+                    .map(|cause| {
+                        (
+                            cause,
+                            authority.state.last_runtime_apply_failure_message.clone(),
+                        )
+                    })
+            };
+            if let Some(observed) = observed {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime loop should terminalize the typed apply failure");
+
+    assert_eq!(cause, mm_dsl::RuntimeApplyFailureCause::RuntimeContextApply);
+    assert_eq!(
+        message.as_deref(),
+        Some("context append failed before turn start")
+    );
+}
+
+#[tokio::test]
+async fn legacy_fail_does_not_fabricate_runtime_apply_failure_cause() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let result: Result<(), RuntimeDriverError> = adapter
+        .accept_input_and_run(
+            &session_id,
+            make_prompt("legacy fail"),
+            |_run_id, _primitive| async {
+                Err::<((), CoreApplyOutput), RuntimeDriverError>(RuntimeDriverError::Internal(
+                    "legacy synchronous failure".to_string(),
+                ))
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(RuntimeDriverError::Internal(_))));
+
+    let (cause, message) = {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions.get(&session_id).expect("session should exist");
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            authority.state.last_runtime_apply_failure_cause,
+            authority.state.last_runtime_apply_failure_message.clone(),
+        )
+    };
+
+    assert_eq!(cause, None);
+    assert_eq!(message, None);
 }
 
 fn make_progress_input(label: &str) -> Input {
@@ -1093,7 +1232,6 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -2091,7 +2229,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         input_id
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve queued work");
@@ -2179,7 +2317,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
         "stale waiter should be visible before recycle reconciliation"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should reconcile waiters against active input truth");
@@ -2234,7 +2372,7 @@ async fn shared_ingress_authority_is_identical_after_register_recover_and_recycl
         "fresh registration should share one ingress authority between session and driver",
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should succeed");
@@ -2288,7 +2426,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         input_id
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve queued work");
@@ -2451,7 +2589,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
         "stale waiter should be visible before recover reconciliation"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should reconcile waiters against active input truth");
@@ -2523,7 +2661,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
         1
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should terminate active completion waiters");
@@ -2568,7 +2706,7 @@ async fn persistent_destroy_synchronizes_driver_control_projection_shadow() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("persistent destroy should succeed");
@@ -2592,6 +2730,209 @@ async fn persistent_destroy_synchronizes_driver_control_projection_shadow() {
         RuntimeState::Destroyed,
         "DSL remains the canonical destroyed authority",
     );
+}
+
+#[tokio::test]
+async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
+    struct BlockingDestroyCommitStore {
+        inner: Arc<crate::store::InMemoryRuntimeStore>,
+        destroy_commit_started: Notify,
+        release_destroy_commit: Notify,
+    }
+
+    impl BlockingDestroyCommitStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(crate::store::InMemoryRuntimeStore::new()),
+                destroy_commit_started: Notify::new(),
+                release_destroy_commit: Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeStore for BlockingDestroyCommitStore {
+        async fn commit_session_boundary(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: crate::store::SessionDelta,
+            run_id: RunId,
+            boundary: RunApplyBoundary,
+            contributing_input_ids: Vec<InputId>,
+            input_updates: Vec<crate::input_state::StoredInputState>,
+        ) -> Result<RunBoundaryReceipt, crate::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_boundary(
+                    runtime_id,
+                    session_delta,
+                    run_id,
+                    boundary,
+                    contributing_input_ids,
+                    input_updates,
+                )
+                .await
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: crate::store::SessionDelta,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: Option<crate::store::SessionDelta>,
+            receipt: RunBoundaryReceipt,
+            input_updates: Vec<crate::input_state::StoredInputState>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Vec<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
+        {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<Option<RunBoundaryReceipt>, crate::store::RuntimeStoreError> {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, crate::store::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: &crate::input_state::StoredInputState,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<Option<crate::input_state::StoredInputState>, crate::store::RuntimeStoreError>
+        {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn persist_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            state: RuntimeState,
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner.persist_runtime_state(runtime_id, state).await
+        }
+
+        async fn load_runtime_state(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<Option<RuntimeState>, crate::store::RuntimeStoreError> {
+            self.inner.load_runtime_state(runtime_id).await
+        }
+
+        async fn atomic_lifecycle_commit(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            runtime_state: RuntimeState,
+            input_states: &[crate::input_state::StoredInputState],
+        ) -> Result<(), crate::store::RuntimeStoreError> {
+            self.inner
+                .atomic_lifecycle_commit(runtime_id, runtime_state, input_states)
+                .await?;
+            if runtime_state == RuntimeState::Destroyed {
+                self.destroy_commit_started.notify_one();
+                self.release_destroy_commit.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(BlockingDestroyCommitStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let destroy_task = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let runtime_id = runtime_id.clone();
+        async move { crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id).await }
+    });
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        store.destroy_commit_started.notified(),
+    )
+    .await
+    .expect("destroy should reach the durable lifecycle commit");
+
+    assert_eq!(
+        store.inner.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "test probe should observe the store after durable destroyed commit",
+    );
+
+    let sessions = adapter.sessions.read().await;
+    let entry = sessions
+        .get(&session_id)
+        .expect("destroy keeps the session entry available for terminal snapshots");
+    assert_eq!(
+        entry.control_snapshot().phase,
+        RuntimeState::Destroyed,
+        "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
+    );
+    let authority = entry
+        .dsl_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+        RuntimeState::Destroyed,
+        "durable destroyed state must not race ahead of canonical DSL destroy truth",
+    );
+    drop(authority);
+    drop(sessions);
+
+    store.release_destroy_commit.notify_waiters();
+    let report = tokio::time::timeout(Duration::from_secs(2), destroy_task)
+        .await
+        .expect("destroy task should finish after releasing the store")
+        .expect("destroy task should not panic")
+        .expect("destroy should succeed");
+    assert_eq!(report.inputs_abandoned, 0);
 }
 
 #[tokio::test]
@@ -2673,7 +3014,7 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
         "wait_all should track the active operation before destroy"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should clear the steered completion waiter while preserving wait_all");
@@ -2782,7 +3123,6 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -2851,7 +3191,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
         "destroy has not yet attempted any executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should synchronously clear queued waiters even with a live loop");
@@ -2928,7 +3268,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3093,7 +3432,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3340,7 +3678,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3598,7 +3935,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -3711,7 +4047,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
     assert_eq!(control_calls.load(Ordering::SeqCst), 1);
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should split attached steered completion and wait_all lifetimes");
@@ -3868,7 +4204,6 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4068,7 +4403,6 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4223,7 +4557,6 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4432,6 +4765,168 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
 }
 
 #[tokio::test]
+async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
+    struct LiveControlHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorControl for LiveControlHandle {
+        async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(command, RunControlCommand::InterruptYielding) {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    struct BlockingExecutor {
+        apply_calls: Arc<AtomicUsize>,
+        queued_control_calls: Arc<AtomicUsize>,
+        live_control_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+            Some(Arc::new(LiveControlHandle {
+                calls: Arc::clone(&self.live_control_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+            if matches!(command, RunControlCommand::InterruptYielding) {
+                self.queued_control_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let queued_control_calls = Arc::new(AtomicUsize::new(0));
+    let live_control_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_calls: Arc::clone(&apply_calls),
+                queued_control_calls: Arc::clone(&queued_control_calls),
+                live_control_calls: Arc::clone(&live_control_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let first_input = Input::Prompt(crate::input::PromptInput::new(
+        "attached service ext running turn",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, _completion_handle) = adapter
+        .accept_input_with_completion(&session_id, first_input)
+        .await
+        .expect("attached steered prompt should be accepted");
+    assert!(outcome.is_accepted());
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("first apply should start");
+
+    live_control_calls.store(0, Ordering::SeqCst);
+    queued_control_calls.store(0, Ordering::SeqCst);
+
+    let peer_input = Input::Peer(crate::input::PeerInput {
+        header: crate::input::InputHeader {
+            id: InputId::new(),
+            timestamp: Utc::now(),
+            source: crate::input::InputOrigin::Peer {
+                peer_id: "peer-service-ext-interrupt".into(),
+                display_identity: None,
+                runtime_id: None,
+            },
+            durability: crate::input::InputDurability::Durable,
+            visibility: crate::input::InputVisibility::default(),
+            idempotency_key: None,
+            supersession_key: None,
+            correlation_id: None,
+        },
+        convention: Some(crate::input::PeerConvention::Message),
+        body: "interrupt through service ext ingest".into(),
+        payload: None,
+        blocks: None,
+        handling_mode: None,
+    });
+
+    let peer_outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+        adapter.as_ref(),
+        &session_id,
+        peer_input,
+    )
+    .await
+    .expect("service ext accept_input should accept running peer input");
+    assert!(peer_outcome.is_accepted());
+
+    assert_eq!(
+        live_control_calls.load(Ordering::SeqCst),
+        1,
+        "service ext Ingest should signal the live out-of-band control handle while apply is blocked"
+    );
+    assert_eq!(
+        queued_control_calls.load(Ordering::SeqCst),
+        0,
+        "ordered runtime-loop control still cannot drain until apply returns"
+    );
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+
+    allow_finish.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if queued_control_calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued control should still drain after apply returns");
+}
+
+#[tokio::test]
 async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_until_apply_finishes() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
@@ -4465,7 +4960,6 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4798,7 +5292,6 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -4995,7 +5488,6 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5138,7 +5630,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_w
         input_id
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should clear queued waiters when no runtime loop can drain");
@@ -5196,7 +5688,6 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5249,7 +5740,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
         "queued progress input should remain pending until retire wakes the attached loop"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve queued work for the live runtime loop to drain");
@@ -5336,7 +5827,6 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5403,7 +5893,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         "recover should not yet have attempted executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect(
@@ -5517,7 +6007,6 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -5584,7 +6073,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         "recycle should not yet have attempted executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect(
@@ -5878,7 +6367,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
         "wait_all should track the active operation before recover"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve the active wait_all carrier");
@@ -6013,7 +6502,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
         "wait_all should track the active operation before recover"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve both queued input and active wait_all");
@@ -6181,7 +6670,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
         "wait_all should track the active operation before recover"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve steered input and active wait_all");
@@ -6345,7 +6834,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
         "wait_all should track the active operation before recycle"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve steered input and active wait_all");
@@ -6483,7 +6972,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
         "wait_all should track the active operation before recycle"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve the active wait_all carrier");
@@ -6610,7 +7099,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
         "wait_all should track the active operation before recycle"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve both queued input and active wait_all");
@@ -6727,7 +7216,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -6822,7 +7310,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
         "recover should not yet have attempted executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should preserve wait_all while replaying attached-loop work");
@@ -6997,7 +7485,6 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -7100,7 +7587,7 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
         "recover should not yet have attempted executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recover(&*adapter, &runtime_id)
         .await
         .expect("recover should split completion and wait_all lifetimes on attached runtimes");
@@ -7276,7 +7763,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -7371,7 +7857,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
         "recycle should not yet have attempted executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should preserve wait_all while requeueing attached-loop work");
@@ -7517,7 +8003,6 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -7620,7 +8105,7 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
         "recycle should not yet have attempted executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should split completion and wait_all lifetimes on attached runtimes");
@@ -8223,7 +8708,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -8430,7 +8914,6 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -8658,7 +9141,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
         "wait_all should track the active operation before destroy"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed for an idle runtime");
@@ -8795,7 +9278,7 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
         "wait_all should track the active operation before destroy"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should split completion and wait_all lifetimes");
@@ -8900,7 +9383,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -8989,7 +9471,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
         "destroy has not yet attempted any executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should preserve wait_all while abandoning queued attached-loop work");
@@ -9087,7 +9569,6 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -9185,7 +9666,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
         "wait_all should track the active operation before destroy"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should split completion and wait_all lifetimes on attached runtimes");
@@ -9760,7 +10241,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -9951,7 +10431,6 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -10211,7 +10690,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
         "wait_all should track the active operation before retire"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve the active wait_all carrier");
@@ -10341,7 +10820,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
         "wait_all should track the active operation before retire"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should split completion and wait_all lifetimes");
@@ -10499,7 +10978,7 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
         "wait_all should track the active operation before retire"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should terminate the steered completion waiter while preserving wait_all");
@@ -10610,7 +11089,6 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -10695,7 +11173,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
         "queued attached-loop work should remain pending until retire wakes the loop"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve wait_all while the live loop drains queued work");
@@ -10862,7 +11340,6 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -10964,7 +11441,7 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
         "retire should not yet have attempted executor control"
     );
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let report = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should preserve queued work and wait_all while the live loop drains");
@@ -11182,7 +11659,7 @@ async fn register_session_rejects_destroyed_session() {
     adapter.register_session(session_id.clone()).await;
 
     // Transition to Destroyed via the control-plane destroy path.
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -11238,7 +11715,7 @@ async fn interrupt_current_run_rejects_destroyed_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -11260,7 +11737,7 @@ async fn cancel_after_boundary_rejects_destroyed_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -11282,7 +11759,7 @@ async fn stop_runtime_executor_rejects_destroyed_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -11328,7 +11805,7 @@ async fn set_peer_ingress_context_rejects_destroyed_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -11360,7 +11837,7 @@ async fn notify_drain_exited_rejects_destroyed_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -11401,7 +11878,7 @@ async fn ingest_rejects_retired_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
@@ -11429,7 +11906,7 @@ async fn ingest_rejects_stopped_session() {
     adapter.register_session(session_id.clone()).await;
 
     // Stop the session by driving it through retire → stop.
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     adapter
         .stop_runtime_executor(
             &session_id,
@@ -11456,16 +11933,12 @@ async fn ingest_rejects_stopped_session() {
 }
 
 #[tokio::test]
-async fn retire_rejects_initializing_session() {
+async fn retire_rejection_from_stopped_surfaces_dsl_authority() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
-    // Don't register, just create a session entry in Initializing state.
-    // Since there's no way to create a session in Initializing via the
-    // public API (register_session transitions to Idle), we test that
-    // retire guards against the union of incompatible phases. The Idle →
-    // Retired path is already exercised above. Focus here on the existing
-    // Stopped guard and Destroyed guard.
+    // Retire legality is DSL-owned; the Idle -> Retired path is exercised
+    // above, so this anchors an incompatible Stopped phase.
     adapter.register_session(session_id.clone()).await;
 
     // First stop
@@ -11479,18 +11952,19 @@ async fn retire_rejects_initializing_session() {
         .await
         .expect("stop should succeed");
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     let err = crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect_err("retire should reject a stopped session");
     assert!(
         matches!(
             err,
-            RuntimeControlPlaneError::InvalidState {
-                state: RuntimeState::Stopped
-            }
+            RuntimeControlPlaneError::Internal(ref reason)
+                if reason.contains("DSL authority (Retire)")
+                    && reason.contains("Stopped")
+                    && reason.contains("Retire")
         ),
-        "expected InvalidState(Stopped), got {err:?}"
+        "expected DSL authority rejection for Retire from Stopped, got {err:?}"
     );
 }
 
@@ -11505,7 +11979,7 @@ async fn accept_input_with_completion_rejects_retired_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
@@ -11530,7 +12004,7 @@ async fn accept_input_with_completion_rejects_destroyed_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -11583,7 +12057,6 @@ fn legacy_run_test_output(run_id: RunId, input_id: InputId) -> CoreApplyOutput {
         },
         session_snapshot: None,
         terminal: None,
-        run_result: None,
     }
 }
 
@@ -11594,7 +12067,7 @@ async fn legacy_run_prepare_rejects_retired_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
@@ -11624,7 +12097,7 @@ async fn legacy_run_prepare_rejects_destroyed_session() {
 
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -12001,7 +12474,7 @@ async fn spine_invariants_hold_after_destroy() {
         .await
         .expect("prompt should be accepted");
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -12027,7 +12500,7 @@ async fn spine_invariants_hold_after_retire() {
         .await
         .expect("prompt should be accepted");
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::retire(&*adapter, &runtime_id)
         .await
         .expect("retire should succeed");
@@ -12053,7 +12526,7 @@ async fn spine_invariants_hold_after_reset() {
         .await
         .expect("prompt should be accepted");
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::reset(&*adapter, &runtime_id)
         .await
         .expect("reset should succeed");
@@ -12079,7 +12552,7 @@ async fn spine_invariants_hold_after_recycle() {
         .await
         .expect("prompt should be accepted");
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .expect("recycle should succeed");
@@ -12652,7 +13125,7 @@ async fn publish_committed_visible_set_rejects_destroyed_session() {
     let session_id = SessionId::new();
     adapter.register_session(session_id.clone()).await;
 
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed");
@@ -13111,7 +13584,6 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -13220,7 +13692,6 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -13366,7 +13837,6 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -13472,7 +13942,6 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -13666,7 +14135,6 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -14445,7 +14913,6 @@ impl CoreExecutor for RuntimeParityNoopExecutor {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
 
@@ -14479,7 +14946,6 @@ impl CoreExecutor for RuntimeParityBlockingExecutor {
             },
             session_snapshot: None,
             terminal: None,
-            run_result: None,
         })
     }
 
@@ -15790,7 +16256,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
 
     crate::traits::RuntimeControlPlane::destroy(
         adapter.as_ref(),
-        &LogicalRuntimeId::new(session_id.to_string()),
+        &runtime_id_for_session(&session_id),
     )
     .await
     .expect("idle queue test should destroy runtime cleanly");
@@ -15842,7 +16308,7 @@ async fn meerkat_reset_clears_silent_intent_overrides() {
         .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
         .await;
 
-    let runtime_id = LogicalRuntimeId::new(fixture.session_id.to_string());
+    let runtime_id = runtime_id_for_session(&fixture.session_id);
     let result = fixture
         .adapter
         .execute_meerkat_machine_command(
@@ -15879,7 +16345,7 @@ async fn meerkat_destroy_clears_silent_intent_overrides() {
         .set_session_silent_intents(&fixture.session_id, runtime_parity_silent_intents())
         .await;
 
-    let runtime_id = LogicalRuntimeId::new(fixture.session_id.to_string());
+    let runtime_id = runtime_id_for_session(&fixture.session_id);
     let result = fixture
         .adapter
         .execute_meerkat_machine_command(
@@ -16212,7 +16678,7 @@ async fn wait_for_runtime_parity_phase(
 async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParityFixture {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
-    let runtime_id = LogicalRuntimeId::new(session_id.to_string());
+    let runtime_id = runtime_id_for_session(&session_id);
 
     match phase {
         RuntimeParityPhase::Idle => {
@@ -16559,7 +17025,6 @@ fn runtime_parity_probe_command(
                     },
                     session_snapshot: None,
                     terminal: None,
-                    run_result: None,
                 },
             }
         }
@@ -17406,9 +17871,115 @@ async fn write_runtime_modeled_state_audit_report(path: PathBuf) -> RuntimeModel
 // Per-session mutation gate tests
 // ---------------------------------------------------------------------------
 
+#[tokio::test]
+async fn retire_from_retired_is_backed_by_dsl_idempotent_transition() {
+    let schema = schema_meerkat_machine();
+    let has_retired_self_loop = schema.transitions.iter().any(|transition| {
+        transition.on.variant_str() == "Retire"
+            && transition
+                .from
+                .iter()
+                .any(|phase| phase.as_str() == "Retired")
+            && transition.to.as_str() == "Retired"
+    });
+    assert!(
+        has_retired_self_loop,
+        "Retire idempotence must be represented by the MeerkatMachine DSL"
+    );
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("initial retire should succeed");
+
+    let report = crate::traits::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("retire from Retired should succeed idempotently through DSL");
+    assert_eq!(report.inputs_abandoned, 0);
+    assert_eq!(report.inputs_pending_drain, 0);
+
+    let state = crate::traits::RuntimeControlPlane::runtime_state(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("runtime state should remain readable");
+    assert_eq!(state, RuntimeState::Retired);
+}
+
+#[tokio::test]
+async fn reset_from_running_surfaces_dsl_rejection() {
+    let fixture = build_runtime_parity_fixture(RuntimeParityPhase::Running).await;
+
+    let result = fixture
+        .adapter
+        .execute_meerkat_machine_command(
+            Some(Arc::clone(&fixture.adapter)),
+            MeerkatMachineCommand::Reset {
+                runtime_id: fixture.runtime_id.clone(),
+            },
+        )
+        .await;
+
+    fixture.cleanup().await;
+
+    let err = result.expect_err("reset from Running should reject through DSL");
+    assert!(
+        matches!(
+            err,
+            MeerkatMachineCommandError::Control(RuntimeControlPlaneError::Internal(ref reason))
+                if reason.contains("DSL authority (Reset)")
+                    && reason.contains("Running")
+                    && reason.contains("Reset")
+        ),
+        "expected DSL authority rejection for Reset from Running, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn destroy_from_bound_initializing_is_backed_by_dsl_guard() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let runtime_id = runtime_id_for_session(&session_id);
+
+    adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("bindings should establish active runtime identity");
+
+    let driver = {
+        let sessions = adapter.sessions.read().await;
+        Arc::clone(
+            &sessions
+                .get(&session_id)
+                .expect("prepared session should exist")
+                .driver,
+        )
+    };
+    {
+        let mut entry = driver.lock().await;
+        let DriverEntry::Ephemeral(driver) = &mut *entry else {
+            panic!("test uses ephemeral driver");
+        };
+        driver.force_runtime_authority(RuntimeState::Initializing, None, None);
+        driver.sync_control_projection_from_dsl_authority();
+    }
+
+    let report = crate::traits::RuntimeControlPlane::destroy(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("bound Initializing destroy should follow the DSL DestroyInitializing guard");
+    assert_eq!(report.inputs_abandoned, 0);
+
+    let state = crate::traits::RuntimeControlPlane::runtime_state(adapter.as_ref(), &runtime_id)
+        .await
+        .expect("runtime state should remain readable after destroy");
+    assert_eq!(state, RuntimeState::Destroyed);
+}
+
 /// Two concurrent Retire commands on the same session must serialize: the
-/// first stages the DSL transition, and the second observes the
-/// DSL-authoritative Retired phase and completes idempotently.
+/// first stages the mutating DSL transition, and the second reaches the
+/// DSL-authoritative Retired self-loop and completes idempotently.
 #[tokio::test]
 async fn concurrent_retire_serializes_via_mutation_gate() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -17442,7 +18013,8 @@ async fn concurrent_retire_serializes_via_mutation_gate() {
     let result_b = result_b.expect("task b should not panic");
 
     // Both command calls should succeed. The mutation gate still matters:
-    // it ensures only one call stages the non-self-looping Retire DSL input.
+    // it ensures the mutating Retire and idempotent Retire self-loop are
+    // observed in sequence.
     let successes = [&result_a, &result_b].iter().filter(|r| r.is_ok()).count();
     let failures = [&result_a, &result_b].iter().filter(|r| r.is_err()).count();
 
@@ -17466,9 +18038,8 @@ async fn concurrent_retire_serializes_via_mutation_gate() {
     );
 }
 
-/// Once the DSL-authoritative session phase is Retired, another command-level
-/// retire should succeed idempotently without restaging the raw DSL Retire
-/// transition.
+/// Once the DSL-authoritative session phase is Retired, another retire should
+/// succeed through the DSL-owned idempotent Retire self-loop.
 #[tokio::test]
 async fn retire_runtime_is_idempotent_from_retired() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
@@ -17508,7 +18079,7 @@ async fn retire_runtime_is_idempotent_from_retired() {
     assert_eq!(state, RuntimeState::Retired);
 
     // Attempt a second Retire from Retired. The command path should be
-    // idempotent without staging the non-self-looping DSL Retire input again.
+    // idempotent through the DSL Retire self-loop.
     let report =
         <MeerkatMachine as SessionServiceRuntimeExt>::retire_runtime(&adapter, &session_id)
             .await

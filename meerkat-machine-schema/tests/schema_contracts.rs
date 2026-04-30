@@ -19,7 +19,7 @@ use meerkat_machine_schema::identity::{
 };
 use meerkat_machine_schema::{
     CompositionDriver, CompositionDriverRustBinding, CompositionSchemaError, DriverDispatchRoute,
-    RouteTargetKind, RouteVariantId, RustTypeAtom, WatchedEffect,
+    RouteTargetKind, RouteVariantId, RustTypeAtom, TypeRef, WatchedEffect,
     canonical_composition_coverage_manifests, canonical_composition_schemas,
     canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_mob_seam_composition,
 };
@@ -58,6 +58,68 @@ fn canonical_machine_registry_contains_only_two_kernel_and_perimeter_entries() {
             "{absorbed} should be absorbed into canonical kernels, not published separately"
         );
     }
+}
+
+#[test]
+fn external_tool_surface_failure_cause_fields_are_typed() {
+    let schema = meerkat_machine();
+    let cause_ty = TypeRef::Enum(
+        EnumTypeId::parse("ExternalToolSurfaceFailureCause").expect("valid enum type"),
+    );
+
+    let pending_failed = schema
+        .inputs
+        .variants
+        .iter()
+        .find(|variant| variant.name.as_str() == "SurfaceMarkPendingFailed")
+        .expect("SurfaceMarkPendingFailed input");
+    assert_eq!(
+        pending_failed
+            .field_named("cause")
+            .expect("typed failure cause field")
+            .ty,
+        cause_ty
+    );
+    assert!(
+        pending_failed.field_named("reason").is_err(),
+        "pending failure cause must not remain a string-shaped reason field"
+    );
+
+    let reject_surface_call = schema
+        .effects
+        .variants
+        .iter()
+        .find(|variant| variant.name.as_str() == "RejectSurfaceCall")
+        .expect("RejectSurfaceCall effect");
+    assert_eq!(
+        reject_surface_call
+            .field_named("cause")
+            .expect("typed rejection cause field")
+            .ty,
+        cause_ty
+    );
+    assert!(
+        reject_surface_call.field_named("reason").is_err(),
+        "surface call rejection cause must not remain a string-shaped reason field"
+    );
+
+    let emit_external_tool_delta = schema
+        .effects
+        .variants
+        .iter()
+        .find(|variant| variant.name.as_str() == "EmitExternalToolDelta")
+        .expect("EmitExternalToolDelta effect");
+    assert_eq!(
+        emit_external_tool_delta
+            .field_named("cause")
+            .expect("typed lifecycle failure cause field")
+            .ty,
+        TypeRef::Option(Box::new(cause_ty))
+    );
+    assert!(
+        emit_external_tool_delta.field_named("reason").is_err(),
+        "lifecycle failure cause must not remain a string-shaped reason field"
+    );
 }
 
 #[test]

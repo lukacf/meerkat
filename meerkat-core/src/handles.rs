@@ -39,7 +39,8 @@ use crate::peer_correlation::{
 use crate::retry::LlmRetrySchedule;
 use crate::tool_scope::{
     ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
+    ExternalToolSurfaceFailureCause, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
+    ExternalToolSurfaceStagedOp,
 };
 use crate::turn_execution_authority::{
     TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
@@ -764,7 +765,7 @@ pub enum ExternalToolSurfaceInput {
         surface_id: String,
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     },
     CallStarted {
         surface_id: String,
@@ -800,13 +801,14 @@ pub enum ExternalToolSurfaceEffect {
         surface_id: String,
         operation: ExternalToolSurfaceDeltaOperation,
         phase: ExternalToolSurfaceDeltaPhase,
+        cause: Option<ExternalToolSurfaceFailureCause>,
     },
     CloseSurfaceConnection {
         surface_id: String,
     },
     RejectSurfaceCall {
         surface_id: String,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     },
 }
 
@@ -851,7 +853,7 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
         surface_id: String,
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     ) -> Result<(), DslTransitionError>;
 
     fn call_started(&self, surface_id: String) -> Result<(), DslTransitionError>;
@@ -1020,11 +1022,25 @@ impl std::fmt::Display for LeaseKey {
 /// Observable snapshot of an auth lease's DSL state for a given [`LeaseKey`].
 ///
 /// Returned by [`AuthLeaseHandle::snapshot`]. If the binding is not tracked
-/// at all, `phase` is `None` and `expires_at` is `None`.
+/// at all, `phase` is `None` and `expires_at` is `None`. `generation`
+/// advances whenever the lease lifecycle accepts a transition, so consumers
+/// can distinguish a stale projection from a freshly reacquired lease even
+/// when the expiry timestamp is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
     pub expires_at: Option<u64>,
+    pub generation: u64,
+}
+
+/// Result of an accepted auth lease lifecycle transition.
+///
+/// `generation` is the projection version assigned while the transition is
+/// accepted, so consumers can bind derived material to the exact lease state
+/// that published it without taking a later snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthLeaseTransition {
+    pub generation: u64,
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is
@@ -1045,11 +1061,12 @@ pub trait AuthLeaseHandle: Send + Sync {
     /// Fire `AcquireAuthLease { lease_key, expires_at }` — unconditional.
     ///
     /// Moves the binding into `auth_valid_leases` and records its expiry.
+    /// Returns the generation assigned by the accepted transition.
     fn acquire_lease(
         &self,
         lease_key: &LeaseKey,
         expires_at: u64,
-    ) -> Result<(), DslTransitionError>;
+    ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
     /// Fire `MarkAuthExpiring { lease_key }` — only legal from `valid`.
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
@@ -1064,13 +1081,14 @@ pub trait AuthLeaseHandle: Send + Sync {
     fn begin_refresh(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
     /// Fire `CompleteAuthRefresh { lease_key, new_expires_at, now }` — only
-    /// legal from `refreshing`.
+    /// legal from `refreshing`. Returns the generation assigned by the accepted
+    /// transition.
     fn complete_refresh(
         &self,
         lease_key: &LeaseKey,
         new_expires_at: u64,
         now: u64,
-    ) -> Result<(), DslTransitionError>;
+    ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
     /// Fire `AuthRefreshFailed { lease_key, permanent }` — only legal from
     /// `refreshing`. `permanent=true` routes to `reauth_required` and emits a
@@ -1798,6 +1816,7 @@ pub trait RealtimeProductTurnHandle: Send + Sync {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
+        ExternalToolSurfaceEffect, ExternalToolSurfaceFailureCause, ExternalToolSurfaceInput,
         PeerConversationProjection, PeerResponseProgressProjectionPhase,
         PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
         PeerResponseTerminalFact, PeerResponseTerminalProjectionStatus,
@@ -1805,6 +1824,41 @@ mod tests {
         PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity,
         peer_response_terminal_context_key,
     };
+    use crate::tool_scope::{ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase};
+
+    #[test]
+    fn external_tool_surface_pending_failure_cause_projects_external_code() {
+        let input = ExternalToolSurfaceInput::MarkPendingFailed {
+            surface_id: "alpha".to_owned(),
+            pending_task_sequence: 7,
+            staged_intent_sequence: 11,
+            cause: ExternalToolSurfaceFailureCause::PendingFailed,
+        };
+
+        let ExternalToolSurfaceInput::MarkPendingFailed { cause, .. } = input else {
+            panic!("constructed MarkPendingFailed input");
+        };
+        assert_eq!(cause, ExternalToolSurfaceFailureCause::PendingFailed);
+        assert_eq!(cause.as_str(), "pending_failed");
+        assert_eq!(
+            serde_json::to_value(cause).expect("serialize failure cause"),
+            serde_json::json!("pending_failed")
+        );
+
+        let effect = ExternalToolSurfaceEffect::EmitExternalToolDelta {
+            surface_id: "alpha".to_owned(),
+            operation: ExternalToolSurfaceDeltaOperation::Add,
+            phase: ExternalToolSurfaceDeltaPhase::Failed,
+            cause: Some(cause),
+        };
+        assert!(matches!(
+            effect,
+            ExternalToolSurfaceEffect::EmitExternalToolDelta {
+                cause: Some(ExternalToolSurfaceFailureCause::PendingFailed),
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn peer_terminal_projection_owns_prompt_and_context_key() {

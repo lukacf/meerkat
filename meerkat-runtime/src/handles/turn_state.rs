@@ -355,6 +355,8 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::RunFailed {
                 run_id: mm_dsl::RunId::from_domain(&run_id),
+                runtime_apply_failure_cause: None,
+                runtime_apply_failure_message: None,
                 error: reason.to_dsl_error(),
             },
             "TurnStateHandle::run_failed",

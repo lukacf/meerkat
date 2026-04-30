@@ -9,9 +9,8 @@
  *     class with the appropriate transport.
  *   - `registerExternalAuthResolver` — wraps the WASM-bundled
  *     `register_external_auth_resolver` binding so a browser host page
- *     can install an OAuth-backed resolver callback that hands Meerkat
- *     either a legacy bearer token string or a typed lease envelope per
- *     structural connection reference.
+ *     can install an OAuth-backed resolver callback that hands Meerkat a
+ *     typed lease envelope per structural connection reference.
  *   - `withConnectionRef` — convenience helper that wires an existing
  *     session config with a connection reference for `createSession`.
  *
@@ -76,15 +75,15 @@ export type ExternalAuthFailure =
   | { kind: 'io'; detail: string }
   | { kind: 'other'; detail: string };
 
-/** Successful resolver result. A string is the legacy compatibility shape;
- * typed leases preserve expiration and metadata across the WASM boundary. */
-export type ExternalAuthResolverResult = string | ExternalAuthLease;
+/** Successful resolver result. Leases preserve expiration and metadata across
+ * the WASM boundary by using a structured envelope. */
+export type ExternalAuthResolverResult = ExternalAuthLease;
 
 /** Host-page resolver callback that the WASM runtime invokes when the
  * selected binding's credential source is `external_resolver`. Takes a
- * structural connection reference, returns a bearer token string or typed
- * lease envelope. Reject the returned promise with `ExternalAuthFailure`
- * to preserve stable failure truth. */
+ * structural connection reference, and returns a typed lease envelope. Reject
+ * the returned promise with `ExternalAuthFailure` to preserve stable failure
+ * truth. */
 export type ExternalAuthResolver = (
   connectionRef: ConnectionRef,
 ) => ExternalAuthResolverResult | Promise<ExternalAuthResolverResult>;
@@ -345,10 +344,8 @@ export class Auth {
  * credential source is `external_resolver`.
  *
  * Plan §4d.wasm.1 + §4d.wasm.3: browser OAuth flows run in the host
- * page; the resolver hands Meerkat a resolved bearer token on
- * demand. For compatibility the resolver may still return a plain string;
- * hosts that know expiration/provenance should return an `ExternalAuthLease`.
- * Meerkat never touches the host's refresh token. Reject with
+ * page; the resolver hands Meerkat a structured `ExternalAuthLease` on
+ * demand. Meerkat never touches the host's refresh token. Reject with
  * `ExternalAuthFailure` to preserve denial, refresh, or missing-credential
  * truth across the WASM boundary.
  */

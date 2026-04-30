@@ -421,7 +421,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     fn runtime_id_for_session(id: &SessionId) -> LogicalRuntimeId {
-        LogicalRuntimeId::new(id.to_string())
+        LogicalRuntimeId::for_session(id)
+    }
+
+    fn legacy_runtime_id_for_session(id: &SessionId) -> LogicalRuntimeId {
+        LogicalRuntimeId::legacy_session_uuid_alias(id)
+    }
+
+    fn runtime_id_candidates_for_session(id: &SessionId) -> Vec<LogicalRuntimeId> {
+        let canonical = Self::runtime_id_for_session(id);
+        let legacy = Self::legacy_runtime_id_for_session(id);
+        if canonical == legacy {
+            vec![canonical]
+        } else {
+            vec![canonical, legacy]
+        }
     }
 
     async fn runtime_input_updates(
@@ -434,22 +448,74 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(runtime_store) = self.runtime_store.as_ref() else {
             return Ok(Vec::new());
         };
-        let runtime_id = Self::runtime_id_for_session(id);
-        let stored_states = runtime_store
-            .load_input_states(&runtime_id)
-            .await
-            .map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to load runtime input states: {err}"
-                )))
-            })?;
+        let mut stored_states: Vec<(usize, StoredInputState)> = Vec::new();
+        let mut primary_alias_loaded = false;
+        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
+            .into_iter()
+            .enumerate()
+        {
+            let candidate_states = match runtime_store.load_input_states(&runtime_id).await {
+                Ok(states) => {
+                    if candidate_index == 0 {
+                        primary_alias_loaded = true;
+                    }
+                    states
+                }
+                Err(err)
+                    if candidate_index > 0
+                        && primary_alias_loaded
+                        && contributing_input_ids.iter().all(|input_id| {
+                            stored_states
+                                .iter()
+                                .any(|(_, state)| &state.state.input_id == input_id)
+                        }) =>
+                {
+                    tracing::warn!(
+                        session_id = %id,
+                        runtime_id = %runtime_id,
+                        error = %err,
+                        "ignoring legacy runtime input-state fallback error because canonical input states were already loaded"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "failed to load runtime input states: {err}"
+                        )),
+                    ));
+                }
+            };
+            for state in candidate_states {
+                let input_id = state.state.input_id.clone();
+                if let Some((existing_index, existing_state)) = stored_states
+                    .iter_mut()
+                    .find(|(_, existing)| existing.state.input_id == input_id)
+                {
+                    let candidate_updated_at = state.state.updated_at();
+                    let existing_updated_at = existing_state.state.updated_at();
+                    let should_replace = if candidate_index == *existing_index {
+                        candidate_updated_at > existing_updated_at
+                    } else {
+                        candidate_index < *existing_index
+                    };
+                    if should_replace {
+                        *existing_index = candidate_index;
+                        *existing_state = state;
+                    }
+                } else {
+                    stored_states.push((candidate_index, state));
+                }
+            }
+        }
 
         Ok(contributing_input_ids
             .iter()
             .filter_map(|input_id| {
                 let mut bundle = stored_states
                     .iter()
-                    .find(|candidate| &candidate.state.input_id == input_id)?
+                    .find(|(_, candidate)| &candidate.state.input_id == input_id)?
+                    .1
                     .clone();
                 // Stamp receipt metadata and mirror the Consumed terminal on
                 // the persisted snapshot. The authoritative DSL transition
@@ -577,8 +643,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         if let Some(runtime_store) = self.runtime_store.as_ref() {
-            let runtime_id = Self::runtime_id_for_session(id);
-            Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await
+            Self::load_runtime_session_snapshot_for_session(runtime_store, id).await
         } else {
             self.store
                 .load(id)
@@ -611,6 +676,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .transpose()
     }
 
+    async fn load_runtime_session_snapshot_for_session(
+        runtime_store: &Arc<dyn RuntimeStore>,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        let mut selected = None;
+        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
+            .into_iter()
+            .enumerate()
+        {
+            match Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await {
+                Ok(Some(session)) => {
+                    if candidate_index == 0 {
+                        return Ok(Some(session));
+                    }
+                    selected = Some(session);
+                }
+                Ok(None) => {}
+                Err(err) if candidate_index > 0 && selected.is_some() => {
+                    tracing::warn!(
+                        session_id = %id,
+                        runtime_id = %runtime_id,
+                        error = ?err,
+                        "ignoring legacy runtime session snapshot fallback error because canonical authority was already loaded"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(selected)
+    }
+
     fn store_only_control_mutation_error(id: &SessionId, operation: &str) -> SessionError {
         SessionError::Unsupported(format!(
             "{operation} cannot mutate store-only compatibility projection for session {id}; runtime-backed control mutations require an authoritative runtime snapshot"
@@ -626,25 +722,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Ok(None);
         };
 
-        let runtime_id = Self::runtime_id_for_session(id);
-        if let Some(runtime) = runtime_store
-            .load_session_snapshot(&runtime_id)
-            .await
-            .map_err(|err| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "failed to load runtime session snapshot: {err}"
-                )))
-            })?
-            .map(|bytes| {
-                meerkat_core::session_migrations::deserialize_session_migrating(&bytes).map_err(
-                    |err| {
-                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                            format!("failed to deserialize runtime session snapshot: {err}"),
-                        ))
-                    },
-                )
-            })
-            .transpose()?
+        if let Some(runtime) =
+            Self::load_runtime_session_snapshot_for_session(runtime_store, id).await?
         {
             return Ok(Some(runtime));
         }
@@ -688,7 +767,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if self.runtime_store.is_none() {
             // Legacy runtime-less compatibility only. This is not a runtime
             // authority path; runtime-backed callers commit through
-            // `RuntimeStore::commit_session_boundary` inside
+            // `RuntimeStore::commit_session_snapshot` inside
             // `save_normalized_session`.
             tracing::debug!(
                 session_id = %session.id(),
@@ -709,9 +788,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         };
 
         let stored = if let Some(runtime_store) = self.runtime_store.as_ref() {
-            let runtime_id = Self::runtime_id_for_session(id);
             let Some(runtime) =
-                Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await?
+                Self::load_runtime_session_snapshot_for_session(runtime_store, id).await?
             else {
                 return Ok(false);
             };
@@ -1045,13 +1123,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 )))
             })?;
             runtime_store
-                .commit_session_boundary(
+                .commit_session_snapshot(
                     &Self::runtime_id_for_session(session.id()),
                     SessionDelta { session_snapshot },
-                    RunId::new(),
-                    RunApplyBoundary::Immediate,
-                    vec![],
-                    vec![],
                 )
                 .await
                 .map_err(|err| {
@@ -1192,7 +1266,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(CoreApplyTerminal::NoPendingBoundary) => CoreApplyOutput {
                 receipt,
                 session_snapshot: Some(session_snapshot),
-                run_result: None,
                 terminal: Some(CoreApplyTerminal::NoPendingBoundary),
             },
             None => CoreApplyOutput::without_terminal(receipt, Some(session_snapshot)),
@@ -1203,9 +1276,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     /// Apply a runtime-driven turn and return the authoritative boundary receipt.
     ///
-    /// In runtime-backed mode, the returned serialized session snapshot is meant
-    /// to be committed by `RuntimeStore::atomic_apply`, making the runtime store
-    /// the sole durable writer for that turn.
+    /// In runtime-backed mode, the serialized session snapshot is committed
+    /// before this method returns, making the runtime store the sole durable
+    /// writer for that turn.
     pub async fn apply_runtime_turn(
         &self,
         id: &SessionId,
@@ -2384,6 +2457,9 @@ mod tests {
     struct GatedSnapshotRuntimeStore {
         inner: InMemoryRuntimeStore,
         hidden_snapshot_loads: AtomicUsize,
+        session_snapshot_overrides: Mutex<HashMap<LogicalRuntimeId, Vec<u8>>>,
+        input_state_load_errors: Mutex<HashSet<LogicalRuntimeId>>,
+        boundary_commits: Mutex<Vec<meerkat_core::lifecycle::RunBoundaryReceipt>>,
     }
 
     impl GatedSnapshotRuntimeStore {
@@ -2391,6 +2467,9 @@ mod tests {
             Self {
                 inner: InMemoryRuntimeStore::new(),
                 hidden_snapshot_loads: AtomicUsize::new(0),
+                session_snapshot_overrides: Mutex::new(HashMap::new()),
+                input_state_load_errors: Mutex::new(HashSet::new()),
+                boundary_commits: Mutex::new(Vec::new()),
             }
         }
 
@@ -2413,6 +2492,25 @@ mod tests {
             }
             false
         }
+
+        async fn boundary_commits(&self) -> Vec<meerkat_core::lifecycle::RunBoundaryReceipt> {
+            self.boundary_commits.lock().await.clone()
+        }
+
+        async fn reset_boundary_commits(&self) {
+            self.boundary_commits.lock().await.clear();
+        }
+
+        async fn override_session_snapshot(&self, runtime_id: LogicalRuntimeId, snapshot: Vec<u8>) {
+            self.session_snapshot_overrides
+                .lock()
+                .await
+                .insert(runtime_id, snapshot);
+        }
+
+        async fn fail_input_state_load_for(&self, runtime_id: LogicalRuntimeId) {
+            self.input_state_load_errors.lock().await.insert(runtime_id);
+        }
     }
 
     #[async_trait::async_trait]
@@ -2429,7 +2527,8 @@ mod tests {
             meerkat_core::lifecycle::RunBoundaryReceipt,
             meerkat_runtime::store::RuntimeStoreError,
         > {
-            self.inner
+            let receipt = self
+                .inner
                 .commit_session_boundary(
                     runtime_id,
                     session_delta,
@@ -2438,6 +2537,18 @@ mod tests {
                     contributing_input_ids,
                     input_updates,
                 )
+                .await?;
+            self.boundary_commits.lock().await.push(receipt.clone());
+            Ok(receipt)
+        }
+
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            session_delta: meerkat_runtime::store::SessionDelta,
+        ) -> Result<(), meerkat_runtime::store::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
                 .await
         }
 
@@ -2464,6 +2575,16 @@ mod tests {
             &self,
             runtime_id: &LogicalRuntimeId,
         ) -> Result<Vec<StoredInputState>, meerkat_runtime::store::RuntimeStoreError> {
+            if self
+                .input_state_load_errors
+                .lock()
+                .await
+                .contains(runtime_id)
+            {
+                return Err(meerkat_runtime::store::RuntimeStoreError::ReadFailed(
+                    "synthetic legacy input-state load failure".to_string(),
+                ));
+            }
             self.inner.load_input_states(runtime_id).await
         }
 
@@ -2487,6 +2608,15 @@ mod tests {
         ) -> Result<Option<Vec<u8>>, meerkat_runtime::store::RuntimeStoreError> {
             if self.should_hide_session_snapshot_load() {
                 return Ok(None);
+            }
+            if let Some(snapshot) = self
+                .session_snapshot_overrides
+                .lock()
+                .await
+                .get(runtime_id)
+                .cloned()
+            {
+                return Ok(Some(snapshot));
             }
             self.inner.load_session_snapshot(runtime_id).await
         }
@@ -3809,7 +3939,6 @@ mod tests {
             output.receipt.contributing_input_ids,
             contributing_input_ids
         );
-        assert!(output.run_result.is_none());
         assert!(matches!(
             output.terminal,
             Some(CoreApplyTerminal::NoPendingBoundary)
@@ -4471,6 +4600,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_runtime_backed_append_system_context_persists_snapshot_without_boundary_receipt()
+    {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        runtime_store.reset_boundary_commits().await;
+
+        service
+            .append_system_context(
+                &result.session_id,
+                AppendSystemContextRequest {
+                    text: "control snapshot should not mint a receipt".to_string(),
+                    source: Some("api".to_string()),
+                    idempotency_key: Some("no-receipt-control-snapshot".to_string()),
+                },
+            )
+            .await
+            .expect("append_system_context should succeed");
+
+        let boundary_commits = runtime_store.boundary_commits().await;
+        assert!(
+            boundary_commits.is_empty(),
+            "non-run control snapshots must not mint synthetic boundary receipts: {boundary_commits:?}"
+        );
+
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&result.session_id);
+        let snapshot = runtime_store
+            .load_session_snapshot(&runtime_id)
+            .await
+            .expect("runtime snapshot load should succeed")
+            .expect("control snapshot should still be durable");
+        let stored: Session =
+            serde_json::from_slice(&snapshot).expect("runtime snapshot should deserialize");
+        let state = stored
+            .system_context_state()
+            .expect("runtime snapshot should carry pending control state");
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(
+            state.pending[0].text,
+            "control snapshot should not mint a receipt"
+        );
+    }
+
+    #[tokio::test]
     async fn test_runtime_backed_append_system_context_uses_newer_runtime_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
@@ -4805,6 +4993,343 @@ mod tests {
             raw_projection.messages().len(),
             "compatibility projection should remain inert in the raw store"
         );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_authoritative_load_accepts_legacy_session_uuid_runtime_alias() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let mut legacy_runtime_session = Session::new();
+        legacy_runtime_session.push(Message::User(UserMessage::text(
+            "legacy runtime alias row".to_string(),
+        )));
+        let id = legacy_runtime_session.id().clone();
+        let snapshot =
+            serde_json::to_vec(&legacy_runtime_session).expect("legacy session should serialize");
+        let legacy_runtime_alias = LogicalRuntimeId::legacy_session_uuid_alias(&id);
+        let canonical_runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        assert_ne!(
+            canonical_runtime_id, legacy_runtime_alias,
+            "canonical runtime id must be distinct from the legacy raw session UUID alias"
+        );
+
+        runtime_store
+            .commit_session_boundary(
+                &legacy_runtime_alias,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: snapshot,
+                },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("test should seed a legacy runtime alias snapshot");
+
+        let authoritative = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("legacy runtime alias should remain readable");
+        assert_eq!(
+            authoritative.messages().len(),
+            legacy_runtime_session.messages().len(),
+            "runtime-backed resume must preserve legacy raw alias snapshots"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_backed_authoritative_load_keeps_canonical_over_newer_legacy_runtime_alias_snapshot()
+     {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let mut canonical_session = Session::new();
+        canonical_session.push(Message::User(UserMessage::text(
+            "canonical runtime alias row".to_string(),
+        )));
+        let id = canonical_session.id().clone();
+        let canonical_runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        runtime_store
+            .commit_session_boundary(
+                &canonical_runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&canonical_session)
+                        .expect("canonical session should serialize"),
+                },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("test should seed a canonical runtime alias snapshot");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let mut legacy_session = canonical_session.clone();
+        legacy_session.push(Message::User(UserMessage::text(
+            "newer legacy runtime alias row".to_string(),
+        )));
+        runtime_store
+            .commit_session_boundary(
+                &LogicalRuntimeId::legacy_session_uuid_alias(&id),
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&legacy_session)
+                        .expect("legacy session should serialize"),
+                },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("test should seed a newer legacy runtime alias snapshot");
+
+        let authoritative = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime alias snapshot should exist");
+        assert_eq!(
+            authoritative.messages().len(),
+            canonical_session.messages().len(),
+            "canonical runtime authority must not be overwritten by a newer legacy raw alias snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_authority_ignores_corrupt_legacy_alias_after_canonical_snapshot() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let mut canonical_session = Session::new();
+        canonical_session.push(Message::User(UserMessage::text(
+            "canonical runtime alias row".to_string(),
+        )));
+        let id = canonical_session.id().clone();
+        let canonical_runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        runtime_store
+            .commit_session_boundary(
+                &canonical_runtime_id,
+                meerkat_runtime::store::SessionDelta {
+                    session_snapshot: serde_json::to_vec(&canonical_session)
+                        .expect("canonical session should serialize"),
+                },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("test should seed a canonical runtime snapshot");
+
+        runtime_store
+            .override_session_snapshot(
+                LogicalRuntimeId::legacy_session_uuid_alias(&id),
+                b"{not valid json".to_vec(),
+            )
+            .await;
+
+        let authoritative = service
+            .load_authoritative_session(&id)
+            .await
+            .expect("valid canonical authority must not be poisoned by corrupt legacy fallback")
+            .expect("canonical runtime snapshot should exist");
+        assert_eq!(
+            authoritative.messages().len(),
+            canonical_session.messages().len(),
+            "canonical runtime authority must win over corrupt legacy fallback data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_input_updates_ignore_legacy_alias_load_error_after_canonical_states() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        let input_id = InputId::new();
+        let canonical_runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        let mut input_state = meerkat_runtime::InputState::new_accepted(input_id.clone());
+        input_state.durability = Some(meerkat_runtime::InputDurability::Durable);
+        let stored = StoredInputState {
+            state: input_state,
+            seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
+        };
+        runtime_store
+            .persist_input_state(&canonical_runtime_id, &stored)
+            .await
+            .expect("test should seed canonical input state");
+        runtime_store
+            .fail_input_state_load_for(LogicalRuntimeId::legacy_session_uuid_alias(&id))
+            .await;
+
+        let run_id = RunId::new();
+        let updates = service
+            .runtime_input_updates(&id, &run_id, 7, std::slice::from_ref(&input_id))
+            .await
+            .expect("legacy input-state load failure must not poison canonical updates");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].state.input_id, input_id);
+        assert_eq!(updates[0].seed.phase, InputLifecycleState::Consumed);
+        assert_eq!(updates[0].seed.last_run_id, Some(run_id));
+        assert_eq!(updates[0].seed.last_boundary_sequence, Some(7));
+    }
+
+    #[tokio::test]
+    async fn test_runtime_input_updates_ignore_legacy_alias_load_error_after_empty_canonical_read()
+    {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        runtime_store
+            .fail_input_state_load_for(LogicalRuntimeId::legacy_session_uuid_alias(&id))
+            .await;
+
+        let updates = service
+            .runtime_input_updates(&id, &RunId::new(), 0, &[])
+            .await
+            .expect("legacy input-state load failure must not poison empty canonical updates");
+
+        assert!(
+            updates.is_empty(),
+            "no-contributor boundary should not need legacy input-state data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_input_updates_require_legacy_alias_when_contributor_missing_from_canonical()
+     {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        let input_id = InputId::new();
+        runtime_store
+            .fail_input_state_load_for(LogicalRuntimeId::legacy_session_uuid_alias(&id))
+            .await;
+
+        let err = service
+            .runtime_input_updates(&id, &RunId::new(), 0, std::slice::from_ref(&input_id))
+            .await
+            .expect_err(
+                "missing canonical contributor must not be silently dropped when legacy is unreadable",
+            );
+
+        assert!(
+            err.to_string()
+                .contains("synthetic legacy input-state load failure"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_input_updates_prefer_canonical_duplicate_over_newer_stale_legacy_row() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let id = SessionId::new();
+        let input_id = InputId::new();
+        let canonical_runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        let legacy_runtime_id = LogicalRuntimeId::legacy_session_uuid_alias(&id);
+
+        let mut canonical_state = meerkat_runtime::InputState::new_accepted(input_id.clone());
+        canonical_state.durability = Some(meerkat_runtime::InputDurability::Durable);
+        canonical_state.recovery_count = 7;
+        let canonical_stored = StoredInputState {
+            state: canonical_state.clone(),
+            seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
+        };
+        runtime_store
+            .persist_input_state(&canonical_runtime_id, &canonical_stored)
+            .await
+            .expect("test should seed canonical input state");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let mut legacy_state = meerkat_runtime::InputState::new_accepted(input_id.clone());
+        legacy_state.durability = Some(meerkat_runtime::InputDurability::Durable);
+        legacy_state.recovery_count = 99;
+        runtime_store
+            .persist_input_state(
+                &legacy_runtime_id,
+                &StoredInputState {
+                    state: legacy_state,
+                    seed: meerkat_runtime::input_state::InputStateSeed::new_accepted(),
+                },
+            )
+            .await
+            .expect("test should seed newer stale legacy input state");
+
+        let updates = service
+            .runtime_input_updates(&id, &RunId::new(), 3, std::slice::from_ref(&input_id))
+            .await
+            .expect("runtime input updates should merge duplicate aliases");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0].state.recovery_count, 7,
+            "canonical contributor state must win over newer stale legacy duplicate"
+        );
+        assert_eq!(updates[0].seed.phase, InputLifecycleState::Consumed);
+        assert_eq!(updates[0].seed.last_boundary_sequence, Some(3));
     }
 
     #[tokio::test]

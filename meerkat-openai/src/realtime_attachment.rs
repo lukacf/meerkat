@@ -637,7 +637,6 @@ mod tests {
                     },
                     session_snapshot: None,
                     terminal: None,
-                    run_result: None,
                 })
             }
 

@@ -149,7 +149,8 @@ impl MeerkatMachine {
                 None,
             )),
         ));
-        let mut entry = self.make_driver(&session_id, Arc::clone(&dsl_authority));
+        let runtime_id = Self::logical_runtime_id(&session_id);
+        let mut entry = self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return;
@@ -161,8 +162,9 @@ impl MeerkatMachine {
         );
         let control_projection = entry.control_projection_handle();
 
-        let (ops_lifecycle, epoch_id, cursor_state) =
-            self.recover_or_create_ops_state(&session_id).await;
+        let (ops_lifecycle, epoch_id, cursor_state) = self
+            .recover_or_create_ops_state(&session_id, &runtime_id)
+            .await;
 
         let tool_visibility_owner = Arc::new(MachineToolVisibilityOwner::new());
         // Bind the DSL authority into the visibility owner so its staging
@@ -170,6 +172,7 @@ impl MeerkatMachine {
         // `next_staged_visibility_revision` (dogma round 4, wave 2b #12).
         tool_visibility_owner.bind_dsl_authority(Arc::clone(&dsl_authority));
         let session_entry = RuntimeSessionEntry {
+            runtime_id,
             mutation_gate: Arc::new(Mutex::new(())),
             control_projection,
             driver: Arc::new(Mutex::new(entry)),
@@ -307,7 +310,9 @@ impl MeerkatMachine {
                         ),
                     ),
                 ));
-                let mut recovered_entry = self.make_driver(&session_id, Arc::clone(&dsl_authority));
+                let runtime_id = Self::logical_runtime_id(&session_id);
+                let mut recovered_entry =
+                    self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
                 if let Err(err) = recovered_entry.as_driver_mut().recover().await {
                     tracing::error!(
                         %session_id,
@@ -324,8 +329,9 @@ impl MeerkatMachine {
 
                 // Recover ops state OUTSIDE the sessions lock to avoid blocking
                 // other adapter operations behind potentially slow disk I/O.
-                let (recovered_ops, recovered_epoch, recovered_cursors) =
-                    self.recover_or_create_ops_state(&session_id).await;
+                let (recovered_ops, recovered_epoch, recovered_cursors) = self
+                    .recover_or_create_ops_state(&session_id, &runtime_id)
+                    .await;
 
                 // Double-check under the lock — another task may have inserted
                 // the entry while we were rebuilding runtime state.
@@ -353,6 +359,7 @@ impl MeerkatMachine {
                     sessions.insert(
                         session_id.clone(),
                         RuntimeSessionEntry {
+                            runtime_id,
                             mutation_gate: Arc::new(Mutex::new(())),
                             control_projection,
                             driver: driver.clone(),
@@ -424,21 +431,25 @@ impl MeerkatMachine {
             let (persist_tx, persist_rx) = crate::tokio::sync::mpsc::unbounded_channel::<
                 crate::ops_lifecycle::OpsLifecyclePersistenceRequest,
             >();
-            let entry_epoch_id = {
+            let (entry_epoch_id, entry_cursor, runtime_id) = {
                 let sessions = self.sessions.read().await;
-                sessions
-                    .get(&session_id)
-                    .map(|e| e.epoch_id.clone())
-                    .unwrap_or_else(meerkat_core::RuntimeEpochId::new)
+                sessions.get(&session_id).map_or_else(
+                    || {
+                        (
+                            meerkat_core::RuntimeEpochId::new(),
+                            Arc::new(meerkat_core::EpochCursorState::new()),
+                            Self::logical_runtime_id(&session_id),
+                        )
+                    },
+                    |entry| {
+                        (
+                            entry.epoch_id.clone(),
+                            Arc::clone(&entry.cursor_state),
+                            entry.runtime_id.clone(),
+                        )
+                    },
+                )
             };
-            let entry_cursor = {
-                let sessions = self.sessions.read().await;
-                sessions
-                    .get(&session_id)
-                    .map(|e| Arc::clone(&e.cursor_state))
-                    .unwrap_or_else(|| Arc::new(meerkat_core::EpochCursorState::new()))
-            };
-            let runtime_id = crate::identifiers::LogicalRuntimeId::new(session_id.to_string());
             spawn_ops_lifecycle_persistence_worker(Arc::clone(store), runtime_id, persist_rx);
             ops_lifecycle.set_persistence_channel(persist_tx, entry_epoch_id, entry_cursor);
         }
@@ -446,6 +457,7 @@ impl MeerkatMachine {
         // Get the completion feed from the registry for feed-based idle wake.
         let completion_feed = ops_lifecycle.completion_feed_handle();
 
+        let control_handle = executor.control_handle();
         let (wake_tx, wake_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let entry_cursor_state = {
@@ -486,7 +498,12 @@ impl MeerkatMachine {
                     } else {
                         match pending_loop_handle.take() {
                             Some(loop_handle) => {
-                                entry.attach_runtime_loop(wake_tx.clone(), control_tx, loop_handle);
+                                entry.attach_runtime_loop(
+                                    wake_tx.clone(),
+                                    control_tx,
+                                    control_handle,
+                                    loop_handle,
+                                );
                                 (true, false)
                             }
                             None => {

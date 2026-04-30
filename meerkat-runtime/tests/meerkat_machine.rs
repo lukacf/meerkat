@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use meerkat_core::BlobStore;
-use meerkat_core::lifecycle::{InputId, RunId};
+use meerkat_core::lifecycle::{
+    InputId, RunBoundaryReceipt, RunId, run_primitive::RunApplyBoundary,
+};
 use meerkat_core::types::SessionId;
 use meerkat_runtime::input_state::StoredInputState;
 use meerkat_runtime::{
@@ -184,6 +186,16 @@ impl RuntimeStore for HarnessRuntimeStore {
                 contributing_input_ids,
                 input_updates,
             )
+            .await
+    }
+
+    async fn commit_session_snapshot(
+        &self,
+        runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        session_delta: SessionDelta,
+    ) -> Result<(), RuntimeStoreError> {
+        self.inner
+            .commit_session_snapshot(runtime_id, session_delta)
             .await
     }
 
@@ -380,7 +392,7 @@ async fn lifecycle_commit_failure_restores_staged_session_dsl_state() {
     let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
     let sid = SessionId::new();
     adapter.register_session(sid.clone()).await;
-    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
 
     let input = make_prompt("retire rollback");
     let input_id = input.id().clone();
@@ -410,6 +422,57 @@ async fn lifecycle_commit_failure_restores_staged_session_dsl_state() {
 }
 
 #[tokio::test]
+async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
+    let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    adapter.register_session(sid.clone()).await;
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
+
+    let input = make_prompt("destroy rollback");
+    let input_id = input.id().clone();
+    let (outcome, handle) = adapter
+        .accept_input_with_completion(&sid, input)
+        .await
+        .expect("input admission should succeed before lifecycle failure");
+    assert!(outcome.is_accepted());
+    let handle = handle.expect("accepted input should produce a completion handle");
+
+    let err = meerkat_runtime::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect_err("destroy should surface lifecycle commit failure");
+    assert!(
+        err.to_string()
+            .contains("synthetic atomic_lifecycle_commit failure"),
+        "unexpected error: {err}",
+    );
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle,
+        "failed destroy must restore the session DSL phase",
+    );
+    assert_eq!(
+        adapter.list_active_inputs(&sid).await.unwrap(),
+        vec![input_id],
+        "failed destroy must restore active input projection",
+    );
+    assert_ne!(
+        store.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "failed destroy must not persist destroyed runtime truth",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), handle.wait())
+            .await
+            .is_err(),
+        "failed destroy must not terminate completion waiters",
+    );
+}
+
+#[tokio::test]
 async fn cold_reregister_preserves_destroyed_runtime_state() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let sid = SessionId::new();
@@ -419,7 +482,7 @@ async fn cold_reregister_preserves_destroyed_runtime_state() {
         memory_blob_store(),
     ));
     adapter.register_session(sid.clone()).await;
-    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
     meerkat_runtime::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
         .await
         .expect("destroy should succeed before adapter restart");
@@ -435,6 +498,115 @@ async fn cold_reregister_preserves_destroyed_runtime_state() {
         RuntimeState::Destroyed,
         "cold re-registration must preserve the stored destroyed phase",
     );
+}
+
+#[tokio::test]
+async fn cold_reregister_recovers_legacy_session_uuid_runtime_state_alias() {
+    let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let sid = SessionId::new();
+    let legacy_runtime_alias = LogicalRuntimeId::legacy_session_uuid_alias(&sid);
+    store
+        .atomic_lifecycle_commit(&legacy_runtime_alias, RuntimeState::Destroyed, &[])
+        .await
+        .expect("seed legacy runtime state alias");
+
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    adapter.register_session(sid.clone()).await;
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Destroyed,
+        "cold re-registration must recover terminal state stored under the legacy raw session UUID alias",
+    );
+}
+
+#[tokio::test]
+async fn cold_reregister_prefers_canonical_runtime_state_over_stale_legacy_alias() {
+    let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let sid = SessionId::new();
+    let canonical_runtime_id = LogicalRuntimeId::for_session(&sid);
+    let legacy_runtime_alias = LogicalRuntimeId::legacy_session_uuid_alias(&sid);
+    store
+        .atomic_lifecycle_commit(&canonical_runtime_id, RuntimeState::Idle, &[])
+        .await
+        .expect("seed canonical runtime state alias");
+    store
+        .atomic_lifecycle_commit(&legacy_runtime_alias, RuntimeState::Retired, &[])
+        .await
+        .expect("seed legacy runtime state alias");
+
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    adapter.register_session(sid.clone()).await;
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Idle,
+        "cold re-registration must not let stale legacy runtime state override canonical state when both aliases exist",
+    );
+}
+
+#[tokio::test]
+async fn control_plane_receipt_lookup_uses_canonical_runtime_id_with_legacy_storage_fallback() {
+    let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
+    let sid = SessionId::new();
+    let canonical_runtime_id = LogicalRuntimeId::for_session(&sid);
+    let legacy_runtime_alias = LogicalRuntimeId::legacy_session_uuid_alias(&sid);
+    let run_id = RunId::new();
+    let receipt = RunBoundaryReceipt {
+        run_id: run_id.clone(),
+        boundary: RunApplyBoundary::RunStart,
+        contributing_input_ids: Vec::new(),
+        conversation_digest: None,
+        message_count: 0,
+        sequence: 0,
+    };
+    store
+        .atomic_apply(
+            &legacy_runtime_alias,
+            None,
+            receipt.clone(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("seed legacy boundary receipt alias");
+
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    adapter.register_session(sid.clone()).await;
+
+    let loaded = meerkat_runtime::traits::RuntimeControlPlane::load_boundary_receipt(
+        adapter.as_ref(),
+        &canonical_runtime_id,
+        &run_id,
+        0,
+    )
+    .await
+    .expect("canonical runtime id should be accepted");
+    assert_eq!(
+        loaded.map(|loaded| loaded.run_id),
+        Some(run_id.clone()),
+        "canonical control-plane lookup should read legacy receipt storage"
+    );
+
+    let raw_alias_err = meerkat_runtime::traits::RuntimeControlPlane::load_boundary_receipt(
+        adapter.as_ref(),
+        &legacy_runtime_alias,
+        &run_id,
+        0,
+    )
+    .await
+    .expect_err("raw session UUID alias must not resolve as a runtime control-plane id");
+    assert!(matches!(
+        raw_alias_err,
+        meerkat_runtime::traits::RuntimeControlPlaneError::NotFound(_)
+    ));
 }
 
 #[tokio::test]
@@ -469,7 +641,7 @@ async fn recycle_preserves_ephemeral_queued_work() {
     adapter.accept_input(&sid, first).await.unwrap();
     adapter.accept_input(&sid, second).await.unwrap();
 
-    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
     let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
@@ -512,7 +684,7 @@ async fn recycle_preserves_persistent_queued_work() {
     adapter.accept_input(&sid, first).await.unwrap();
     adapter.accept_input(&sid, second).await.unwrap();
 
-    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
     let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
@@ -569,7 +741,6 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -588,7 +759,7 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
     assert!(outcome.is_accepted());
     let handle = handle.expect("accepted input should produce a completion handle");
 
-    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
     let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
@@ -643,7 +814,6 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -698,7 +868,7 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
     assert!(outcome.is_accepted());
     let handle = handle.expect("queued progress input should expose a completion handle");
 
-    let runtime_id = LogicalRuntimeId::new(sid.to_string());
+    let runtime_id = LogicalRuntimeId::for_session(&sid);
     let report = meerkat_runtime::RuntimeControlPlane::recycle(&*adapter, &runtime_id)
         .await
         .unwrap();
@@ -790,7 +960,6 @@ async fn accept_with_executor_triggers_loop() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -840,7 +1009,9 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
     use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
-    use meerkat_core::{HandlingMode, InteractionContent, InteractionId, ResponseStatus};
+    use meerkat_core::{
+        HandlingMode, InteractionContent, InteractionId, PeerCorrelationId, ResponseStatus,
+    };
     use meerkat_runtime::PeerConvention;
     use tokio::sync::Notify;
     use uuid::Uuid;
@@ -894,7 +1065,6 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -936,7 +1106,24 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         .await
         .expect("prepare runtime bindings");
     requester_comms.install_peer_comms_handle(Arc::clone(&bindings.peer_comms));
-    requester_comms.install_peer_interaction_handle(Arc::clone(&bindings.peer_interaction));
+    requester_comms.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::clone(&bindings.peer_interaction),
+            Arc::clone(&bindings.interaction_stream),
+        ),
+    );
+    let responder_adapter = Arc::new(MeerkatMachine::ephemeral());
+    let responder_sid = SessionId::new();
+    let responder_bindings = responder_adapter
+        .prepare_bindings(responder_sid)
+        .await
+        .expect("prepare responder runtime bindings");
+    responder_comms.install_peer_request_response_authority(
+        meerkat_comms::PeerRequestResponseAuthority::new(
+            Arc::clone(&responder_bindings.peer_interaction),
+            Arc::clone(&responder_bindings.interaction_stream),
+        ),
+    );
 
     let calls = Arc::new(AtomicUsize::new(0));
     let first_apply_started = Arc::new(Notify::new());
@@ -997,6 +1184,10 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
         request_at_responder[0].interaction.content,
         InteractionContent::Request { .. }
     ));
+    responder_bindings
+        .peer_interaction
+        .request_received(PeerCorrelationId::from_uuid(request_id))
+        .expect("seed responder inbound request state");
 
     CoreCommsRuntime::send(
         responder_comms.as_ref(),
@@ -1104,9 +1295,7 @@ async fn failed_executor_does_not_strand_input_in_apc() {
             _run_id: RunId,
             _primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
-            Err(CoreExecutorError::ApplyFailed {
-                reason: "LLM error".into(),
-            })
+            Err(CoreExecutorError::apply_failed_runtime_turn("LLM error"))
         }
 
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -1174,9 +1363,7 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
             _primitive: RunPrimitive,
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Err(CoreExecutorError::ApplyFailed {
-                reason: "always fails".into(),
-            })
+            Err(CoreExecutorError::apply_failed_runtime_turn("always fails"))
         }
 
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -1269,9 +1456,9 @@ async fn failed_executor_continues_processing_backlog() {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
             if call == 0 {
-                return Err(CoreExecutorError::ApplyFailed {
-                    reason: "first run fails".into(),
-                });
+                return Err(CoreExecutorError::apply_failed_runtime_turn(
+                    "first run fails",
+                ));
             }
             Ok(CoreApplyOutput {
                 receipt: RunBoundaryReceipt {
@@ -1284,7 +1471,6 @@ async fn failed_executor_continues_processing_backlog() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1379,7 +1565,6 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1468,7 +1653,6 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1554,7 +1738,6 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1589,7 +1772,6 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1692,7 +1874,6 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1796,7 +1977,6 @@ async fn boundary_commit_failure_unwinds_sync_runtime_state() {
                     },
                     session_snapshot: None,
                     terminal: None,
-                    run_result: None,
                 },
             ))
         })
@@ -1853,7 +2033,6 @@ async fn boundary_commit_failure_unwinds_runtime_loop_state() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1925,7 +2104,6 @@ async fn boundary_commit_failure_terminates_runtime_loop_completion_waiter() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -1990,7 +2168,6 @@ async fn terminal_snapshot_failure_unregisters_runtime_loop_session() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -2073,7 +2250,6 @@ async fn terminal_snapshot_failure_unregisters_sync_runtime_session() {
                         },
                         session_snapshot: None,
                         terminal: None,
-                        run_result: None,
                     },
                 ))
             },
@@ -2138,8 +2314,8 @@ async fn dedup_terminal_input_returns_none_handle() {
                 schema_warnings: None,
                 skill_diagnostics: None,
             };
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -2147,14 +2323,9 @@ async fn dedup_terminal_input_returns_none_handle() {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                terminal: Some(
-                    meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(
-                        run_result.clone(),
-                    ),
-                ),
-                run_result: Some(run_result),
-            })
+                None,
+                run_result,
+            ))
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
             Ok(())
@@ -2242,8 +2413,8 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                 schema_warnings: None,
                 skill_diagnostics: None,
             };
-            Ok(CoreApplyOutput {
-                receipt: RunBoundaryReceipt {
+            Ok(CoreApplyOutput::with_run_result(
+                RunBoundaryReceipt {
                     run_id,
                     boundary: RunApplyBoundary::RunStart,
                     contributing_input_ids: primitive.contributing_input_ids().to_vec(),
@@ -2251,14 +2422,9 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
                     message_count: 0,
                     sequence: 0,
                 },
-                session_snapshot: None,
-                terminal: Some(
-                    meerkat_core::lifecycle::core_executor::CoreApplyTerminal::RunResult(
-                        run_result.clone(),
-                    ),
-                ),
-                run_result: Some(run_result),
-            })
+                None,
+                run_result,
+            ))
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
             Ok(())
@@ -2359,7 +2525,7 @@ async fn accept_input_and_run_rejects_deduplicated_admission() {
 }
 
 /// Gate A4 (part 1): resolve_without_result sends CompletedWithoutResult
-/// when executor returns run_result: None.
+/// when executor returns no terminal result.
 #[tokio::test]
 async fn completion_handle_resolves_without_result() {
     use meerkat_core::lifecycle::core_executor::{
@@ -2387,8 +2553,7 @@ async fn completion_handle_resolves_without_result() {
                     sequence: 0,
                 },
                 session_snapshot: None,
-                terminal: None,
-                run_result: None, // No RunResult
+                terminal: None, // No RunResult
             })
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {
@@ -2415,7 +2580,7 @@ async fn completion_handle_resolves_without_result() {
             result,
             meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
         ),
-        "executor returning run_result: None should resolve as CompletedWithoutResult, got {result:?}"
+        "executor returning no terminal result should resolve as CompletedWithoutResult, got {result:?}"
     );
 }
 
@@ -2657,7 +2822,6 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -2717,7 +2881,6 @@ async fn successful_execution_fires_boundary_applied() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
 
@@ -2798,7 +2961,6 @@ async fn executor_attached_session_is_executor_ready() {
                 },
                 session_snapshot: None,
                 terminal: None,
-                run_result: None,
             })
         }
         async fn control(&mut self, _cmd: RunControlCommand) -> Result<(), CoreExecutorError> {

@@ -28,7 +28,8 @@ pub fn publish_token_lifecycle_acquired(
     tokens: &PersistedTokens,
 ) -> Result<(), DslTransitionError> {
     let lease_key = LeaseKey::from_connection_ref(connection_ref);
-    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))
+    handle.acquire_lease(&lease_key, persisted_token_expires_at_epoch_secs(tokens))?;
+    Ok(())
 }
 
 pub fn publish_token_lifecycle_released(
@@ -156,13 +157,6 @@ pub fn project_published_auth_status<'a>(
     stored: Option<&'a PersistedTokens>,
     snapshot: &AuthLeaseSnapshot,
 ) -> PublishedAuthStatus<'a> {
-    let Some(tokens) = stored else {
-        return PublishedAuthStatus {
-            phase: AuthStatusPhase::Unknown,
-            expires_at: None,
-            tokens: None,
-        };
-    };
     let phase = AuthStatusPhase::from_lease_snapshot(now, snapshot);
     if phase == AuthStatusPhase::Unknown {
         return PublishedAuthStatus {
@@ -173,8 +167,9 @@ pub fn project_published_auth_status<'a>(
     }
     PublishedAuthStatus {
         phase,
-        expires_at: lease_snapshot_expires_at_datetime(snapshot).or(tokens.expires_at),
-        tokens: Some(tokens),
+        expires_at: lease_snapshot_expires_at_datetime(snapshot)
+            .or_else(|| stored.and_then(|tokens| tokens.expires_at)),
+        tokens: stored,
     }
 }
 
@@ -186,7 +181,7 @@ mod tests {
 
     use crate::auth::PersistedAuthMode;
     use crate::connection::{BindingId, RealmId};
-    use crate::handles::{AuthLeasePhase, DslTransitionError};
+    use crate::handles::{AuthLeasePhase, AuthLeaseTransition, DslTransitionError};
     use async_trait::async_trait;
 
     #[derive(Default)]
@@ -216,12 +211,12 @@ mod tests {
             &self,
             lease_key: &LeaseKey,
             expires_at: u64,
-        ) -> Result<(), DslTransitionError> {
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
             self.acquired
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((lease_key.clone(), expires_at));
-            Ok(())
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -237,8 +232,8 @@ mod tests {
             _lease_key: &LeaseKey,
             _new_expires_at: u64,
             _now: u64,
-        ) -> Result<(), DslTransitionError> {
-            Ok(())
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
         }
 
         fn refresh_failed(
@@ -265,6 +260,7 @@ mod tests {
             AuthLeaseSnapshot {
                 phase: Some(AuthLeasePhase::Valid),
                 expires_at: None,
+                generation: 1,
             }
         }
     }
@@ -503,5 +499,21 @@ mod tests {
             "lifecycle must remain untouched when unreadable token material cannot be cleared"
         );
         assert!(handle.acquired().is_empty());
+    }
+
+    #[test]
+    fn published_status_projects_lease_phase_without_token_material() {
+        let now = Utc::now();
+        let snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some((now + chrono::Duration::hours(1)).timestamp() as u64),
+            generation: 1,
+        };
+
+        let status = project_published_auth_status(now, None, &snapshot);
+
+        assert_eq!(status.phase, AuthStatusPhase::Valid);
+        assert!(status.expires_at.is_some());
+        assert!(status.tokens.is_none());
     }
 }

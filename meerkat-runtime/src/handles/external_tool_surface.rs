@@ -10,7 +10,8 @@ use meerkat_core::handles::{
 };
 use meerkat_core::tool_scope::{
     ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation, ExternalToolSurfaceDeltaPhase,
-    ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
+    ExternalToolSurfaceFailureCause, ExternalToolSurfaceGlobalPhase, ExternalToolSurfacePendingOp,
+    ExternalToolSurfaceStagedOp,
 };
 
 use super::HandleDslAuthority;
@@ -161,13 +162,13 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
                 surface_id,
                 pending_task_sequence,
                 staged_intent_sequence,
-                reason,
+                cause,
             } => self.apply_input_with_effects(
                 mm_dsl::MeerkatMachineInput::SurfaceMarkPendingFailed {
                     surface_id,
                     pending_task_sequence,
                     staged_intent_sequence,
-                    reason,
+                    cause: mm_dsl::ExternalToolSurfaceFailureCause::from(cause),
                 },
                 "ExternalToolSurfaceHandle::mark_pending_failed",
             ),
@@ -273,7 +274,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
         surface_id: String,
         pending_task_sequence: u64,
         staged_intent_sequence: u64,
-        reason: String,
+        cause: ExternalToolSurfaceFailureCause,
     ) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
@@ -281,7 +282,7 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
                 surface_id,
                 pending_task_sequence,
                 staged_intent_sequence,
-                reason,
+                cause: mm_dsl::ExternalToolSurfaceFailureCause::from(cause),
             },
             "ExternalToolSurfaceHandle::mark_pending_failed",
         )
@@ -468,16 +469,21 @@ fn map_surface_effect(
             surface_id,
             operation,
             phase,
+            cause,
         } => Some(ExternalToolSurfaceEffect::EmitExternalToolDelta {
             surface_id,
             operation: ExternalToolSurfaceDeltaOperation::from(operation),
             phase: ExternalToolSurfaceDeltaPhase::from(phase),
+            cause: cause.map(ExternalToolSurfaceFailureCause::from),
         }),
         mm_dsl::MeerkatMachineEffect::CloseSurfaceConnection { surface_id } => {
             Some(ExternalToolSurfaceEffect::CloseSurfaceConnection { surface_id })
         }
-        mm_dsl::MeerkatMachineEffect::RejectSurfaceCall { surface_id, reason } => {
-            Some(ExternalToolSurfaceEffect::RejectSurfaceCall { surface_id, reason })
+        mm_dsl::MeerkatMachineEffect::RejectSurfaceCall { surface_id, cause } => {
+            Some(ExternalToolSurfaceEffect::RejectSurfaceCall {
+                surface_id,
+                cause: ExternalToolSurfaceFailureCause::from(cause),
+            })
         }
         _ => None,
     }
@@ -488,6 +494,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use meerkat_core::ExternalToolSurfaceFailureCause;
 
     fn handle_in_phase(phase: mm_dsl::MeerkatPhase) -> RuntimeExternalToolSurfaceHandle {
         let state = mm_dsl::MeerkatMachineState {
@@ -668,5 +675,43 @@ mod tests {
             Some(ExternalToolSurfaceBaseState::Removed)
         );
         assert!(!handle.visible_surfaces().contains("alpha"));
+    }
+
+    #[test]
+    fn runtime_mark_pending_failed_accepts_typed_failure_cause() {
+        let handle = handle_in_phase(mm_dsl::MeerkatPhase::Attached);
+
+        handle.stage_add("alpha".to_owned(), 10).expect("stage add");
+        let staged_sequence = handle
+            .surface_snapshot("alpha")
+            .and_then(|entry| entry.staged_intent_sequence)
+            .expect("staged add sequence");
+        handle
+            .apply_boundary("alpha".to_owned(), 20, staged_sequence, 99)
+            .expect("apply add boundary");
+
+        let transition = handle
+            .apply_surface_input(ExternalToolSurfaceInput::MarkPendingFailed {
+                surface_id: "alpha".to_owned(),
+                pending_task_sequence: 1,
+                staged_intent_sequence: staged_sequence,
+                cause: ExternalToolSurfaceFailureCause::PendingFailed,
+            })
+            .expect("typed pending failure");
+        assert!(transition.effects.iter().any(|effect| matches!(
+            effect,
+            ExternalToolSurfaceEffect::EmitExternalToolDelta {
+                phase: ExternalToolSurfaceDeltaPhase::Failed,
+                cause: Some(ExternalToolSurfaceFailureCause::PendingFailed),
+                ..
+            }
+        )));
+
+        let failed = handle.surface_snapshot("alpha").expect("failed alpha");
+        assert_eq!(
+            failed.last_delta_phase,
+            Some(ExternalToolSurfaceDeltaPhase::Failed)
+        );
+        assert_eq!(failed.pending_op, ExternalToolSurfacePendingOp::None);
     }
 }

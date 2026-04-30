@@ -10,6 +10,7 @@ use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceipt;
 use crate::types::RunResult;
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Errors from CoreExecutor operations.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -107,6 +108,14 @@ impl CoreApplyOutput {
     }
 }
 
+/// Cloneable out-of-band control endpoint for executors whose live work can be
+/// interrupted without borrowing the runtime loop's `CoreExecutor` value.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait CoreExecutorControl: Send + Sync {
+    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError>;
+}
+
 /// The interface core exposes for the runtime layer to apply run primitives.
 ///
 /// The runtime layer creates an implementation that wraps an `Agent` and
@@ -118,6 +127,15 @@ impl CoreApplyOutput {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutor: Send + Sync {
+    /// Optional out-of-band control endpoint.
+    ///
+    /// The runtime loop still owns the ordered `control(&mut self, ...)` path.
+    /// Implementations return this only when the underlying live turn has its
+    /// own interrupt channel and can be signaled while `apply()` is in flight.
+    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
+        None
+    }
+
     /// Apply a run primitive to the conversation.
     ///
     /// Returns a receipt proving the application, including a digest of the

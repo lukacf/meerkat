@@ -1353,7 +1353,15 @@ fn collect_machine_enum_types(schema: &MachineSchema) -> Vec<(String, Vec<String
 
     enums
         .into_iter()
-        .filter_map(|name| known_enum_variants(&name).map(|variants| (rust_ident(&name), variants)))
+        .filter_map(|name| {
+            if matches!(
+                lookup_named_type_atom(schema, &name),
+                Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
+            ) {
+                return None;
+            }
+            known_enum_variants(&name).map(|variants| (rust_ident(&name), variants))
+        })
         .collect()
 }
 
@@ -1387,6 +1395,7 @@ fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String 
         RustTypeAtom::U64 => "u64".to_string(),
         RustTypeAtom::Bool => "bool".to_string(),
         RustTypeAtom::String => "String".to_string(),
+        RustTypeAtom::StringEnum { .. } => "String".to_string(),
         RustTypeAtom::TypePath(path) => path
             .strip_prefix("crate::catalog::")
             .map(|suffix| format!("meerkat_machine_schema::catalog::{suffix}"))
@@ -1434,6 +1443,87 @@ fn render_named_type_definition(
             );
             pushln!(out, "}}");
         }
+        RustTypeAtom::StringEnum { variants } => {
+            if let Some((first, second, ident)) = string_enum_variant_ident_collision(variants) {
+                pushln!(
+                    out,
+                    "compile_error!(\"string enum {} variants `{}` and `{}` sanitize to duplicate Rust identifier `{}`\");",
+                    rust_name,
+                    first,
+                    second,
+                    ident
+                );
+                return;
+            }
+            pushln!(out, "#[allow(non_camel_case_types)]");
+            pushln!(
+                out,
+                "#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
+            );
+            pushln!(out, "pub enum {} {{", rust_name);
+            for (index, variant) in variants.iter().enumerate() {
+                if index == 0 {
+                    pushln!(out, "    #[default]");
+                }
+                pushln!(out, "    #[serde(rename = \"{}\")]", variant.as_str());
+                pushln!(out, "    {},", rust_ident(variant.as_str()));
+            }
+            pushln!(out, "}}");
+            pushln!(out, "impl {} {{", rust_name);
+            pushln!(out, "    pub fn as_str(&self) -> &'static str {{");
+            pushln!(out, "        match self {{");
+            for variant in variants {
+                pushln!(
+                    out,
+                    "            Self::{} => \"{}\",",
+                    rust_ident(variant.as_str()),
+                    variant.as_str()
+                );
+            }
+            pushln!(out, "        }}");
+            pushln!(out, "    }}");
+            pushln!(out, "}}");
+            pushln!(out, "impl std::convert::TryFrom<&str> for {} {{", rust_name);
+            pushln!(out, "    type Error = String;");
+            pushln!(
+                out,
+                "    fn try_from(value: &str) -> Result<Self, Self::Error> {{"
+            );
+            pushln!(out, "        match value {{");
+            for variant in variants {
+                pushln!(
+                    out,
+                    "            \"{}\" => Ok(Self::{}),",
+                    variant.as_str(),
+                    rust_ident(variant.as_str())
+                );
+            }
+            pushln!(
+                out,
+                "            other => Err(format!(\"invalid {} value `{{other}}`\")),",
+                rust_name
+            );
+            pushln!(out, "        }}");
+            pushln!(out, "    }}");
+            pushln!(out, "}}");
+            pushln!(
+                out,
+                "impl std::convert::TryFrom<String> for {} {{",
+                rust_name
+            );
+            pushln!(out, "    type Error = String;");
+            pushln!(
+                out,
+                "    fn try_from(value: String) -> Result<Self, Self::Error> {{ Self::try_from(value.as_str()) }}"
+            );
+            pushln!(out, "}}");
+            pushln!(out, "impl std::fmt::Display for {} {{", rust_name);
+            pushln!(
+                out,
+                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ f.write_str(self.as_str()) }}"
+            );
+            pushln!(out, "}}");
+        }
         RustTypeAtom::Bool
         | RustTypeAtom::U8
         | RustTypeAtom::U16
@@ -1460,6 +1550,22 @@ fn render_named_type_definition(
             pushln!(out, "}}");
         }
     }
+}
+
+#[cfg(not(test))]
+fn string_enum_variant_ident_collision<T: AsRef<str>>(
+    variants: &[T],
+) -> Option<(String, String, String)> {
+    let mut seen: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for variant in variants {
+        let raw = variant.as_ref();
+        let ident = rust_ident(raw);
+        if let Some(first) = seen.get(&ident) {
+            return Some((first.clone(), raw.to_owned(), ident));
+        }
+        seen.insert(ident, raw.to_owned());
+    }
+    None
 }
 
 /// Look up the authoritative Rust atom for a `TypeRef::Named` slug.

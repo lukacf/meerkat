@@ -291,6 +291,14 @@ pub enum RustTypeAtom {
     U8,
     Bool,
     String,
+    /// String-backed closed semantic domain.
+    ///
+    /// This keeps the schema-level representation compatible with DSL enum
+    /// literals while giving codegen and the runtime oracle an authoritative
+    /// finite value set for named string types.
+    StringEnum {
+        variants: Vec<EnumVariantId>,
+    },
     /// Fully-qualified Rust type path, e.g. `"crate::domain::MySpecialType"`.
     TypePath(String),
 }
@@ -327,6 +335,31 @@ impl NamedTypeBinding {
             #[allow(clippy::expect_used)]
             name: NamedTypeId::parse(name).expect("valid named-type slug"),
             rust: RustTypeAtom::String,
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a closed string
+    /// domain rendered as a Rust enum.
+    ///
+    /// Panics if `name` or any variant is not a valid slug, or if the variant
+    /// set is empty. Intended for catalog construction sites.
+    pub fn string_enum(name: &str, variants: &[&str]) -> Self {
+        assert!(
+            !variants.is_empty(),
+            "string enum named-type bindings require at least one variant"
+        );
+        Self {
+            #[allow(clippy::expect_used)]
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::StringEnum {
+                variants: variants
+                    .iter()
+                    .map(|variant| {
+                        #[allow(clippy::expect_used)]
+                        EnumVariantId::parse(*variant).expect("valid enum variant slug")
+                    })
+                    .collect(),
+            },
         }
     }
 

@@ -233,6 +233,19 @@ fn rust_type_atom_type_path_roundtrips() {
 }
 
 #[test]
+fn rust_type_atom_string_enum_roundtrips() {
+    let atom = RustTypeAtom::StringEnum {
+        variants: vec![
+            EnumVariantId::parse("Pending").unwrap(),
+            EnumVariantId::parse("Running").unwrap(),
+        ],
+    };
+    let json = serde_json::to_string(&atom).unwrap();
+    let restored: RustTypeAtom = serde_json::from_str(&json).unwrap();
+    assert_eq!(atom, restored);
+}
+
+#[test]
 fn rust_type_atom_scalar_variants_roundtrip() {
     for atom in [
         RustTypeAtom::U64,

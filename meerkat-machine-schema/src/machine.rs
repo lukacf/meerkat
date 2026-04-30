@@ -1,6 +1,7 @@
 use crate::identity::{
     EffectVariantId, EnumTypeId, EnumVariantId, FieldId, InputVariantId, MachineId,
-    NamedTypeBinding, NamedTypeId, PhaseId, ProtocolId, SignalVariantId, TransitionId,
+    NamedTypeBinding, NamedTypeId, PhaseId, ProtocolId, RustTypeAtom, SignalVariantId,
+    TransitionId,
 };
 use indexmap::{IndexMap, IndexSet};
 use std::fmt;
@@ -244,6 +245,7 @@ impl MachineSchema {
                     name: binding.name.as_str().to_owned(),
                 });
             }
+            validate_named_type_binding_payload(binding)?;
         }
         {
             let mut referenced: IndexSet<String> = IndexSet::new();
@@ -254,6 +256,7 @@ impl MachineSchema {
                 }
             }
         }
+        validate_string_enum_named_variants_machine(self)?;
 
         // Validate effect dispositions: every rule must reference a known effect variant,
         // no duplicates, and when dispositions are present every effect must be covered.
@@ -1157,6 +1160,52 @@ impl Expr {
     }
 }
 
+fn validate_named_type_binding_payload(
+    binding: &NamedTypeBinding,
+) -> Result<(), MachineSchemaError> {
+    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
+        return Ok(());
+    };
+    if variants.is_empty() {
+        return Err(MachineSchemaError::InvalidStringEnumBinding {
+            name: binding.name.as_str().to_owned(),
+            reason: "must define at least one variant".to_owned(),
+        });
+    }
+
+    let mut seen_values: IndexSet<&str> = IndexSet::new();
+    let mut seen_rust_idents: IndexMap<String, &str> = IndexMap::new();
+    for variant in variants {
+        let raw = variant.as_str();
+        if !seen_values.insert(raw) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: binding.name.as_str().to_owned(),
+                reason: format!("defines duplicate variant `{raw}`"),
+            });
+        }
+
+        let rust_identifier = string_enum_variant_rust_ident(raw);
+        if let Some(first) = seen_rust_idents.get(&rust_identifier) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: binding.name.as_str().to_owned(),
+                reason: format!(
+                    "variants `{first}` and `{raw}` sanitize to duplicate Rust identifier `{rust_identifier}`"
+                ),
+            });
+        }
+        seen_rust_idents.insert(rust_identifier, raw);
+    }
+
+    Ok(())
+}
+
+fn string_enum_variant_rust_ident(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
 /// Recursively collect every `NamedTypeId` slug referenced by a type tree.
 fn collect_named_type_references_type(ty: &TypeRef, out: &mut IndexSet<String>) {
     match ty {
@@ -1197,6 +1246,165 @@ pub(crate) fn collect_named_type_references_machine(
         }
         collect_named_type_references_type(&helper.returns, out);
     }
+}
+
+fn validate_string_enum_named_variants_machine(
+    schema: &MachineSchema,
+) -> Result<(), MachineSchemaError> {
+    for init in &schema.state.init.fields {
+        validate_string_enum_named_variants_expr(schema, &init.expr)?;
+    }
+    for invariant in &schema.invariants {
+        validate_string_enum_named_variants_expr(schema, &invariant.expr)?;
+    }
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        validate_string_enum_named_variants_expr(schema, &helper.body)?;
+    }
+    for transition in &schema.transitions {
+        for guard in &transition.guards {
+            validate_string_enum_named_variants_expr(schema, &guard.expr)?;
+        }
+        for update in &transition.updates {
+            validate_string_enum_named_variants_update(schema, update)?;
+        }
+        for effect in &transition.emit {
+            for expr in effect.fields.values() {
+                validate_string_enum_named_variants_expr(schema, expr)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_string_enum_named_variants_update(
+    schema: &MachineSchema,
+    update: &Update,
+) -> Result<(), MachineSchemaError> {
+    match update {
+        Update::Assign { expr, .. } => validate_string_enum_named_variants_expr(schema, expr)?,
+        Update::Increment { .. } | Update::Decrement { .. } | Update::SeqPopFront { .. } => {}
+        Update::MapInsert { key, value, .. } => {
+            validate_string_enum_named_variants_expr(schema, key)?;
+            validate_string_enum_named_variants_expr(schema, value)?;
+        }
+        Update::MapIncrement { key, .. }
+        | Update::MapDecrement { key, .. }
+        | Update::MapRemove { key, .. } => validate_string_enum_named_variants_expr(schema, key)?,
+        Update::SetInsert { value, .. }
+        | Update::SetRemove { value, .. }
+        | Update::SeqAppend { value, .. }
+        | Update::SeqRemoveValue { value, .. } => {
+            validate_string_enum_named_variants_expr(schema, value)?;
+        }
+        Update::SeqPrepend { values, .. } | Update::SeqRemoveAll { values, .. } => {
+            validate_string_enum_named_variants_expr(schema, values)?;
+        }
+        Update::Conditional {
+            condition,
+            then_updates,
+            else_updates,
+        } => {
+            validate_string_enum_named_variants_expr(schema, condition)?;
+            for nested in then_updates.iter().chain(else_updates.iter()) {
+                validate_string_enum_named_variants_update(schema, nested)?;
+            }
+        }
+        Update::ForEach { over, updates, .. } => {
+            validate_string_enum_named_variants_expr(schema, over)?;
+            for nested in updates {
+                validate_string_enum_named_variants_update(schema, nested)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_string_enum_named_variants_expr(
+    schema: &MachineSchema,
+    expr: &Expr,
+) -> Result<(), MachineSchemaError> {
+    match expr {
+        Expr::NamedVariant { enum_name, variant } => {
+            let Ok(named_type_name) = NamedTypeId::parse(enum_name.as_str()) else {
+                return Ok(());
+            };
+            if let Some(NamedTypeBinding {
+                rust: RustTypeAtom::StringEnum { variants },
+                ..
+            }) = schema.named_type_binding(&named_type_name)
+                && !variants.iter().any(|allowed| allowed == variant)
+            {
+                return Err(MachineSchemaError::UnknownStringEnumVariant {
+                    enum_name: enum_name.as_str().to_owned(),
+                    variant: variant.as_str().to_owned(),
+                });
+            }
+        }
+        Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
+            for item in items {
+                validate_string_enum_named_variants_expr(schema, item)?;
+            }
+        }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            validate_string_enum_named_variants_expr(schema, condition)?;
+            validate_string_enum_named_variants_expr(schema, then_expr)?;
+            validate_string_enum_named_variants_expr(schema, else_expr)?;
+        }
+        Expr::Not(inner)
+        | Expr::Len(inner)
+        | Expr::Head(inner)
+        | Expr::MapKeys(inner)
+        | Expr::SeqElements(inner)
+        | Expr::Some(inner) => validate_string_enum_named_variants_expr(schema, inner)?,
+        Expr::Eq(left, right)
+        | Expr::Neq(left, right)
+        | Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Gte(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Lte(left, right) => {
+            validate_string_enum_named_variants_expr(schema, left)?;
+            validate_string_enum_named_variants_expr(schema, right)?;
+        }
+        Expr::Contains { collection, value } => {
+            validate_string_enum_named_variants_expr(schema, collection)?;
+            validate_string_enum_named_variants_expr(schema, value)?;
+        }
+        Expr::MapContainsKey { map, key } | Expr::MapGet { map, key } => {
+            validate_string_enum_named_variants_expr(schema, map)?;
+            validate_string_enum_named_variants_expr(schema, key)?;
+        }
+        Expr::SeqStartsWith { seq, prefix } => {
+            validate_string_enum_named_variants_expr(schema, seq)?;
+            validate_string_enum_named_variants_expr(schema, prefix)?;
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                validate_string_enum_named_variants_expr(schema, arg)?;
+            }
+        }
+        Expr::Quantified { over, body, .. } => {
+            validate_string_enum_named_variants_expr(schema, over)?;
+            validate_string_enum_named_variants_expr(schema, body)?;
+        }
+        Expr::Bool(_)
+        | Expr::U64(_)
+        | Expr::String(_)
+        | Expr::EmptySet
+        | Expr::EmptyMap
+        | Expr::CurrentPhase
+        | Expr::Phase(_)
+        | Expr::Field(_)
+        | Expr::Binding(_)
+        | Expr::Variant(_)
+        | Expr::None => {}
+    }
+    Ok(())
 }
 
 fn unique_names<'a>(
@@ -1240,6 +1448,8 @@ pub enum MachineSchemaError {
     SurfaceOnlyInputHasTransition { variant: String, transition: String },
     DuplicateNamedTypeBinding { name: String },
     MissingNamedTypeBinding { name: String },
+    UnknownStringEnumVariant { enum_name: String, variant: String },
+    InvalidStringEnumBinding { name: String, reason: String },
 }
 
 impl fmt::Display for MachineSchemaError {
@@ -1306,6 +1516,18 @@ impl fmt::Display for MachineSchemaError {
                     "named type `{name}` is referenced by this schema but has no NamedTypeBinding entry in `named_types`"
                 )
             }
+            Self::UnknownStringEnumVariant { enum_name, variant } => {
+                write!(
+                    f,
+                    "string enum `{enum_name}` does not define variant `{variant}`"
+                )
+            }
+            Self::InvalidStringEnumBinding { name, reason } => {
+                write!(
+                    f,
+                    "invalid string enum named-type binding `{name}`: {reason}"
+                )
+            }
         }
     }
 }
@@ -1315,7 +1537,11 @@ impl std::error::Error for MachineSchemaError {}
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use crate::{MachineSchemaError, catalog::dsl::dsl_meerkat_machine as meerkat_machine};
+    use crate::identity::{EnumTypeId, EnumVariantId, NamedTypeId};
+    use crate::{
+        Expr, MachineSchema, MachineSchemaError, NamedTypeBinding, RustTypeAtom, Update,
+        catalog::dsl::dsl_meerkat_machine as meerkat_machine,
+    };
 
     #[test]
     fn validates_meerkat_machine_schema() {
@@ -1350,6 +1576,114 @@ mod tests {
             vec!["Destroyed".to_owned()]
         );
         assert_eq!(schema.validate(), Ok(()));
+    }
+
+    fn replace_register_op_status_update(schema: &mut MachineSchema, status: &str) {
+        let transition = schema
+            .transitions
+            .iter_mut()
+            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
+            .expect("RegisterOpIdle transition");
+        let update = transition
+            .updates
+            .iter_mut()
+            .find(|update| {
+                matches!(
+                    update,
+                    Update::MapInsert { field, .. } if field.as_str() == "op_statuses"
+                )
+            })
+            .expect("op_statuses update");
+        let Update::MapInsert { value, .. } = update else {
+            panic!("op_statuses update must be a map insert");
+        };
+        *value = Expr::NamedVariant {
+            enum_name: EnumTypeId::parse("OperationStatus").expect("enum type slug"),
+            variant: EnumVariantId::parse(status).expect("enum variant slug"),
+        };
+    }
+
+    fn string_enum_binding(name: &str, variants: &[&str]) -> NamedTypeBinding {
+        NamedTypeBinding {
+            name: NamedTypeId::parse(name).expect("named type slug"),
+            rust: RustTypeAtom::StringEnum {
+                variants: variants
+                    .iter()
+                    .map(|variant| EnumVariantId::parse(*variant).expect("enum variant slug"))
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unknown_string_enum_named_variant_in_transition_update() {
+        let mut schema = meerkat_machine();
+        replace_register_op_status_update(&mut schema, "Launched");
+
+        let err = schema
+            .validate()
+            .expect_err("unknown OperationStatus variant must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("OperationStatus") && message.contains("Launched"),
+            "error should identify the invalid string enum variant, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_string_enum_named_type_binding() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .push(string_enum_binding("SyntheticStatus", &[]));
+
+        let err = schema
+            .validate()
+            .expect_err("empty StringEnum bindings must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("SyntheticStatus") && message.contains("at least one variant"),
+            "error should identify the empty StringEnum binding, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_string_enum_named_type_variants() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .push(string_enum_binding("SyntheticStatus", &["Ready", "Ready"]));
+
+        let err = schema
+            .validate()
+            .expect_err("duplicate StringEnum variants must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("SyntheticStatus")
+                && message.contains("Ready")
+                && message.contains("duplicate"),
+            "error should identify the duplicate StringEnum variant, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_string_enum_named_type_variant_ident_collisions() {
+        let mut schema = meerkat_machine();
+        schema.named_types.push(string_enum_binding(
+            "SyntheticStatus",
+            &["foo-bar", "foo_bar"],
+        ));
+
+        let err = schema
+            .validate()
+            .expect_err("StringEnum variant Rust identifier collisions must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("SyntheticStatus")
+                && message.contains("foo-bar")
+                && message.contains("foo_bar"),
+            "error should identify colliding StringEnum variants, got: {message}"
+        );
     }
 
     #[test]

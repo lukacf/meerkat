@@ -383,6 +383,7 @@ impl GeneratedMachineKernel {
             state.fields.insert(init.field.clone(), value);
         }
 
+        self.validate_state_fields(&state, &helper_transition)?;
         Ok(state)
     }
 
@@ -442,6 +443,8 @@ impl GeneratedMachineKernel {
                 ));
             }
         }
+
+        self.validate_state_fields(state, &helper_transition_id())?;
 
         let mut matches = Vec::new();
         for transition in &self.schema.transitions {
@@ -543,6 +546,7 @@ impl GeneratedMachineKernel {
             self.apply_update(&mut next_state, bindings, update, &transition.name)?;
         }
         next_state.phase = transition.to.clone();
+        self.validate_state_fields(&next_state, &transition.name)?;
 
         let mut effects = Vec::new();
         for effect in &transition.emit {
@@ -594,7 +598,9 @@ impl GeneratedMachineKernel {
             bindings.insert(param.name.as_str().to_owned(), value.clone());
         }
 
-        self.eval_helper(state, &bindings, helper, &helper_transition)
+        let value = self.eval_helper_body(state, &bindings, helper, &helper_transition)?;
+        self.validate_helper_return_value(helper, &value, &helper_transition)?;
+        Ok(value)
     }
 
     fn render_effect(
@@ -611,10 +617,12 @@ impl GeneratedMachineKernel {
                 self.eval_expr(state, bindings, expr, transition_name)?,
             );
         }
-        Ok(KernelEffect {
+        let effect = KernelEffect {
             variant: effect.variant.clone(),
             fields,
-        })
+        };
+        self.validate_effect_fields(&effect, transition_name)?;
+        Ok(effect)
     }
 
     fn apply_update(
@@ -1191,7 +1199,39 @@ impl GeneratedMachineKernel {
         helper: &HelperSchema,
         transition_name: &TransitionId,
     ) -> Result<KernelValue, TransitionRefusal> {
+        let value = self.eval_helper_body(state, bindings, helper, transition_name)?;
+        self.validate_helper_return_value(helper, &value, transition_name)?;
+        Ok(value)
+    }
+
+    fn eval_helper_body(
+        &self,
+        state: &KernelState,
+        bindings: &BTreeMap<String, KernelValue>,
+        helper: &HelperSchema,
+        transition_name: &TransitionId,
+    ) -> Result<KernelValue, TransitionRefusal> {
         self.eval_expr(state, bindings, &helper.body, transition_name)
+    }
+
+    fn validate_helper_return_value(
+        &self,
+        helper: &HelperSchema,
+        value: &KernelValue,
+        transition_name: &TransitionId,
+    ) -> Result<(), TransitionRefusal> {
+        if self.type_contains_constrained_string_enum(&helper.returns)
+            && !self.value_matches_type(value, &helper.returns)
+        {
+            return Err(self.eval_error(
+                transition_name,
+                format!(
+                    "helper `{}` return value does not match declared type",
+                    helper.name
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn compare_values(
@@ -1226,6 +1266,98 @@ impl GeneratedMachineKernel {
 
     fn value_matches_type(&self, value: &KernelValue, ty: &TypeRef) -> bool {
         value_matches_type(&self.schema, value, ty)
+    }
+
+    fn validate_state_fields(
+        &self,
+        state: &KernelState,
+        transition_name: &TransitionId,
+    ) -> Result<(), TransitionRefusal> {
+        for field in &self.schema.state.fields {
+            if !self.type_contains_constrained_string_enum(&field.ty) {
+                continue;
+            }
+            let Some(value) = state.fields.get(&field.name) else {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!("missing state field `{}`", field.name),
+                ));
+            };
+            if !self.value_matches_type(value, &field.ty) {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!("state field `{}` does not match declared type", field.name),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_effect_fields(
+        &self,
+        effect: &KernelEffect,
+        transition_name: &TransitionId,
+    ) -> Result<(), TransitionRefusal> {
+        let variant = self
+            .schema
+            .effects
+            .variant_named(effect.variant.as_str())
+            .map_err(|_| {
+                self.eval_error(
+                    transition_name,
+                    format!("unknown effect variant `{}`", effect.variant),
+                )
+            })?;
+        for field in &variant.fields {
+            if !self.type_contains_constrained_string_enum(&field.ty) {
+                continue;
+            }
+            let Some(value) = effect.fields.get(&field.name) else {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!(
+                        "effect `{}` field `{}` is missing",
+                        effect.variant, field.name
+                    ),
+                ));
+            };
+            if !self.value_matches_type(value, &field.ty) {
+                return Err(self.eval_error(
+                    transition_name,
+                    format!(
+                        "effect `{}` field `{}` does not match declared type",
+                        effect.variant, field.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn type_contains_constrained_string_enum(&self, ty: &TypeRef) -> bool {
+        match ty {
+            TypeRef::Named(name) => matches!(
+                named_type_atom(&self.schema, name),
+                Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
+            ),
+            TypeRef::Enum(name) => {
+                let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
+                    return false;
+                };
+                matches!(
+                    named_type_atom(&self.schema, &named_type_name),
+                    Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
+                )
+            }
+            TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+                self.type_contains_constrained_string_enum(inner)
+            }
+            TypeRef::Map(key, value) => {
+                self.type_contains_constrained_string_enum(key)
+                    || self.type_contains_constrained_string_enum(value)
+            }
+            TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => false,
+        }
     }
 }
 
@@ -1358,14 +1490,10 @@ fn default_value_for_type(schema: &MachineSchema, ty: &TypeRef) -> KernelValue {
             type_name: name.clone(),
             value: Box::new(default_value_for_named_type(schema, name)),
         },
-        TypeRef::Enum(name) =>
-        {
-            #[allow(clippy::expect_used)]
-            KernelValue::NamedVariant {
-                enum_name: name.clone(),
-                variant: EnumVariantId::parse("_Unset").expect("reserved default enum variant"),
-            }
-        }
+        TypeRef::Enum(name) => KernelValue::NamedVariant {
+            enum_name: name.clone(),
+            variant: default_variant_for_enum_type(schema, name).unwrap_or_else(unset_enum_variant),
+        },
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
         TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),
@@ -1381,8 +1509,15 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
         (KernelValue::Named { type_name, value }, TypeRef::Named(name)) if type_name == name => {
             named_type_inner_matches(schema, name, value.as_ref())
         }
-        (KernelValue::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) if enum_name == name => {
-            true
+        (KernelValue::NamedVariant { enum_name, variant }, TypeRef::Named(name))
+            if enum_name.as_str() == name.as_str() =>
+        {
+            named_type_variant_matches(schema, name, variant)
+        }
+        (KernelValue::NamedVariant { enum_name, variant }, TypeRef::Enum(name))
+            if enum_name == name =>
+        {
+            enum_variant_matches(schema, name, variant)
         }
         (KernelValue::None, TypeRef::Option(_)) => true,
         (inner, TypeRef::Option(inner_ty)) => {
@@ -1423,7 +1558,29 @@ fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> K
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
         )
         | None => KernelValue::String(String::new()),
+        Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => variants
+            .first()
+            .map(|variant| KernelValue::String(variant.as_str().to_owned()))
+            .unwrap_or_else(|| KernelValue::String(String::new())),
     }
+}
+
+fn default_variant_for_enum_type(
+    schema: &MachineSchema,
+    name: &EnumTypeId,
+) -> Option<EnumVariantId> {
+    let named_type_name = NamedTypeId::parse(name.as_str()).ok()?;
+    match named_type_atom(schema, &named_type_name) {
+        Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
+            variants.first().cloned()
+        }
+        _ => None,
+    }
+}
+
+fn unset_enum_variant() -> EnumVariantId {
+    #[allow(clippy::expect_used)]
+    EnumVariantId::parse("_Unset").expect("reserved default enum variant")
 }
 
 fn named_type_inner_matches(
@@ -1448,6 +1605,22 @@ fn named_type_inner_matches(
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
         )
         | None => matches!(value, KernelValue::String(_)),
+        Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
+            matches!(value, KernelValue::String(value) if variants.iter().any(|variant| variant.as_str() == value))
+        }
+    }
+}
+
+fn named_type_variant_matches(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    variant: &EnumVariantId,
+) -> bool {
+    match named_type_atom(schema, name) {
+        Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
+            variants.iter().any(|allowed| allowed == variant)
+        }
+        _ => false,
     }
 }
 
@@ -1456,6 +1629,22 @@ fn named_type_atom<'a>(
     name: &NamedTypeId,
 ) -> Option<&'a meerkat_machine_schema::RustTypeAtom> {
     schema.named_type_binding(name).map(|binding| &binding.rust)
+}
+
+fn enum_variant_matches(
+    schema: &MachineSchema,
+    name: &EnumTypeId,
+    variant: &EnumVariantId,
+) -> bool {
+    let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
+        return true;
+    };
+    match named_type_atom(schema, &named_type_name) {
+        Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
+            variants.iter().any(|allowed| allowed == variant)
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -1473,7 +1662,7 @@ mod tests {
 
     use super::{
         GeneratedMachineKernel, KernelInput, KernelSignal, KernelValue, TransitionRefusal,
-        default_value_for_type,
+        default_value_for_type, value_matches_type,
     };
 
     fn input_id(slug: &str) -> InputVariantId {
@@ -1535,6 +1724,105 @@ mod tests {
         EnumVariantId::parse(slug).expect("valid enum variant slug")
     }
 
+    fn replace_register_op_status_update(schema: &mut meerkat_machine_schema::MachineSchema) {
+        let transition = schema
+            .transitions
+            .iter_mut()
+            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
+            .expect("RegisterOpIdle transition");
+        let update = transition
+            .updates
+            .iter_mut()
+            .find(|update| {
+                matches!(
+                    update,
+                    meerkat_machine_schema::Update::MapInsert { field, .. }
+                        if field.as_str() == "op_statuses"
+                )
+            })
+            .expect("op_statuses update");
+        let meerkat_machine_schema::Update::MapInsert { value, .. } = update else {
+            panic!("op_statuses update must be a map insert");
+        };
+        *value = meerkat_machine_schema::Expr::NamedVariant {
+            enum_name: enum_type_id("OperationStatus"),
+            variant: enum_variant_id("Launched"),
+        };
+    }
+
+    fn add_invalid_register_op_effect_status(schema: &mut meerkat_machine_schema::MachineSchema) {
+        let effect_variant = schema
+            .effects
+            .variants
+            .iter_mut()
+            .find(|variant| variant.name.as_str() == "SubmitOpEvent")
+            .expect("SubmitOpEvent effect variant");
+        effect_variant
+            .fields
+            .push(meerkat_machine_schema::FieldSchema {
+                name: field_id("status"),
+                ty: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            });
+
+        let transition = schema
+            .transitions
+            .iter_mut()
+            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
+            .expect("RegisterOpIdle transition");
+        let effect = transition
+            .emit
+            .iter_mut()
+            .find(|effect| effect.variant.as_str() == "SubmitOpEvent")
+            .expect("SubmitOpEvent emit");
+        effect.fields.insert(
+            field_id("status"),
+            meerkat_machine_schema::Expr::NamedVariant {
+                enum_name: enum_type_id("OperationStatus"),
+                variant: enum_variant_id("Launched"),
+            },
+        );
+    }
+
+    fn add_invalid_operation_status_helper(schema: &mut meerkat_machine_schema::MachineSchema) {
+        schema.helpers.push(meerkat_machine_schema::HelperSchema {
+            name: "invalid_operation_status".to_string(),
+            params: Vec::new(),
+            returns: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            body: meerkat_machine_schema::Expr::String("Launched".to_string()),
+        });
+    }
+
+    fn add_state_backed_operation_status_helper(
+        schema: &mut meerkat_machine_schema::MachineSchema,
+    ) {
+        schema.helpers.push(meerkat_machine_schema::HelperSchema {
+            name: "state_backed_operation_status".to_string(),
+            params: vec![meerkat_machine_schema::FieldSchema {
+                name: field_id("operation_id"),
+                ty: meerkat_machine_schema::TypeRef::String,
+            }],
+            returns: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            body: meerkat_machine_schema::Expr::MapGet {
+                map: Box::new(meerkat_machine_schema::Expr::Field(field_id("op_statuses"))),
+                key: Box::new(meerkat_machine_schema::Expr::Binding(
+                    "operation_id".to_string(),
+                )),
+            },
+        });
+    }
+
+    fn add_wrong_domain_operation_kind_helper(schema: &mut meerkat_machine_schema::MachineSchema) {
+        schema.helpers.push(meerkat_machine_schema::HelperSchema {
+            name: "wrong_domain_operation_kind".to_string(),
+            params: Vec::new(),
+            returns: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationKind")),
+            body: meerkat_machine_schema::Expr::NamedVariant {
+                enum_name: enum_type_id("OperationStatus"),
+                variant: enum_variant_id("Running"),
+            },
+        });
+    }
+
     #[allow(clippy::expect_used)]
     #[test]
     fn every_catalog_machine_builds_an_initial_state() {
@@ -1567,6 +1855,384 @@ mod tests {
                 if type_name == named_type_id("FenceToken")
                     && matches!(value.as_ref(), KernelValue::U64(0))
         ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_unknown_kernel_values() {
+        let schema = meerkat_machine();
+
+        assert!(value_matches_type(
+            &schema,
+            &KernelValue::NamedVariant {
+                enum_name: enum_type_id("OperationStatus"),
+                variant: enum_variant_id("Running"),
+            },
+            &meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+        ));
+        assert!(
+            !value_matches_type(
+                &schema,
+                &KernelValue::NamedVariant {
+                    enum_name: enum_type_id("OperationStatus"),
+                    variant: enum_variant_id("Launched"),
+                },
+                &meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            ),
+            "unknown OperationStatus enum variants must not enter kernel state"
+        );
+        assert!(value_matches_type(
+            &schema,
+            &named_string("OperationStatus", "Running"),
+            &meerkat_machine_schema::TypeRef::Named(named_type_id("OperationStatus")),
+        ));
+        assert!(
+            !value_matches_type(
+                &schema,
+                &named_string("OperationStatus", "Launched"),
+                &meerkat_machine_schema::TypeRef::Named(named_type_id("OperationStatus")),
+            ),
+            "unknown OperationStatus string values must not enter kernel state"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn closed_dsl_domains_reject_unknown_kernel_values() {
+        let schema = meerkat_machine();
+
+        for (domain, valid, invalid) in [
+            ("TurnPhase", "Ready", "Teleporting"),
+            ("DrainPhase", "Running", "Paused"),
+            ("DrainMode", "Timed", "Manual"),
+            ("McpServerState", "Connected", "HalfOpen"),
+            ("RealtimeReconnectCycleState", "Idle", "CoolingDown"),
+            (
+                "OperationTerminalOutcomeKind",
+                "Completed",
+                "PartiallyCompleted",
+            ),
+        ] {
+            assert!(
+                value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(valid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Enum(enum_type_id(domain)),
+                ),
+                "{domain} should accept known enum variant `{valid}`"
+            );
+            assert!(
+                !value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(invalid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Enum(enum_type_id(domain)),
+                ),
+                "unknown {domain} enum variants must not enter kernel state"
+            );
+            assert!(
+                value_matches_type(
+                    &schema,
+                    &named_string(domain, valid),
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "{domain} should accept known named string value `{valid}`"
+            );
+            assert!(
+                !value_matches_type(
+                    &schema,
+                    &named_string(domain, invalid),
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "unknown {domain} string values must not enter kernel state"
+            );
+            assert!(
+                value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(valid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "{domain} should accept known named variants for named-type fields"
+            );
+            assert!(
+                !value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(invalid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "unknown {domain} named variants must not enter named-type state fields"
+            );
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn constrained_enum_state_default_uses_first_allowed_variant() {
+        let mut schema = meerkat_machine();
+        schema
+            .state
+            .fields
+            .push(meerkat_machine_schema::FieldSchema {
+                name: field_id("defaulted_status"),
+                ty: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
+            });
+
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel
+            .initial_state()
+            .expect("constrained enum default should be a valid state value");
+
+        let status = state
+            .fields
+            .get(&field_id("defaulted_status"))
+            .expect("defaulted status field");
+        assert!(
+            matches!(
+                status,
+                KernelValue::NamedVariant { enum_name, variant }
+                    if enum_name.as_str() == "OperationStatus" && variant.as_str() == "Absent"
+            ),
+            "defaulted OperationStatus should use first allowed variant, got {status:?}"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_unknown_transition_update_value() {
+        let mut schema = meerkat_machine();
+        replace_register_op_status_update(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+
+        let refusal = kernel
+            .transition(
+                &initialized.next_state,
+                &KernelInput {
+                    variant: input_id("RegisterOp"),
+                    fields: BTreeMap::from([
+                        (field_id("operation_id"), KernelValue::String("op-1".into())),
+                        (
+                            field_id("kind"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("OperationKind"),
+                                variant: enum_variant_id("BackgroundToolOp"),
+                            },
+                        ),
+                    ]),
+                },
+            )
+            .expect_err("invalid OperationStatus update must not enter state");
+        assert!(matches!(refusal, TransitionRefusal::EvaluationError { .. }));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_unknown_effect_payload_value() {
+        let mut schema = meerkat_machine();
+        add_invalid_register_op_effect_status(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+
+        let refusal = kernel
+            .transition(
+                &initialized.next_state,
+                &KernelInput {
+                    variant: input_id("RegisterOp"),
+                    fields: BTreeMap::from([
+                        (field_id("operation_id"), KernelValue::String("op-1".into())),
+                        (
+                            field_id("kind"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("OperationKind"),
+                                variant: enum_variant_id("BackgroundToolOp"),
+                            },
+                        ),
+                    ]),
+                },
+            )
+            .expect_err("invalid OperationStatus effect payload must not be returned");
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("SubmitOpEvent") && reason.contains("status"),
+                    "effect payload refusal should identify the bad field, got: {reason}"
+                );
+            }
+            other => panic!("expected effect payload evaluation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_unknown_existing_state_before_transition_matching() {
+        let kernel = GeneratedMachineKernel::new(meerkat_machine());
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+        let mut invalid_state = initialized.next_state;
+        invalid_state.fields.insert(
+            field_id("op_statuses"),
+            KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("op-1".into()),
+                KernelValue::NamedVariant {
+                    enum_name: enum_type_id("OperationStatus"),
+                    variant: enum_variant_id("Launched"),
+                },
+            )])),
+        );
+        invalid_state.phase = phase_id("NoTransitionPhase");
+
+        let refusal = kernel
+            .transition(
+                &invalid_state,
+                &KernelInput {
+                    variant: input_id("RegisterOp"),
+                    fields: BTreeMap::from([
+                        (field_id("operation_id"), KernelValue::String("op-2".into())),
+                        (
+                            field_id("kind"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("OperationKind"),
+                                variant: enum_variant_id("BackgroundToolOp"),
+                            },
+                        ),
+                    ]),
+                },
+            )
+            .expect_err("invalid existing OperationStatus state must be rejected before matching");
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("op_statuses"),
+                    "state validation refusal should identify the bad field, got: {reason}"
+                );
+            }
+            other => panic!("expected state validation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_unknown_helper_return_value() {
+        let mut schema = meerkat_machine();
+        add_invalid_operation_status_helper(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state");
+
+        let refusal = kernel
+            .evaluate_helper(&state, "invalid_operation_status", &BTreeMap::new())
+            .expect_err("invalid OperationStatus helper return must not be exposed");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("invalid_operation_status") && reason.contains("return value"),
+                    "helper return refusal should identify the bad helper, got: {reason}"
+                );
+            }
+            other => panic!("expected helper return evaluation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_status_rejects_state_backed_helper_return_value() {
+        let mut schema = meerkat_machine();
+        add_state_backed_operation_status_helper(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let mut state = kernel.initial_state().expect("initial state");
+        state.fields.insert(
+            field_id("op_statuses"),
+            KernelValue::Map(BTreeMap::from([(
+                KernelValue::String("op-bad".to_string()),
+                KernelValue::NamedVariant {
+                    enum_name: enum_type_id("OperationStatus"),
+                    variant: enum_variant_id("Launched"),
+                },
+            )])),
+        );
+
+        let refusal = kernel
+            .evaluate_helper(
+                &state,
+                "state_backed_operation_status",
+                &BTreeMap::from([(
+                    field_id("operation_id"),
+                    KernelValue::String("op-bad".to_string()),
+                )]),
+            )
+            .expect_err("state-backed invalid OperationStatus helper return must not be exposed");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("state_backed_operation_status")
+                        && reason.contains("return value"),
+                    "helper return refusal should identify the bad helper, got: {reason}"
+                );
+            }
+            other => panic!("expected helper return evaluation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn operation_kind_rejects_wrong_domain_helper_return_value() {
+        let mut schema = meerkat_machine();
+        add_wrong_domain_operation_kind_helper(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state");
+
+        let refusal = kernel
+            .evaluate_helper(&state, "wrong_domain_operation_kind", &BTreeMap::new())
+            .expect_err("wrong-domain OperationKind helper return must not be exposed");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("wrong_domain_operation_kind")
+                        && reason.contains("return value"),
+                    "helper return refusal should identify the bad helper, got: {reason}"
+                );
+            }
+            other => panic!("expected helper return evaluation error, got {other:?}"),
+        }
     }
 
     #[allow(clippy::expect_used)]

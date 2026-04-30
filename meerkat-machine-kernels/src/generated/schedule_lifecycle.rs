@@ -40,9 +40,11 @@ impl std::fmt::Display for OccurrenceId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -52,20 +54,44 @@ impl std::fmt::Display for OccurrenceId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct ScheduleLifecycleState(pub String);
-impl From<String> for ScheduleLifecycleState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum ScheduleLifecycleState {
+    #[default]
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Paused")]
+    Paused,
+    #[serde(rename = "Deleted")]
+    Deleted,
+}
+impl ScheduleLifecycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Paused => "Paused",
+            Self::Deleted => "Deleted",
+        }
     }
 }
-impl From<&str> for ScheduleLifecycleState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for ScheduleLifecycleState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Active" => Ok(Self::Active),
+            "Paused" => Ok(Self::Paused),
+            "Deleted" => Ok(Self::Deleted),
+            other => Err(format!("invalid ScheduleLifecycleState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ScheduleLifecycleState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for ScheduleLifecycleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 

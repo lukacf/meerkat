@@ -2612,6 +2612,10 @@ fn render_named_domain_assignment(
         };
     }
 
+    if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
+        return format!("{{{}}}", samples.join(", "));
+    }
+
     if sample_cardinality == 0 {
         return "{}".into();
     }
@@ -2697,9 +2701,14 @@ fn sample_values(
                 vec!["1".into()]
             }
         }
-        TypeRef::Named(_) if sample_cardinality == 0 => Vec::new(),
         TypeRef::Named(name) => {
             let name = name.as_str();
+            if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
+                return samples;
+            }
+            if sample_cardinality == 0 {
+                return Vec::new();
+            }
             if let Some(samples) = known_structural_named_domain_samples(name, sample_cardinality) {
                 return samples;
             }
@@ -2718,9 +2727,14 @@ fn sample_values(
                 .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
                 .collect()
         }
-        TypeRef::Enum(_) if sample_cardinality == 0 => Vec::new(),
         TypeRef::Enum(name) => {
             let name = name.as_str();
+            if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
+                return samples;
+            }
+            if sample_cardinality == 0 {
+                return Vec::new();
+            }
             if let Some(samples) = known_named_domain_samples(name, sample_cardinality) {
                 return samples.into_iter().map(tla_string).collect();
             }
@@ -2819,6 +2833,23 @@ fn known_structural_named_domain_samples(
             .take(sample_cardinality.max(1))
             .collect(),
     )
+}
+
+fn string_enum_binding_samples(
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> Option<Vec<String>> {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    match bindings.get(name) {
+        Some(RustTypeAtom::StringEnum { variants }) => Some(
+            variants
+                .iter()
+                .map(|variant| tla_string(variant.as_str()))
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 /// Consult the schema's named-type binding table to decide whether a

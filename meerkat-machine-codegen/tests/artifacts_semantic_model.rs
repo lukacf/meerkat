@@ -1,4 +1,4 @@
-use meerkat_machine_codegen::render_machine_semantic_model;
+use meerkat_machine_codegen::{render_machine_ci_cfg, render_machine_semantic_model};
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
 };
@@ -24,6 +24,22 @@ fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
         "integer map value projections should not render DOMAIN checks against scalar values"
     );
     assert!(!rendered.contains("MeerkatIdValues"));
+}
+
+#[test]
+fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), false);
+
+    assert!(
+        rendered.contains("OperationKindValues = {\"MobMemberChild\", \"BackgroundToolOp\"}"),
+        "OperationKindValues must come from the closed StringEnum binding:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "OperationStatusValues = {\"Absent\", \"Provisioning\", \"Running\", \"Retiring\", \"Completed\", \"Failed\", \"Aborted\", \"Cancelled\", \"Retired\", \"Terminated\"}"
+        ),
+        "OperationStatusValues must come from the closed StringEnum binding:\n{rendered}"
+    );
 }
 
 #[test]

@@ -12,9 +12,11 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_auth_machine()
 }
 
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -24,20 +26,52 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct AuthLifecyclePhase(pub String);
-impl From<String> for AuthLifecyclePhase {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum AuthLifecyclePhase {
+    #[default]
+    #[serde(rename = "Valid")]
+    Valid,
+    #[serde(rename = "Expiring")]
+    Expiring,
+    #[serde(rename = "Refreshing")]
+    Refreshing,
+    #[serde(rename = "ReauthRequired")]
+    ReauthRequired,
+    #[serde(rename = "Released")]
+    Released,
+}
+impl AuthLifecyclePhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Valid => "Valid",
+            Self::Expiring => "Expiring",
+            Self::Refreshing => "Refreshing",
+            Self::ReauthRequired => "ReauthRequired",
+            Self::Released => "Released",
+        }
     }
 }
-impl From<&str> for AuthLifecyclePhase {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for AuthLifecyclePhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Valid" => Ok(Self::Valid),
+            "Expiring" => Ok(Self::Expiring),
+            "Refreshing" => Ok(Self::Refreshing),
+            "ReauthRequired" => Ok(Self::ReauthRequired),
+            "Released" => Ok(Self::Released),
+            other => Err(format!("invalid AuthLifecyclePhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AuthLifecyclePhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for AuthLifecyclePhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 

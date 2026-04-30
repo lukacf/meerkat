@@ -1039,6 +1039,7 @@ where
     pub fn cancel(&mut self) {
         use crate::turn_execution_authority::TurnExecutionInput;
 
+        self.clear_runtime_execution_kind();
         let snapshot = self
             .turn_state_handle
             .as_deref()

@@ -471,6 +471,10 @@ fn pending_system_context_appends(
         .collect()
 }
 
+fn should_apply_context_without_turn(primitive: &RunPrimitive) -> bool {
+    primitive.is_context_only_apply_without_turn()
+}
+
 async fn apply_runtime_turn(
     context: &McpRuntimeIngressContext,
     state: &Arc<McpRuntimeSessionState>,
@@ -490,10 +494,11 @@ async fn apply_runtime_turn(
         };
         return context
             .service
-            .apply_runtime_context_appends(
+            .apply_runtime_context_appends_with_boundary(
                 session_id,
                 run_id,
                 pending_system_context_appends(&staged.context_appends),
+                primitive.apply_boundary(),
                 staged.contributing_input_ids.clone(),
             )
             .await;
@@ -698,6 +703,15 @@ mod tests {
         })
     }
 
+    fn context_append() -> ConversationContextAppend {
+        ConversationContextAppend {
+            key: "peer_response_terminal:analyst:req-1".to_string(),
+            content: CoreRenderable::Text {
+                text: "done".to_string(),
+            },
+        }
+    }
+
     #[tokio::test]
     async fn mcp_runtime_ingress_rejects_malformed_terminal_peer_response_intent() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -731,5 +745,43 @@ mod tests {
             error.to_string().contains("requires RunStart boundary"),
             "unexpected rejection reason: {error}"
         );
+    }
+
+    #[test]
+    fn mcp_context_only_shortcut_excludes_terminal_peer_response() {
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends: Vec::new(),
+            context_appends: vec![context_append()],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                peer_response_terminal_apply_intent: Some(
+                    PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                ),
+                ..Default::default()
+            }),
+        });
+
+        assert!(
+            !should_apply_context_without_turn(&primitive),
+            "terminal peer responses must append context and run a requester reaction turn"
+        );
+    }
+
+    #[test]
+    fn mcp_context_only_shortcut_keeps_plain_context_append() {
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![context_append()],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+        });
+
+        assert!(should_apply_context_without_turn(&primitive));
     }
 }

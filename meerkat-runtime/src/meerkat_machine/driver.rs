@@ -1738,6 +1738,23 @@ mod tests {
     }
 
     #[test]
+    fn recovered_ingress_entry_requires_persisted_input_payload() {
+        let mut state = InputState::new_accepted(InputId::new());
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::identifiers::PolicyVersion(1),
+            decision: queue_policy(
+                crate::policy::WakeMode::WakeIfIdle,
+                crate::policy::DrainPolicy::QueueNextTurn,
+            ),
+        });
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must not infer Prompt/ContentTurn when persisted input payload is missing"
+        );
+    }
+
+    #[test]
     fn prompt_batch_selection_excludes_mixed_execution_kind_prefix() {
         let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
             "mixed-prefix-test",

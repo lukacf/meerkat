@@ -23,7 +23,7 @@ use meerkat_core::image_generation::{
     ImageOperationTerminalClass, ImageQualityPreference, ImageSizePreference, PromptSource,
     PromptText, SessionModelRoutingStatus, ToolCallId,
 };
-use meerkat_core::lifecycle::run_primitive::ModelId;
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeExecutionKind};
 use meerkat_core::service::{InitialTurnPolicy, SessionBuildOptions};
 use meerkat_core::{
     AgentToolDispatcher, AssistantBlock, BlobStore, ContentBlock, ProviderId, SessionEffect,
@@ -454,10 +454,16 @@ mod image_generation_substrate {
             .await
             .expect("factory should build runtime-backed image agent");
         let (run_tx, _run_rx) = mpsc::channel(32);
-        let result =
-            SessionAgent::run_with_events(&mut agent, "make an image".to_string().into(), run_tx)
-                .await
-                .expect("agent turn should complete after generate_image");
+        let result = SessionAgent::run_turn_with_events(
+            &mut agent,
+            "make an image".to_string().into(),
+            meerkat_core::types::HandlingMode::Queue,
+            None,
+            Some(RuntimeExecutionKind::ContentTurn),
+            run_tx,
+        )
+        .await
+        .expect("agent turn should complete after generate_image");
         assert_eq!(result.tool_calls, 1);
 
         let image_ref = agent

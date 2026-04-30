@@ -874,6 +874,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_backed_cancel_consumes_execution_kind_stamp() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .require_runtime_execution_kind_stamp()
+            .build(client, tools, store)
+            .await;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        agent.cancel();
+
+        let err = agent
+            .run("raw follow-up".to_string().into())
+            .await
+            .expect_err("runtime-backed follow-up run must require a fresh stamp after cancel");
+
+        assert!(
+            err.to_string().contains("runtime_execution_kind not set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_builder_event_tap_receives_turn_started_without_primary_event_tx() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);

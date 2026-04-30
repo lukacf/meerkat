@@ -34,9 +34,36 @@ use std::time::SystemTime;
 use tokio::sync::mpsc;
 
 fn agent_builder_with_ephemeral_turn_state() -> AgentBuilder {
-    AgentBuilder::new().with_turn_state_handle(Arc::new(
-        meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-    ))
+    let mut session = Session::new();
+    session
+        .set_session_metadata(meerkat_core::SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "test-model".to_string(),
+            max_tokens: 1024,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::Other,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: meerkat_core::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            connection_ref: None,
+        })
+        .expect("test metadata serializes");
+    session
+        .set_build_state(meerkat_core::SessionBuildState::default())
+        .expect("test build state serializes");
+
+    AgentBuilder::new()
+        .resume_session(session)
+        .with_turn_state_handle(Arc::new(
+            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +762,10 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = builder.build_standalone(client, tools, store).await;
+        let agent = builder
+            .build_after_factory_policy(client, tools, store)
+            .await
+            .map_err(|err| SessionError::Unsupported(err.to_string()))?;
         Ok(CompactionSessionAgent { agent })
     }
 }
@@ -767,7 +797,10 @@ impl SessionAgentBuilder for RealAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = builder.build_standalone(client, tools, store).await;
+        let agent = builder
+            .build_after_factory_policy(client, tools, store)
+            .await
+            .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(RealSessionAgent { agent })
     }

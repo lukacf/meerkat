@@ -8,14 +8,13 @@ use async_trait::async_trait;
 use futures::stream;
 use meerkat::{
     AgentBuildConfig, AgentBuilder, AgentFactory, AgentLlmClient, AgentToolDispatcher,
-    BuildAgentError, Config, CoreAgentBuilder, LlmDoneOutcome, LlmEvent, LlmRequest, ToolDef,
-    ToolError, ToolResult,
+    BuildAgentError, Config, LlmDoneOutcome, LlmEvent, LlmRequest, ToolDef, ToolError, ToolResult,
 };
 use meerkat_client::LlmClient;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::{
-    AssistantBlock, BlobId, BlobRef, LlmStreamResult, Message, Provider, ProviderImageMetadata,
-    RevisedPromptDisposition, StopReason, ToolCallView, Usage,
+    AgentBuildPolicyError, AssistantBlock, BlobId, BlobRef, LlmStreamResult, Message, Provider,
+    ProviderImageMetadata, RevisedPromptDisposition, StopReason, ToolCallView, Usage,
 };
 use meerkat_core::{HookEngine, HookEngineError, HookExecutionReport, HookId, HookInvocation};
 use meerkat_tools::schema_for;
@@ -632,8 +631,8 @@ fn assert_unsupported_builder_injection(error: BuildAgentError, method: &str) {
         "error should name unsupported method {method}: {message}"
     );
     assert!(
-        message.contains("CoreAgentBuilder"),
-        "error should point callers to the standalone builder: {message}"
+        message.contains("AgentFactory/AgentBuildConfig"),
+        "error should point callers to factory-owned settings: {message}"
     );
 }
 
@@ -707,7 +706,7 @@ async fn public_agentbuilder_rejects_standalone_core_injections_loudly() {
 }
 
 #[tokio::test]
-async fn core_agentbuilder_remains_explicit_standalone_escape_hatch() {
+async fn core_agentbuilder_factory_policy_rejects_missing_metadata() {
     let factory = AgentFactory::new(".rkat/sessions");
     let llm_client = Arc::new(MockLlmClient {
         calls: Arc::new(AtomicUsize::new(1)),
@@ -719,18 +718,18 @@ async fn core_agentbuilder_remains_explicit_standalone_escape_hatch() {
     let store = Arc::new(TestSessionStore::new());
     let store_adapter = Arc::new(factory.build_store_adapter(store).await);
 
-    let agent = CoreAgentBuilder::new()
+    let result = meerkat_core::AgentBuilder::new()
         .model("mock-model")
         .max_tokens_per_turn(64)
         .with_turn_state_handle(Arc::new(
             meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
         ))
-        .build_standalone(llm_adapter, tools, store_adapter)
+        .build_after_factory_policy(llm_adapter, tools, store_adapter)
         .await;
 
-    assert!(
-        agent.session().session_metadata().is_none(),
-        "CoreAgentBuilder intentionally remains a standalone primitive builder; \
-         facade metadata is owned by meerkat::AgentBuilder/AgentFactory"
-    );
+    match result {
+        Err(AgentBuildPolicyError::MissingSession) => {}
+        Err(error) => panic!("expected missing session policy error, got {error}"),
+        Ok(_) => panic!("core factory-policy build must reject missing factory metadata"),
+    }
 }

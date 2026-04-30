@@ -754,6 +754,9 @@ for (const pkg of localPackages.values()) {
       if (scansWorkspaceRustSources) {
         data.push("//:workspace_rust_sources");
       }
+      if (key === "meerkat" && target.name === "agent_builder_policy_canary") {
+        data.push("//:workspace_runfiles");
+      }
       if (key === "meerkat-machine-codegen" && target.name === "runtime_schema_parity") {
         data.push("//:workspace_runfiles");
         env.push(`        "WORKSPACE_ROOT": ".",`);

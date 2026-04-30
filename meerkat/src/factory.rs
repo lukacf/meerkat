@@ -3623,6 +3623,63 @@ impl AgentFactory {
             call_timeout_override: build_config.call_timeout_override.clone(),
         };
 
+        // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
+        // effective bool. This ensures Inherit survives across save/resume cycles so
+        // the session continues to follow future runtime defaults.
+        let factory_metadata = if let Some(mut metadata) = resumed_session_metadata {
+            metadata.model = model.clone();
+            metadata.max_tokens = max_tokens;
+            metadata.structured_output_retries = build_config.structured_output_retries;
+            metadata.provider = provider;
+            metadata.self_hosted_server_id = self_hosted_server_id.clone();
+            metadata.provider_params = build_config.provider_params.clone();
+            metadata.tooling.builtins = build_config.override_builtins;
+            metadata.tooling.shell = build_config.override_shell;
+            // No override_comms field in AgentBuildConfig — preserve the existing
+            // metadata value so explicit Enable/Disable survives across resumes.
+            // (metadata.tooling.comms is left unchanged)
+            metadata.tooling.mob = build_config.override_mob;
+            metadata.tooling.memory = build_config.override_memory;
+            if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
+                metadata.tooling.active_skills = active_skill_ids.clone();
+            }
+            metadata.keep_alive = build_config.keep_alive;
+            metadata.comms_name = build_config.comms_name.clone();
+            metadata.peer_meta = build_config.peer_meta.clone();
+            metadata.realm_id = build_config.realm_id.clone();
+            metadata.instance_id = build_config.instance_id.clone();
+            metadata.backend = build_config.backend.clone();
+            metadata.config_generation = build_config.config_generation;
+            metadata.connection_ref = build_config.connection_ref.clone();
+            metadata
+        } else {
+            SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: model.clone(),
+                max_tokens,
+                structured_output_retries: build_config.structured_output_retries,
+                provider,
+                self_hosted_server_id: self_hosted_server_id.clone(),
+                provider_params: build_config.provider_params.clone(),
+                tooling: SessionTooling {
+                    builtins: build_config.override_builtins,
+                    shell: build_config.override_shell,
+                    comms: ToolCategoryOverride::Inherit,
+                    mob: build_config.override_mob,
+                    memory: build_config.override_memory,
+                    active_skills: active_skill_ids.clone(),
+                },
+                keep_alive: build_config.keep_alive,
+                comms_name: build_config.comms_name.clone(),
+                peer_meta: build_config.peer_meta.clone(),
+                realm_id: build_config.realm_id.clone(),
+                instance_id: build_config.instance_id.clone(),
+                backend: build_config.backend.clone(),
+                config_generation: build_config.config_generation,
+                connection_ref: build_config.connection_ref.clone(),
+            }
+        };
+
         // 12. Build AgentBuilder
         let budget_limits = build_config
             .budget_limits
@@ -3671,6 +3728,20 @@ impl AgentFactory {
         let _is_resumed = build_config.resume_session.is_some();
         #[cfg(feature = "memory-store-session")]
         let session_id = session.id().clone();
+        session
+            .set_session_metadata(factory_metadata)
+            .map_err(|err| {
+                BuildAgentError::Config(format!(
+                    "Failed to store session metadata before core build: {err}"
+                ))
+            })?;
+        session
+            .set_build_state(persisted_build_state)
+            .map_err(|err| {
+                BuildAgentError::Config(format!(
+                    "Failed to store session build state before core build: {err}"
+                ))
+            })?;
         builder = builder.resume_session(session);
         #[cfg(feature = "comms")]
         if let Some(runtime) = comms_runtime {
@@ -3799,11 +3870,14 @@ impl AgentFactory {
         }
 
         // 13. Build agent. AgentFactory owns the policy composition above; core
-        // intentionally exposes only an explicitly named standalone primitive
-        // rather than a public, forgeable factory-authority token.
+        // validates that the durable policy metadata/runtime handle exists
+        // before constructing the agent.
         let mut agent = builder
-            .build_standalone(llm_adapter, tools, store_adapter)
-            .await;
+            .build_after_factory_policy(llm_adapter, tools, store_adapter)
+            .await
+            .map_err(|err| {
+                BuildAgentError::Config(format!("AgentFactory policy validation failed: {err}"))
+            })?;
 
         if let Some(provider) = hoisted_control_visibility_provider {
             provider.set_scope(agent.tool_scope().clone());
@@ -3812,71 +3886,6 @@ impl AgentFactory {
         // Wire mob authority handle into agent for session-effect application.
         if let Some(handle) = hoisted_mob_authority_handle {
             agent.set_mob_authority_handle(handle);
-        }
-
-        // 14. Set SessionMetadata
-        //
-        // Persist the *override intent* (Inherit/Enable/Disable), not the resolved
-        // effective bool. This ensures Inherit survives across save/resume cycles so
-        // the session continues to follow future runtime defaults.
-        let metadata = if let Some(mut metadata) = resumed_session_metadata {
-            metadata.model = model;
-            metadata.max_tokens = max_tokens;
-            metadata.structured_output_retries = build_config.structured_output_retries;
-            metadata.provider = provider;
-            metadata.self_hosted_server_id = self_hosted_server_id.clone();
-            metadata.provider_params = build_config.provider_params;
-            metadata.tooling.builtins = build_config.override_builtins;
-            metadata.tooling.shell = build_config.override_shell;
-            // No override_comms field in AgentBuildConfig — preserve the existing
-            // metadata value so explicit Enable/Disable survives across resumes.
-            // (metadata.tooling.comms is left unchanged)
-            metadata.tooling.mob = build_config.override_mob;
-            metadata.tooling.memory = build_config.override_memory;
-            if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
-                metadata.tooling.active_skills = active_skill_ids;
-            }
-            metadata.keep_alive = build_config.keep_alive;
-            metadata.comms_name = build_config.comms_name;
-            metadata.peer_meta = build_config.peer_meta;
-            metadata.realm_id = build_config.realm_id;
-            metadata.instance_id = build_config.instance_id;
-            metadata.backend = build_config.backend;
-            metadata.config_generation = build_config.config_generation;
-            metadata.connection_ref = build_config.connection_ref.clone();
-            metadata
-        } else {
-            SessionMetadata {
-                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
-                model,
-                max_tokens,
-                structured_output_retries: build_config.structured_output_retries,
-                provider,
-                self_hosted_server_id,
-                provider_params: build_config.provider_params,
-                tooling: SessionTooling {
-                    builtins: build_config.override_builtins,
-                    shell: build_config.override_shell,
-                    comms: ToolCategoryOverride::Inherit,
-                    mob: build_config.override_mob,
-                    memory: build_config.override_memory,
-                    active_skills: active_skill_ids,
-                },
-                keep_alive: build_config.keep_alive,
-                comms_name: build_config.comms_name,
-                peer_meta: build_config.peer_meta,
-                realm_id: build_config.realm_id,
-                instance_id: build_config.instance_id,
-                backend: build_config.backend,
-                config_generation: build_config.config_generation,
-                connection_ref: build_config.connection_ref.clone(),
-            }
-        };
-        if let Err(err) = agent.session_mut().set_session_metadata(metadata) {
-            tracing::warn!("Failed to store session metadata: {}", err);
-        }
-        if let Err(err) = agent.session_mut().set_build_state(persisted_build_state) {
-            tracing::warn!("Failed to store session build state: {}", err);
         }
 
         Ok(agent)

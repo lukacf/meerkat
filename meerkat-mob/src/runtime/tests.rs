@@ -75,6 +75,37 @@ fn default_supervisor_authority_record() -> SupervisorAuthorityRecord {
     )
 }
 
+fn factory_policy_session(mut session: Session, model: String, max_tokens: u32) -> Session {
+    if session.session_metadata().is_none() {
+        session
+            .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model,
+                max_tokens,
+                structured_output_retries: 2,
+                provider: Provider::Other,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                connection_ref: None,
+            })
+            .expect("test metadata serializes");
+    }
+    if session.build_state().is_none() {
+        session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("test build state serializes");
+    }
+    session
+}
+
 fn install_ephemeral_peer_request_response_authority(
     runtime: &Arc<meerkat_comms::CommsRuntime>,
     session: &str,
@@ -4637,24 +4668,35 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         if let Some(system_prompt) = &req.system_prompt {
             builder = builder.system_prompt(system_prompt.clone());
         }
-        if let Some(session) = req
+        let session = req
             .build
             .as_ref()
             .and_then(|build| build.resume_session.clone())
-        {
-            builder = builder.resume_session(session);
-        }
+            .unwrap_or_else(Session::new);
+        builder = builder.resume_session(factory_policy_session(
+            session,
+            req.model.clone(),
+            req.max_tokens.unwrap_or(1024),
+        ));
+        let mut has_turn_state_handle = false;
         if let Some(build) = &req.build {
             match &build.runtime_build_mode {
                 meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings) => {
                     builder = builder.with_turn_state_handle(Arc::clone(&bindings.turn_state));
+                    has_turn_state_handle = true;
                 }
                 meerkat_core::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral => {
                     builder = builder.with_turn_state_handle(Arc::new(
                         meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
                     ));
+                    has_turn_state_handle = true;
                 }
             }
+        }
+        if !has_turn_state_handle {
+            builder = builder.with_turn_state_handle(Arc::new(
+                meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
+            ));
         }
 
         let client = Arc::new(OverlayProbeLlmClient {
@@ -4662,7 +4704,10 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         });
         let tools = Arc::new(OverlayProbeDispatcher::new());
         let store = Arc::new(OverlayProbeSessionStore);
-        let agent = builder.build_standalone(client, tools, store).await;
+        let agent = builder
+            .build_after_factory_policy(client, tools, store)
+            .await
+            .map_err(|err| SessionError::Unsupported(err.to_string()))?;
 
         Ok(OverlayProbeSessionAgent { agent })
     }

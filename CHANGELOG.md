@@ -107,8 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `RuntimeSessionHost` extracted and then replaced with free recipe functions at proper crate boundaries: `wire_runtime_bindings`, `materialize_session`, `configure_peer_ingress`, `default_persistent_executor`.
 
 #### AgentBuilder facade now uses AgentFactory
-- Public `meerkat::AgentBuilder` now routes builds through `AgentFactory::build_agent()` and returns `Result<DynAgent, BuildAgentError>`; use `CoreAgentBuilder` or `StandaloneAgentBuilder` for the older concrete `Agent<C, T, S>` standalone builder contract.
-- Standalone-only direct injections (`provider_tool_defaults`, `compactor`, `memory_store`, `with_turn_state_handle`) now fail loudly on the facade builder instead of being ignored; configure the factory path or use `CoreAgentBuilder` when intentionally owning core loop primitives.
+- Public `meerkat::AgentBuilder` now routes builds through `AgentFactory::build_agent()` and returns `Result<DynAgent, BuildAgentError>`.
+- Standalone-only direct injections (`provider_tool_defaults`, `compactor`, `memory_store`, `with_turn_state_handle`) now fail loudly on the facade builder instead of being ignored; configure the factory path for facade-owned settings.
 
 ### Removed
 - **Redb persistence**: All `RedbSessionIndex`, `RedbSessionStore`, and redb-backed storage removed. All persistence is now SQLite (WAL mode) via `SqliteSessionIndex`.

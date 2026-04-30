@@ -505,7 +505,7 @@
           "FILE:@@//Cargo.toml e5d6d35d507c9bc2a5e2b83e17b12b659f92a78addd0a7ae2a24b1cdcc1d6c5e",
           "FILE:@@//meerkat-machine-derive/Cargo.toml f91da732cdc018477e0db4a1e89ea66cbbf1659bc4eae29782f9b6ba2ac487a6",
           "FILE:@@//meerkat-models/Cargo.toml d2c34db2fbe0ef549bec09bb87d7d048cd4af937ae50fe77a74ddecd92308379",
-          "FILE:@@//meerkat-core/Cargo.toml f041b804d1f3b6aaec4561e3764e9ea5108a6343fa27f30d9ea86016d30c7b03",
+          "FILE:@@//meerkat-core/Cargo.toml 0a58caab46c6140bccfa12ab25127b91d8d8e1f53464f5b92eaa19b7db5af72b",
           "FILE:@@//meerkat-llm-core/Cargo.toml 14fd6e29cc62cbcf08a3b967f10eb1a6c6b7c34a4de2cb2bd1961d2c5142c71a",
           "FILE:@@//meerkat-contracts/Cargo.toml cf8e30e4d4810fd574bc7fce0a5bb7fa37abbe3e0f7dda088e6bffc8d38041ec",
           "FILE:@@//meerkat-schedule/Cargo.toml d41d0a1f0e7a62ca70654b698f026ec88d49437f921a9a720ead13b3a56da089",

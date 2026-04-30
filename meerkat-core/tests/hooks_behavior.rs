@@ -151,6 +151,34 @@ impl AgentSessionStore for NoopStore {
     }
 }
 
+fn factory_policy_session() -> meerkat_core::Session {
+    let mut session = meerkat_core::Session::new();
+    session
+        .set_session_metadata(meerkat_core::SessionMetadata {
+            schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+            model: "mock-model".to_string(),
+            max_tokens: 1024,
+            structured_output_retries: 2,
+            provider: meerkat_core::Provider::Other,
+            self_hosted_server_id: None,
+            provider_params: None,
+            tooling: meerkat_core::SessionTooling::default(),
+            keep_alive: false,
+            comms_name: None,
+            peer_meta: None,
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            config_generation: None,
+            connection_ref: None,
+        })
+        .expect("test metadata serializes");
+    session
+        .set_build_state(meerkat_core::SessionBuildState::default())
+        .expect("test build state serializes");
+    session
+}
+
 #[derive(Default)]
 struct TestHookEngine {
     pre_llm_max_tokens: Option<u32>,
@@ -265,12 +293,14 @@ async fn build_agent(
     let store = Arc::new(NoopStore);
 
     AgentBuilder::new()
+        .resume_session(factory_policy_session())
         .with_turn_state_handle(Arc::new(
             meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new(),
         ))
         .with_hook_engine(Arc::new(hooks))
-        .build_standalone(client, tools, store)
+        .build_after_factory_policy(client, tools, store)
         .await
+        .expect("factory policy test builder")
 }
 
 fn test_hooks() -> TestHookEngine {

@@ -20,6 +20,7 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat::*;
+use meerkat_core::AgentBuilder as CoreAgentBuilder;
 use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -1304,8 +1305,31 @@ mod scenario_10_memory {
         };
         let compactor = Arc::new(DefaultCompactor::new(compactor_config))
             as Arc<dyn meerkat_core::compact::Compactor>;
-        let memory_session = meerkat_core::Session::new();
+        let mut memory_session = meerkat_core::Session::new();
         let memory_session_id = memory_session.id().clone();
+        memory_session
+            .set_session_metadata(SessionMetadata {
+                schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+                model: smoke_model().to_string(),
+                max_tokens: 512,
+                structured_output_retries: 2,
+                provider: Provider::Anthropic,
+                self_hosted_server_id: None,
+                provider_params: None,
+                tooling: SessionTooling::default(),
+                keep_alive: false,
+                comms_name: None,
+                peer_meta: None,
+                realm_id: None,
+                instance_id: None,
+                backend: None,
+                config_generation: None,
+                connection_ref: None,
+            })
+            .expect("test metadata serializes");
+        memory_session
+            .set_build_state(meerkat_core::SessionBuildState::default())
+            .expect("test build state serializes");
 
         // Build memory_search tool dispatcher
         let memory_dispatcher = meerkat_memory::MemorySearchDispatcher::for_session(
@@ -1333,8 +1357,9 @@ mod scenario_10_memory {
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ))
-            .build_standalone(llm_adapter, memory_tools, store_adapter)
-            .await;
+            .build_after_factory_policy(llm_adapter, memory_tools, store_adapter)
+            .await
+            .expect("factory-policy memory smoke builder");
 
         // Turn 1: Distinctive content
         let r1 = agent

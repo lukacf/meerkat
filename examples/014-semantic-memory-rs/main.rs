@@ -25,7 +25,8 @@
 
 use std::sync::Arc;
 
-use meerkat::{AgentFactory, AnthropicClient, CoreAgentBuilder, ToolGatewayBuilder};
+use meerkat::{AgentFactory, AnthropicClient, ToolGatewayBuilder};
+use meerkat_core::AgentBuilder as CoreAgentBuilder;
 use meerkat_core::memory::{
     MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryStore as _,
 };
@@ -56,8 +57,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // similarity search backed by hnsw_rs + SQLite persistence.
 
     let memory_store = Arc::new(SimpleMemoryStore::new());
-    let memory_session = meerkat_core::Session::new();
+    let mut memory_session = meerkat_core::Session::new();
     let memory_session_id = memory_session.id().clone();
+    memory_session.set_session_metadata(meerkat_core::SessionMetadata {
+        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+        model: "claude-sonnet-4-6".to_string(),
+        max_tokens: 1024,
+        structured_output_retries: 2,
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+        tooling: meerkat_core::SessionTooling::default(),
+        keep_alive: false,
+        comms_name: None,
+        peer_meta: None,
+        realm_id: None,
+        instance_id: None,
+        backend: None,
+        config_generation: None,
+        connection_ref: None,
+    })?;
+    memory_session.set_build_state(meerkat_core::SessionBuildState::default())?;
 
     // ── Step 2: Pre-seed memory with facts ───────────────────────────────────
     //
@@ -142,8 +162,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_turn_state_handle(Arc::new(
             meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
         ))
-        .build_standalone(Arc::new(llm), Arc::new(gateway), store)
-        .await;
+        .build_after_factory_policy(Arc::new(llm), Arc::new(gateway), store)
+        .await?;
 
     // ── Step 6: Ask the agent to recall from memory ──────────────────────────
 

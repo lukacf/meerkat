@@ -65,6 +65,20 @@ pub struct AgentBuilder {
         Option<Arc<dyn crate::handles::McpServerLifecycleHandle>>,
 }
 
+/// Error returned when the canonical factory has not composed the policy state
+/// required before crossing into core agent construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AgentBuildPolicyError {
+    #[error("factory policy build requires an explicit session")]
+    MissingSession,
+    #[error("factory policy build requires session metadata")]
+    MissingSessionMetadata,
+    #[error("factory policy build requires session build state metadata")]
+    MissingSessionBuildState,
+    #[error("factory policy build requires a runtime turn-state handle")]
+    MissingTurnStateHandle,
+}
+
 impl AgentBuilder {
     /// Create a new agent builder with default config
     pub fn new() -> Self {
@@ -212,11 +226,34 @@ impl AgentBuilder {
         self
     }
 
+    /// Build after the canonical factory has composed policy metadata.
+    ///
+    /// This is the production construction seam. It refuses to build unless
+    /// the surrounding factory has attached durable session metadata, durable
+    /// build-state metadata, and a runtime turn-state handle to the builder.
+    pub async fn build_after_factory_policy<C, T, S>(
+        self,
+        client: Arc<C>,
+        tools: Arc<T>,
+        store: Arc<S>,
+    ) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
+    where
+        C: AgentLlmClient + ?Sized,
+        T: AgentToolDispatcher + ?Sized,
+        S: AgentSessionStore + ?Sized,
+    {
+        self.validate_factory_policy()?;
+        Ok(self.build_inner(client, tools, store).await)
+    }
+
     /// Build a standalone low-level agent without facade/factory policy.
     ///
     /// This is an explicit escape hatch for core tests and embeddings that own
     /// every loop primitive themselves. Production-facing Meerkat surfaces
-    /// should route through `AgentFactory::build_agent`.
+    /// should route through `AgentFactory::build_agent`. The method is not part
+    /// of the default production API; embedding users must opt into the
+    /// `standalone-agent-builder` feature explicitly.
+    #[cfg(any(test, feature = "standalone-agent-builder"))]
     pub async fn build_standalone<C, T, S>(
         self,
         client: Arc<C>,
@@ -229,6 +266,23 @@ impl AgentBuilder {
         S: AgentSessionStore + ?Sized,
     {
         self.build_inner(client, tools, store).await
+    }
+
+    fn validate_factory_policy(&self) -> Result<(), AgentBuildPolicyError> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(AgentBuildPolicyError::MissingSession)?;
+        if session.session_metadata().is_none() {
+            return Err(AgentBuildPolicyError::MissingSessionMetadata);
+        }
+        if session.build_state().is_none() {
+            return Err(AgentBuildPolicyError::MissingSessionBuildState);
+        }
+        if self.turn_state_handle.is_none() {
+            return Err(AgentBuildPolicyError::MissingTurnStateHandle);
+        }
+        Ok(())
     }
 
     async fn build_inner<C, T, S>(

@@ -17,7 +17,8 @@
 
 use std::sync::Arc;
 
-use meerkat::{AgentEvent, AgentFactory, AnthropicClient, CoreAgentBuilder, DefaultCompactor};
+use meerkat::{AgentEvent, AgentFactory, AnthropicClient, DefaultCompactor};
+use meerkat_core::AgentBuilder as CoreAgentBuilder;
 use meerkat_core::compact::CompactionConfig;
 use meerkat_store::{JsonlStore, StoreAdapter};
 use meerkat_tools::EmptyToolDispatcher;
@@ -56,6 +57,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Compaction threshold: 2000 tokens (low for demo purposes)");
     println!("Recent turns preserved: 2\n");
 
+    let mut session = meerkat_core::Session::new();
+    session.set_session_metadata(meerkat_core::SessionMetadata {
+        schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
+        model: "claude-sonnet-4-6".to_string(),
+        max_tokens: 1024,
+        structured_output_retries: 2,
+        provider: meerkat_core::Provider::Anthropic,
+        self_hosted_server_id: None,
+        provider_params: None,
+        tooling: meerkat_core::SessionTooling::default(),
+        keep_alive: false,
+        comms_name: None,
+        peer_meta: None,
+        realm_id: None,
+        instance_id: None,
+        backend: None,
+        config_generation: None,
+        connection_ref: None,
+    })?;
+    session.set_build_state(meerkat_core::SessionBuildState::default())?;
+
     // Build a low-level core agent with the compactor wired in directly.
     let mut agent = CoreAgentBuilder::new()
         .model("claude-sonnet-4-6")
@@ -65,12 +87,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              detailed explanations with code examples.",
         )
         .max_tokens_per_turn(1024)
+        .resume_session(session)
         .compactor(compactor)
         .with_turn_state_handle(Arc::new(
             meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
         ))
-        .build_standalone(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
-        .await;
+        .build_after_factory_policy(Arc::new(llm), Arc::new(EmptyToolDispatcher), store)
+        .await?;
 
     // Simulate a long conversation that will trigger compaction.
     // Each prompt asks for detailed explanations to accumulate tokens quickly.

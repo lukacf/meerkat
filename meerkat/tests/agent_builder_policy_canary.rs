@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,19 @@ fn is_test_source(path: &Path) -> bool {
         || path.file_name().is_some_and(|name| name == "tests.rs")
 }
 
+fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
+    let Some(pos) = source.find("pub async fn build_standalone") else {
+        return true;
+    };
+    let cfg_window = source[..pos]
+        .lines()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    cfg_window.contains(r#"#[cfg(any(test, feature = "standalone-agent-builder"))]"#)
+}
+
 #[test]
 fn core_agent_builder_does_not_expose_public_build_bypass() {
     let builder = repo_file("meerkat-core/src/agent/builder.rs");
@@ -45,9 +59,21 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          route through AgentFactory policy or an explicitly named low-level seam"
     );
     assert!(
+        public_standalone_build_is_cfg_gated(&builder),
+        "meerkat_core::AgentBuilder must not expose public standalone \
+         build(client, tools, store) in its default production API; low-level \
+         standalone construction must be test/embedding opt-in"
+    );
+    assert!(
         !builder.contains("pub async fn build_with_factory_policy"),
         "meerkat_core::AgentBuilder must not expose a public factory-policy \
          seam backed by a publicly mintable token"
+    );
+    assert!(
+        builder.contains("pub async fn build_after_factory_policy")
+            && builder.contains("self.validate_factory_policy()?"),
+        "canonical factory construction must cross into core through a \
+         validating factory-policy seam"
     );
     assert!(
         !builder.contains("pub struct AgentFactoryBuildToken")
@@ -61,6 +87,7 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
 fn core_factory_authority_token_is_not_reexported() {
     let agent_mod = repo_file("meerkat-core/src/agent.rs");
     let lib = repo_file("meerkat-core/src/lib.rs");
+    let facade_lib = repo_file("meerkat/src/lib.rs");
 
     assert!(
         !agent_mod.contains("AgentFactoryBuildToken"),
@@ -72,13 +99,18 @@ fn core_factory_authority_token_is_not_reexported() {
         "meerkat_core must not re-export a factory token that downstream crates \
          can mint or pass"
     );
+    assert!(
+        !facade_lib.contains("CoreAgentBuilder") && !facade_lib.contains("StandaloneAgentBuilder"),
+        "meerkat facade must not publicly re-export the core builder as a \
+         standalone construction shortcut"
+    );
 }
 
 #[test]
 fn production_crates_do_not_adopt_standalone_builder_seam() {
     let root = repo_root();
-    let allowed_factory = root.join("meerkat/src/factory.rs");
     let mut production_files = Vec::new();
+    let mut scanned_crates = BTreeSet::new();
 
     for entry in
         fs::read_dir(&root).unwrap_or_else(|err| panic!("failed to read {}: {err}", root.display()))
@@ -93,10 +125,20 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
         }
         let src = path.join("src");
         if src.is_dir() {
+            scanned_crates.insert(name.to_string());
             rust_files_under(&src, &mut production_files);
         }
     }
+    scanned_crates.insert("meerkat".to_string());
     rust_files_under(&root.join("meerkat/src"), &mut production_files);
+
+    for required in ["meerkat-runtime", "meerkat-rest", "meerkat-rpc"] {
+        assert!(
+            scanned_crates.contains(required),
+            "production canary did not scan {required}; ensure Cargo and \
+             Bazel/BuildBuddy runfiles include the intended production crate set"
+        );
+    }
 
     for path in production_files {
         if is_test_source(&path) {
@@ -104,23 +146,19 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
         }
         let source = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        if path != allowed_factory {
-            assert!(
-                !source.contains(".build_standalone("),
-                "production source must not bypass AgentFactory via build_standalone: {}",
-                path.display()
-            );
-        }
+        assert!(
+            !source.contains(".build_standalone("),
+            "production source must not bypass AgentFactory via build_standalone: {}",
+            path.display()
+        );
 
-        if path != allowed_factory {
-            assert!(
-                !source.contains("build_with_factory_policy(")
-                    && !source.contains("new_unchecked_for_canonical_factory"),
-                "production source must not depend on a publicly mintable \
-                 core factory-token seam: {}",
-                path.display()
-            );
-        }
+        assert!(
+            !source.contains("build_with_factory_policy(")
+                && !source.contains("new_unchecked_for_canonical_factory"),
+            "production source must not depend on a publicly mintable \
+             core factory-token seam: {}",
+            path.display()
+        );
     }
 }
 
@@ -133,6 +171,11 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
         !factory.contains("builder.build(llm_adapter, tools, store_adapter)"),
         "AgentFactory must not enter meerkat_core through the removed \
          unqualified build seam"
+    );
+    assert!(
+        !factory.contains(".build_standalone("),
+        "AgentFactory must not enter meerkat_core through the standalone \
+         test/embedding seam"
     );
     assert!(
         !comms_agent.contains("pub struct CommsAgentBuilder"),

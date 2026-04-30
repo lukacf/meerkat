@@ -35,8 +35,8 @@ use meerkat_core::CommsRuntimeMode;
 #[cfg(feature = "mob")]
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, DeferredPromptPolicy, SessionBuildOptions, SessionError, SessionQuery,
-    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, SessionBuildOptions, SessionQuery, SessionService,
+    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, AuthStatusPhase, BlobId, ConnectionRef, EventEnvelope, RealmConfig, RealmLocator,
@@ -4966,6 +4966,10 @@ impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for CliRuntimeInterrup
         self.service
             .interrupt(&self.session_id)
             .await
+            .or_else(|err| match err {
+                meerkat::SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
             .map_err(|err| {
                 meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
                     err.to_string(),
@@ -7927,10 +7931,17 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
         let session_id = resolve_scoped_session_id(id, scope)?;
 
         let (config, _) = load_config(scope).await?;
-        let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+        let (service, runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+        service
+            .read(&session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to interrupt session: {e}"))?;
 
-        match service.interrupt(&session_id).await {
-            Ok(()) | Err(SessionError::NotRunning { .. }) => {
+        match runtime_adapter
+            .hard_cancel_current_run(&session_id, "CLI session interrupt")
+            .await
+        {
+            Ok(()) | Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => {
                 println!("Interrupted session: {session_id}");
                 println!(
                     "Session Ref: {}",

@@ -39,11 +39,15 @@ use meerkat::{
 };
 use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::lifecycle::RunId;
-use meerkat_core::PendingSystemContextAppend;
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
+};
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
 use meerkat_core::mcp_config::McpConfig;
+use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
     StartTurnRequest,
@@ -1075,6 +1079,44 @@ impl TargetCoreExecutor {
     }
 }
 
+struct TargetCoreBoundaryHandle {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorBoundaryHandle for TargetCoreBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|error| match error {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                error => Err(error),
+            })
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
+struct TargetCoreInterruptHandle {
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorInterruptHandle for TargetCoreInterruptHandle {
+    async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.service
+            .interrupt(&self.session_id)
+            .await
+            .or_else(|error| match error {
+                SessionError::NotRunning { .. } => Ok(()),
+                error => Err(error),
+            })
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
+}
+
 fn render_runtime_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -1137,6 +1179,20 @@ fn start_turn_request_from_primitive(
 
 #[async_trait::async_trait]
 impl CoreExecutor for TargetCoreExecutor {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(TargetCoreBoundaryHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(TargetCoreInterruptHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: RunId,
@@ -1160,6 +1216,10 @@ impl CoreExecutor for TargetCoreExecutor {
         self.service
             .cancel_after_boundary(&self.session_id)
             .await
+            .or_else(|error| match error {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                error => Err(error),
+            })
             .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))
     }
 

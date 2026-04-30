@@ -462,6 +462,10 @@ impl CoreExecutorInterruptHandle for McpSessionRuntimeInterruptHandle {
             .service
             .interrupt(&self.session_id)
             .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 }

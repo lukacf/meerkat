@@ -760,6 +760,10 @@ impl CoreExecutorInterruptHandle for MobSessionRuntimeInterruptHandle {
         self.session_service
             .interrupt(&self.bridge_session_id)
             .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 }

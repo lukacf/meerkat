@@ -85,6 +85,20 @@ EOF
     exit 1
   fi
 
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-rest/src"
+  cat >"$tmpdir/meerkat-rest/src/lib.rs" <<'EOF'
+async fn public_interrupt(service: Service, session_id: SessionId) {
+    let _ = service.interrupt(&session_id).await;
+}
+EOF
+  if "$0" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: public surface interrupt fixture passed" >&2
+    exit 1
+  fi
+
   echo "audit-effect-authority self-test passed"
   exit 0
 fi
@@ -109,7 +123,37 @@ report_matches() {
 run_rg() {
   local pattern="$1"
   shift
-  rg -n "$pattern" "$root" --glob '!target/**' --glob '!scripts/audit-effect-authority.sh' "$@" 2>/dev/null || true
+  (cd "$root" && rg -n "$pattern" . --glob '!target/**' --glob '!scripts/audit-effect-authority.sh' "$@") 2>/dev/null || true
+}
+
+strip_core_executor_interrupt_impls() {
+  awk '
+    function brace_delta(line, opened, closed, copy) {
+      copy = line
+      opened = gsub(/\{/, "{", copy)
+      copy = line
+      closed = gsub(/\}/, "}", copy)
+      return opened - closed
+    }
+    /impl[[:space:]][^{]*CoreExecutorInterruptHandle[[:space:]]+for[[:space:]]/ {
+      in_impl = 1
+      depth = 0
+      saw_open = 0
+    }
+    in_impl {
+      if (index($0, "{") > 0) {
+        saw_open = 1
+      }
+      depth += brace_delta($0)
+      if (saw_open && depth <= 0) {
+        in_impl = 0
+        depth = 0
+        saw_open = 0
+      }
+      next
+    }
+    { print }
+  ' "$1"
 }
 
 run_control_name="RunControl""Command"
@@ -176,6 +220,24 @@ fi
 
 authority_mints="$(run_rg 'UserInterruptAuthority::new\(\)' --glob '!meerkat-runtime/src/meerkat_machine/runtime_control.rs')"
 report_matches "UserInterruptAuthority may only be minted by the command-owned interrupt path" "$authority_mints"
+
+public_interrupt_bypasses=""
+for surface_file in \
+  "$root/meerkat-rest/src/lib.rs" \
+  "$root/meerkat-mcp-server/src/lib.rs" \
+  "$root/meerkat-rpc/src/handlers/session.rs" \
+  "$root/meerkat-rpc/src/handlers/turn.rs" \
+  "$root/meerkat-cli/src/main.rs"
+do
+  if [[ -f "$surface_file" ]]; then
+    found="$(strip_core_executor_interrupt_impls "$surface_file" \
+      | rg -n '\b(runtime|service|svc|session_service|cancel_svc|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(' 2>/dev/null || true)"
+    if [[ -n "$found" ]]; then
+      public_interrupt_bypasses+="$surface_file"$'\n'"$found"$'\n'
+    fi
+  fi
+done
+report_matches "public surface interrupt paths must route through MeerkatMachine::hard_cancel_current_run" "$public_interrupt_bypasses"
 
 report_matches "direct RuntimeEffect constructor helpers are forbidden" \
   "$(run_rg 'RuntimeEffect::(cancel_after_boundary|stop_runtime_executor)\b')"

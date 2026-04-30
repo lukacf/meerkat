@@ -1862,9 +1862,17 @@ async fn handle_meerkat_interrupt(
         meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
     state
         .service
-        .interrupt(&session_id)
+        .read(&session_id)
         .await
         .map_err(|e| format!("Failed to interrupt session: {e}"))?;
+    match state
+        .runtime_adapter
+        .hard_cancel_current_run(&session_id, "MCP session interrupt")
+        .await
+    {
+        Ok(()) | Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => {}
+        Err(e) => return Err(format!("Failed to interrupt session: {e}")),
+    }
     Ok(wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "interrupted": true
@@ -2632,14 +2640,16 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     if let Some(context) = request_context.as_ref() {
-        let service = state.service.clone();
+        let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
             .install_cancel_action_or_cancelled(request_action(move || {
-                let service = service.clone();
+                let runtime_adapter = runtime_adapter.clone();
                 let session_id = session_id_for_cancel.clone();
                 async move {
-                    let _ = service.interrupt(&session_id).await;
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
+                        .await;
                 }
             }))
             .await;
@@ -2817,14 +2827,16 @@ async fn handle_meerkat_resume(
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
 
     if let Some(context) = request_context.as_ref() {
-        let service = state.service.clone();
+        let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
             .install_cancel_action_or_cancelled(request_action(move || {
-                let service = service.clone();
+                let runtime_adapter = runtime_adapter.clone();
                 let session_id = session_id_for_cancel.clone();
                 async move {
-                    let _ = service.interrupt(&session_id).await;
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
+                        .await;
                 }
             }))
             .await;

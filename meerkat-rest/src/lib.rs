@@ -236,6 +236,10 @@ impl CoreExecutorInterruptHandle for RestSessionRuntimeInterruptHandle {
             .session_service
             .interrupt(&self.session_id)
             .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 }
@@ -2858,14 +2862,16 @@ async fn create_session_inner(
         // Install cancel action: interrupt the session. If a cancel already
         // landed before this install, install_cancel_action fires the newly
         // installed action immediately and reports the observed phase.
-        let cancel_svc = state.session_service.clone();
+        let cancel_adapter = state.runtime_adapter.clone();
         let cancel_sid = session_id.clone();
         let phase = ctx
             .install_cancel_action_or_cancelled(request_action(move || {
-                let svc = cancel_svc.clone();
+                let adapter = cancel_adapter.clone();
                 let sid = cancel_sid.clone();
                 async move {
-                    let _ = svc.interrupt(&sid).await;
+                    let _ = adapter
+                        .hard_cancel_current_run(&sid, "REST request cancelled")
+                        .await;
                 }
             }))
             .await;
@@ -3368,14 +3374,15 @@ async fn interrupt_session(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
-    match state.session_service.interrupt(&session_id).await {
-        Ok(()) | Err(SessionError::NotRunning { .. }) => Ok(Json(json!({
+    match state
+        .runtime_adapter
+        .hard_cancel_current_run(&session_id, "REST session interrupt")
+        .await
+    {
+        Ok(()) | Err(meerkat_runtime::RuntimeDriverError::NotReady { .. }) => Ok(Json(json!({
             "session_id": session_id.to_string(),
             "interrupted": true
         }))),
-        Err(SessionError::NotFound { .. }) => {
-            Err(ApiError::NotFound(format!("Session not found: {id}")))
-        }
         Err(e) => Err(ApiError::Internal(format!(
             "Failed to interrupt session: {e}"
         ))),
@@ -3775,14 +3782,16 @@ async fn continue_session_inner(
                 }
             }));
 
-            let cancel_svc = state.session_service.clone();
+            let cancel_adapter = state.runtime_adapter.clone();
             let cancel_sid = session_id.clone();
             let phase = ctx
                 .install_cancel_action_or_cancelled(request_action(move || {
-                    let svc = cancel_svc.clone();
+                    let adapter = cancel_adapter.clone();
                     let sid = cancel_sid.clone();
                     async move {
-                        let _ = svc.interrupt(&sid).await;
+                        let _ = adapter
+                            .hard_cancel_current_run(&sid, "REST request cancelled")
+                            .await;
                     }
                 }))
                 .await;
@@ -3910,14 +3919,16 @@ async fn continue_session_inner(
 
         // Install cancel action: interrupt the session.
         if let Some(ctx) = req_ctx.as_ref() {
-            let cancel_svc = state.session_service.clone();
+            let cancel_adapter = state.runtime_adapter.clone();
             let cancel_sid = session_id.clone();
             let phase = ctx
                 .install_cancel_action_or_cancelled(request_action(move || {
-                    let svc = cancel_svc.clone();
+                    let adapter = cancel_adapter.clone();
                     let sid = cancel_sid.clone();
                     async move {
-                        let _ = svc.interrupt(&sid).await;
+                        let _ = adapter
+                            .hard_cancel_current_run(&sid, "REST request cancelled")
+                            .await;
                     }
                 }))
                 .await;

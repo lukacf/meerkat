@@ -170,6 +170,10 @@ impl CoreExecutorInterruptHandle for PersistentRuntimeInterruptHandle {
         self.service
             .interrupt(&self.session_id)
             .await
+            .or_else(|error| match error {
+                SessionError::NotRunning { .. } => Ok(()),
+                error => Err(error),
+            })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
 }

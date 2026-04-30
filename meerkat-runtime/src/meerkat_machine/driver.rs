@@ -831,12 +831,25 @@ pub(crate) fn machine_batch_peer_response_terminal_apply_intent(
 
 pub(crate) fn machine_batch_primitive_projections(
     driver: &DriverEntry,
-    work_ids: &[InputId],
+    inputs: &[(InputId, Input)],
 ) -> Vec<crate::ingress_types::RuntimeInputProjection> {
     let ingress = driver.driver_ingress();
-    work_ids
+    inputs
         .iter()
-        .map(|id| ingress.primitive_projection(id).unwrap_or_default())
+        .map(|(id, input)| {
+            let projection = ingress.primitive_projection(id).unwrap_or_default();
+            if matches!(
+                input,
+                Input::Peer(crate::input::PeerInput {
+                    convention: Some(crate::input::PeerConvention::ResponseTerminal { .. }),
+                    ..
+                })
+            ) {
+                crate::input::runtime_input_projection_for_machine_batch(input)
+            } else {
+                projection
+            }
+        })
         .collect()
 }
 

@@ -223,7 +223,7 @@ async fn completed_response_idle_wakes() {
 }
 
 #[tokio::test]
-async fn completed_response_admission_stamps_context_and_run_apply_intent() {
+async fn completed_response_admission_stamps_apply_intent_without_context_projection() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
     let interaction = make_response("peer-1", ResponseStatus::Completed);
     let input = runtime_input_for_interaction(&interaction, &rid());
@@ -254,7 +254,10 @@ async fn completed_response_admission_stamps_context_and_run_apply_intent() {
         .admitted_primitive_projection(&input_id)
         .expect("accepted input should have primitive projection");
     assert!(projection.append.is_none());
-    assert!(projection.context_append.is_some());
+    assert!(
+        projection.context_append.is_none(),
+        "terminal response context projection is supplied by the machine-selected runtime batch"
+    );
 }
 
 // ---------------------------------------------------------------------------

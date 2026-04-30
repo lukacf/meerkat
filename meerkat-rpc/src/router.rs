@@ -102,8 +102,8 @@ fn load_configured_mcp_tools_for_rpc_mob(
     }
 
     let mut router = meerkat::McpRouter::new();
-    for scoped in servers {
-        if let Err(error) = router.stage_add(scoped.server) {
+    for scoped in &servers {
+        if let Err(error) = router.stage_add(scoped.server.clone()) {
             tracing::warn!(error = %error, "failed to stage configured MCP server for RPC mob members");
         }
     }
@@ -117,10 +117,18 @@ fn load_configured_mcp_tools_for_rpc_mob(
             .map_err(|error| format!("build MCP connect runtime: {error}"))
             .map(|runtime| {
                 runtime.block_on(async move {
+                    let apply = adapter_for_poll
+                        .apply_staged()
+                        .await
+                        .map_err(|error| format!("apply staged MCP servers: {error}"))?;
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     loop {
                         let update = adapter_for_poll.poll_external_updates().await;
-                        if update.pending.is_empty() {
+                        if apply.pending_count == 0 || update.pending.is_empty() {
+                            adapter_for_poll
+                                .refresh_tools()
+                                .await
+                                .map_err(|error| format!("refresh MCP tools: {error}"))?;
                             return Ok(());
                         }
                         if std::time::Instant::now() >= deadline {

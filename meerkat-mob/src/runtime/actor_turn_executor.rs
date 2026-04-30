@@ -165,16 +165,7 @@ impl ActorFlowTurnExecutor {
                         }
                         return;
                     }
-                    AgentEvent::InteractionCallbackPending {
-                        tool_name, args, ..
-                    } => {
-                        if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: format!("callback pending for tool '{tool_name}': {args}"),
-                            });
-                        }
-                        return;
-                    }
+                    AgentEvent::InteractionCallbackPending { .. } => {}
                     AgentEvent::RunFailed { error, .. }
                     | AgentEvent::InteractionFailed { error, .. } => {
                         if let Some(tx) = completion_tx.take() {
@@ -454,10 +445,15 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
 mod tests {
     use super::ActorFlowTurnExecutor;
     use crate::ids::RunId;
+    use crate::runtime::turn_executor::FlowTurnOutcome;
+    use meerkat_core::event::AgentEvent;
+    use meerkat_core::interaction::InteractionId;
+    use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, oneshot};
+    use uuid::Uuid;
 
     #[test]
     fn test_release_orphan_slot_caps_at_max_budget() {
@@ -508,5 +504,42 @@ mod tests {
             !per_run_orphans.lock().await.contains_key(&run_id),
             "detached panic path should release per-run orphan accounting"
         );
+    }
+
+    #[tokio::test]
+    async fn test_subscription_bridge_keeps_waiting_after_callback_pending() {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let (completion_tx, mut completion_rx) = oneshot::channel();
+
+        let bridge =
+            ActorFlowTurnExecutor::spawn_subscription_bridge(event_rx, completion_tx, None, None);
+        let interaction_id = InteractionId(Uuid::new_v4());
+
+        event_tx
+            .send(AgentEvent::InteractionCallbackPending {
+                interaction_id,
+                tool_name: "linear.save_comment".to_string(),
+                args: json!({"issueId": "LUC-238"}),
+            })
+            .await
+            .expect("send callback-pending event");
+        assert!(
+            completion_rx.try_recv().is_err(),
+            "callback-pending is a non-terminal tool boundary, not a failed flow turn"
+        );
+
+        event_tx
+            .send(AgentEvent::InteractionComplete {
+                interaction_id,
+                result: "planned".to_string(),
+            })
+            .await
+            .expect("send completion event");
+
+        match completion_rx.await.expect("completion outcome") {
+            FlowTurnOutcome::Completed { output } => assert_eq!(output, "planned"),
+            other => panic!("expected completed outcome after callback-pending, got {other:?}"),
+        }
+        bridge.await.expect("bridge task exits cleanly");
     }
 }

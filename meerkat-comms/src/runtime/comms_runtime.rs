@@ -81,6 +81,10 @@ impl StreamRegistryEntry {
 }
 
 type InteractionStreamRegistry = Arc<Mutex<HashMap<Uuid, StreamRegistryEntry>>>;
+type PeerRequestResponseAuthorityHandles = (
+    Arc<dyn meerkat_core::handles::PeerInteractionHandle>,
+    Arc<dyn meerkat_core::handles::InteractionStreamHandle>,
+);
 
 #[derive(Clone)]
 pub struct PeerRequestResponseAuthority {
@@ -558,11 +562,10 @@ impl CoreCommsRuntime for CommsRuntime {
                 let interaction_id = Uuid::new_v4();
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
-                let peer_handle = self.require_peer_interaction_authority("PeerRequest")?;
+                let (peer_handle, stream_authority) =
+                    self.require_peer_request_response_authority("PeerRequest")?;
                 let stream_handle = if stream_reserved {
-                    Some(self.require_interaction_stream_authority(
-                        "PeerRequest with ReserveInteraction",
-                    )?)
+                    Some(stream_authority)
                 } else {
                     None
                 };
@@ -627,7 +630,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 result,
                 handling_mode,
             } => {
-                let peer_handle = self.require_peer_interaction_authority("PeerResponse")?;
+                let (peer_handle, _stream_authority) =
+                    self.require_peer_request_response_authority("PeerResponse")?;
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
                 let core_status = status;
                 let status = match status {
@@ -731,9 +735,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
-                let peer_handle = self.require_peer_interaction_authority("PeerRequest")?;
-                let stream_handle = self
-                    .require_interaction_stream_authority("PeerRequest with ReserveInteraction")?;
+                let (peer_handle, stream_handle) =
+                    self.require_peer_request_response_authority("PeerRequest")?;
 
                 if let Err(err) = peer_handle.request_sent(corr_id, to.peer_id.to_string()) {
                     tracing::warn!(
@@ -865,6 +868,17 @@ impl CoreCommsRuntime for CommsRuntime {
         &self,
     ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
         self.peer_interaction_handle()
+    }
+
+    fn peer_request_response_authority_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::handles::PeerInteractionHandle>> {
+        let peer_handle = self.peer_interaction_handle();
+        if peer_handle.is_some() && self.interaction_stream_handle().is_some() {
+            peer_handle
+        } else {
+            None
+        }
     }
 
     async fn drain_classified_inbox_interactions(
@@ -1718,9 +1732,18 @@ impl CommsRuntime {
         })
     }
 
+    fn require_peer_request_response_authority(
+        &self,
+        command: &'static str,
+    ) -> Result<PeerRequestResponseAuthorityHandles, SendError> {
+        let peer_handle = self.require_peer_interaction_authority(command)?;
+        let stream_handle = self.require_interaction_stream_authority(command)?;
+        Ok((peer_handle, stream_handle))
+    }
+
     fn peer_request_response_sendable_kinds(&self) -> Vec<PeerSendability> {
         let mut kinds = vec![PeerSendability::PeerMessage];
-        if self.peer_interaction_handle().is_some() {
+        if self.peer_interaction_handle().is_some() && self.interaction_stream_handle().is_some() {
             kinds.push(PeerSendability::PeerRequest);
             kinds.push(PeerSendability::PeerResponse);
         }
@@ -3669,6 +3692,148 @@ mod tests {
             .expect("trusted peer should be listed");
 
         assert_eq!(entry.sendable_kinds, vec![PeerSendability::PeerMessage]);
+    }
+
+    #[tokio::test]
+    async fn partial_peer_authority_does_not_advertise_semantic_request_response() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let peer_name = format!("directory-partial-peer-{suffix}");
+        let runtime_name = format!("directory-partial-runtime-{suffix}");
+
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
+        runtime.install_peer_interaction_handle(Arc::new(TestPeerInteractionHandle::default()));
+        CoreCommsRuntime::add_trusted_peer(
+            runtime.as_ref(),
+            trusted_descriptor(
+                &peer_name,
+                peer.public_key(),
+                &format!("inproc://{peer_name}"),
+            ),
+        )
+        .await
+        .expect("runtime should trust peer");
+
+        let peers = CoreCommsRuntime::peers(runtime.as_ref()).await;
+        let entry = peers
+            .iter()
+            .find(|entry| entry.name.as_str() == peer_name)
+            .expect("trusted peer should be listed");
+
+        assert_eq!(entry.sendable_kinds, vec![PeerSendability::PeerMessage]);
+    }
+
+    #[tokio::test]
+    async fn partial_peer_authority_rejects_peer_request_receipts_without_stream_authority() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let peer_name = format!("partial-authority-peer-{suffix}");
+        let runtime_name = format!("partial-authority-runtime-{suffix}");
+
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
+        runtime.install_peer_interaction_handle(Arc::new(TestPeerInteractionHandle::default()));
+        CoreCommsRuntime::add_trusted_peer(
+            runtime.as_ref(),
+            trusted_descriptor(
+                &peer_name,
+                peer.public_key(),
+                &format!("inproc://{peer_name}"),
+            ),
+        )
+        .await
+        .expect("runtime should trust peer");
+        CoreCommsRuntime::add_trusted_peer(
+            &peer,
+            trusted_descriptor(
+                &runtime_name,
+                runtime.public_key(),
+                &format!("inproc://{runtime_name}"),
+            ),
+        )
+        .await
+        .expect("peer should trust runtime");
+
+        let result = CoreCommsRuntime::send(
+            runtime.as_ref(),
+            CommsCommand::PeerRequest {
+                to: peer_route(&peer_name, peer.public_key()),
+                intent: "must-have-complete-authority".to_string(),
+                params: serde_json::json!({}),
+                handling_mode: meerkat_core::types::HandlingMode::Queue,
+                stream: InputStreamMode::None,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SendError::Validation(ref message)) if message.contains("machine interaction stream authority")),
+            "partial peer authority must fail before emitting PeerRequestSent, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_peer_authority_rejects_peer_response_receipts_without_stream_authority() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let peer_name = format!("partial-response-peer-{suffix}");
+        let runtime_name = format!("partial-response-runtime-{suffix}");
+
+        let peer = CommsRuntime::inproc_only(&peer_name).unwrap();
+        let runtime = Arc::new(CommsRuntime::inproc_only(&runtime_name).unwrap());
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        runtime.install_peer_interaction_handle(peer_handle.clone());
+        CoreCommsRuntime::add_trusted_peer(
+            runtime.as_ref(),
+            trusted_descriptor(
+                &peer_name,
+                peer.public_key(),
+                &format!("inproc://{peer_name}"),
+            ),
+        )
+        .await
+        .expect("runtime should trust peer");
+        CoreCommsRuntime::add_trusted_peer(
+            &peer,
+            trusted_descriptor(
+                &runtime_name,
+                runtime.public_key(),
+                &format!("inproc://{runtime_name}"),
+            ),
+        )
+        .await
+        .expect("peer should trust runtime");
+
+        let interaction_id = Uuid::new_v4();
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+        meerkat_core::handles::PeerInteractionHandle::request_received(
+            peer_handle.as_ref(),
+            corr_id,
+        )
+        .expect("seed inbound request state");
+
+        let result = CoreCommsRuntime::send(
+            runtime.as_ref(),
+            CommsCommand::PeerResponse {
+                to: peer_route(&peer_name, peer.public_key()),
+                in_reply_to: InteractionId(interaction_id),
+                status: meerkat_core::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(SendError::Validation(ref message)) if message.contains("machine interaction stream authority")),
+            "partial peer authority must fail before emitting PeerResponseSent, got {result:?}"
+        );
+        assert_eq!(
+            meerkat_core::handles::PeerInteractionHandle::inbound_state(
+                peer_handle.as_ref(),
+                corr_id
+            ),
+            Some(meerkat_core::InboundPeerRequestState::Received),
+            "failed PeerResponse must leave inbound request state retryable"
+        );
     }
 
     #[tokio::test]

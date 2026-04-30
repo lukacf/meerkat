@@ -7,7 +7,9 @@ use meerkat_machine_codegen::{
     render_machine_mapping_coverage, render_machine_module,
 };
 use meerkat_machine_schema::catalog::dsl::{
-    dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
+    dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
+    dsl_mob_machine as mob_machine, dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
+    dsl_schedule_lifecycle_machine as schedule_lifecycle,
 };
 use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
@@ -283,6 +285,186 @@ fn generated_meerkat_operation_kind_uses_string_enum_binding() {
             )),
             "OperationKind serde must preserve raw value `{variant}`:\n{rendered}"
         );
+    }
+}
+
+#[test]
+fn generated_meerkat_closed_dsl_domains_use_string_enum_bindings() {
+    let rendered = render_machine_kernel_module(&meerkat_machine());
+
+    for (domain, variants) in [
+        (
+            "TurnPhase",
+            &[
+                "Ready",
+                "ApplyingPrimitive",
+                "CallingLlm",
+                "WaitingForOps",
+                "DrainingBoundary",
+                "Extracting",
+                "ErrorRecovery",
+                "Cancelling",
+                "Completed",
+                "Failed",
+                "Cancelled",
+            ][..],
+        ),
+        (
+            "DrainPhase",
+            &["Inactive", "Running", "Stopped", "ExitedRespawnable"],
+        ),
+        ("DrainMode", &["Timed", "AttachedSession", "PersistentHost"]),
+        (
+            "McpServerState",
+            &["PendingConnect", "Connected", "Failed", "Disconnected"],
+        ),
+        (
+            "RealtimeReconnectCycleState",
+            &["Idle", "Reconnecting", "Exhausted"],
+        ),
+        (
+            "OperationTerminalOutcomeKind",
+            &[
+                "Completed",
+                "Failed",
+                "Aborted",
+                "Cancelled",
+                "Retired",
+                "Terminated",
+            ],
+        ),
+    ] {
+        assert!(
+            rendered.contains(&format!("pub enum {domain}")),
+            "{domain} must be generated as a closed enum:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("impl std::convert::TryFrom<&str> for {domain}")),
+            "{domain} must expose checked string parsing from its binding:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&format!("pub struct {domain}(pub String);")),
+            "{domain} must not accept arbitrary strings:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&format!("impl From<&str> for {domain}")),
+            "{domain} must not expose unchecked string construction:\n{rendered}"
+        );
+        for variant in variants {
+            assert!(
+                rendered.contains(&format!(
+                    "    #[serde(rename = \"{variant}\")]\n    {variant},"
+                )),
+                "{domain} must preserve raw variant `{variant}` through serde:\n{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_catalog_lifecycle_domains_use_string_enum_bindings() {
+    for (rendered, domains) in [
+        (
+            render_machine_kernel_module(&auth_machine()),
+            vec![(
+                "AuthLifecyclePhase",
+                vec![
+                    "Valid",
+                    "Expiring",
+                    "Refreshing",
+                    "ReauthRequired",
+                    "Released",
+                ],
+            )],
+        ),
+        (
+            render_machine_kernel_module(&mob_machine()),
+            vec![
+                (
+                    "KickoffPhase",
+                    vec![
+                        "Pending",
+                        "Starting",
+                        "CallbackPending",
+                        "Started",
+                        "Failed",
+                        "Cancelled",
+                    ],
+                ),
+                ("MobMemberState", vec!["Active", "Retiring"]),
+                (
+                    "TaskStatus",
+                    vec!["Pending", "InProgress", "Completed", "Cancelled"],
+                ),
+                ("WorkOrigin", vec!["External", "Internal", "Ingest"]),
+            ],
+        ),
+        (
+            render_machine_kernel_module(&schedule_lifecycle()),
+            vec![(
+                "ScheduleLifecycleState",
+                vec!["Active", "Paused", "Deleted"],
+            )],
+        ),
+        (
+            render_machine_kernel_module(&occurrence_lifecycle()),
+            vec![
+                (
+                    "OccurrenceFailureClass",
+                    vec![
+                        "TargetMaterializationFailed",
+                        "TargetMissing",
+                        "TargetBusy",
+                        "RuntimeRejected",
+                        "MobRejected",
+                        "LeaseLost",
+                        "TransportError",
+                        "InternalError",
+                    ],
+                ),
+                (
+                    "OccurrenceLifecycleState",
+                    vec![
+                        "Pending",
+                        "Claimed",
+                        "Dispatching",
+                        "AwaitingCompletion",
+                        "Completed",
+                        "Skipped",
+                        "Misfired",
+                        "Superseded",
+                        "DeliveryFailed",
+                    ],
+                ),
+            ],
+        ),
+    ] {
+        for (domain, variants) in domains {
+            assert!(
+                rendered.contains(&format!("pub enum {domain}")),
+                "{domain} must be generated as a closed enum:\n{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("impl std::convert::TryFrom<&str> for {domain}")),
+                "{domain} must expose checked string parsing from its binding:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains(&format!("pub struct {domain}(pub String);")),
+                "{domain} must not accept arbitrary strings:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains(&format!("impl From<&str> for {domain}")),
+                "{domain} must not expose unchecked string construction:\n{rendered}"
+            );
+            for variant in variants {
+                assert!(
+                    rendered.contains(&format!(
+                        "    #[serde(rename = \"{variant}\")]\n    {variant},"
+                    )),
+                    "{domain} must preserve raw variant `{variant}` through serde:\n{rendered}"
+                );
+            }
+        }
     }
 }
 

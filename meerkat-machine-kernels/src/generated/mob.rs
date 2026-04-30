@@ -229,9 +229,11 @@ impl std::fmt::Display for Generation {
         write!(f, "{}", self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -241,20 +243,56 @@ impl std::fmt::Display for Generation {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct KickoffPhase(pub String);
-impl From<String> for KickoffPhase {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum KickoffPhase {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Starting")]
+    Starting,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "Started")]
+    Started,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl KickoffPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Starting => "Starting",
+            Self::CallbackPending => "CallbackPending",
+            Self::Started => "Started",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
     }
 }
-impl From<&str> for KickoffPhase {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for KickoffPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Starting" => Ok(Self::Starting),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "Started" => Ok(Self::Started),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!("invalid KickoffPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for KickoffPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for KickoffPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -341,9 +379,11 @@ impl std::fmt::Display for MobId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -353,20 +393,40 @@ impl std::fmt::Display for MobId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct MobMemberState(pub String);
-impl From<String> for MobMemberState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum MobMemberState {
+    #[default]
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Retiring")]
+    Retiring,
+}
+impl MobMemberState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Retiring => "Retiring",
+        }
     }
 }
-impl From<&str> for MobMemberState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for MobMemberState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Active" => Ok(Self::Active),
+            "Retiring" => Ok(Self::Retiring),
+            other => Err(format!("invalid MobMemberState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MobMemberState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for MobMemberState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -537,9 +597,11 @@ impl std::fmt::Display for TaskId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -549,20 +611,48 @@ impl std::fmt::Display for TaskId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct TaskStatus(pub String);
-impl From<String> for TaskStatus {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum TaskStatus {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "InProgress")]
+    InProgress,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::InProgress => "InProgress",
+            Self::Completed => "Completed",
+            Self::Cancelled => "Cancelled",
+        }
     }
 }
-impl From<&str> for TaskStatus {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for TaskStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "InProgress" => Ok(Self::InProgress),
+            "Completed" => Ok(Self::Completed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!("invalid TaskStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TaskStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -619,6 +709,60 @@ impl From<&str> for WorkId {
 impl std::fmt::Display for WorkId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkOrigin {
+    #[default]
+    #[serde(rename = "External")]
+    External,
+    #[serde(rename = "Internal")]
+    Internal,
+    #[serde(rename = "Ingest")]
+    Ingest,
+}
+impl WorkOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::External => "External",
+            Self::Internal => "Internal",
+            Self::Ingest => "Ingest",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkOrigin {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "External" => Ok(Self::External),
+            "Internal" => Ok(Self::Internal),
+            "Ingest" => Ok(Self::Ingest),
+            other => Err(format!("invalid WorkOrigin value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkOrigin {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1258,40 +1402,6 @@ impl WiringLifecycleKind {
     }
 }
 impl std::fmt::Display for WiringLifecycleKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum WorkOrigin {
-    #[default]
-    External,
-    Internal,
-    Ingest,
-}
-impl WorkOrigin {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::External => "External",
-            Self::Internal => "Internal",
-            Self::Ingest => "Ingest",
-        }
-    }
-}
-impl std::fmt::Display for WorkOrigin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

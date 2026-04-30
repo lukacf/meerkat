@@ -1509,6 +1509,11 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
         (KernelValue::Named { type_name, value }, TypeRef::Named(name)) if type_name == name => {
             named_type_inner_matches(schema, name, value.as_ref())
         }
+        (KernelValue::NamedVariant { enum_name, variant }, TypeRef::Named(name))
+            if enum_name.as_str() == name.as_str() =>
+        {
+            named_type_variant_matches(schema, name, variant)
+        }
         (KernelValue::NamedVariant { enum_name, variant }, TypeRef::Enum(name))
             if enum_name == name =>
         {
@@ -1603,6 +1608,19 @@ fn named_type_inner_matches(
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             matches!(value, KernelValue::String(value) if variants.iter().any(|variant| variant.as_str() == value))
         }
+    }
+}
+
+fn named_type_variant_matches(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    variant: &EnumVariantId,
+) -> bool {
+    match named_type_atom(schema, name) {
+        Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
+            variants.iter().any(|allowed| allowed == variant)
+        }
+        _ => false,
     }
 }
 
@@ -1876,6 +1894,86 @@ mod tests {
             ),
             "unknown OperationStatus string values must not enter kernel state"
         );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn closed_dsl_domains_reject_unknown_kernel_values() {
+        let schema = meerkat_machine();
+
+        for (domain, valid, invalid) in [
+            ("TurnPhase", "Ready", "Teleporting"),
+            ("DrainPhase", "Running", "Paused"),
+            ("DrainMode", "Timed", "Manual"),
+            ("McpServerState", "Connected", "HalfOpen"),
+            ("RealtimeReconnectCycleState", "Idle", "CoolingDown"),
+            (
+                "OperationTerminalOutcomeKind",
+                "Completed",
+                "PartiallyCompleted",
+            ),
+        ] {
+            assert!(
+                value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(valid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Enum(enum_type_id(domain)),
+                ),
+                "{domain} should accept known enum variant `{valid}`"
+            );
+            assert!(
+                !value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(invalid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Enum(enum_type_id(domain)),
+                ),
+                "unknown {domain} enum variants must not enter kernel state"
+            );
+            assert!(
+                value_matches_type(
+                    &schema,
+                    &named_string(domain, valid),
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "{domain} should accept known named string value `{valid}`"
+            );
+            assert!(
+                !value_matches_type(
+                    &schema,
+                    &named_string(domain, invalid),
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "unknown {domain} string values must not enter kernel state"
+            );
+            assert!(
+                value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(valid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "{domain} should accept known named variants for named-type fields"
+            );
+            assert!(
+                !value_matches_type(
+                    &schema,
+                    &KernelValue::NamedVariant {
+                        enum_name: enum_type_id(domain),
+                        variant: enum_variant_id(invalid),
+                    },
+                    &meerkat_machine_schema::TypeRef::Named(named_type_id(domain)),
+                ),
+                "unknown {domain} named variants must not enter named-type state fields"
+            );
+        }
     }
 
     #[allow(clippy::expect_used)]

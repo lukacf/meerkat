@@ -14631,21 +14631,31 @@ fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
         TypeRef::Bool => KernelValue::Bool(false),
         TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
         TypeRef::String => KernelValue::String(String::new()),
-        TypeRef::Named(name) => runtime_modeled_named_value(
-            name,
-            if name.as_str() == "ToolVisibilityWitness" {
-                KernelValue::Map(BTreeMap::new())
-            } else if runtime_modeled_named_type_is_u64(name.as_str()) {
-                KernelValue::U64(0)
+        TypeRef::Named(name) => {
+            if let Some(value) = runtime_modeled_default_string_enum_named_value(name) {
+                value
             } else {
-                KernelValue::String(String::new())
-            },
-        ),
-        TypeRef::Enum(name) => KernelValue::NamedVariant {
-            enum_name: name.clone(),
-            variant: meerkat_machine_schema::identity::EnumVariantId::parse("_")
-                .expect("valid placeholder slug"),
-        },
+                runtime_modeled_named_value(
+                    name,
+                    if name.as_str() == "ToolVisibilityWitness" {
+                        KernelValue::Map(BTreeMap::new())
+                    } else if runtime_modeled_named_type_is_u64(name.as_str()) {
+                        KernelValue::U64(0)
+                    } else {
+                        KernelValue::String(String::new())
+                    },
+                )
+            }
+        }
+        TypeRef::Enum(name) => {
+            runtime_modeled_default_string_enum_variant(name).unwrap_or_else(|| {
+                KernelValue::NamedVariant {
+                    enum_name: name.clone(),
+                    variant: meerkat_machine_schema::identity::EnumVariantId::parse("_")
+                        .expect("valid placeholder slug"),
+                }
+            })
+        }
         TypeRef::Option(_) => KernelValue::None,
         TypeRef::Set(_) => KernelValue::Set(BTreeSet::new()),
         TypeRef::Seq(_) => KernelValue::Seq(Vec::new()),
@@ -14660,6 +14670,82 @@ fn runtime_modeled_named_type_is_u64(name: &str) -> bool {
     )
 }
 
+fn runtime_modeled_string_enum_variants(
+    name: &meerkat_machine_schema::identity::NamedTypeId,
+) -> Option<Vec<meerkat_machine_schema::identity::EnumVariantId>> {
+    let schema = modeled_meerkat_kernel::schema();
+    let binding = schema.named_type_binding(name)?;
+    match &binding.rust {
+        meerkat_machine_schema::identity::RustTypeAtom::StringEnum { variants } => {
+            Some(variants.clone())
+        }
+        _ => None,
+    }
+}
+
+fn runtime_modeled_string_enum_named_value_from_raw(
+    name: &meerkat_machine_schema::identity::NamedTypeId,
+    raw: &str,
+) -> Option<KernelValue> {
+    let enum_name = meerkat_machine_schema::identity::EnumTypeId::parse(name.as_str()).ok()?;
+    runtime_modeled_string_enum_variants(name)?
+        .into_iter()
+        .find(|variant| variant.as_str() == raw)
+        .map(|variant| KernelValue::NamedVariant { enum_name, variant })
+}
+
+fn runtime_modeled_default_string_enum_named_value(
+    name: &meerkat_machine_schema::identity::NamedTypeId,
+) -> Option<KernelValue> {
+    let enum_name = meerkat_machine_schema::identity::EnumTypeId::parse(name.as_str()).ok()?;
+    runtime_modeled_string_enum_variants(name)?
+        .into_iter()
+        .next()
+        .map(|variant| KernelValue::NamedVariant { enum_name, variant })
+}
+
+fn runtime_modeled_default_string_enum_variant(
+    name: &meerkat_machine_schema::identity::EnumTypeId,
+) -> Option<KernelValue> {
+    let named_type = meerkat_machine_schema::identity::NamedTypeId::parse(name.as_str()).ok()?;
+    runtime_modeled_string_enum_variants(&named_type)?
+        .into_iter()
+        .next()
+        .map(|variant| KernelValue::NamedVariant {
+            enum_name: name.clone(),
+            variant,
+        })
+}
+
+fn runtime_modeled_string_enum_named_value_from_json(
+    name: &meerkat_machine_schema::identity::NamedTypeId,
+    value: &serde_json::Value,
+) -> Option<KernelValue> {
+    runtime_modeled_string_enum_named_value_from_raw(name, value.as_str()?)
+}
+
+fn runtime_modeled_string_enum_named_value(
+    name: &meerkat_machine_schema::identity::NamedTypeId,
+    value: &KernelValue,
+) -> Option<KernelValue> {
+    match value {
+        KernelValue::NamedVariant { enum_name, variant } if enum_name.as_str() == name.as_str() => {
+            runtime_modeled_string_enum_variants(name)?
+                .iter()
+                .any(|allowed| allowed == variant)
+                .then(|| value.clone())
+        }
+        KernelValue::Named { type_name, value } if type_name == name => {
+            runtime_modeled_string_enum_named_value(name, value)
+        }
+        KernelValue::String(raw) => serde_json::from_str::<String>(raw)
+            .ok()
+            .or_else(|| Some(raw.clone()))
+            .and_then(|raw| runtime_modeled_string_enum_named_value_from_raw(name, &raw)),
+        _ => None,
+    }
+}
+
 fn runtime_modeled_named_value(
     type_name: &meerkat_machine_schema::identity::NamedTypeId,
     value: KernelValue,
@@ -14671,6 +14757,10 @@ fn runtime_modeled_named_value(
             ..
         } if existing == type_name
     ) {
+        return value;
+    }
+
+    if let Some(value) = runtime_modeled_string_enum_named_value(type_name, &value) {
         return value;
     }
 
@@ -14798,12 +14888,13 @@ fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Valu
                 value,
             )),
         },
-        TypeRef::Named(name) => KernelValue::Named {
-            type_name: name.clone(),
-            value: Box::new(KernelValue::String(
-                serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
-            )),
-        },
+        TypeRef::Named(name) => runtime_modeled_string_enum_named_value_from_json(name, value)
+            .unwrap_or_else(|| KernelValue::Named {
+                type_name: name.clone(),
+                value: Box::new(KernelValue::String(
+                    serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
+                )),
+            }),
         TypeRef::Enum(name) => KernelValue::NamedVariant {
             enum_name: name.clone(),
             variant: meerkat_machine_schema::identity::EnumVariantId::parse(

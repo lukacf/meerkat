@@ -68,9 +68,11 @@ impl std::fmt::Display for DeliveryReceipt {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -80,20 +82,64 @@ impl std::fmt::Display for DeliveryReceipt {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct OccurrenceFailureClass(pub String);
-impl From<String> for OccurrenceFailureClass {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum OccurrenceFailureClass {
+    #[default]
+    #[serde(rename = "TargetMaterializationFailed")]
+    TargetMaterializationFailed,
+    #[serde(rename = "TargetMissing")]
+    TargetMissing,
+    #[serde(rename = "TargetBusy")]
+    TargetBusy,
+    #[serde(rename = "RuntimeRejected")]
+    RuntimeRejected,
+    #[serde(rename = "MobRejected")]
+    MobRejected,
+    #[serde(rename = "LeaseLost")]
+    LeaseLost,
+    #[serde(rename = "TransportError")]
+    TransportError,
+    #[serde(rename = "InternalError")]
+    InternalError,
+}
+impl OccurrenceFailureClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TargetMaterializationFailed => "TargetMaterializationFailed",
+            Self::TargetMissing => "TargetMissing",
+            Self::TargetBusy => "TargetBusy",
+            Self::RuntimeRejected => "RuntimeRejected",
+            Self::MobRejected => "MobRejected",
+            Self::LeaseLost => "LeaseLost",
+            Self::TransportError => "TransportError",
+            Self::InternalError => "InternalError",
+        }
     }
 }
-impl From<&str> for OccurrenceFailureClass {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for OccurrenceFailureClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TargetMaterializationFailed" => Ok(Self::TargetMaterializationFailed),
+            "TargetMissing" => Ok(Self::TargetMissing),
+            "TargetBusy" => Ok(Self::TargetBusy),
+            "RuntimeRejected" => Ok(Self::RuntimeRejected),
+            "MobRejected" => Ok(Self::MobRejected),
+            "LeaseLost" => Ok(Self::LeaseLost),
+            "TransportError" => Ok(Self::TransportError),
+            "InternalError" => Ok(Self::InternalError),
+            other => Err(format!("invalid OccurrenceFailureClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceFailureClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for OccurrenceFailureClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -124,9 +170,11 @@ impl std::fmt::Display for OccurrenceId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -136,20 +184,68 @@ impl std::fmt::Display for OccurrenceId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct OccurrenceLifecycleState(pub String);
-impl From<String> for OccurrenceLifecycleState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum OccurrenceLifecycleState {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Claimed")]
+    Claimed,
+    #[serde(rename = "Dispatching")]
+    Dispatching,
+    #[serde(rename = "AwaitingCompletion")]
+    AwaitingCompletion,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Skipped")]
+    Skipped,
+    #[serde(rename = "Misfired")]
+    Misfired,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "DeliveryFailed")]
+    DeliveryFailed,
+}
+impl OccurrenceLifecycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Claimed => "Claimed",
+            Self::Dispatching => "Dispatching",
+            Self::AwaitingCompletion => "AwaitingCompletion",
+            Self::Completed => "Completed",
+            Self::Skipped => "Skipped",
+            Self::Misfired => "Misfired",
+            Self::Superseded => "Superseded",
+            Self::DeliveryFailed => "DeliveryFailed",
+        }
     }
 }
-impl From<&str> for OccurrenceLifecycleState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for OccurrenceLifecycleState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Claimed" => Ok(Self::Claimed),
+            "Dispatching" => Ok(Self::Dispatching),
+            "AwaitingCompletion" => Ok(Self::AwaitingCompletion),
+            "Completed" => Ok(Self::Completed),
+            "Skipped" => Ok(Self::Skipped),
+            "Misfired" => Ok(Self::Misfired),
+            "Superseded" => Ok(Self::Superseded),
+            "DeliveryFailed" => Ok(Self::DeliveryFailed),
+            other => Err(format!("invalid OccurrenceLifecycleState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OccurrenceLifecycleState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for OccurrenceLifecycleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(

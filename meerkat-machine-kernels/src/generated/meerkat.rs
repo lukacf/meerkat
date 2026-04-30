@@ -68,9 +68,11 @@ impl std::fmt::Display for CommsRuntimeId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -80,25 +82,113 @@ impl std::fmt::Display for CommsRuntimeId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct DrainMode(pub String);
-impl From<String> for DrainMode {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum DrainExitReason {
+    #[default]
+    #[serde(rename = "IdleTimeout")]
+    IdleTimeout,
+    #[serde(rename = "Dismissed")]
+    Dismissed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Aborted")]
+    Aborted,
+    #[serde(rename = "SessionShutdown")]
+    SessionShutdown,
+}
+impl DrainExitReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::IdleTimeout => "IdleTimeout",
+            Self::Dismissed => "Dismissed",
+            Self::Failed => "Failed",
+            Self::Aborted => "Aborted",
+            Self::SessionShutdown => "SessionShutdown",
+        }
     }
 }
-impl From<&str> for DrainMode {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for DrainExitReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "IdleTimeout" => Ok(Self::IdleTimeout),
+            "Dismissed" => Ok(Self::Dismissed),
+            "Failed" => Ok(Self::Failed),
+            "Aborted" => Ok(Self::Aborted),
+            "SessionShutdown" => Ok(Self::SessionShutdown),
+            other => Err(format!("invalid DrainExitReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DrainExitReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DrainExitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DrainMode {
+    #[default]
+    #[serde(rename = "Timed")]
+    Timed,
+    #[serde(rename = "AttachedSession")]
+    AttachedSession,
+    #[serde(rename = "PersistentHost")]
+    PersistentHost,
+}
+impl DrainMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Timed => "Timed",
+            Self::AttachedSession => "AttachedSession",
+            Self::PersistentHost => "PersistentHost",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DrainMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Timed" => Ok(Self::Timed),
+            "AttachedSession" => Ok(Self::AttachedSession),
+            "PersistentHost" => Ok(Self::PersistentHost),
+            other => Err(format!("invalid DrainMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DrainMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for DrainMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -108,20 +198,236 @@ impl std::fmt::Display for DrainMode {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct DrainPhase(pub String);
-impl From<String> for DrainPhase {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum DrainPhase {
+    #[default]
+    #[serde(rename = "Inactive")]
+    Inactive,
+    #[serde(rename = "Running")]
+    Running,
+    #[serde(rename = "Stopped")]
+    Stopped,
+    #[serde(rename = "ExitedRespawnable")]
+    ExitedRespawnable,
+}
+impl DrainPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inactive => "Inactive",
+            Self::Running => "Running",
+            Self::Stopped => "Stopped",
+            Self::ExitedRespawnable => "ExitedRespawnable",
+        }
     }
 }
-impl From<&str> for DrainPhase {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for DrainPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Inactive" => Ok(Self::Inactive),
+            "Running" => Ok(Self::Running),
+            "Stopped" => Ok(Self::Stopped),
+            "ExitedRespawnable" => Ok(Self::ExitedRespawnable),
+            other => Err(format!("invalid DrainPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DrainPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for DrainPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ExternalToolSurfaceBaseState {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Active")]
+    Active,
+    #[serde(rename = "Removing")]
+    Removing,
+    #[serde(rename = "Removed")]
+    Removed,
+}
+impl ExternalToolSurfaceBaseState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Active => "Active",
+            Self::Removing => "Removing",
+            Self::Removed => "Removed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ExternalToolSurfaceBaseState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Active" => Ok(Self::Active),
+            "Removing" => Ok(Self::Removing),
+            "Removed" => Ok(Self::Removed),
+            other => Err(format!(
+                "invalid ExternalToolSurfaceBaseState value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ExternalToolSurfaceBaseState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ExternalToolSurfaceBaseState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ExternalToolSurfaceDeltaOperation {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Add")]
+    Add,
+    #[serde(rename = "Remove")]
+    Remove,
+    #[serde(rename = "Reload")]
+    Reload,
+}
+impl ExternalToolSurfaceDeltaOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Add => "Add",
+            Self::Remove => "Remove",
+            Self::Reload => "Reload",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ExternalToolSurfaceDeltaOperation {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Add" => Ok(Self::Add),
+            "Remove" => Ok(Self::Remove),
+            "Reload" => Ok(Self::Reload),
+            other => Err(format!(
+                "invalid ExternalToolSurfaceDeltaOperation value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ExternalToolSurfaceDeltaOperation {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ExternalToolSurfaceDeltaOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ExternalToolSurfaceDeltaPhase {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "Draining")]
+    Draining,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Forced")]
+    Forced,
+}
+impl ExternalToolSurfaceDeltaPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Pending => "Pending",
+            Self::Applied => "Applied",
+            Self::Draining => "Draining",
+            Self::Failed => "Failed",
+            Self::Forced => "Forced",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ExternalToolSurfaceDeltaPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Pending" => Ok(Self::Pending),
+            "Applied" => Ok(Self::Applied),
+            "Draining" => Ok(Self::Draining),
+            "Failed" => Ok(Self::Failed),
+            "Forced" => Ok(Self::Forced),
+            other => Err(format!(
+                "invalid ExternalToolSurfaceDeltaPhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ExternalToolSurfaceDeltaPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ExternalToolSurfaceDeltaPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -172,9 +478,11 @@ impl std::fmt::Display for Generation {
         write!(f, "{}", self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -184,20 +492,106 @@ impl std::fmt::Display for Generation {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct InboundPeerRequestState(pub String);
-impl From<String> for InboundPeerRequestState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum InboundPeerRequestState {
+    #[default]
+    #[serde(rename = "Received")]
+    Received,
+    #[serde(rename = "Replied")]
+    Replied,
+}
+impl InboundPeerRequestState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Received => "Received",
+            Self::Replied => "Replied",
+        }
     }
 }
-impl From<&str> for InboundPeerRequestState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for InboundPeerRequestState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Received" => Ok(Self::Received),
+            "Replied" => Ok(Self::Replied),
+            other => Err(format!("invalid InboundPeerRequestState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InboundPeerRequestState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for InboundPeerRequestState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InputAbandonReason {
+    #[default]
+    #[serde(rename = "Retired")]
+    Retired,
+    #[serde(rename = "Reset")]
+    Reset,
+    #[serde(rename = "Stopped")]
+    Stopped,
+    #[serde(rename = "Destroyed")]
+    Destroyed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "MaxAttemptsExhausted")]
+    MaxAttemptsExhausted,
+}
+impl InputAbandonReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retired => "Retired",
+            Self::Reset => "Reset",
+            Self::Stopped => "Stopped",
+            Self::Destroyed => "Destroyed",
+            Self::Cancelled => "Cancelled",
+            Self::MaxAttemptsExhausted => "MaxAttemptsExhausted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputAbandonReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Retired" => Ok(Self::Retired),
+            "Reset" => Ok(Self::Reset),
+            "Stopped" => Ok(Self::Stopped),
+            "Destroyed" => Ok(Self::Destroyed),
+            "Cancelled" => Ok(Self::Cancelled),
+            "MaxAttemptsExhausted" => Ok(Self::MaxAttemptsExhausted),
+            other => Err(format!("invalid InputAbandonReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputAbandonReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputAbandonReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -228,9 +622,11 @@ impl std::fmt::Display for InputId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -240,25 +636,241 @@ impl std::fmt::Display for InputId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct InteractionStreamState(pub String);
-impl From<String> for InteractionStreamState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum InputLane {
+    #[default]
+    #[serde(rename = "Queue")]
+    Queue,
+    #[serde(rename = "Steer")]
+    Steer,
+}
+impl InputLane {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queue => "Queue",
+            Self::Steer => "Steer",
+        }
     }
 }
-impl From<&str> for InteractionStreamState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for InputLane {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queue" => Ok(Self::Queue),
+            "Steer" => Ok(Self::Steer),
+            other => Err(format!("invalid InputLane value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputLane {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputLane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InputPhase {
+    #[default]
+    #[serde(rename = "Queued")]
+    Queued,
+    #[serde(rename = "Staged")]
+    Staged,
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "AppliedPendingConsumption")]
+    AppliedPendingConsumption,
+    #[serde(rename = "Consumed")]
+    Consumed,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+}
+impl InputPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queued" => Ok(Self::Queued),
+            "Staged" => Ok(Self::Staged),
+            "Applied" => Ok(Self::Applied),
+            "AppliedPendingConsumption" => Ok(Self::AppliedPendingConsumption),
+            "Consumed" => Ok(Self::Consumed),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Abandoned" => Ok(Self::Abandoned),
+            other => Err(format!("invalid InputPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InputTerminalKind {
+    #[default]
+    #[serde(rename = "Consumed")]
+    Consumed,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+}
+impl InputTerminalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InputTerminalKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Consumed" => Ok(Self::Consumed),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Abandoned" => Ok(Self::Abandoned),
+            other => Err(format!("invalid InputTerminalKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InputTerminalKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for InputTerminalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum InteractionStreamState {
+    #[default]
+    #[serde(rename = "Reserved")]
+    Reserved,
+    #[serde(rename = "Attached")]
+    Attached,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Expired")]
+    Expired,
+    #[serde(rename = "ClosedEarly")]
+    ClosedEarly,
+}
+impl InteractionStreamState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reserved => "Reserved",
+            Self::Attached => "Attached",
+            Self::Completed => "Completed",
+            Self::Expired => "Expired",
+            Self::ClosedEarly => "ClosedEarly",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for InteractionStreamState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Reserved" => Ok(Self::Reserved),
+            "Attached" => Ok(Self::Attached),
+            "Completed" => Ok(Self::Completed),
+            "Expired" => Ok(Self::Expired),
+            "ClosedEarly" => Ok(Self::ClosedEarly),
+            other => Err(format!("invalid InteractionStreamState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for InteractionStreamState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for InteractionStreamState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -268,20 +880,110 @@ impl std::fmt::Display for InteractionStreamState {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct LiveTopologyPhase(pub String);
-impl From<String> for LiveTopologyPhase {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum LiveTopologyPhase {
+    #[default]
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Reconfiguring")]
+    Reconfiguring,
+    #[serde(rename = "Detached")]
+    Detached,
+    #[serde(rename = "HostIdentityApplied")]
+    HostIdentityApplied,
+    #[serde(rename = "HostVisibilityApplied")]
+    HostVisibilityApplied,
+}
+impl LiveTopologyPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Reconfiguring => "Reconfiguring",
+            Self::Detached => "Detached",
+            Self::HostIdentityApplied => "HostIdentityApplied",
+            Self::HostVisibilityApplied => "HostVisibilityApplied",
+        }
     }
 }
-impl From<&str> for LiveTopologyPhase {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for LiveTopologyPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Idle" => Ok(Self::Idle),
+            "Reconfiguring" => Ok(Self::Reconfiguring),
+            "Detached" => Ok(Self::Detached),
+            "HostIdentityApplied" => Ok(Self::HostIdentityApplied),
+            "HostVisibilityApplied" => Ok(Self::HostVisibilityApplied),
+            other => Err(format!("invalid LiveTopologyPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LiveTopologyPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for LiveTopologyPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum LlmRetryFailureKind {
+    #[default]
+    #[serde(rename = "RateLimited")]
+    RateLimited,
+    #[serde(rename = "NetworkTimeout")]
+    NetworkTimeout,
+    #[serde(rename = "CallTimeout")]
+    CallTimeout,
+    #[serde(rename = "RetryableProviderError")]
+    RetryableProviderError,
+}
+impl LlmRetryFailureKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RateLimited => "RateLimited",
+            Self::NetworkTimeout => "NetworkTimeout",
+            Self::CallTimeout => "CallTimeout",
+            Self::RetryableProviderError => "RetryableProviderError",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for LlmRetryFailureKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RateLimited" => Ok(Self::RateLimited),
+            "NetworkTimeout" => Ok(Self::NetworkTimeout),
+            "CallTimeout" => Ok(Self::CallTimeout),
+            "RetryableProviderError" => Ok(Self::RetryableProviderError),
+            other => Err(format!("invalid LlmRetryFailureKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for LlmRetryFailureKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for LlmRetryFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -312,9 +1014,11 @@ impl std::fmt::Display for McpServerId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -324,20 +1028,48 @@ impl std::fmt::Display for McpServerId {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct McpServerState(pub String);
-impl From<String> for McpServerState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum McpServerState {
+    #[default]
+    #[serde(rename = "PendingConnect")]
+    PendingConnect,
+    #[serde(rename = "Connected")]
+    Connected,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Disconnected")]
+    Disconnected,
+}
+impl McpServerState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PendingConnect => "PendingConnect",
+            Self::Connected => "Connected",
+            Self::Failed => "Failed",
+            Self::Disconnected => "Disconnected",
+        }
     }
 }
-impl From<&str> for McpServerState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for McpServerState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PendingConnect" => Ok(Self::PendingConnect),
+            "Connected" => Ok(Self::Connected),
+            "Failed" => Ok(Self::Failed),
+            "Disconnected" => Ok(Self::Disconnected),
+            other => Err(format!("invalid McpServerState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for McpServerState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for McpServerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -528,9 +1260,11 @@ impl std::fmt::Display for OperationStatus {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -540,25 +1274,65 @@ impl std::fmt::Display for OperationStatus {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct OperationTerminalOutcomeKind(pub String);
-impl From<String> for OperationTerminalOutcomeKind {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum OperationTerminalOutcomeKind {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Aborted")]
+    Aborted,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Retired")]
+    Retired,
+    #[serde(rename = "Terminated")]
+    Terminated,
+}
+impl OperationTerminalOutcomeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Aborted => "Aborted",
+            Self::Cancelled => "Cancelled",
+            Self::Retired => "Retired",
+            Self::Terminated => "Terminated",
+        }
     }
 }
-impl From<&str> for OperationTerminalOutcomeKind {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for OperationTerminalOutcomeKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Aborted" => Ok(Self::Aborted),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Retired" => Ok(Self::Retired),
+            "Terminated" => Ok(Self::Terminated),
+            other => Err(format!(
+                "invalid OperationTerminalOutcomeKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OperationTerminalOutcomeKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for OperationTerminalOutcomeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -568,20 +1342,52 @@ impl std::fmt::Display for OperationTerminalOutcomeKind {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct OutboundPeerRequestState(pub String);
-impl From<String> for OutboundPeerRequestState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum OutboundPeerRequestState {
+    #[default]
+    #[serde(rename = "Sent")]
+    Sent,
+    #[serde(rename = "AcceptedProgress")]
+    AcceptedProgress,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "TimedOut")]
+    TimedOut,
+}
+impl OutboundPeerRequestState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sent => "Sent",
+            Self::AcceptedProgress => "AcceptedProgress",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::TimedOut => "TimedOut",
+        }
     }
 }
-impl From<&str> for OutboundPeerRequestState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for OutboundPeerRequestState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Sent" => Ok(Self::Sent),
+            "AcceptedProgress" => Ok(Self::AcceptedProgress),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "TimedOut" => Ok(Self::TimedOut),
+            other => Err(format!("invalid OutboundPeerRequestState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OutboundPeerRequestState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for OutboundPeerRequestState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -613,9 +1419,11 @@ impl std::fmt::Display for PeerCorrelationId {
     }
 }
 pub type PeerEndpoint = meerkat_machine_schema::catalog::dsl::meerkat_machine::PeerEndpoint;
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -625,25 +1433,101 @@ pub type PeerEndpoint = meerkat_machine_schema::catalog::dsl::meerkat_machine::P
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct PeerTerminalDisposition(pub String);
-impl From<String> for PeerTerminalDisposition {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum PeerIngressOwnerKind {
+    #[default]
+    #[serde(rename = "Unattached")]
+    Unattached,
+    #[serde(rename = "SessionOwned")]
+    SessionOwned,
+    #[serde(rename = "MobOwned")]
+    MobOwned,
+}
+impl PeerIngressOwnerKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unattached => "Unattached",
+            Self::SessionOwned => "SessionOwned",
+            Self::MobOwned => "MobOwned",
+        }
     }
 }
-impl From<&str> for PeerTerminalDisposition {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for PeerIngressOwnerKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unattached" => Ok(Self::Unattached),
+            "SessionOwned" => Ok(Self::SessionOwned),
+            "MobOwned" => Ok(Self::MobOwned),
+            other => Err(format!("invalid PeerIngressOwnerKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressOwnerKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressOwnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerTerminalDisposition {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl PeerTerminalDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerTerminalDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!("invalid PeerTerminalDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerTerminalDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for PeerTerminalDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -653,25 +1537,337 @@ impl std::fmt::Display for PeerTerminalDisposition {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct RealtimeReconnectCycleState(pub String);
-impl From<String> for RealtimeReconnectCycleState {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum PostAdmissionSignalKind {
+    #[default]
+    #[serde(rename = "WakeLoop")]
+    WakeLoop,
+    #[serde(rename = "InterruptYielding")]
+    InterruptYielding,
+    #[serde(rename = "RequestImmediateProcessing")]
+    RequestImmediateProcessing,
+}
+impl PostAdmissionSignalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WakeLoop => "WakeLoop",
+            Self::InterruptYielding => "InterruptYielding",
+            Self::RequestImmediateProcessing => "RequestImmediateProcessing",
+        }
     }
 }
-impl From<&str> for RealtimeReconnectCycleState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for PostAdmissionSignalKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "WakeLoop" => Ok(Self::WakeLoop),
+            "InterruptYielding" => Ok(Self::InterruptYielding),
+            "RequestImmediateProcessing" => Ok(Self::RequestImmediateProcessing),
+            other => Err(format!("invalid PostAdmissionSignalKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PostAdmissionSignalKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PostAdmissionSignalKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PreRunPhase {
+    #[default]
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Attached")]
+    Attached,
+    #[serde(rename = "Retired")]
+    Retired,
+}
+impl PreRunPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Attached => "Attached",
+            Self::Retired => "Retired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PreRunPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Idle" => Ok(Self::Idle),
+            "Attached" => Ok(Self::Attached),
+            "Retired" => Ok(Self::Retired),
+            other => Err(format!("invalid PreRunPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PreRunPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PreRunPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeBindingState {
+    #[default]
+    #[serde(rename = "Unbound")]
+    Unbound,
+    #[serde(rename = "BindingNotReady")]
+    BindingNotReady,
+    #[serde(rename = "BindingReady")]
+    BindingReady,
+    #[serde(rename = "ReplacementPending")]
+    ReplacementPending,
+}
+impl RealtimeBindingState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unbound => "Unbound",
+            Self::BindingNotReady => "BindingNotReady",
+            Self::BindingReady => "BindingReady",
+            Self::ReplacementPending => "ReplacementPending",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeBindingState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unbound" => Ok(Self::Unbound),
+            "BindingNotReady" => Ok(Self::BindingNotReady),
+            "BindingReady" => Ok(Self::BindingReady),
+            "ReplacementPending" => Ok(Self::ReplacementPending),
+            other => Err(format!("invalid RealtimeBindingState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeBindingState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeBindingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeProductTurnPhase {
+    #[default]
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "AwaitingProgress")]
+    AwaitingProgress,
+    #[serde(rename = "Committed")]
+    Committed,
+    #[serde(rename = "OutputStarted")]
+    OutputStarted,
+    #[serde(rename = "Preemptible")]
+    Preemptible,
+}
+impl RealtimeProductTurnPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::AwaitingProgress => "AwaitingProgress",
+            Self::Committed => "Committed",
+            Self::OutputStarted => "OutputStarted",
+            Self::Preemptible => "Preemptible",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeProductTurnPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Idle" => Ok(Self::Idle),
+            "AwaitingProgress" => Ok(Self::AwaitingProgress),
+            "Committed" => Ok(Self::Committed),
+            "OutputStarted" => Ok(Self::OutputStarted),
+            "Preemptible" => Ok(Self::Preemptible),
+            other => Err(format!("invalid RealtimeProductTurnPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeProductTurnPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeProductTurnPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeProjectionFreshness {
+    #[default]
+    #[serde(rename = "Clean")]
+    Clean,
+    #[serde(rename = "StaleDeferred")]
+    StaleDeferred,
+    #[serde(rename = "StaleImmediate")]
+    StaleImmediate,
+}
+impl RealtimeProjectionFreshness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Clean => "Clean",
+            Self::StaleDeferred => "StaleDeferred",
+            Self::StaleImmediate => "StaleImmediate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeProjectionFreshness {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Clean" => Ok(Self::Clean),
+            "StaleDeferred" => Ok(Self::StaleDeferred),
+            "StaleImmediate" => Ok(Self::StaleImmediate),
+            other => Err(format!(
+                "invalid RealtimeProjectionFreshness value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeProjectionFreshness {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeProjectionFreshness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RealtimeReconnectCycleState {
+    #[default]
+    #[serde(rename = "Idle")]
+    Idle,
+    #[serde(rename = "Reconnecting")]
+    Reconnecting,
+    #[serde(rename = "Exhausted")]
+    Exhausted,
+}
+impl RealtimeReconnectCycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Reconnecting => "Reconnecting",
+            Self::Exhausted => "Exhausted",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RealtimeReconnectCycleState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Idle" => Ok(Self::Idle),
+            "Reconnecting" => Ok(Self::Reconnecting),
+            "Exhausted" => Ok(Self::Exhausted),
+            other => Err(format!(
+                "invalid RealtimeReconnectCycleState value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeReconnectCycleState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for RealtimeReconnectCycleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -681,20 +1877,530 @@ impl std::fmt::Display for RealtimeReconnectCycleState {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct RegistrationPhase(pub String);
-impl From<String> for RegistrationPhase {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum RealtimeReconnectPolicy {
+    #[default]
+    #[serde(rename = "CleanExit")]
+    CleanExit,
+    #[serde(rename = "ReattachAndRecover")]
+    ReattachAndRecover,
+}
+impl RealtimeReconnectPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CleanExit => "CleanExit",
+            Self::ReattachAndRecover => "ReattachAndRecover",
+        }
     }
 }
-impl From<&str> for RegistrationPhase {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for RealtimeReconnectPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CleanExit" => Ok(Self::CleanExit),
+            "ReattachAndRecover" => Ok(Self::ReattachAndRecover),
+            other => Err(format!("invalid RealtimeReconnectPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RealtimeReconnectPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RealtimeReconnectPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RegistrationPhase {
+    #[default]
+    #[serde(rename = "Queuing")]
+    Queuing,
+    #[serde(rename = "Active")]
+    Active,
+}
+impl RegistrationPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queuing => "Queuing",
+            Self::Active => "Active",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RegistrationPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queuing" => Ok(Self::Queuing),
+            "Active" => Ok(Self::Active),
+            other => Err(format!("invalid RegistrationPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RegistrationPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for RegistrationPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingApprovalParentKind {
+    #[default]
+    #[serde(rename = "SwitchTurn")]
+    SwitchTurn,
+    #[serde(rename = "ImageOperation")]
+    ImageOperation,
+}
+impl RoutingApprovalParentKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SwitchTurn => "SwitchTurn",
+            Self::ImageOperation => "ImageOperation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingApprovalParentKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "SwitchTurn" => Ok(Self::SwitchTurn),
+            "ImageOperation" => Ok(Self::ImageOperation),
+            other => Err(format!("invalid RoutingApprovalParentKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingApprovalParentKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingApprovalParentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingApprovalPhase {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "PresentedToUser")]
+    PresentedToUser,
+    #[serde(rename = "Approved")]
+    Approved,
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "SurfaceDetached")]
+    SurfaceDetached,
+}
+impl RoutingApprovalPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::PresentedToUser => "PresentedToUser",
+            Self::Approved => "Approved",
+            Self::Denied => "Denied",
+            Self::SurfaceDetached => "SurfaceDetached",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingApprovalPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "PresentedToUser" => Ok(Self::PresentedToUser),
+            "Approved" => Ok(Self::Approved),
+            "Denied" => Ok(Self::Denied),
+            "SurfaceDetached" => Ok(Self::SurfaceDetached),
+            other => Err(format!("invalid RoutingApprovalPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingApprovalPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingApprovalPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingDenialReason {
+    #[default]
+    #[serde(rename = "CapabilityPolicy")]
+    CapabilityPolicy,
+    #[serde(rename = "ApprovalRequiredButUnavailable")]
+    ApprovalRequiredButUnavailable,
+    #[serde(rename = "DeniedDuringApproval")]
+    DeniedDuringApproval,
+    #[serde(rename = "ScopedOverrideConflict")]
+    ScopedOverrideConflict,
+    #[serde(rename = "RealtimeTransportConflict")]
+    RealtimeTransportConflict,
+}
+impl RoutingDenialReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CapabilityPolicy => "CapabilityPolicy",
+            Self::ApprovalRequiredButUnavailable => "ApprovalRequiredButUnavailable",
+            Self::DeniedDuringApproval => "DeniedDuringApproval",
+            Self::ScopedOverrideConflict => "ScopedOverrideConflict",
+            Self::RealtimeTransportConflict => "RealtimeTransportConflict",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingDenialReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CapabilityPolicy" => Ok(Self::CapabilityPolicy),
+            "ApprovalRequiredButUnavailable" => Ok(Self::ApprovalRequiredButUnavailable),
+            "DeniedDuringApproval" => Ok(Self::DeniedDuringApproval),
+            "ScopedOverrideConflict" => Ok(Self::ScopedOverrideConflict),
+            "RealtimeTransportConflict" => Ok(Self::RealtimeTransportConflict),
+            other => Err(format!("invalid RoutingDenialReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingDenialReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingDenialReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingImageOperationPhase {
+    #[default]
+    #[serde(rename = "Requested")]
+    Requested,
+    #[serde(rename = "PlanResolved")]
+    PlanResolved,
+    #[serde(rename = "ScopedOverrideActive")]
+    ScopedOverrideActive,
+    #[serde(rename = "ProviderCallInFlight")]
+    ProviderCallInFlight,
+    #[serde(rename = "ResultCommitted")]
+    ResultCommitted,
+    #[serde(rename = "RestoringScopedOverride")]
+    RestoringScopedOverride,
+    #[serde(rename = "Terminal")]
+    Terminal,
+}
+impl RoutingImageOperationPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Requested => "Requested",
+            Self::PlanResolved => "PlanResolved",
+            Self::ScopedOverrideActive => "ScopedOverrideActive",
+            Self::ProviderCallInFlight => "ProviderCallInFlight",
+            Self::ResultCommitted => "ResultCommitted",
+            Self::RestoringScopedOverride => "RestoringScopedOverride",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageOperationPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Requested" => Ok(Self::Requested),
+            "PlanResolved" => Ok(Self::PlanResolved),
+            "ScopedOverrideActive" => Ok(Self::ScopedOverrideActive),
+            "ProviderCallInFlight" => Ok(Self::ProviderCallInFlight),
+            "ResultCommitted" => Ok(Self::ResultCommitted),
+            "RestoringScopedOverride" => Ok(Self::RestoringScopedOverride),
+            "Terminal" => Ok(Self::Terminal),
+            other => Err(format!(
+                "invalid RoutingImageOperationPhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageOperationPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageOperationPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingImageTerminal {
+    #[default]
+    #[serde(rename = "Generated")]
+    Generated,
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "EmptyResult")]
+    EmptyResult,
+    #[serde(rename = "RefusedByProvider")]
+    RefusedByProvider,
+    #[serde(rename = "SafetyFiltered")]
+    SafetyFiltered,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Timeout")]
+    Timeout,
+    #[serde(rename = "ScopedRestoreFailed")]
+    ScopedRestoreFailed,
+}
+impl RoutingImageTerminal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generated => "Generated",
+            Self::Denied => "Denied",
+            Self::EmptyResult => "EmptyResult",
+            Self::RefusedByProvider => "RefusedByProvider",
+            Self::SafetyFiltered => "SafetyFiltered",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+            Self::Timeout => "Timeout",
+            Self::ScopedRestoreFailed => "ScopedRestoreFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingImageTerminal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Generated" => Ok(Self::Generated),
+            "Denied" => Ok(Self::Denied),
+            "EmptyResult" => Ok(Self::EmptyResult),
+            "RefusedByProvider" => Ok(Self::RefusedByProvider),
+            "SafetyFiltered" => Ok(Self::SafetyFiltered),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Timeout" => Ok(Self::Timeout),
+            "ScopedRestoreFailed" => Ok(Self::ScopedRestoreFailed),
+            other => Err(format!("invalid RoutingImageTerminal value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingImageTerminal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingImageTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingSwitchTurnPhase {
+    #[default]
+    #[serde(rename = "Requested")]
+    Requested,
+    #[serde(rename = "PendingForBoundary")]
+    PendingForBoundary,
+    #[serde(rename = "ActiveFiniteOverride")]
+    ActiveFiniteOverride,
+    #[serde(rename = "ApplyingPersistentReconfigure")]
+    ApplyingPersistentReconfigure,
+    #[serde(rename = "Terminal")]
+    Terminal,
+}
+impl RoutingSwitchTurnPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Requested => "Requested",
+            Self::PendingForBoundary => "PendingForBoundary",
+            Self::ActiveFiniteOverride => "ActiveFiniteOverride",
+            Self::ApplyingPersistentReconfigure => "ApplyingPersistentReconfigure",
+            Self::Terminal => "Terminal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingSwitchTurnPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Requested" => Ok(Self::Requested),
+            "PendingForBoundary" => Ok(Self::PendingForBoundary),
+            "ActiveFiniteOverride" => Ok(Self::ActiveFiniteOverride),
+            "ApplyingPersistentReconfigure" => Ok(Self::ApplyingPersistentReconfigure),
+            "Terminal" => Ok(Self::Terminal),
+            other => Err(format!("invalid RoutingSwitchTurnPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingSwitchTurnPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingSwitchTurnPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RoutingSwitchTurnTerminal {
+    #[default]
+    #[serde(rename = "Denied")]
+    Denied,
+    #[serde(rename = "ConsumedAndRestored")]
+    ConsumedAndRestored,
+    #[serde(rename = "PersistentReconfigureApplied")]
+    PersistentReconfigureApplied,
+}
+impl RoutingSwitchTurnTerminal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "Denied",
+            Self::ConsumedAndRestored => "ConsumedAndRestored",
+            Self::PersistentReconfigureApplied => "PersistentReconfigureApplied",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RoutingSwitchTurnTerminal {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Denied" => Ok(Self::Denied),
+            "ConsumedAndRestored" => Ok(Self::ConsumedAndRestored),
+            "PersistentReconfigureApplied" => Ok(Self::PersistentReconfigureApplied),
+            other => Err(format!("invalid RoutingSwitchTurnTerminal value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RoutingSwitchTurnTerminal {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RoutingSwitchTurnTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -723,6 +2429,68 @@ impl From<&str> for RunId {
 impl std::fmt::Display for RunId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RuntimeNoticeKind {
+    #[default]
+    #[serde(rename = "Drain")]
+    Drain,
+    #[serde(rename = "Reset")]
+    Reset,
+    #[serde(rename = "Stop")]
+    Stop,
+    #[serde(rename = "Exit")]
+    Exit,
+    #[serde(rename = "Recover")]
+    Recover,
+}
+impl RuntimeNoticeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Drain => "Drain",
+            Self::Reset => "Reset",
+            Self::Stop => "Stop",
+            Self::Exit => "Exit",
+            Self::Recover => "Recover",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeNoticeKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Drain" => Ok(Self::Drain),
+            "Reset" => Ok(Self::Reset),
+            "Stop" => Ok(Self::Stop),
+            "Exit" => Ok(Self::Exit),
+            "Recover" => Ok(Self::Recover),
+            other => Err(format!("invalid RuntimeNoticeKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeNoticeKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeNoticeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -781,9 +2549,11 @@ impl std::fmt::Display for SessionLlmCapabilitySurface {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -793,20 +2563,42 @@ impl std::fmt::Display for SessionLlmCapabilitySurface {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct SessionLlmCapabilitySurfaceStatus(pub String);
-impl From<String> for SessionLlmCapabilitySurfaceStatus {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum SessionLlmCapabilitySurfaceStatus {
+    #[default]
+    #[serde(rename = "Unresolved")]
+    Unresolved,
+    #[serde(rename = "Resolved")]
+    Resolved,
+}
+impl SessionLlmCapabilitySurfaceStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unresolved => "Unresolved",
+            Self::Resolved => "Resolved",
+        }
     }
 }
-impl From<&str> for SessionLlmCapabilitySurfaceStatus {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for SessionLlmCapabilitySurfaceStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unresolved" => Ok(Self::Unresolved),
+            "Resolved" => Ok(Self::Resolved),
+            other => Err(format!(
+                "invalid SessionLlmCapabilitySurfaceStatus value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SessionLlmCapabilitySurfaceStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for SessionLlmCapabilitySurfaceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -893,9 +2685,11 @@ impl std::fmt::Display for SessionToolVisibilityState {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -905,25 +2699,101 @@ impl std::fmt::Display for SessionToolVisibilityState {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct SurfacePendingOp(pub String);
-impl From<String> for SurfacePendingOp {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum SupervisorBindingKind {
+    #[default]
+    #[serde(rename = "Unbound")]
+    Unbound,
+    #[serde(rename = "Bound")]
+    Bound,
+}
+impl SupervisorBindingKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unbound => "Unbound",
+            Self::Bound => "Bound",
+        }
     }
 }
-impl From<&str> for SurfacePendingOp {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for SupervisorBindingKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unbound" => Ok(Self::Unbound),
+            "Bound" => Ok(Self::Bound),
+            other => Err(format!("invalid SupervisorBindingKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SupervisorBindingKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SupervisorBindingKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfacePendingOp {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Add")]
+    Add,
+    #[serde(rename = "Reload")]
+    Reload,
+}
+impl SurfacePendingOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Add => "Add",
+            Self::Reload => "Reload",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfacePendingOp {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Add" => Ok(Self::Add),
+            "Reload" => Ok(Self::Reload),
+            other => Err(format!("invalid SurfacePendingOp value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfacePendingOp {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for SurfacePendingOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -933,25 +2803,47 @@ impl std::fmt::Display for SurfacePendingOp {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct SurfacePhase(pub String);
-impl From<String> for SurfacePhase {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum SurfacePhase {
+    #[default]
+    #[serde(rename = "Operating")]
+    Operating,
+    #[serde(rename = "Shutdown")]
+    Shutdown,
+}
+impl SurfacePhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Operating => "Operating",
+            Self::Shutdown => "Shutdown",
+        }
     }
 }
-impl From<&str> for SurfacePhase {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for SurfacePhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Operating" => Ok(Self::Operating),
+            "Shutdown" => Ok(Self::Shutdown),
+            other => Err(format!("invalid SurfacePhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfacePhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for SurfacePhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -961,20 +2853,48 @@ impl std::fmt::Display for SurfacePhase {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct SurfaceStagedOp(pub String);
-impl From<String> for SurfaceStagedOp {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum SurfaceStagedOp {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Add")]
+    Add,
+    #[serde(rename = "Remove")]
+    Remove,
+    #[serde(rename = "Reload")]
+    Reload,
+}
+impl SurfaceStagedOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Add => "Add",
+            Self::Remove => "Remove",
+            Self::Reload => "Reload",
+        }
     }
 }
-impl From<&str> for SurfaceStagedOp {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for SurfaceStagedOp {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Add" => Ok(Self::Add),
+            "Remove" => Ok(Self::Remove),
+            "Reload" => Ok(Self::Reload),
+            other => Err(format!("invalid SurfaceStagedOp value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceStagedOp {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for SurfaceStagedOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -1007,9 +2927,11 @@ impl std::fmt::Display for ToolFilter {
 }
 pub type ToolVisibilityWitness =
     meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolVisibilityWitness;
+#[allow(non_camel_case_types)]
 #[derive(
     Debug,
     Clone,
+    Copy,
     Default,
     PartialEq,
     Eq,
@@ -1019,20 +2941,250 @@ pub type ToolVisibilityWitness =
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct TurnPhase(pub String);
-impl From<String> for TurnPhase {
-    fn from(value: String) -> Self {
-        Self(value)
+pub enum TurnCancellationReason {
+    #[default]
+    #[serde(rename = "Observed")]
+    Observed,
+}
+impl TurnCancellationReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Observed => "Observed",
+        }
     }
 }
-impl From<&str> for TurnPhase {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
+impl std::convert::TryFrom<&str> for TurnCancellationReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Observed" => Ok(Self::Observed),
+            other => Err(format!("invalid TurnCancellationReason value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnCancellationReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TurnCancellationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TurnPhase {
+    #[default]
+    #[serde(rename = "Ready")]
+    Ready,
+    #[serde(rename = "ApplyingPrimitive")]
+    ApplyingPrimitive,
+    #[serde(rename = "CallingLlm")]
+    CallingLlm,
+    #[serde(rename = "WaitingForOps")]
+    WaitingForOps,
+    #[serde(rename = "DrainingBoundary")]
+    DrainingBoundary,
+    #[serde(rename = "Extracting")]
+    Extracting,
+    #[serde(rename = "ErrorRecovery")]
+    ErrorRecovery,
+    #[serde(rename = "Cancelling")]
+    Cancelling,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+}
+impl TurnPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::ApplyingPrimitive => "ApplyingPrimitive",
+            Self::CallingLlm => "CallingLlm",
+            Self::WaitingForOps => "WaitingForOps",
+            Self::DrainingBoundary => "DrainingBoundary",
+            Self::Extracting => "Extracting",
+            Self::ErrorRecovery => "ErrorRecovery",
+            Self::Cancelling => "Cancelling",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TurnPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Ready" => Ok(Self::Ready),
+            "ApplyingPrimitive" => Ok(Self::ApplyingPrimitive),
+            "CallingLlm" => Ok(Self::CallingLlm),
+            "WaitingForOps" => Ok(Self::WaitingForOps),
+            "DrainingBoundary" => Ok(Self::DrainingBoundary),
+            "Extracting" => Ok(Self::Extracting),
+            "ErrorRecovery" => Ok(Self::ErrorRecovery),
+            "Cancelling" => Ok(Self::Cancelling),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => Err(format!("invalid TurnPhase value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
     }
 }
 impl std::fmt::Display for TurnPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TurnPrimitiveKind {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "ConversationTurn")]
+    ConversationTurn,
+    #[serde(rename = "ImmediateAppend")]
+    ImmediateAppend,
+    #[serde(rename = "ImmediateContextAppend")]
+    ImmediateContextAppend,
+}
+impl TurnPrimitiveKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::ConversationTurn => "ConversationTurn",
+            Self::ImmediateAppend => "ImmediateAppend",
+            Self::ImmediateContextAppend => "ImmediateContextAppend",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TurnPrimitiveKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "ConversationTurn" => Ok(Self::ConversationTurn),
+            "ImmediateAppend" => Ok(Self::ImmediateAppend),
+            "ImmediateContextAppend" => Ok(Self::ImmediateContextAppend),
+            other => Err(format!("invalid TurnPrimitiveKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnPrimitiveKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TurnPrimitiveKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum TurnTerminalOutcome {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "BudgetExhausted")]
+    BudgetExhausted,
+    #[serde(rename = "TimeBudgetExceeded")]
+    TimeBudgetExceeded,
+    #[serde(rename = "StructuredOutputValidationFailed")]
+    StructuredOutputValidationFailed,
+}
+impl TurnTerminalOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+            Self::BudgetExhausted => "BudgetExhausted",
+            Self::TimeBudgetExceeded => "TimeBudgetExceeded",
+            Self::StructuredOutputValidationFailed => "StructuredOutputValidationFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TurnTerminalOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            "BudgetExhausted" => Ok(Self::BudgetExhausted),
+            "TimeBudgetExceeded" => Ok(Self::TimeBudgetExceeded),
+            "StructuredOutputValidationFailed" => Ok(Self::StructuredOutputValidationFailed),
+            other => Err(format!("invalid TurnTerminalOutcome value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnTerminalOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TurnTerminalOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(
@@ -1091,345 +3243,61 @@ impl std::fmt::Display for WorkId {
         f.write_str(&self.0)
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkOrigin {
+    #[default]
+    #[serde(rename = "External")]
+    External,
+    #[serde(rename = "Internal")]
+    Internal,
+    #[serde(rename = "Ingest")]
+    Ingest,
+}
+impl WorkOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::External => "External",
+            Self::Internal => "Internal",
+            Self::Ingest => "Ingest",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkOrigin {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "External" => Ok(Self::External),
+            "Internal" => Ok(Self::Internal),
+            "Ingest" => Ok(Self::Ingest),
+            other => Err(format!("invalid WorkOrigin value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkOrigin {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum DrainExitReason {
-    #[default]
-    IdleTimeout,
-    Dismissed,
-    Failed,
-    Aborted,
-    SessionShutdown,
-}
-impl DrainExitReason {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::IdleTimeout => "IdleTimeout",
-            Self::Dismissed => "Dismissed",
-            Self::Failed => "Failed",
-            Self::Aborted => "Aborted",
-            Self::SessionShutdown => "SessionShutdown",
-        }
-    }
-}
-impl std::fmt::Display for DrainExitReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum ExternalToolSurfaceBaseState {
-    #[default]
-    Absent,
-    Active,
-    Removing,
-    Removed,
-}
-impl ExternalToolSurfaceBaseState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Absent => "Absent",
-            Self::Active => "Active",
-            Self::Removing => "Removing",
-            Self::Removed => "Removed",
-        }
-    }
-}
-impl std::fmt::Display for ExternalToolSurfaceBaseState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum ExternalToolSurfaceDeltaOperation {
-    #[default]
-    None,
-    Add,
-    Remove,
-    Reload,
-}
-impl ExternalToolSurfaceDeltaOperation {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Add => "Add",
-            Self::Remove => "Remove",
-            Self::Reload => "Reload",
-        }
-    }
-}
-impl std::fmt::Display for ExternalToolSurfaceDeltaOperation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum ExternalToolSurfaceDeltaPhase {
-    #[default]
-    None,
-    Pending,
-    Applied,
-    Draining,
-    Failed,
-    Forced,
-}
-impl ExternalToolSurfaceDeltaPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Pending => "Pending",
-            Self::Applied => "Applied",
-            Self::Draining => "Draining",
-            Self::Failed => "Failed",
-            Self::Forced => "Forced",
-        }
-    }
-}
-impl std::fmt::Display for ExternalToolSurfaceDeltaPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum InputAbandonReason {
-    #[default]
-    Retired,
-    Reset,
-    Stopped,
-    Destroyed,
-    Cancelled,
-    MaxAttemptsExhausted,
-}
-impl InputAbandonReason {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Retired => "Retired",
-            Self::Reset => "Reset",
-            Self::Stopped => "Stopped",
-            Self::Destroyed => "Destroyed",
-            Self::Cancelled => "Cancelled",
-            Self::MaxAttemptsExhausted => "MaxAttemptsExhausted",
-        }
-    }
-}
-impl std::fmt::Display for InputAbandonReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum InputLane {
-    #[default]
-    Queue,
-    Steer,
-}
-impl InputLane {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queue => "Queue",
-            Self::Steer => "Steer",
-        }
-    }
-}
-impl std::fmt::Display for InputLane {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum InputPhase {
-    #[default]
-    Queued,
-    Staged,
-    Applied,
-    AppliedPendingConsumption,
-    Consumed,
-    Superseded,
-    Coalesced,
-    Abandoned,
-}
-impl InputPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Queued => "Queued",
-            Self::Staged => "Staged",
-            Self::Applied => "Applied",
-            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
-            Self::Consumed => "Consumed",
-            Self::Superseded => "Superseded",
-            Self::Coalesced => "Coalesced",
-            Self::Abandoned => "Abandoned",
-        }
-    }
-}
-impl std::fmt::Display for InputPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum InputTerminalKind {
-    #[default]
-    Consumed,
-    Superseded,
-    Coalesced,
-    Abandoned,
-}
-impl InputTerminalKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Consumed => "Consumed",
-            Self::Superseded => "Superseded",
-            Self::Coalesced => "Coalesced",
-            Self::Abandoned => "Abandoned",
-        }
-    }
-}
-impl std::fmt::Display for InputTerminalKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum LlmRetryFailureKind {
-    #[default]
-    RateLimited,
-    NetworkTimeout,
-    CallTimeout,
-    RetryableProviderError,
-}
-impl LlmRetryFailureKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::RateLimited => "RateLimited",
-            Self::NetworkTimeout => "NetworkTimeout",
-            Self::CallTimeout => "CallTimeout",
-            Self::RetryableProviderError => "RetryableProviderError",
-        }
-    }
-}
-impl std::fmt::Display for LlmRetryFailureKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -1634,40 +3502,6 @@ impl std::fmt::Display for PeerIngressLifecycleClass {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum PeerIngressOwnerKind {
-    #[default]
-    Unattached,
-    SessionOwned,
-    MobOwned,
-}
-impl PeerIngressOwnerKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unattached => "Unattached",
-            Self::SessionOwned => "SessionOwned",
-            Self::MobOwned => "MobOwned",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressOwnerKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum PeerIngressResponseStatus {
     #[default]
     Accepted,
@@ -1718,694 +3552,6 @@ impl PeerIngressResponseTerminality {
     }
 }
 impl std::fmt::Display for PeerIngressResponseTerminality {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PostAdmissionSignalKind {
-    #[default]
-    WakeLoop,
-    InterruptYielding,
-    RequestImmediateProcessing,
-}
-impl PostAdmissionSignalKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::WakeLoop => "WakeLoop",
-            Self::InterruptYielding => "InterruptYielding",
-            Self::RequestImmediateProcessing => "RequestImmediateProcessing",
-        }
-    }
-}
-impl std::fmt::Display for PostAdmissionSignalKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PreRunPhase {
-    #[default]
-    Idle,
-    Attached,
-    Retired,
-}
-impl PreRunPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::Attached => "Attached",
-            Self::Retired => "Retired",
-        }
-    }
-}
-impl std::fmt::Display for PreRunPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeBindingState {
-    #[default]
-    Unbound,
-    BindingNotReady,
-    BindingReady,
-    ReplacementPending,
-}
-impl RealtimeBindingState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unbound => "Unbound",
-            Self::BindingNotReady => "BindingNotReady",
-            Self::BindingReady => "BindingReady",
-            Self::ReplacementPending => "ReplacementPending",
-        }
-    }
-}
-impl std::fmt::Display for RealtimeBindingState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeProductTurnPhase {
-    #[default]
-    Idle,
-    AwaitingProgress,
-    Committed,
-    OutputStarted,
-    Preemptible,
-}
-impl RealtimeProductTurnPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::AwaitingProgress => "AwaitingProgress",
-            Self::Committed => "Committed",
-            Self::OutputStarted => "OutputStarted",
-            Self::Preemptible => "Preemptible",
-        }
-    }
-}
-impl std::fmt::Display for RealtimeProductTurnPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeProjectionFreshness {
-    #[default]
-    Clean,
-    StaleDeferred,
-    StaleImmediate,
-}
-impl RealtimeProjectionFreshness {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Clean => "Clean",
-            Self::StaleDeferred => "StaleDeferred",
-            Self::StaleImmediate => "StaleImmediate",
-        }
-    }
-}
-impl std::fmt::Display for RealtimeProjectionFreshness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeReconnectPolicy {
-    #[default]
-    CleanExit,
-    ReattachAndRecover,
-}
-impl RealtimeReconnectPolicy {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::CleanExit => "CleanExit",
-            Self::ReattachAndRecover => "ReattachAndRecover",
-        }
-    }
-}
-impl std::fmt::Display for RealtimeReconnectPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RoutingApprovalParentKind {
-    #[default]
-    SwitchTurn,
-    ImageOperation,
-}
-impl RoutingApprovalParentKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::SwitchTurn => "SwitchTurn",
-            Self::ImageOperation => "ImageOperation",
-        }
-    }
-}
-impl std::fmt::Display for RoutingApprovalParentKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RoutingApprovalPhase {
-    #[default]
-    Pending,
-    PresentedToUser,
-    Approved,
-    Denied,
-    SurfaceDetached,
-}
-impl RoutingApprovalPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "Pending",
-            Self::PresentedToUser => "PresentedToUser",
-            Self::Approved => "Approved",
-            Self::Denied => "Denied",
-            Self::SurfaceDetached => "SurfaceDetached",
-        }
-    }
-}
-impl std::fmt::Display for RoutingApprovalPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RoutingDenialReason {
-    #[default]
-    CapabilityPolicy,
-    ApprovalRequiredButUnavailable,
-    DeniedDuringApproval,
-    ScopedOverrideConflict,
-    RealtimeTransportConflict,
-}
-impl RoutingDenialReason {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::CapabilityPolicy => "CapabilityPolicy",
-            Self::ApprovalRequiredButUnavailable => "ApprovalRequiredButUnavailable",
-            Self::DeniedDuringApproval => "DeniedDuringApproval",
-            Self::ScopedOverrideConflict => "ScopedOverrideConflict",
-            Self::RealtimeTransportConflict => "RealtimeTransportConflict",
-        }
-    }
-}
-impl std::fmt::Display for RoutingDenialReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RoutingImageOperationPhase {
-    #[default]
-    Requested,
-    PlanResolved,
-    ScopedOverrideActive,
-    ProviderCallInFlight,
-    ResultCommitted,
-    RestoringScopedOverride,
-    Terminal,
-}
-impl RoutingImageOperationPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Requested => "Requested",
-            Self::PlanResolved => "PlanResolved",
-            Self::ScopedOverrideActive => "ScopedOverrideActive",
-            Self::ProviderCallInFlight => "ProviderCallInFlight",
-            Self::ResultCommitted => "ResultCommitted",
-            Self::RestoringScopedOverride => "RestoringScopedOverride",
-            Self::Terminal => "Terminal",
-        }
-    }
-}
-impl std::fmt::Display for RoutingImageOperationPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RoutingImageTerminal {
-    #[default]
-    Generated,
-    Denied,
-    EmptyResult,
-    RefusedByProvider,
-    SafetyFiltered,
-    Failed,
-    Cancelled,
-    Timeout,
-    ScopedRestoreFailed,
-}
-impl RoutingImageTerminal {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Generated => "Generated",
-            Self::Denied => "Denied",
-            Self::EmptyResult => "EmptyResult",
-            Self::RefusedByProvider => "RefusedByProvider",
-            Self::SafetyFiltered => "SafetyFiltered",
-            Self::Failed => "Failed",
-            Self::Cancelled => "Cancelled",
-            Self::Timeout => "Timeout",
-            Self::ScopedRestoreFailed => "ScopedRestoreFailed",
-        }
-    }
-}
-impl std::fmt::Display for RoutingImageTerminal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RoutingSwitchTurnPhase {
-    #[default]
-    Requested,
-    PendingForBoundary,
-    ActiveFiniteOverride,
-    ApplyingPersistentReconfigure,
-    Terminal,
-}
-impl RoutingSwitchTurnPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Requested => "Requested",
-            Self::PendingForBoundary => "PendingForBoundary",
-            Self::ActiveFiniteOverride => "ActiveFiniteOverride",
-            Self::ApplyingPersistentReconfigure => "ApplyingPersistentReconfigure",
-            Self::Terminal => "Terminal",
-        }
-    }
-}
-impl std::fmt::Display for RoutingSwitchTurnPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RoutingSwitchTurnTerminal {
-    #[default]
-    Denied,
-    ConsumedAndRestored,
-    PersistentReconfigureApplied,
-}
-impl RoutingSwitchTurnTerminal {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Denied => "Denied",
-            Self::ConsumedAndRestored => "ConsumedAndRestored",
-            Self::PersistentReconfigureApplied => "PersistentReconfigureApplied",
-        }
-    }
-}
-impl std::fmt::Display for RoutingSwitchTurnTerminal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RuntimeNoticeKind {
-    #[default]
-    Drain,
-    Reset,
-    Stop,
-    Exit,
-    Recover,
-}
-impl RuntimeNoticeKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Drain => "Drain",
-            Self::Reset => "Reset",
-            Self::Stop => "Stop",
-            Self::Exit => "Exit",
-            Self::Recover => "Recover",
-        }
-    }
-}
-impl std::fmt::Display for RuntimeNoticeKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum SupervisorBindingKind {
-    #[default]
-    Unbound,
-    Bound,
-}
-impl SupervisorBindingKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unbound => "Unbound",
-            Self::Bound => "Bound",
-        }
-    }
-}
-impl std::fmt::Display for SupervisorBindingKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum TurnCancellationReason {
-    #[default]
-    Observed,
-}
-impl TurnCancellationReason {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Observed => "Observed",
-        }
-    }
-}
-impl std::fmt::Display for TurnCancellationReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum TurnPrimitiveKind {
-    #[default]
-    None,
-    ConversationTurn,
-    ImmediateAppend,
-    ImmediateContextAppend,
-}
-impl TurnPrimitiveKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::ConversationTurn => "ConversationTurn",
-            Self::ImmediateAppend => "ImmediateAppend",
-            Self::ImmediateContextAppend => "ImmediateContextAppend",
-        }
-    }
-}
-impl std::fmt::Display for TurnPrimitiveKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum TurnTerminalOutcome {
-    #[default]
-    None,
-    Completed,
-    Failed,
-    Cancelled,
-    BudgetExhausted,
-    TimeBudgetExceeded,
-    StructuredOutputValidationFailed,
-}
-impl TurnTerminalOutcome {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-            Self::Cancelled => "Cancelled",
-            Self::BudgetExhausted => "BudgetExhausted",
-            Self::TimeBudgetExceeded => "TimeBudgetExceeded",
-            Self::StructuredOutputValidationFailed => "StructuredOutputValidationFailed",
-        }
-    }
-}
-impl std::fmt::Display for TurnTerminalOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum WorkOrigin {
-    #[default]
-    External,
-    Internal,
-    Ingest,
-}
-impl WorkOrigin {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::External => "External",
-            Self::Internal => "Internal",
-            Self::Ingest => "Ingest",
-        }
-    }
-}
-impl std::fmt::Display for WorkOrigin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -5518,7 +6664,7 @@ pub fn initial_state() -> State {
         surface_phase: SurfacePhase::default(),
         removal_timeout_ms: 0,
         realtime_intent_present: false,
-        realtime_binding_state: RealtimeBindingState::Unbound,
+        realtime_binding_state: RealtimeBindingState::default(),
         realtime_binding_authority_epoch: None,
         realtime_reattach_required: false,
         realtime_next_authority_epoch: 0,
@@ -5533,14 +6679,14 @@ pub fn initial_state() -> State {
         last_session_context_updated_at_ms: 0,
         reserved_interaction_streams: Default::default(),
         attached_interaction_streams: Default::default(),
-        realtime_product_turn_phase: RealtimeProductTurnPhase::Idle,
-        realtime_projection_freshness: RealtimeProjectionFreshness::Clean,
+        realtime_product_turn_phase: RealtimeProductTurnPhase::default(),
+        realtime_projection_freshness: RealtimeProjectionFreshness::default(),
         realtime_projection_frontier_ms: 0,
-        realtime_reconnect_policy: RealtimeReconnectPolicy::CleanExit,
-        peer_ingress_owner_kind: PeerIngressOwnerKind::Unattached,
+        realtime_reconnect_policy: RealtimeReconnectPolicy::default(),
+        peer_ingress_owner_kind: PeerIngressOwnerKind::default(),
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,
-        supervisor_binding_kind: SupervisorBindingKind::Unbound,
+        supervisor_binding_kind: SupervisorBindingKind::default(),
         supervisor_bound_name: None,
         supervisor_bound_peer_id: None,
         supervisor_bound_address: None,

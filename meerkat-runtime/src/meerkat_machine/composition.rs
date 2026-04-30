@@ -711,19 +711,41 @@ mod tests {
     fn routed_meerkat_signal_projection_tracks_generated_route_facts() {
         use crate::generated::meerkat_mob_seam as seam_facts;
 
-        let signal = MeerkatSeamSignal::RuntimeBound {
-            agent_runtime_id: mm_dsl::AgentRuntimeId("rt-1".into()),
-            fence_token: mm_dsl::FenceToken(11),
-        };
-        let route = signal.generated_signal_route().expect("generated route");
+        let cases = vec![
+            (
+                MeerkatSeamSignal::RuntimeBound {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-bound".into()),
+                    fence_token: mm_dsl::FenceToken(11),
+                },
+                seam_facts::route_runtime_bound_reaches_mob(),
+            ),
+            (
+                MeerkatSeamSignal::RuntimeRetired {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-retired".into()),
+                    fence_token: mm_dsl::FenceToken(12),
+                },
+                seam_facts::route_runtime_retired_reaches_mob(),
+            ),
+            (
+                MeerkatSeamSignal::RuntimeDestroyed {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId("rt-destroyed".into()),
+                    fence_token: mm_dsl::FenceToken(13),
+                },
+                seam_facts::route_runtime_destroyed_reaches_mob(),
+            ),
+        ];
 
-        assert_eq!(route, seam_facts::route_runtime_bound_reaches_mob());
-        for (producer_field, _) in &route.bindings {
-            assert!(
-                signal.field(producer_field).is_some(),
-                "generated route requires producer field `{}`",
-                producer_field.as_str()
-            );
+        for (signal, expected_route) in cases {
+            let route = signal.generated_signal_route().expect("generated route");
+            assert_eq!(route, expected_route);
+            for (producer_field, _) in &route.bindings {
+                assert!(
+                    signal.field(producer_field).is_some(),
+                    "generated route `{}` requires producer field `{}`",
+                    route.route_id.as_str(),
+                    producer_field.as_str()
+                );
+            }
         }
     }
 

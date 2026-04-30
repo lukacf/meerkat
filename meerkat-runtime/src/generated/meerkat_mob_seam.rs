@@ -2,6 +2,7 @@
 // DO NOT EDIT. Emitted by meerkat_machine_codegen::render_composition_driver.
 // Source of truth: catalog::compositions::meerkat_mob_seam
 // Driver: `meerkat_mob_seam_driver` (rust path: `meerkat-runtime/src/generated/meerkat_mob_seam.rs`).
+#![allow(clippy::expect_used)]
 
 use meerkat_machine_schema::identity::{
     CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId, RouteId,

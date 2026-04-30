@@ -244,6 +244,10 @@ fn emitted_seam_module_carries_generated_marker_and_source_pointer() {
         "missing @generated marker:\n{rendered}"
     );
     assert!(
+        rendered.contains("#![allow(clippy::expect_used)]"),
+        "generated seam facts should be lint-clean under workspace clippy denies:\n{rendered}"
+    );
+    assert!(
         rendered.contains("Source of truth: catalog::compositions::meerkat_mob_seam"),
         "missing source-of-truth pointer:\n{rendered}"
     );

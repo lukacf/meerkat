@@ -519,23 +519,51 @@ mod tests {
     fn routed_mob_effect_projection_tracks_generated_route_facts() {
         use meerkat_runtime::generated::meerkat_mob_seam as seam_facts;
 
-        let body = mob_dsl::MobMachineEffect::RequestRuntimeBinding {
-            agent_identity: mob_dsl::AgentIdentity::from("agent"),
-            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
-            fence_token: mob_dsl::FenceToken(7),
-            generation: mob_dsl::Generation(3),
-            session_id: mob_dsl::SessionId::from("session-1"),
-        };
-        let effect = MobSeamEffect::Mob(body);
-        let route = effect.generated_input_route().expect("generated route");
+        let cases = vec![
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
+                    agent_identity: mob_dsl::AgentIdentity::from("agent"),
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                    fence_token: mob_dsl::FenceToken(7),
+                    generation: mob_dsl::Generation(3),
+                    session_id: mob_dsl::SessionId::from("session-1"),
+                }),
+                seam_facts::route_binding_request_reaches_meerkat(),
+            ),
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
+                    agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-1"),
+                    fence_token: mob_dsl::FenceToken(7),
+                    work_id: mob_dsl::WorkId::from("work-1"),
+                    origin: mob_dsl::WorkOrigin::External,
+                }),
+                seam_facts::route_work_request_reaches_meerkat(),
+            ),
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire {
+                    session_id: mob_dsl::SessionId::from("session-1"),
+                }),
+                seam_facts::route_retire_request_reaches_meerkat(),
+            ),
+            (
+                MobSeamEffect::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy {
+                    session_id: mob_dsl::SessionId::from("session-1"),
+                }),
+                seam_facts::route_destroy_request_reaches_meerkat(),
+            ),
+        ];
 
-        assert_eq!(route, seam_facts::route_binding_request_reaches_meerkat());
-        for (producer_field, _) in &route.bindings {
-            assert!(
-                effect.field(producer_field).is_some(),
-                "generated route requires producer field `{}`",
-                producer_field.as_str()
-            );
+        for (effect, expected_route) in cases {
+            let route = effect.generated_input_route().expect("generated route");
+            assert_eq!(route, expected_route);
+            for (producer_field, _) in &route.bindings {
+                assert!(
+                    effect.field(producer_field).is_some(),
+                    "generated route `{}` requires producer field `{}`",
+                    route.route_id.as_str(),
+                    producer_field.as_str()
+                );
+            }
         }
     }
 

@@ -921,16 +921,13 @@ pub fn render_composition_semantic_model(schema: &CompositionSchema) -> String {
 /// The emitted module is the typed seam between the composition's route
 /// schema and the runtime composition dispatcher. It declares:
 ///
-/// * a top-level seam-effect enum wrapping each participant machine's
-///   generated `Effect` type (one variant per distinct producer instance),
-/// * the `TypedRoutedInput` descriptor re-exported from the schema
-///   identity layer, and
-/// * a `route_to_input(&SeamEffect) -> Option<TypedRoutedInput>` function
-///   that resolves routed effects to their typed target input using the
-///   composition's `RouteId → (MachineInstanceId, InputVariantId, Vec<(FieldId, FieldId)>)`
-///   table, and
-/// * a `route_to_signal(&SeamEffect) -> Option<TypedRoutedSignal>` function
-///   for signal-kind routes using the same producer-field binding shape.
+/// * generated producer/effect/input/signal/field identity facts,
+/// * `TypedRoutedInput` / `TypedRoutedSignal` descriptors carrying typed
+///   route targets and `(FieldId, FieldId)` binding pairs,
+/// * a `route_to_input(instance, effect_variant) -> Option<TypedRoutedInput>`
+///   fact resolver for input-kind routes, and
+/// * a `route_to_signal(instance, effect_variant) -> Option<TypedRoutedSignal>`
+///   fact resolver for signal-kind routes.
 ///
 /// Returns `None` when the composition declares no driver descriptor; the
 /// driver descriptor continues to carry the Rust emission path for xtask
@@ -1004,6 +1001,7 @@ pub fn render_composition_driver(schema: &CompositionSchema) -> Option<String> {
         driver.name,
         driver.rust.module_path
     );
+    pushln!(&mut out, "#![allow(clippy::expect_used)]");
     out.push('\n');
 
     pushln!(

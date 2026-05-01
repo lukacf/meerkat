@@ -18,10 +18,13 @@ use meerkat_machine_schema::identity::{
     RouteId, TransitionId,
 };
 use meerkat_machine_schema::{
-    CompositionDriver, CompositionDriverRustBinding, CompositionSchemaError, DriverDispatchRoute,
-    RouteTargetKind, RouteVariantId, RustTypeAtom, TypeRef, WatchedEffect,
-    canonical_composition_coverage_manifests, canonical_composition_schemas,
-    canonical_machine_coverage_manifests, canonical_machine_schemas, meerkat_mob_seam_composition,
+    ActorKind, ActorSchema, CompositionDriver, CompositionDriverRustBinding, CompositionSchema,
+    CompositionSchemaError, CompositionStateLimits, CompositionWitness, CompositionWitnessField,
+    CompositionWitnessInput, CompositionWitnessState, DriverDispatchRoute, Expr, MachineInstance,
+    Route, RouteBindingSource, RouteDelivery, RouteFieldBinding, RouteTarget, RouteTargetKind,
+    RouteVariantId, RustTypeAtom, TypeRef, WatchedEffect, canonical_composition_coverage_manifests,
+    canonical_composition_schemas, canonical_machine_coverage_manifests, canonical_machine_schemas,
+    meerkat_mob_seam_composition,
 };
 
 #[test]
@@ -1094,6 +1097,178 @@ fn composition_with_driver_none_still_validates_as_before() {
         composition.validate_against(&[&meerkat, &mob]),
         Ok(()),
         "composition without a driver must validate",
+    );
+}
+
+fn literal_probe_composition(
+    routes: Vec<Route>,
+    witnesses: Vec<CompositionWitness>,
+) -> CompositionSchema {
+    CompositionSchema {
+        name: CompositionId::parse("literal_probe").expect("composition slug"),
+        machines: vec![MachineInstance {
+            instance_id: MachineInstanceId::parse("meerkat").expect("machine instance"),
+            machine_name: MachineId::parse("MeerkatMachine").expect("machine slug"),
+            actor: ActorId::parse("meerkat_actor").expect("actor slug"),
+        }],
+        actors: vec![ActorSchema {
+            name: ActorId::parse("meerkat_actor").expect("actor slug"),
+            kind: ActorKind::Machine,
+        }],
+        handoff_protocols: vec![],
+        entry_inputs: vec![],
+        routes,
+        route_target_selectors: vec![],
+        driver: None,
+        transaction_plans: vec![],
+        actor_priorities: vec![],
+        scheduler_rules: vec![],
+        invariants: vec![],
+        witnesses,
+        deep_domain_cardinality: 2,
+        deep_domain_overrides: BTreeMap::new(),
+        witness_domain_cardinality: 2,
+        ci_limits: Some(CompositionStateLimits::ci_defaults()),
+        closed_world: true,
+    }
+}
+
+fn literal_probe_witness(
+    expected_routes: Vec<RouteId>,
+    preload_inputs: Vec<CompositionWitnessInput>,
+    expected_states: Vec<CompositionWitnessState>,
+) -> CompositionWitness {
+    CompositionWitness {
+        name: meerkat_machine_schema::identity::CompositionWitnessId::parse("literal_probe")
+            .expect("witness slug"),
+        preload_inputs,
+        expected_routes,
+        expected_scheduler_rules: vec![],
+        expected_states,
+        expected_transitions: vec![],
+        expected_transition_order: vec![],
+        state_limits: CompositionStateLimits::ci_defaults(),
+    }
+}
+
+fn route_literal_to_meerkat_input(
+    route_name: &str,
+    input_variant: &str,
+    field: &str,
+    expr: Expr,
+) -> Route {
+    Route {
+        name: RouteId::parse(route_name).expect("route slug"),
+        from_machine: MachineInstanceId::parse("meerkat").expect("machine instance"),
+        effect_variant: EffectVariantId::parse("CommittedVisibleSetPublished")
+            .expect("effect slug"),
+        to: RouteTarget::new(
+            MachineInstanceId::parse("meerkat").expect("machine instance"),
+            RouteVariantId::Input(InputVariantId::parse(input_variant).expect("input slug")),
+        ),
+        bindings: vec![RouteFieldBinding {
+            to_field: FieldId::parse(field).expect("field slug"),
+            source: RouteBindingSource::Literal(expr),
+        }],
+        delivery: RouteDelivery::Immediate,
+    }
+}
+
+#[test]
+fn composition_route_literal_rejects_closed_tool_filter_placeholder_string() {
+    let meerkat = meerkat_machine();
+    let route = route_literal_to_meerkat_input(
+        "bad_tool_filter_route",
+        "StageVisibilityFilter",
+        "filter",
+        Expr::String("toolfilter_2".into()),
+    );
+    let composition = literal_probe_composition(
+        vec![route],
+        vec![literal_probe_witness(
+            vec![RouteId::parse("bad_tool_filter_route").expect("route slug")],
+            vec![],
+            vec![],
+        )],
+    );
+
+    let result = composition.validate_against(&[&meerkat]);
+    assert!(
+        matches!(
+            &result,
+            Err(CompositionSchemaError::RouteLiteralTypeMismatch { route, to_field, .. })
+                if route == "bad_tool_filter_route" && to_field == "filter"
+        ),
+        "expected route literal type mismatch for closed ToolFilter domain, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_witness_input_rejects_unknown_enum_named_variant_literal() {
+    let meerkat = meerkat_machine();
+    let composition = literal_probe_composition(
+        vec![],
+        vec![literal_probe_witness(
+            vec![],
+            vec![CompositionWitnessInput {
+                machine: MachineInstanceId::parse("meerkat").expect("machine instance"),
+                input_variant: InputVariantId::parse("RegisterOp").expect("input slug"),
+                fields: vec![
+                    CompositionWitnessField {
+                        field: FieldId::parse("operation_id").expect("field slug"),
+                        expr: Expr::String("op-1".into()),
+                    },
+                    CompositionWitnessField {
+                        field: FieldId::parse("kind").expect("field slug"),
+                        expr: Expr::NamedVariant {
+                            enum_name: EnumTypeId::parse("OperationKind").expect("enum type"),
+                            variant: EnumVariantId::parse("Bogus").expect("variant slug"),
+                        },
+                    },
+                ],
+            }],
+            vec![],
+        )],
+    );
+
+    let result = composition.validate_against(&[&meerkat]);
+    assert!(
+        matches!(
+            &result,
+            Err(CompositionSchemaError::WitnessLiteralTypeMismatch { field, .. })
+                if field == "kind"
+        ),
+        "expected witness literal type mismatch for unknown OperationKind, got {result:?}",
+    );
+}
+
+#[test]
+fn composition_witness_state_rejects_closed_tool_filter_placeholder_string() {
+    let meerkat = meerkat_machine();
+    let composition = literal_probe_composition(
+        vec![],
+        vec![literal_probe_witness(
+            vec![],
+            vec![],
+            vec![CompositionWitnessState {
+                machine: MachineInstanceId::parse("meerkat").expect("machine instance"),
+                phase: None,
+                fields: vec![CompositionWitnessField {
+                    field: FieldId::parse("active_filter").expect("field slug"),
+                    expr: Expr::String("toolfilter_2".into()),
+                }],
+            }],
+        )],
+    );
+
+    let result = composition.validate_against(&[&meerkat]);
+    assert!(
+        matches!(
+            &result,
+            Err(CompositionSchemaError::WitnessStateLiteralTypeMismatch { field, .. })
+                if field == "active_filter"
+        ),
+        "expected witness state literal type mismatch for closed ToolFilter domain, got {result:?}",
     );
 }
 

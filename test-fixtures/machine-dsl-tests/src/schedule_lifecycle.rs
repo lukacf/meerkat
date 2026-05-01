@@ -347,13 +347,15 @@ mod tests {
 
     #[test]
     fn schema_validates() {
-        // Mirror the schedule-lifecycle catalog binding set from
-        // `meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_schedule_lifecycle_machine`.
+        // Mirror this fixture machine's typed binding set.
         // B-4 (`c0cb12071`) made `named_types` validation-gated.
         use meerkat_machine_schema::identity::NamedTypeBinding;
         let mut schema = ScheduleLifecycleMachineState::schema();
         schema.named_types = vec![
+            NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "Execute"]),
+            NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string("OccurrenceId"),
+            NamedTypeBinding::string_enum("OverlapPolicy", &["SkipIfRunning", "Queue"]),
             NamedTypeBinding::string("ScheduleLifecycleState"),
         ];
         schema

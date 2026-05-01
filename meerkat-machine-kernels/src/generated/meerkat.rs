@@ -505,6 +505,62 @@ impl std::fmt::Display for ExternalToolSurfaceDeltaPhase {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ExternalToolSurfaceFailureCause {
+    #[default]
+    #[serde(rename = "PendingFailed")]
+    PendingFailed,
+    #[serde(rename = "SurfaceDraining")]
+    SurfaceDraining,
+    #[serde(rename = "SurfaceUnavailable")]
+    SurfaceUnavailable,
+}
+impl ExternalToolSurfaceFailureCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PendingFailed => "PendingFailed",
+            Self::SurfaceDraining => "SurfaceDraining",
+            Self::SurfaceUnavailable => "SurfaceUnavailable",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ExternalToolSurfaceFailureCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PendingFailed" => Ok(Self::PendingFailed),
+            "SurfaceDraining" => Ok(Self::SurfaceDraining),
+            "SurfaceUnavailable" => Ok(Self::SurfaceUnavailable),
+            other => Err(format!(
+                "invalid ExternalToolSurfaceFailureCause value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ExternalToolSurfaceFailureCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ExternalToolSurfaceFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -1508,6 +1564,316 @@ pub type PeerEndpoint = meerkat_machine_schema::catalog::dsl::meerkat_machine::P
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum PeerIngressAdmittedKind {
+    #[default]
+    #[serde(rename = "Message")]
+    Message,
+    #[serde(rename = "Request")]
+    Request,
+    #[serde(rename = "Response")]
+    Response,
+    #[serde(rename = "Ack")]
+    Ack,
+    #[serde(rename = "PlainEvent")]
+    PlainEvent,
+}
+impl PeerIngressAdmittedKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Message => "Message",
+            Self::Request => "Request",
+            Self::Response => "Response",
+            Self::Ack => "Ack",
+            Self::PlainEvent => "PlainEvent",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressAdmittedKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Message" => Ok(Self::Message),
+            "Request" => Ok(Self::Request),
+            "Response" => Ok(Self::Response),
+            "Ack" => Ok(Self::Ack),
+            "PlainEvent" => Ok(Self::PlainEvent),
+            other => Err(format!("invalid PeerIngressAdmittedKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressAdmittedKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressAdmittedKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressAuthClass {
+    #[default]
+    #[serde(rename = "Required")]
+    Required,
+    #[serde(rename = "SupervisorBridgeExempt")]
+    SupervisorBridgeExempt,
+}
+impl PeerIngressAuthClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Required => "Required",
+            Self::SupervisorBridgeExempt => "SupervisorBridgeExempt",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressAuthClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Required" => Ok(Self::Required),
+            "SupervisorBridgeExempt" => Ok(Self::SupervisorBridgeExempt),
+            other => Err(format!("invalid PeerIngressAuthClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressAuthClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressAuthClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressEnvelopeClass {
+    #[default]
+    #[serde(rename = "Message")]
+    Message,
+    #[serde(rename = "Request")]
+    Request,
+    #[serde(rename = "Lifecycle")]
+    Lifecycle,
+    #[serde(rename = "Response")]
+    Response,
+    #[serde(rename = "Ack")]
+    Ack,
+}
+impl PeerIngressEnvelopeClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Message => "Message",
+            Self::Request => "Request",
+            Self::Lifecycle => "Lifecycle",
+            Self::Response => "Response",
+            Self::Ack => "Ack",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressEnvelopeClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Message" => Ok(Self::Message),
+            "Request" => Ok(Self::Request),
+            "Lifecycle" => Ok(Self::Lifecycle),
+            "Response" => Ok(Self::Response),
+            "Ack" => Ok(Self::Ack),
+            other => Err(format!("invalid PeerIngressEnvelopeClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressEnvelopeClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressEnvelopeClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressInputClass {
+    #[default]
+    #[serde(rename = "ActionableMessage")]
+    ActionableMessage,
+    #[serde(rename = "ActionableRequest")]
+    ActionableRequest,
+    #[serde(rename = "ResponseProgress")]
+    ResponseProgress,
+    #[serde(rename = "ResponseTerminal")]
+    ResponseTerminal,
+    #[serde(rename = "PeerLifecycleAdded")]
+    PeerLifecycleAdded,
+    #[serde(rename = "PeerLifecycleRetired")]
+    PeerLifecycleRetired,
+    #[serde(rename = "PeerLifecycleUnwired")]
+    PeerLifecycleUnwired,
+    #[serde(rename = "SilentRequest")]
+    SilentRequest,
+    #[serde(rename = "Ack")]
+    Ack,
+    #[serde(rename = "PlainEvent")]
+    PlainEvent,
+}
+impl PeerIngressInputClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ActionableMessage => "ActionableMessage",
+            Self::ActionableRequest => "ActionableRequest",
+            Self::ResponseProgress => "ResponseProgress",
+            Self::ResponseTerminal => "ResponseTerminal",
+            Self::PeerLifecycleAdded => "PeerLifecycleAdded",
+            Self::PeerLifecycleRetired => "PeerLifecycleRetired",
+            Self::PeerLifecycleUnwired => "PeerLifecycleUnwired",
+            Self::SilentRequest => "SilentRequest",
+            Self::Ack => "Ack",
+            Self::PlainEvent => "PlainEvent",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressInputClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ActionableMessage" => Ok(Self::ActionableMessage),
+            "ActionableRequest" => Ok(Self::ActionableRequest),
+            "ResponseProgress" => Ok(Self::ResponseProgress),
+            "ResponseTerminal" => Ok(Self::ResponseTerminal),
+            "PeerLifecycleAdded" => Ok(Self::PeerLifecycleAdded),
+            "PeerLifecycleRetired" => Ok(Self::PeerLifecycleRetired),
+            "PeerLifecycleUnwired" => Ok(Self::PeerLifecycleUnwired),
+            "SilentRequest" => Ok(Self::SilentRequest),
+            "Ack" => Ok(Self::Ack),
+            "PlainEvent" => Ok(Self::PlainEvent),
+            other => Err(format!("invalid PeerIngressInputClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressInputClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressInputClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressLifecycleClass {
+    #[default]
+    #[serde(rename = "PeerAdded")]
+    PeerAdded,
+    #[serde(rename = "PeerRetired")]
+    PeerRetired,
+    #[serde(rename = "PeerUnwired")]
+    PeerUnwired,
+}
+impl PeerIngressLifecycleClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PeerAdded => "PeerAdded",
+            Self::PeerRetired => "PeerRetired",
+            Self::PeerUnwired => "PeerUnwired",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressLifecycleClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PeerAdded" => Ok(Self::PeerAdded),
+            "PeerRetired" => Ok(Self::PeerRetired),
+            "PeerUnwired" => Ok(Self::PeerUnwired),
+            other => Err(format!("invalid PeerIngressLifecycleClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressLifecycleClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressLifecycleClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum PeerIngressOwnerKind {
     #[default]
     #[serde(rename = "Unattached")]
@@ -1544,6 +1910,116 @@ impl std::convert::TryFrom<String> for PeerIngressOwnerKind {
     }
 }
 impl std::fmt::Display for PeerIngressOwnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressResponseStatus {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl PeerIngressResponseStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressResponseStatus {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!("invalid PeerIngressResponseStatus value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressResponseStatus {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressResponseStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PeerIngressResponseTerminality {
+    #[default]
+    #[serde(rename = "Progress")]
+    Progress,
+    #[serde(rename = "TerminalCompleted")]
+    TerminalCompleted,
+    #[serde(rename = "TerminalFailed")]
+    TerminalFailed,
+}
+impl PeerIngressResponseTerminality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Progress => "Progress",
+            Self::TerminalCompleted => "TerminalCompleted",
+            Self::TerminalFailed => "TerminalFailed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for PeerIngressResponseTerminality {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Progress" => Ok(Self::Progress),
+            "TerminalCompleted" => Ok(Self::TerminalCompleted),
+            "TerminalFailed" => Ok(Self::TerminalFailed),
+            other => Err(format!(
+                "invalid PeerIngressResponseTerminality value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for PeerIngressResponseTerminality {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for PeerIngressResponseTerminality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2520,6 +2996,76 @@ impl std::fmt::Display for RunId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeApplyFailureCause {
+    #[default]
+    #[serde(rename = "Unknown")]
+    Unknown,
+    #[serde(rename = "PrimitiveRejected")]
+    PrimitiveRejected,
+    #[serde(rename = "RuntimeContextApply")]
+    RuntimeContextApply,
+    #[serde(rename = "RuntimeTurn")]
+    RuntimeTurn,
+    #[serde(rename = "ExecutorStopped")]
+    ExecutorStopped,
+    #[serde(rename = "ExecutorControlFailed")]
+    ExecutorControlFailed,
+    #[serde(rename = "ExecutorInternal")]
+    ExecutorInternal,
+}
+impl RuntimeApplyFailureCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::PrimitiveRejected => "PrimitiveRejected",
+            Self::RuntimeContextApply => "RuntimeContextApply",
+            Self::RuntimeTurn => "RuntimeTurn",
+            Self::ExecutorStopped => "ExecutorStopped",
+            Self::ExecutorControlFailed => "ExecutorControlFailed",
+            Self::ExecutorInternal => "ExecutorInternal",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeApplyFailureCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Unknown" => Ok(Self::Unknown),
+            "PrimitiveRejected" => Ok(Self::PrimitiveRejected),
+            "RuntimeContextApply" => Ok(Self::RuntimeContextApply),
+            "RuntimeTurn" => Ok(Self::RuntimeTurn),
+            "ExecutorStopped" => Ok(Self::ExecutorStopped),
+            "ExecutorControlFailed" => Ok(Self::ExecutorControlFailed),
+            "ExecutorInternal" => Ok(Self::ExecutorInternal),
+            other => Err(format!("invalid RuntimeApplyFailureCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeApplyFailureCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeApplyFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeEffectKind {
     #[default]
     #[serde(rename = "CancelAfterBoundary")]
@@ -3022,34 +3568,7 @@ impl std::fmt::Display for SurfaceStagedOp {
         f.write_str(self.as_str())
     }
 }
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct ToolFilter(pub String);
-impl From<String> for ToolFilter {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for ToolFilter {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for ToolFilter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+pub type ToolFilter = meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolFilter;
 pub type ToolVisibilityWitness =
     meerkat_machine_schema::catalog::dsl::meerkat_machine::ToolVisibilityWitness;
 #[allow(non_camel_case_types)]
@@ -3418,341 +3937,6 @@ impl std::convert::TryFrom<String> for WorkOrigin {
     }
 }
 impl std::fmt::Display for WorkOrigin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum ExternalToolSurfaceFailureCause {
-    #[default]
-    PendingFailed,
-    SurfaceDraining,
-    SurfaceUnavailable,
-}
-impl ExternalToolSurfaceFailureCause {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::PendingFailed => "PendingFailed",
-            Self::SurfaceDraining => "SurfaceDraining",
-            Self::SurfaceUnavailable => "SurfaceUnavailable",
-        }
-    }
-}
-impl std::fmt::Display for ExternalToolSurfaceFailureCause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PeerIngressAdmittedKind {
-    #[default]
-    Message,
-    Request,
-    Response,
-    Ack,
-    PlainEvent,
-}
-impl PeerIngressAdmittedKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Message => "Message",
-            Self::Request => "Request",
-            Self::Response => "Response",
-            Self::Ack => "Ack",
-            Self::PlainEvent => "PlainEvent",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressAdmittedKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PeerIngressAuthClass {
-    #[default]
-    Required,
-    SupervisorBridgeExempt,
-}
-impl PeerIngressAuthClass {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Required => "Required",
-            Self::SupervisorBridgeExempt => "SupervisorBridgeExempt",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressAuthClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PeerIngressEnvelopeClass {
-    #[default]
-    Message,
-    Request,
-    Lifecycle,
-    Response,
-    Ack,
-}
-impl PeerIngressEnvelopeClass {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Message => "Message",
-            Self::Request => "Request",
-            Self::Lifecycle => "Lifecycle",
-            Self::Response => "Response",
-            Self::Ack => "Ack",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressEnvelopeClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PeerIngressInputClass {
-    #[default]
-    ActionableMessage,
-    ActionableRequest,
-    ResponseProgress,
-    ResponseTerminal,
-    PeerLifecycleAdded,
-    PeerLifecycleRetired,
-    PeerLifecycleUnwired,
-    SilentRequest,
-    Ack,
-    PlainEvent,
-}
-impl PeerIngressInputClass {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::ActionableMessage => "ActionableMessage",
-            Self::ActionableRequest => "ActionableRequest",
-            Self::ResponseProgress => "ResponseProgress",
-            Self::ResponseTerminal => "ResponseTerminal",
-            Self::PeerLifecycleAdded => "PeerLifecycleAdded",
-            Self::PeerLifecycleRetired => "PeerLifecycleRetired",
-            Self::PeerLifecycleUnwired => "PeerLifecycleUnwired",
-            Self::SilentRequest => "SilentRequest",
-            Self::Ack => "Ack",
-            Self::PlainEvent => "PlainEvent",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressInputClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PeerIngressLifecycleClass {
-    #[default]
-    PeerAdded,
-    PeerRetired,
-    PeerUnwired,
-}
-impl PeerIngressLifecycleClass {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::PeerAdded => "PeerAdded",
-            Self::PeerRetired => "PeerRetired",
-            Self::PeerUnwired => "PeerUnwired",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressLifecycleClass {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PeerIngressResponseStatus {
-    #[default]
-    Accepted,
-    Completed,
-    Failed,
-}
-impl PeerIngressResponseStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Accepted => "Accepted",
-            Self::Completed => "Completed",
-            Self::Failed => "Failed",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressResponseStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum PeerIngressResponseTerminality {
-    #[default]
-    Progress,
-    TerminalCompleted,
-    TerminalFailed,
-}
-impl PeerIngressResponseTerminality {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Progress => "Progress",
-            Self::TerminalCompleted => "TerminalCompleted",
-            Self::TerminalFailed => "TerminalFailed",
-        }
-    }
-}
-impl std::fmt::Display for PeerIngressResponseTerminality {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RuntimeApplyFailureCause {
-    #[default]
-    Unknown,
-    PrimitiveRejected,
-    RuntimeContextApply,
-    RuntimeTurn,
-    ExecutorStopped,
-    ExecutorControlFailed,
-    ExecutorInternal,
-}
-impl RuntimeApplyFailureCause {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unknown => "Unknown",
-            Self::PrimitiveRejected => "PrimitiveRejected",
-            Self::RuntimeContextApply => "RuntimeContextApply",
-            Self::RuntimeTurn => "RuntimeTurn",
-            Self::ExecutorStopped => "ExecutorStopped",
-            Self::ExecutorControlFailed => "ExecutorControlFailed",
-            Self::ExecutorInternal => "ExecutorInternal",
-        }
-    }
-}
-impl std::fmt::Display for RuntimeApplyFailureCause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }

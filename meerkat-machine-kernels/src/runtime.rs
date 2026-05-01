@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 const TOOL_PROVENANCE_TYPE: &str = "ToolProvenance";
+const TOOL_FILTER_TYPE: &str = "ToolFilter";
 const TOOL_SOURCE_KIND_TYPE: &str = "ToolSourceKind";
 const TOOL_VISIBILITY_WITNESS_TYPE: &str = "ToolVisibilityWitness";
 
@@ -255,6 +256,22 @@ fn tool_visibility_witness_identity_len(value: &KernelValue) -> Option<usize> {
         len += 1;
     }
     Some(len)
+}
+
+fn tool_filter_payload_matches(fields: &BTreeMap<KernelValue, KernelValue>) -> bool {
+    if fields.len() != 2 {
+        return false;
+    }
+
+    let tag = fields.get(&string_key("tag"));
+    let names = fields.get(&string_key("names"));
+    matches!(
+        tag,
+        Some(KernelValue::String(tag)) if matches!(tag.as_str(), "Allow" | "Deny")
+    ) && matches!(
+        names,
+        Some(KernelValue::Set(values)) if values.iter().all(|value| matches!(value, KernelValue::String(_)))
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1338,17 +1355,12 @@ impl GeneratedMachineKernel {
         match ty {
             TypeRef::Named(name) => matches!(
                 named_type_atom(&self.schema, name),
-                Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
-            ),
-            TypeRef::Enum(name) => {
-                let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
-                    return false;
-                };
-                matches!(
-                    named_type_atom(&self.schema, &named_type_name),
-                    Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
+                Some(
+                    meerkat_machine_schema::RustTypeAtom::StringEnum { .. }
+                        | meerkat_machine_schema::RustTypeAtom::TypePathEnum { .. }
                 )
-            }
+            ),
+            TypeRef::Enum(_) => true,
             TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
                 self.type_contains_constrained_string_enum(inner)
             }
@@ -1558,6 +1570,12 @@ fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> K
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
         )
         | None => KernelValue::String(String::new()),
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
+            unit_variants
+                .first()
+                .map(|variant| KernelValue::String(variant.as_str().to_owned()))
+                .unwrap_or_else(|| KernelValue::String(String::new()))
+        }
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => variants
             .first()
             .map(|variant| KernelValue::String(variant.as_str().to_owned()))
@@ -1605,9 +1623,30 @@ fn named_type_inner_matches(
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
         )
         | None => matches!(value, KernelValue::String(_)),
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
+            type_path_enum_unit_matches(name, unit_variants, value)
+                || (name.as_str() == TOOL_FILTER_TYPE
+                    && matches!(value, KernelValue::Map(fields) if tool_filter_payload_matches(fields)))
+        }
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             matches!(value, KernelValue::String(value) if variants.iter().any(|variant| variant.as_str() == value))
         }
+    }
+}
+
+fn type_path_enum_unit_matches(
+    name: &NamedTypeId,
+    unit_variants: &[EnumVariantId],
+    value: &KernelValue,
+) -> bool {
+    match value {
+        KernelValue::String(value) => unit_variants
+            .iter()
+            .any(|variant| variant.as_str() == value.as_str()),
+        KernelValue::NamedVariant { enum_name, variant } if enum_name.as_str() == name.as_str() => {
+            unit_variants.iter().any(|allowed| allowed == variant)
+        }
+        _ => false,
     }
 }
 
@@ -1619,6 +1658,9 @@ fn named_type_variant_matches(
     match named_type_atom(schema, name) {
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             variants.iter().any(|allowed| allowed == variant)
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
+            unit_variants.iter().any(|allowed| allowed == variant)
         }
         _ => false,
     }
@@ -1637,13 +1679,13 @@ fn enum_variant_matches(
     variant: &EnumVariantId,
 ) -> bool {
     let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
-        return true;
+        return false;
     };
     match named_type_atom(schema, &named_type_name) {
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             variants.iter().any(|allowed| allowed == variant)
         }
-        _ => true,
+        _ => false,
     }
 }
 
@@ -1859,6 +1901,46 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
+    fn unbound_semantic_enum_state_domains_reject_unknown_values() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let mut state = kernel.initial_state().expect("initial state");
+        state.fields.insert(
+            field_id("run_step_dependency_modes"),
+            KernelValue::Map(BTreeMap::from([(
+                named_string("RunId", "run-1"),
+                KernelValue::Map(BTreeMap::from([(
+                    named_string("StepId", "step-1"),
+                    KernelValue::NamedVariant {
+                        enum_name: enum_type_id("DependencyMode"),
+                        variant: enum_variant_id("Neither"),
+                    },
+                )])),
+            )])),
+        );
+
+        let refusal = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: input_id("Stop"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect_err("invalid DependencyMode state must be rejected before transitioning");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("run_step_dependency_modes"),
+                    "state validation refusal should identify the bad field, got: {reason}"
+                );
+            }
+            other => panic!("expected state validation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
     fn operation_status_rejects_unknown_kernel_values() {
         let schema = meerkat_machine();
 
@@ -1974,6 +2056,95 @@ mod tests {
                 "unknown {domain} named variants must not enter named-type state fields"
             );
         }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn typed_tool_filter_domain_rejects_arbitrary_string_values() {
+        let schema = meerkat_machine();
+        let tool_filter_ty = meerkat_machine_schema::TypeRef::Named(named_type_id("ToolFilter"));
+
+        assert!(value_matches_type(
+            &schema,
+            &named_string("ToolFilter", "All"),
+            &tool_filter_ty,
+        ));
+        assert!(value_matches_type(
+            &schema,
+            &KernelValue::NamedVariant {
+                enum_name: enum_type_id("ToolFilter"),
+                variant: enum_variant_id("All"),
+            },
+            &tool_filter_ty,
+        ));
+        assert!(
+            !value_matches_type(
+                &schema,
+                &named_string("ToolFilter", "toolfilter_2"),
+                &tool_filter_ty,
+            ),
+            "ToolFilter must not accept arbitrary generated placeholder strings"
+        );
+        assert!(
+            !value_matches_type(
+                &schema,
+                &KernelValue::NamedVariant {
+                    enum_name: enum_type_id("ToolFilter"),
+                    variant: enum_variant_id("Bogus"),
+                },
+                &tool_filter_ty,
+            ),
+            "ToolFilter named variants must be constrained by the typed owner"
+        );
+
+        let allow_payload = KernelValue::Named {
+            type_name: named_type_id("ToolFilter"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([
+                (
+                    KernelValue::String("tag".into()),
+                    KernelValue::String("Allow".into()),
+                ),
+                (
+                    KernelValue::String("names".into()),
+                    KernelValue::Set(BTreeSet::from([KernelValue::String("tool-a".into())])),
+                ),
+            ]))),
+        };
+        assert!(value_matches_type(&schema, &allow_payload, &tool_filter_ty));
+
+        let mut alternate_schema = schema.clone();
+        alternate_schema
+            .named_types
+            .iter_mut()
+            .find(|binding| binding.name.as_str() == "ToolFilter")
+            .expect("ToolFilter binding")
+            .rust = meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+            path: "crate::catalog::dsl::meerkat_machine::ToolFilter".to_string(),
+            unit_variants: vec![enum_variant_id("Only")],
+        };
+        assert!(
+            !value_matches_type(
+                &alternate_schema,
+                &named_string("ToolFilter", "All"),
+                &tool_filter_ty,
+            ),
+            "ToolFilter unit strings must be authorized by TypePathEnum metadata"
+        );
+        assert!(
+            !value_matches_type(
+                &alternate_schema,
+                &KernelValue::NamedVariant {
+                    enum_name: enum_type_id("ToolFilter"),
+                    variant: enum_variant_id("All"),
+                },
+                &tool_filter_ty,
+            ),
+            "ToolFilter named variants must be authorized by TypePathEnum metadata"
+        );
+        assert!(
+            value_matches_type(&alternate_schema, &allow_payload, &tool_filter_ty),
+            "structural ToolFilter payloads remain validated by shape after the typed owner authorizes the domain"
+        );
     }
 
     #[allow(clippy::expect_used)]

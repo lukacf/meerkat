@@ -12,6 +12,106 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_schedule_lifecycle_machine()
 }
 
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MisfirePolicy {
+    #[default]
+    #[serde(rename = "Skip")]
+    Skip,
+    #[serde(rename = "CatchUpWithin")]
+    CatchUpWithin,
+}
+impl MisfirePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Skip => "Skip",
+            Self::CatchUpWithin => "CatchUpWithin",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MisfirePolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Skip" => Ok(Self::Skip),
+            "CatchUpWithin" => Ok(Self::CatchUpWithin),
+            other => Err(format!("invalid MisfirePolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MisfirePolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MisfirePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MissingTargetPolicy {
+    #[default]
+    #[serde(rename = "MarkMisfired")]
+    MarkMisfired,
+    #[serde(rename = "Skip")]
+    Skip,
+}
+impl MissingTargetPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MarkMisfired => "MarkMisfired",
+            Self::Skip => "Skip",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MissingTargetPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "MarkMisfired" => Ok(Self::MarkMisfired),
+            "Skip" => Ok(Self::Skip),
+            other => Err(format!("invalid MissingTargetPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MissingTargetPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MissingTargetPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -38,6 +138,56 @@ impl From<&str> for OccurrenceId {
 impl std::fmt::Display for OccurrenceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OverlapPolicy {
+    #[default]
+    #[serde(rename = "AllowConcurrent")]
+    AllowConcurrent,
+    #[serde(rename = "SkipIfRunning")]
+    SkipIfRunning,
+}
+impl OverlapPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AllowConcurrent => "AllowConcurrent",
+            Self::SkipIfRunning => "SkipIfRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OverlapPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AllowConcurrent" => Ok(Self::AllowConcurrent),
+            "SkipIfRunning" => Ok(Self::SkipIfRunning),
+            other => Err(format!("invalid OverlapPolicy value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OverlapPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OverlapPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[allow(non_camel_case_types)]
@@ -90,103 +240,6 @@ impl std::convert::TryFrom<String> for ScheduleLifecycleState {
     }
 }
 impl std::fmt::Display for ScheduleLifecycleState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum MisfirePolicy {
-    #[default]
-    Skip,
-    CatchUpWithin,
-}
-impl MisfirePolicy {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Skip => "Skip",
-            Self::CatchUpWithin => "CatchUpWithin",
-        }
-    }
-}
-impl std::fmt::Display for MisfirePolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum MissingTargetPolicy {
-    #[default]
-    MarkMisfired,
-    Skip,
-}
-impl MissingTargetPolicy {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::MarkMisfired => "MarkMisfired",
-            Self::Skip => "Skip",
-        }
-    }
-}
-impl std::fmt::Display for MissingTargetPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum OverlapPolicy {
-    #[default]
-    AllowConcurrent,
-    SkipIfRunning,
-}
-impl OverlapPolicy {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AllowConcurrent => "AllowConcurrent",
-            Self::SkipIfRunning => "SkipIfRunning",
-        }
-    }
-}
-impl std::fmt::Display for OverlapPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -422,9 +475,9 @@ pub fn initial_state() -> State {
         revision: 0,
         trigger_key: String::new(),
         target_binding_key: String::new(),
-        misfire_policy: MisfirePolicy::Skip,
-        overlap_policy: OverlapPolicy::AllowConcurrent,
-        missing_target_policy: MissingTargetPolicy::MarkMisfired,
+        misfire_policy: MisfirePolicy::default(),
+        overlap_policy: OverlapPolicy::default(),
+        missing_target_policy: MissingTargetPolicy::default(),
         planning_cursor_utc_ms: None,
         next_occurrence_ordinal: 0,
         superseded_ack_ids: Default::default(),

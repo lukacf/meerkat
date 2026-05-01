@@ -15954,7 +15954,9 @@ fn runtime_modeled_default_kernel_value(ty: &TypeRef) -> KernelValue {
         TypeRef::U32 | TypeRef::U64 => KernelValue::U64(0),
         TypeRef::String => KernelValue::String(String::new()),
         TypeRef::Named(name) => {
-            if let Some(value) = runtime_modeled_default_string_enum_named_value(name) {
+            if name.as_str() == "ToolFilter" {
+                runtime_modeled_named_value(name, runtime_modeled_tool_filter_all_inner())
+            } else if let Some(value) = runtime_modeled_default_string_enum_named_value(name) {
                 value
             } else {
                 runtime_modeled_named_value(
@@ -16080,6 +16082,13 @@ fn runtime_modeled_named_value(
         } if existing == type_name
     ) {
         return value;
+    }
+
+    if type_name.as_str() == "ToolFilter" {
+        return KernelValue::Named {
+            type_name: type_name.clone(),
+            value: Box::new(runtime_modeled_tool_filter_inner(value)),
+        };
     }
 
     if let Some(value) = runtime_modeled_string_enum_named_value(type_name, &value) {
@@ -16210,6 +16219,10 @@ fn runtime_modeled_kernel_value_from_json(ty: &TypeRef, value: &serde_json::Valu
                 value,
             )),
         },
+        TypeRef::Named(name) if name.as_str() == "ToolFilter" => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(runtime_modeled_tool_filter_inner_from_json(value)),
+        },
         TypeRef::Named(name) => runtime_modeled_string_enum_named_value_from_json(name, value)
             .unwrap_or_else(|| KernelValue::Named {
                 type_name: name.clone(),
@@ -16284,6 +16297,9 @@ fn runtime_modeled_json_from_kernel_value(value: &KernelValue) -> serde_json::Va
         KernelValue::U64(value) => serde_json::Value::Number(serde_json::Number::from(*value)),
         KernelValue::String(value) => {
             serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.clone()))
+        }
+        KernelValue::Named { type_name, value } if type_name.as_str() == "ToolFilter" => {
+            runtime_modeled_tool_filter_json_from_inner(value)
         }
         KernelValue::Named { value, .. } => runtime_modeled_json_from_kernel_value(value),
         KernelValue::NamedVariant { variant, .. } => {
@@ -16370,6 +16386,122 @@ fn runtime_modeled_string_set(values: &[&str]) -> KernelValue {
             .map(|value| KernelValue::String((*value).to_string()))
             .collect(),
     )
+}
+
+fn runtime_modeled_tool_filter_all_inner() -> KernelValue {
+    KernelValue::String("All".to_string())
+}
+
+fn runtime_modeled_tool_filter_names(values: impl Iterator<Item = String>) -> KernelValue {
+    KernelValue::Set(values.map(KernelValue::String).collect())
+}
+
+fn runtime_modeled_tool_filter_inner_from_domain(filter: &meerkat_core::ToolFilter) -> KernelValue {
+    match filter {
+        meerkat_core::ToolFilter::All => runtime_modeled_tool_filter_all_inner(),
+        meerkat_core::ToolFilter::Allow(names) => KernelValue::Map(BTreeMap::from([
+            (
+                KernelValue::String("tag".to_string()),
+                KernelValue::String("Allow".to_string()),
+            ),
+            (
+                KernelValue::String("names".to_string()),
+                runtime_modeled_tool_filter_names(
+                    names.iter().map(|name| name.as_str().to_string()),
+                ),
+            ),
+        ])),
+        meerkat_core::ToolFilter::Deny(names) => KernelValue::Map(BTreeMap::from([
+            (
+                KernelValue::String("tag".to_string()),
+                KernelValue::String("Deny".to_string()),
+            ),
+            (
+                KernelValue::String("names".to_string()),
+                runtime_modeled_tool_filter_names(
+                    names.iter().map(|name| name.as_str().to_string()),
+                ),
+            ),
+        ])),
+    }
+}
+
+fn runtime_modeled_tool_filter_inner_from_json(value: &serde_json::Value) -> KernelValue {
+    serde_json::from_value::<meerkat_core::ToolFilter>(value.clone())
+        .map(|filter| runtime_modeled_tool_filter_inner_from_domain(&filter))
+        .unwrap_or_else(|_| KernelValue::String(String::new()))
+}
+
+fn runtime_modeled_tool_filter_inner(value: KernelValue) -> KernelValue {
+    match value {
+        KernelValue::Named { type_name, value } if type_name.as_str() == "ToolFilter" => {
+            runtime_modeled_tool_filter_inner(*value)
+        }
+        KernelValue::NamedVariant { enum_name, variant }
+            if enum_name.as_str() == "ToolFilter" && variant.as_str() == "All" =>
+        {
+            runtime_modeled_tool_filter_all_inner()
+        }
+        KernelValue::String(raw) => KernelValue::String(raw),
+        map @ KernelValue::Map(_) => map,
+        other => serde_json::from_value::<meerkat_core::ToolFilter>(
+            runtime_modeled_json_from_kernel_value(&other),
+        )
+        .map(|filter| runtime_modeled_tool_filter_inner_from_domain(&filter))
+        .unwrap_or(other),
+    }
+}
+
+fn runtime_modeled_tool_filter_deny_inner(names: &[&str]) -> KernelValue {
+    let mut filter_names = meerkat_core::ToolNameSet::new();
+    for name in names {
+        filter_names.insert(*name);
+    }
+    runtime_modeled_tool_filter_inner_from_domain(&meerkat_core::ToolFilter::Deny(filter_names))
+}
+
+fn runtime_modeled_tool_filter_json_from_inner(value: &KernelValue) -> serde_json::Value {
+    match value {
+        KernelValue::String(tag) if tag == "All" => serde_json::Value::String("All".to_string()),
+        KernelValue::NamedVariant { enum_name, variant }
+            if enum_name.as_str() == "ToolFilter" && variant.as_str() == "All" =>
+        {
+            serde_json::Value::String("All".to_string())
+        }
+        KernelValue::Map(fields) => {
+            let tag = fields
+                .get(&KernelValue::String("tag".to_string()))
+                .and_then(|value| match value {
+                    KernelValue::String(tag) if matches!(tag.as_str(), "Allow" | "Deny") => {
+                        Some(tag.clone())
+                    }
+                    _ => None,
+                });
+            let names = fields
+                .get(&KernelValue::String("names".to_string()))
+                .and_then(|value| match value {
+                    KernelValue::Set(names) => Some(
+                        names
+                            .iter()
+                            .filter_map(|name| match name {
+                                KernelValue::String(name) => {
+                                    Some(serde_json::Value::String(name.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                });
+            match (tag, names) {
+                (Some(tag), Some(names)) => serde_json::Value::Object(serde_json::Map::from_iter(
+                    [(tag, serde_json::Value::Array(names))],
+                )),
+                _ => runtime_modeled_json_from_kernel_value(value),
+            }
+        }
+        other => runtime_modeled_json_from_kernel_value(other),
+    }
 }
 
 fn runtime_modeled_tool_source_kind_label(kind: &meerkat_core::ToolSourceKind) -> &'static str {
@@ -16598,14 +16730,9 @@ fn runtime_modeled_kernel_input(
                 })
                 .unwrap_or_else(|_| "\"<next-visibility-state>\"".into()),
             ),
-            "next_capability_base_filter" => runtime_modeled_named_string(
-                serde_json::to_string(&meerkat_core::ToolFilter::Deny(
-                    [meerkat_core::VIEW_IMAGE_TOOL_NAME.to_string()]
-                        .into_iter()
-                        .collect(),
-                ))
-                .unwrap_or_else(|_| "\"<next-capability-base-filter>\"".into()),
-            ),
+            "next_capability_base_filter" => {
+                runtime_modeled_tool_filter_deny_inner(&[meerkat_core::VIEW_IMAGE_TOOL_NAME])
+            }
             "next_active_visibility_revision" => KernelValue::U64(1),
             "tool_visibility_delta" => {
                 runtime_modeled_named_string("\"<tool-visibility-delta>\"".to_string())
@@ -16615,16 +16742,8 @@ fn runtime_modeled_kernel_input(
             "provider" => KernelValue::String("openai".to_string()),
             "provider_params" => KernelValue::None,
             "intents" => runtime_modeled_string_set(&["mob.peer_added", "probe.intent"]),
-            "filter" => KernelValue::String(
-                serde_json::to_string(&meerkat_core::ToolFilter::Deny(
-                    ["probe_tool".to_string()].into_iter().collect(),
-                ))
-                .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-            ),
-            "active_filter" | "staged_filter" => KernelValue::String(
-                serde_json::to_string(&meerkat_core::ToolFilter::All)
-                    .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-            ),
+            "filter" => runtime_modeled_tool_filter_deny_inner(&["probe_tool"]),
+            "active_filter" | "staged_filter" => runtime_modeled_tool_filter_all_inner(),
             "witnesses" | "authorities" => runtime_modeled_witness_map(),
             "names" => runtime_modeled_string_set(&["probe_tool"]),
             "active_requested_deferred_names" | "staged_requested_deferred_names" => {
@@ -16883,20 +17002,8 @@ fn runtime_modeled_publish_input(
     modeled_kernel_input(
         "PublishCommittedVisibleSet",
         [
-            (
-                "active_filter",
-                KernelValue::String(
-                    serde_json::to_string(&meerkat_core::ToolFilter::All)
-                        .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-                ),
-            ),
-            (
-                "staged_filter",
-                KernelValue::String(
-                    serde_json::to_string(&meerkat_core::ToolFilter::All)
-                        .unwrap_or_else(|_| "\"<tool-filter>\"".into()),
-                ),
-            ),
+            ("active_filter", runtime_modeled_tool_filter_all_inner()),
+            ("staged_filter", runtime_modeled_tool_filter_all_inner()),
             (
                 "active_requested_deferred_names",
                 runtime_modeled_string_set(&[]),
@@ -16923,6 +17030,38 @@ fn runtime_modeled_publish_input(
             ),
         ],
     )
+}
+
+#[test]
+fn modeled_tool_filter_input_rejects_legacy_json_string_payload() {
+    let schema = modeled_meerkat_kernel::schema();
+    let legacy_filter = KernelValue::String(
+        serde_json::to_string(&meerkat_core::ToolFilter::Deny(
+            ["probe_tool".to_string()].into_iter().collect(),
+        ))
+        .expect("legacy filter serializes"),
+    );
+    let input = modeled_kernel_input(
+        "StagePersistentFilter",
+        [
+            ("filter", legacy_filter),
+            ("witnesses", runtime_modeled_witness_map()),
+        ],
+    );
+    let kernel = GeneratedMachineKernel::new(schema);
+    let state = kernel.initial_state().expect("initial modeled state");
+    let err = kernel
+        .transition(&state, &input)
+        .expect_err("legacy JSON-string ToolFilter payload must not be normalized");
+
+    assert!(
+        matches!(
+            err,
+            TransitionRefusal::InvalidInputPayload { ref reason, .. }
+                if reason.contains("filter")
+        ),
+        "legacy JSON-string ToolFilter should fail input payload validation, got {err:?}"
+    );
 }
 
 fn runtime_parity_witnesses() -> BTreeMap<String, meerkat_core::ToolVisibilityWitness> {

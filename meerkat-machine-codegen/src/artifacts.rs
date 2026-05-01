@@ -2616,6 +2616,10 @@ fn render_named_domain_assignment(
         return format!("{{{}}}", samples.join(", "));
     }
 
+    if let Some(samples) = type_path_enum_binding_samples(named_bindings, name) {
+        return format!("{{{}}}", samples.join(", "));
+    }
+
     if sample_cardinality == 0 {
         return "{}".into();
     }
@@ -2631,26 +2635,6 @@ fn render_named_domain_assignment(
 
     if let Some(samples) = known_structural_named_domain_samples(name, sample_cardinality) {
         return format!("{{{}}}", samples.join(", "));
-    }
-
-    if name == "ToolFilter" {
-        let target_cardinality = sample_cardinality.max(2);
-        let mut values = named_samples
-            .get(name)
-            .into_iter()
-            .flat_map(|samples| samples.iter().take(target_cardinality).cloned())
-            .collect::<Vec<_>>();
-        let base_len = values.len();
-        values.extend(
-            ((base_len + 1)..=target_cardinality)
-                .map(|idx| format!("{}_{}", tla_ident(name).to_lowercase(), idx)),
-        );
-        let rendered = values
-            .into_iter()
-            .map(|sample| tla_string(&sample))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return format!("{{{rendered}}}");
     }
 
     if let Some(rendered) = collected_sample_literals(name, sample_cardinality, named_samples) {
@@ -2704,6 +2688,9 @@ fn sample_values(
         TypeRef::Named(name) => {
             let name = name.as_str();
             if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
+                return samples;
+            }
+            if let Some(samples) = type_path_enum_binding_samples(named_bindings, name) {
                 return samples;
             }
             if sample_cardinality == 0 {
@@ -2846,6 +2833,23 @@ fn string_enum_binding_samples(
             variants
                 .iter()
                 .map(|variant| tla_string(string_enum_wire_label(name, variant.as_str())))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn type_path_enum_binding_samples(
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> Option<Vec<String>> {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    match bindings.get(name) {
+        Some(RustTypeAtom::TypePathEnum { unit_variants, .. }) => Some(
+            unit_variants
+                .iter()
+                .map(|variant| tla_string(variant.as_str()))
                 .collect(),
         ),
         _ => None,
@@ -7699,29 +7703,4 @@ fn tla_ident(value: impl AsRef<str>) -> String {
 
 fn tla_string(value: impl AsRef<str>) -> String {
     format!("\"{}\"", value.as_ref().replace('"', "\\\""))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn meerkat_schema() -> MachineSchema {
-        canonical_machine_schemas()
-            .into_iter()
-            .find(|machine| machine.machine == "MeerkatMachine")
-            .expect("MeerkatMachine schema")
-            .schema
-    }
-
-    #[test]
-    fn machine_ci_cfg_broadens_tool_filter_domain() {
-        let cfg = render_machine_ci_cfg(&meerkat_schema(), false);
-        assert!(cfg.contains("ToolFilterValues = {\"All\", \"toolfilter_2\"}"));
-    }
-
-    #[test]
-    fn machine_deep_cfg_broadens_tool_filter_domain() {
-        let cfg = render_machine_ci_cfg(&meerkat_schema(), true);
-        assert!(cfg.contains("ToolFilterValues = {\"All\", \"toolfilter_2\"}"));
-    }
 }

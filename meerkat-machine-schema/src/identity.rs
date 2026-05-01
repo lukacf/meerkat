@@ -301,6 +301,12 @@ pub enum RustTypeAtom {
     },
     /// Fully-qualified Rust type path, e.g. `"crate::domain::MySpecialType"`.
     TypePath(String),
+    /// Fully-qualified Rust enum type path with explicit unit variants that
+    /// can appear as DSL named-variant literals.
+    TypePathEnum {
+        path: String,
+        unit_variants: Vec<EnumVariantId>,
+    },
 }
 
 /// Authoritative binding from a DSL-declared named type to its Rust atom.
@@ -370,6 +376,33 @@ impl NamedTypeBinding {
             #[allow(clippy::expect_used)]
             name: NamedTypeId::parse(name).expect("valid named-type slug"),
             rust: RustTypeAtom::TypePath(rust_path.into()),
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified
+    /// structural enum type path with a closed variant domain.
+    pub fn type_path_enum(
+        name: &str,
+        rust_path: impl Into<String>,
+        unit_variants: &[&str],
+    ) -> Self {
+        assert!(
+            !unit_variants.is_empty(),
+            "type-path enum named-type bindings require at least one unit variant"
+        );
+        Self {
+            #[allow(clippy::expect_used)]
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::TypePathEnum {
+                path: rust_path.into(),
+                unit_variants: unit_variants
+                    .iter()
+                    .map(|variant| {
+                        #[allow(clippy::expect_used)]
+                        EnumVariantId::parse(*variant).expect("valid enum variant slug")
+                    })
+                    .collect(),
+            },
         }
     }
 }

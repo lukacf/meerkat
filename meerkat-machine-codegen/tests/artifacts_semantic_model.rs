@@ -54,6 +54,28 @@ fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
         ),
         "OperationStatusValues must come from the closed StringEnum binding:\n{rendered}"
     );
+    assert!(
+        rendered.contains("ToolFilterValues = {\"All\"}"),
+        "ToolFilterValues must come from the canonical TypePathEnum unit domain:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("toolfilter_2"),
+        "ToolFilterValues must not fall back to generated placeholder strings:\n{rendered}"
+    );
+}
+
+#[test]
+fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
+    let rendered = render_machine_ci_cfg(&meerkat_machine(), true);
+
+    assert!(
+        rendered.contains("ToolFilterValues = {\"All\"}"),
+        "deep ToolFilterValues must come from the canonical TypePathEnum unit domain:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("toolfilter_2"),
+        "deep ToolFilterValues must not fall back to generated placeholder strings:\n{rendered}"
+    );
 }
 
 #[test]

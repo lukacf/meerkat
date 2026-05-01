@@ -1366,7 +1366,13 @@ pub enum SessionLlmCapabilitySurfaceStatus {
     Unresolved,
 }
 stub_newtype!(SessionToolVisibilityDelta);
-stub_newtype!(ToolFilter);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ToolFilter {
+    #[default]
+    All,
+    Allow(std::collections::BTreeSet<String>),
+    Deny(std::collections::BTreeSet<String>),
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum ToolSourceKind {
     #[default]
@@ -1591,7 +1597,11 @@ mod tests {
             NamedTypeBinding::string("SessionLlmIdentity"),
             NamedTypeBinding::string("SessionToolVisibilityDelta"),
             NamedTypeBinding::string("SessionToolVisibilityState"),
-            NamedTypeBinding::string("ToolFilter"),
+            NamedTypeBinding::type_path_enum(
+                "ToolFilter",
+                "crate::meerkat_machine::ToolFilter",
+                &["All"],
+            ),
             NamedTypeBinding::type_path(
                 "ToolVisibilityWitness",
                 "crate::meerkat_machine::ToolVisibilityWitness",
@@ -1693,7 +1703,11 @@ mod tests {
             meerkat_machine_schema::identity::NamedTypeBinding::string(
                 "SessionToolVisibilityState",
             ),
-            meerkat_machine_schema::identity::NamedTypeBinding::string("ToolFilter"),
+            meerkat_machine_schema::identity::NamedTypeBinding::type_path_enum(
+                "ToolFilter",
+                "crate::meerkat_machine::ToolFilter",
+                &["All"],
+            ),
             meerkat_machine_schema::identity::NamedTypeBinding::type_path(
                 "ToolVisibilityWitness",
                 "crate::meerkat_machine::ToolVisibilityWitness",

@@ -222,6 +222,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "ExternalToolSurfaceDeltaPhase",
                 &["None", "Pending", "Applied", "Draining", "Failed", "Forced"],
             ),
+            NamedTypeBinding::string_enum(
+                "ExternalToolSurfaceFailureCause",
+                &["PendingFailed", "SurfaceDraining", "SurfaceUnavailable"],
+            ),
             NamedTypeBinding::string_enum("InboundPeerRequestState", &["Received", "Replied"]),
             NamedTypeBinding::string("InputId"),
             NamedTypeBinding::string_enum(
@@ -329,8 +333,47 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string("PeerCorrelationId"),
             NamedTypeBinding::string_enum(
+                "PeerIngressAdmittedKind",
+                &["Message", "Request", "Response", "Ack", "PlainEvent"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressAuthClass",
+                &["Required", "SupervisorBridgeExempt"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressEnvelopeClass",
+                &["Message", "Request", "Lifecycle", "Response", "Ack"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressInputClass",
+                &[
+                    "ActionableMessage",
+                    "ActionableRequest",
+                    "ResponseProgress",
+                    "ResponseTerminal",
+                    "PeerLifecycleAdded",
+                    "PeerLifecycleRetired",
+                    "PeerLifecycleUnwired",
+                    "SilentRequest",
+                    "Ack",
+                    "PlainEvent",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressLifecycleClass",
+                &["PeerAdded", "PeerRetired", "PeerUnwired"],
+            ),
+            NamedTypeBinding::string_enum(
                 "PeerIngressOwnerKind",
                 &["Unattached", "SessionOwned", "MobOwned"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressResponseStatus",
+                &["Accepted", "Completed", "Failed"],
+            ),
+            NamedTypeBinding::string_enum(
+                "PeerIngressResponseTerminality",
+                &["Progress", "TerminalCompleted", "TerminalFailed"],
             ),
             NamedTypeBinding::string_enum("PeerTerminalDisposition", &["Completed", "Failed"]),
             NamedTypeBinding::string_enum(
@@ -448,6 +491,18 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string("RunId"),
             NamedTypeBinding::string_enum(
+                "RuntimeApplyFailureCause",
+                &[
+                    "Unknown",
+                    "PrimitiveRejected",
+                    "RuntimeContextApply",
+                    "RuntimeTurn",
+                    "ExecutorStopped",
+                    "ExecutorControlFailed",
+                    "ExecutorInternal",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "RuntimeNoticeKind",
                 &["Drain", "Reset", "Stop", "Exit", "Recover"],
             ),
@@ -471,7 +526,11 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("SurfaceId"),
             NamedTypeBinding::string_enum("SurfacePendingOp", &["None", "Add", "Reload"]),
             NamedTypeBinding::string_enum("SurfaceStagedOp", &["None", "Add", "Remove", "Reload"]),
-            NamedTypeBinding::string("ToolFilter"),
+            NamedTypeBinding::type_path_enum(
+                "ToolFilter",
+                "crate::catalog::dsl::meerkat_machine::ToolFilter",
+                &["All"],
+            ),
             NamedTypeBinding::string("ToolProvenance"),
             NamedTypeBinding::string_enum(
                 "ToolSourceKind",
@@ -737,7 +796,23 @@ pub fn dsl_mob_machine_production_schema() -> MachineSchema {
 pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
         vec![
+            NamedTypeBinding::string_enum("CollectionPolicyKind", &["All", "Any", "Quorum"]),
+            NamedTypeBinding::string_enum("DependencyMode", &["All", "Any"]),
             NamedTypeBinding::u64("FenceToken"),
+            NamedTypeBinding::string_enum(
+                "FlowFrameReducerCommandKind",
+                &[
+                    "StartRootFrame",
+                    "StartBodyFrame",
+                    "AdmitNextReadyNode",
+                    "CompleteNode",
+                    "RecordNodeOutput",
+                    "FailNode",
+                    "SkipNode",
+                    "CancelNode",
+                    "SealFrame",
+                ],
+            ),
             NamedTypeBinding::u64("Generation"),
             NamedTypeBinding::string("AgentIdentity"),
             NamedTypeBinding::string("AgentRuntimeId"),
@@ -751,8 +826,66 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "crate::catalog::dsl::mob_machine::ExternalPeerEndpoint",
             ),
             NamedTypeBinding::string("FlowNodeId"),
+            NamedTypeBinding::string_enum("FlowNodeKind", &["Step", "Loop"]),
+            NamedTypeBinding::string_enum(
+                "FlowRunReducerCommandKind",
+                &[
+                    "CreateRun",
+                    "StartRun",
+                    "DispatchStep",
+                    "CompleteStep",
+                    "RecordStepOutput",
+                    "ConditionPassed",
+                    "ConditionRejected",
+                    "FailStep",
+                    "SkipStep",
+                    "ProjectFrameStepStatus",
+                    "CancelStep",
+                    "RegisterTargets",
+                    "RecordTargetSuccess",
+                    "RecordTargetTerminalFailure",
+                    "RecordTargetCanceled",
+                    "RecordTargetFailure",
+                    "RegisterReadyFrame",
+                    "PumpNodeScheduler",
+                    "RegisterPendingBodyFrame",
+                    "PumpFrameScheduler",
+                    "NodeExecutionReleased",
+                    "FrameTerminated",
+                    "TerminalizeCompleted",
+                    "TerminalizeFailed",
+                    "TerminalizeCanceled",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "FlowRunStatus",
+                &[
+                    "Absent",
+                    "Pending",
+                    "Running",
+                    "Completed",
+                    "Failed",
+                    "Canceled",
+                ],
+            ),
             NamedTypeBinding::string("FrameNodeKey"),
             NamedTypeBinding::string("FrameId"),
+            NamedTypeBinding::string_enum("FrameScope", &["Root", "Body"]),
+            NamedTypeBinding::string_enum(
+                "FrameStatus",
+                &["Running", "Completed", "Failed", "Canceled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "KickoffIntent",
+                &[
+                    "Pending",
+                    "Starting",
+                    "Started",
+                    "CallbackPending",
+                    "Failed",
+                    "Cancelled",
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "KickoffPhase",
                 &[
@@ -764,8 +897,45 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Cancelled",
                 ],
             ),
+            NamedTypeBinding::string_enum(
+                "LoopIterationReducerCommandKind",
+                &[
+                    "StartLoop",
+                    "BodyFrameStarted",
+                    "BodyFrameCompleted",
+                    "BodyFrameFailed",
+                    "BodyFrameCanceled",
+                    "UntilConditionMet",
+                    "UntilConditionFailed",
+                    "CancelLoop",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "LoopIterationStage",
+                &[
+                    "AwaitingBodyFrame",
+                    "BodyFrameActive",
+                    "AwaitingUntilEvaluation",
+                ],
+            ),
             NamedTypeBinding::string("LoopId"),
             NamedTypeBinding::string("LoopInstanceId"),
+            NamedTypeBinding::string_enum(
+                "LoopStatus",
+                &["Running", "Completed", "Exhausted", "Failed", "Canceled"],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberLifecycleKind",
+                &[
+                    "Spawned",
+                    "Retiring",
+                    "Retired",
+                    "Reset",
+                    "Respawned",
+                    "Completed",
+                    "Destroyed",
+                ],
+            ),
             NamedTypeBinding::string("MobId"),
             NamedTypeBinding::string_enum("MobMemberState", &["Active", "Retiring"]),
             NamedTypeBinding::string_enum(
@@ -773,16 +943,33 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Running", "Stopped", "Completed", "Destroyed"],
             ),
             NamedTypeBinding::string("MobTask"),
+            NamedTypeBinding::string_enum(
+                "NodeRunStatus",
+                &[
+                    "Pending",
+                    "Ready",
+                    "Running",
+                    "Completed",
+                    "Failed",
+                    "Skipped",
+                    "Canceled",
+                ],
+            ),
             NamedTypeBinding::string("RunId"),
             NamedTypeBinding::string("RunStepKey"),
             NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string("StepId"),
+            NamedTypeBinding::string_enum(
+                "StepRunStatus",
+                &["Dispatched", "Completed", "Failed", "Skipped", "Canceled"],
+            ),
             NamedTypeBinding::string("TaskId"),
             NamedTypeBinding::string_enum(
                 "TaskStatus",
                 &["Pending", "InProgress", "Completed", "Cancelled"],
             ),
             NamedTypeBinding::string("WiringEdge"),
+            NamedTypeBinding::string_enum("WiringLifecycleKind", &["Wired", "Unwired"]),
             NamedTypeBinding::string("WorkId"),
             NamedTypeBinding::string_enum("WorkOrigin", &["External", "Internal", "Ingest"]),
             NamedTypeBinding::type_path(
@@ -847,7 +1034,10 @@ pub fn schedule_lifecycle_schema_metadata() -> MachineSchemaMetadata {
         // receives `ConfirmOccurrencesSuperseded { occurrence_id }` from
         // the occurrence authority; both sides must agree on the atom.
         vec![
+            NamedTypeBinding::string_enum("MisfirePolicy", &["Skip", "CatchUpWithin"]),
+            NamedTypeBinding::string_enum("MissingTargetPolicy", &["MarkMisfired", "Skip"]),
             NamedTypeBinding::string("OccurrenceId"),
+            NamedTypeBinding::string_enum("OverlapPolicy", &["AllowConcurrent", "SkipIfRunning"]),
             NamedTypeBinding::string_enum(
                 "ScheduleLifecycleState",
                 &["Active", "Paused", "Deleted"],

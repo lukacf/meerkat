@@ -49,11 +49,7 @@ fn named_u64(type_name: &str, value: u64) -> KernelValue {
 }
 
 fn tool_filter_all() -> KernelValue {
-    named_string(
-        "ToolFilter",
-        &serde_json::to_string(&meerkat_core::ToolFilter::All)
-            .expect("tool filter should serialize"),
-    )
+    named_string("ToolFilter", "All")
 }
 
 fn string_key(value: &str) -> KernelValue {

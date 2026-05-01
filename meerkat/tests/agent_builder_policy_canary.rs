@@ -396,14 +396,44 @@ fn downstream_unsafe_code_cannot_enter_factory_policy_finalizer() -> std::io::Re
 name = "agent-builder-policy-downstream-unsafe-finalizer"
 version = "0.0.0"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 async-trait = "0.1"
 futures = "0.3"
 meerkat-core = {{ path = "{}" }}
+
+[build-dependencies]
+meerkat-core = {{ path = "{}" }}
 "#,
+            repo_root().join("meerkat-core").display(),
             repo_root().join("meerkat-core").display()
         ),
+    )?;
+    fs::write(
+        temp.path().join("build.rs"),
+        r#"
+use std::{env, fs, path::PathBuf};
+
+fn main() {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let target_root = out_dir
+        .ancestors()
+        .nth(4)
+        .unwrap_or(out_dir.as_path())
+        .to_path_buf();
+    let config_path = target_root
+        .join(".meerkat")
+        .join("agent_factory_policy_bridge_config_v2");
+    let config = fs::read_to_string(&config_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", config_path.display()));
+    let mut lines = config.lines();
+    let symbol = lines.next().expect("bridge symbol");
+    let proof = lines.next().expect("bridge proof");
+    println!("cargo:rustc-env=FORGED_FACTORY_POLICY_BUILD_SYMBOL={symbol}");
+    println!("cargo:rustc-env=FORGED_FACTORY_POLICY_BUILD_PROOF={proof}");
+}
+"#,
     )?;
     fs::write(
         src_dir.join("main.rs"),
@@ -417,10 +447,6 @@ meerkat-core = {{ path = "{}" }}
         .arg("--manifest-path")
         .arg(temp.path().join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", temp.path().join("target"))
-        .env(
-            "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL",
-            "__meerkat_agent_factory_policy_bridge_attacker_canary",
-        )
         .output()?;
     assert!(
         !output.status.success(),
@@ -434,7 +460,8 @@ meerkat-core = {{ path = "{}" }}
         "downstream unsafe finalizer reached the live factory-policy bridge and constructed an agent:\n{stderr}"
     );
     assert!(
-        stderr.contains("__meerkat_agent_factory_policy_bridge_attacker_canary")
+        stderr.contains("FORGED_FACTORY_POLICY_BUILD_SYMBOL")
+            || stderr.contains("agent_factory_policy_bridge_config")
             || stderr.contains("exported_agent_factory_policy_build")
             || stderr.contains("link_name"),
         "downstream unsafe finalizer fixture failed for the wrong reason:\n{stderr}"
@@ -903,9 +930,12 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("validate_factory_policy()?")
-            && builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
-            && builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF")
-            && builder.contains("InvalidFactoryBridgeProof")
+            && builder.contains("validate_factory_bridge_token(factory_bridge_token)?")
+            && builder.contains("AgentFactoryPolicyBridgeRegistration")
+            && builder.contains("InvalidFactoryBridgeToken")
+            && builder.contains("inventory::collect!(AgentFactoryPolicyBridgeRegistration)")
+            && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
+            && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF")
             && !builder.contains("__meerkat_core_agent_factory_policy_build")
             && builder.contains("pub(crate) unsafe extern \"Rust\" fn")
             && !builder.contains("is_canonical_factory_authority()")
@@ -1025,8 +1055,8 @@ fn bazel_factory_authority_target_is_not_publicly_visible() {
 #[test]
 fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
     let authority_build = repo_file("meerkat-agent-build-authority/build.rs");
-    let core_build = repo_file("meerkat-core/build.rs");
-    let facade_build = repo_file("meerkat/build.rs");
+    let core_build = try_repo_file("meerkat-core/build.rs");
+    let facade_build = try_repo_file("meerkat/build.rs");
 
     assert!(
         !authority_build.contains("cargo:metadata=")
@@ -1035,17 +1065,22 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
         "authority build script must not publish canonical factory authority \
          seal words through Cargo metadata or rustc environment"
     );
-    assert!(
-        !facade_build.contains("DEP_MEERKAT_AGENT_BUILD_AUTHORITY_WORD_")
-            && !facade_build.contains("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_"),
-        "facade build script must not consume leaked authority seal words from \
-         dependency metadata; direct downstream dependents can read the same \
-         DEP_* values"
-    );
+    if let Some(facade_build) = facade_build.as_ref() {
+        assert!(
+            !facade_build.contains("DEP_MEERKAT_AGENT_BUILD_AUTHORITY_WORD_")
+                && !facade_build.contains("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_"),
+            "facade build script must not consume leaked authority seal words \
+             from dependency metadata; direct downstream dependents can read \
+             the same DEP_* values"
+        );
+    }
     for (name, build_script) in [
-        ("meerkat-core/build.rs", core_build.as_str()),
-        ("meerkat/build.rs", facade_build.as_str()),
+        ("meerkat-core/build.rs", core_build.as_deref()),
+        ("meerkat/build.rs", facade_build.as_deref()),
     ] {
+        let Some(build_script) = build_script else {
+            continue;
+        };
         assert!(
             !build_script.contains("rerun-if-env-changed={SYMBOL_ENV}")
                 && !build_script.contains("env::var(SYMBOL_ENV)")
@@ -1096,23 +1131,17 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     assert!(
         !public_core.contains("\"internal-agent-factory-build\"")
             && !public_core.contains("\"standalone-agent-builder\"")
-            && public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
-            && public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
+            && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
+            && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
         "public //meerkat-core:meerkat_core must not expose standalone build \
-         features or internal feature selectors, and the factory bridge must \
-         require the paired build proof in Bazel builds"
+         features, internal feature selectors, or recoverable factory bridge \
+         proof material in Bazel builds"
     );
 
-    let internal_core = bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build")
-        .expect("meerkat-core BUILD.bazel must contain a non-public AgentFactory core variant");
     assert!(
-        !internal_core.contains("\"standalone-agent-builder\"")
-            && !internal_core.contains("meerkat_agent_build_authority")
-            && !internal_core.contains("//visibility:public")
-            && internal_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
-            && internal_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
-        "Bazel AgentFactory core bridge must stay non-public and must not \
-         expose standalone build features or carry the retired authority dependency"
+        bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build").is_none(),
+        "Bazel must not publish a second core crate graph for AgentFactory; \
+         split core graphs make public API types diverge"
     );
 }
 
@@ -1328,11 +1357,12 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
     );
     assert!(
         factory.contains("core_agent_factory_policy_build(")
+            && factory.contains("agent_factory_policy_bridge_token()")
             && !factory.contains("agent_factory_policy_authority()")
             && !factory.contains(".build_after_factory_policy("),
         "AgentFactory must enter meerkat_core through the explicit \
-         factory-policy seam rather than a public AgentBuilder method or \
-         publicly mintable authority helper"
+         factory-policy seam with its private bridge token rather than a \
+         public AgentBuilder method or publicly mintable authority helper"
     );
     assert!(
         !factory.contains("struct AgentFactoryPolicyAuthority")

@@ -2,6 +2,7 @@
 
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
+use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 #[cfg(feature = "skills")]
 use std::collections::BTreeSet;
@@ -170,11 +171,31 @@ type CoreAgentFactoryBuildFuture =
 type CoreAgentFactoryBuildFuture =
     Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>>>>;
 
+struct AgentFactoryPolicyBridgeToken;
+
+static AGENT_FACTORY_POLICY_BRIDGE_TOKEN: AgentFactoryPolicyBridgeToken =
+    AgentFactoryPolicyBridgeToken;
+
+fn agent_factory_policy_bridge_token_type_id() -> TypeId {
+    TypeId::of::<AgentFactoryPolicyBridgeToken>()
+}
+
+fn agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync) {
+    &AGENT_FACTORY_POLICY_BRIDGE_TOKEN
+}
+
+inventory::submit! {
+    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::new(
+        "meerkat",
+        agent_factory_policy_bridge_token_type_id,
+    )
+}
+
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
-    #[link_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")]
+    #[link_name = "__meerkat_agent_factory_policy_build_v3"]
     fn core_agent_factory_policy_build(
-        bridge_proof: &'static str,
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,
         tools: Arc<dyn AgentToolDispatcher>,
@@ -3901,7 +3922,7 @@ impl AgentFactory {
         #[allow(unsafe_code)]
         let mut agent = unsafe {
             core_agent_factory_policy_build(
-                env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
+                agent_factory_policy_bridge_token(),
                 builder,
                 llm_adapter,
                 tools,
@@ -4050,7 +4071,7 @@ mod tests {
         #[allow(unsafe_code)]
         let result = unsafe {
             core_agent_factory_policy_build(
-                env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
+                agent_factory_policy_bridge_token(),
                 builder,
                 llm_adapter,
                 tools,

@@ -18,6 +18,7 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
+use std::any::{Any, TypeId};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -79,9 +80,37 @@ pub enum AgentBuildPolicyError {
     MissingSessionBuildState,
     #[error("factory policy build requires a runtime turn-state handle")]
     MissingTurnStateHandle,
-    #[error("factory policy build requires the canonical factory bridge proof")]
-    InvalidFactoryBridgeProof,
+    #[error("factory policy build requires a registered canonical factory bridge token")]
+    MissingFactoryBridgeTokenRegistration,
+    #[error("factory policy build found multiple canonical factory bridge token registrations")]
+    AmbiguousFactoryBridgeTokenRegistration,
+    #[error("factory policy build requires the canonical factory bridge token")]
+    InvalidFactoryBridgeToken,
 }
+
+/// Link-time registration for the facade-private factory bridge token.
+///
+/// The registration carries only a type-id projection function for the private
+/// token owned by the `meerkat` facade. Core validates the token type before it
+/// enters the low-level build path, so recovering the exported symbol is not
+/// sufficient to construct an agent.
+#[doc(hidden)]
+pub struct AgentFactoryPolicyBridgeRegistration {
+    crate_name: &'static str,
+    token_type_id: fn() -> TypeId,
+}
+
+impl AgentFactoryPolicyBridgeRegistration {
+    #[doc(hidden)]
+    pub const fn new(crate_name: &'static str, token_type_id: fn() -> TypeId) -> Self {
+        Self {
+            crate_name,
+            token_type_id,
+        }
+    }
+}
+
+inventory::collect!(AgentFactoryPolicyBridgeRegistration);
 
 #[cfg(not(target_arch = "wasm32"))]
 type AgentFactoryBuildFuture = Pin<
@@ -108,21 +137,41 @@ type AgentFactoryBuildFuture = Pin<
 >;
 
 #[allow(improper_ctypes_definitions, unsafe_code)]
-#[unsafe(export_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL"))]
+#[unsafe(export_name = "__meerkat_agent_factory_policy_build_v3")]
 pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
-    bridge_proof: &'static str,
+    factory_bridge_token: &'static (dyn Any + Send + Sync),
     builder: AgentBuilder,
     client: Arc<dyn AgentLlmClient>,
     tools: Arc<dyn AgentToolDispatcher>,
     store: Arc<dyn AgentSessionStore>,
 ) -> AgentFactoryBuildFuture {
     Box::pin(async move {
-        if bridge_proof != env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF") {
-            return Err(AgentBuildPolicyError::InvalidFactoryBridgeProof);
-        }
+        validate_factory_bridge_token(factory_bridge_token)?;
         builder.validate_factory_policy()?;
         Ok(builder.build_inner(client, tools, store).await)
     })
+}
+
+fn validate_factory_bridge_token(
+    token: &(dyn Any + Send + Sync),
+) -> Result<(), AgentBuildPolicyError> {
+    let mut canonical = None;
+    for registration in inventory::iter::<AgentFactoryPolicyBridgeRegistration> {
+        if registration.crate_name != "meerkat" {
+            continue;
+        }
+        let token_type_id = (registration.token_type_id)();
+        if canonical.replace(token_type_id).is_some() {
+            return Err(AgentBuildPolicyError::AmbiguousFactoryBridgeTokenRegistration);
+        }
+    }
+    let canonical =
+        canonical.ok_or(AgentBuildPolicyError::MissingFactoryBridgeTokenRegistration)?;
+    if token.type_id() == canonical {
+        Ok(())
+    } else {
+        Err(AgentBuildPolicyError::InvalidFactoryBridgeToken)
+    }
 }
 
 impl AgentBuilder {

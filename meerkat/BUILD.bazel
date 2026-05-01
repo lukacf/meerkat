@@ -56,10 +56,6 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
-    rustc_env = {
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
-    },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat",
         proc_macro = True,
@@ -126,8 +122,6 @@ rust_test(
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -221,8 +215,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "agent_builder_policy_canary",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -259,7 +251,7 @@ rust_test(
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core_agent_factory_build",
+        "//meerkat-core:meerkat_core",
         "//meerkat-gemini:meerkat_gemini",
         "//meerkat-hooks:meerkat_hooks",
         "//meerkat-llm-core:meerkat_llm_core",
@@ -331,8 +323,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "agent_factory_connection_ref",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -424,8 +414,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "catalog_control_agent_boundary",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -517,8 +505,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "e2e_shell",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "e2e",
@@ -614,8 +600,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "embedded_skill_registration",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -707,8 +691,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "factory_build_agent",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -802,8 +784,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "integration",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "integration",
@@ -898,8 +878,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "live_meerkat_comms",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "integration",
@@ -992,8 +970,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "live_meerkat_regression",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "integration",
@@ -1086,8 +1062,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "live_meerkat_user_flows",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "integration",
@@ -1184,8 +1158,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "persistence_contract",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -1277,8 +1249,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "realtime_channel_builder",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -1370,8 +1340,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "schedule_host_typed_mapping",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -1466,8 +1434,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "sdk_agentfactory",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -1562,8 +1528,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "sdk_config_ephemeral",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -1656,8 +1620,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "sdk_structured_output",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "fast",
@@ -1749,8 +1711,6 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "smoke_meerkat_sdk",
         "CARGO_MANIFEST_DIR": "./meerkat",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
-        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04",
     },
     tags = [
         "integration",

@@ -4,6 +4,7 @@
     clippy::unwrap_used
 )]
 
+use std::any::{Any, TypeId};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,11 +32,31 @@ type CoreAgentFactoryBuildFuture =
 type CoreAgentFactoryBuildFuture =
     Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>>>>;
 
+struct TestAgentFactoryPolicyBridgeToken;
+
+static TEST_AGENT_FACTORY_POLICY_BRIDGE_TOKEN: TestAgentFactoryPolicyBridgeToken =
+    TestAgentFactoryPolicyBridgeToken;
+
+fn test_agent_factory_policy_bridge_token_type_id() -> TypeId {
+    TypeId::of::<TestAgentFactoryPolicyBridgeToken>()
+}
+
+fn test_agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync) {
+    &TEST_AGENT_FACTORY_POLICY_BRIDGE_TOKEN
+}
+
+inventory::submit! {
+    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::new(
+        "meerkat",
+        test_agent_factory_policy_bridge_token_type_id,
+    )
+}
+
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
-    #[link_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")]
+    #[link_name = "__meerkat_agent_factory_policy_build_v3"]
     fn core_agent_factory_policy_build(
-        bridge_proof: &'static str,
+        factory_bridge_token: &'static (dyn Any + Send + Sync),
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,
         tools: Arc<dyn AgentToolDispatcher>,
@@ -327,7 +348,7 @@ async fn build_agent(
     #[allow(unsafe_code)]
     unsafe {
         core_agent_factory_policy_build(
-            env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
+            test_agent_factory_policy_bridge_token(),
             builder,
             client,
             tools,

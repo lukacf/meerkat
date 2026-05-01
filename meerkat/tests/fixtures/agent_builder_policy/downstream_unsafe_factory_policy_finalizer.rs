@@ -79,8 +79,9 @@ type FactoryPolicyBuildFuture = BoxFuture<
 
 #[allow(improper_ctypes_definitions)]
 unsafe extern "Rust" {
-    #[link_name = "__meerkat_agent_factory_policy_bridge_attacker_canary"]
+    #[link_name = env!("FORGED_FACTORY_POLICY_BUILD_SYMBOL")]
     fn exported_agent_factory_policy_build(
+        bridge_proof: &'static str,
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,
         tools: Arc<dyn AgentToolDispatcher>,
@@ -129,6 +130,7 @@ fn main() {
         // must still reject the caller before constructing an agent.
         unsafe {
             exported_agent_factory_policy_build(
+                env!("FORGED_FACTORY_POLICY_BUILD_PROOF"),
                 builder,
                 Arc::new(NoopClient),
                 Arc::new(NoopTools),

@@ -39,7 +39,6 @@ const packageKey = (pkg) => {
 const packageLabel = (pkg) => `//${relative(root, packageDir(pkg))}:${crateName(pkg.name)}`;
 const crateName = (name) => name.replaceAll("-", "_");
 const q = (value) => JSON.stringify(value);
-const coreAgentFactoryBuildLabel = "//meerkat-core:meerkat_core_agent_factory_build";
 
 function defaultFeatures(pkg) {
   return pkg.features?.default ?? [];
@@ -158,12 +157,6 @@ function publicCoreCrateFeatures(key, pkg) {
   return [...features].sort();
 }
 
-function coreAgentFactoryBuildFeatures(key, pkg) {
-  const features = new Set(crateFeaturesFor(key, pkg));
-  features.delete("internal-agent-factory-build");
-  return [...features].sort();
-}
-
 function externalCrateLabel(dep) {
   const candidates = externalByName.get(dep.name) ?? [];
   let pkg = candidates.length === 1 ? candidates[0] : null;
@@ -215,19 +208,6 @@ function rustTargetVisibility(key) {
     ]);
   }
   return `["//visibility:public"]`;
-}
-
-const agentFactoryPolicyBridgeSymbol =
-  "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886";
-const agentFactoryPolicyBridgeProof =
-  "3ec40ef0883b45cfbfc8f3e79c3b1886cf543b880fe04ce3b688c397e3f8c04";
-
-function agentFactoryPolicyBridgeRustcEnv(key) {
-  if (key !== "meerkat-core" && key !== "meerkat") return [];
-  return [
-    `        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": ${q(agentFactoryPolicyBridgeSymbol)},`,
-    `        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF": ${q(agentFactoryPolicyBridgeProof)},`,
-  ];
 }
 
 const nativeE2eSystemTests = [
@@ -699,7 +679,7 @@ for (const pkg of localPackages.values()) {
         ? `${crateName(target.name)}_bin`
         : crateName(pkg.name);
     const optionalExternal = optionalExternalDeps(pkg);
-    const selfLibraryLabel = key === "meerkat-core" ? coreAgentFactoryBuildLabel : packageLabel(pkg);
+    const selfLibraryLabel = packageLabel(pkg);
     const deps = isTest
       ? [...new Set([...(libOrMacro ? [selfLibraryLabel] : []), ...localDeps(pkg, false, true)])].sort()
       : target.kind.includes("bin") && libOrMacro
@@ -715,15 +695,6 @@ for (const pkg of localPackages.values()) {
       targetDeps = deps
         .filter((dep) => dep !== "//meerkat-schedule:meerkat_schedule")
         .concat("//meerkat-schedule:meerkat_schedule_machine_schema_exports")
-        .sort();
-    }
-    if (isTest && targetSourceText.includes(".build_standalone(")) {
-      targetDeps = targetDeps
-        .map((dep) =>
-          dep === "//meerkat-core:meerkat_core"
-            ? "//meerkat-core:meerkat_core_agent_factory_build"
-            : dep
-        )
         .sort();
     }
     const externalNormal = `all_crate_deps(\n        package_name = ${q(key)},\n        normal = True,\n    )`;
@@ -766,7 +737,6 @@ for (const pkg of localPackages.values()) {
       `    visibility = ${rustTargetVisibility(key)},`,
       `    deps = ${depsExpr},`,
     ];
-    const bridgeRustcEnv = agentFactoryPolicyBridgeRustcEnv(key);
     if (rule === "rust_binary" || rule === "rust_test") {
       const packageRunfilesDir = relative(root, dir) || ".";
       const cargoManifestDir = isTest && packageRunfilesDir !== "."
@@ -775,15 +745,12 @@ for (const pkg of localPackages.values()) {
       const rustcEnv = [
         `        "CARGO_BIN_NAME": ${q(target.name)},`,
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
-        ...bridgeRustcEnv,
       ];
       if (rule === "rust_test" && key === "meerkat-rpc") {
         rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`);
         rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",`);
       }
       attrs.splice(attrs.length - 1, 0, `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`);
-    } else if (bridgeRustcEnv.length) {
-      attrs.splice(attrs.length - 1, 0, `    rustc_env = {\n${bridgeRustcEnv.join("\n")}\n    },`);
     }
     let rustTestBaseAttrs = null;
     let filteredNativeTests = [];
@@ -871,27 +838,6 @@ for (const pkg of localPackages.values()) {
     attrs.splice(attrs.length - 1, 0, `    proc_macro_deps = ${procExpr},`);
     rules.push(`${rule}(\n${attrs.join("\n")}\n)`);
     if (rule === "rust_library") {
-      if (isCorePublicLibrary) {
-        const internalDeps = [...new Set(targetDeps)].sort();
-        const internalDepsExpr = internalDeps.length
-          ? `${listExpr(internalDeps)} + ${externalNormal}`
-          : externalNormal;
-        const internalAttrs = [
-          `    name = "meerkat_core_agent_factory_build",`,
-          `    aliases = ${aliasesExpr},`,
-          `    crate_name = ${q(crateName(target.name))},`,
-          `    crate_root = ${q(relative(dir, target.src_path))},`,
-          `    crate_features = ${listExpr(coreAgentFactoryBuildFeatures(key, pkg))},`,
-          `    edition = "2024",`,
-          `    compile_data = ${compileDataExpr},`,
-          `    srcs = ${srcsExpr},`,
-          `    visibility = ${listExpr(["//:__subpackages__"])},`,
-          `    rustc_env = {\n${bridgeRustcEnv.join("\n")}\n    },`,
-          `    proc_macro_deps = ${procExpr},`,
-          `    deps = ${internalDepsExpr},`,
-        ];
-        rules.push(`rust_library(\n${internalAttrs.join("\n")}\n)`);
-      }
       const unitName = `${crateName(target.name)}_unit_test`;
       const packageRunfilesDir = relative(root, dir) || ".";
       const cargoManifestDir = packageRunfilesDir !== "."
@@ -925,7 +871,6 @@ for (const pkg of localPackages.values()) {
       }
       const unitRustcEnv = [
         `        "CARGO_MANIFEST_DIR": ${q(cargoManifestDir)},`,
-        ...bridgeRustcEnv,
       ];
       const unitAttrs = [
         `    name = ${q(unitName)},`,

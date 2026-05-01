@@ -1540,6 +1540,35 @@ struct LocalCommsRuntime {
     notify: Arc<tokio::sync::Notify>,
 }
 
+fn encode_ed25519_public_key(bytes: &[u8; 32]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity("ed25519:".len() + 44);
+    encoded.push_str("ed25519:");
+    for chunk in bytes.chunks_exact(3) {
+        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
+        encoded.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        encoded.push(TABLE[(n & 0x3f) as usize] as char);
+    }
+    let remainder = bytes.chunks_exact(3).remainder();
+    if !remainder.is_empty() {
+        let b0 = remainder[0];
+        let b1 = remainder.get(1).copied().unwrap_or(0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8);
+        encoded.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        encoded.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if remainder.len() == 2 {
+            encoded.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+            encoded.push('=');
+        } else {
+            encoded.push('=');
+            encoded.push('=');
+        }
+    }
+    encoded
+}
+
 impl LocalCommsRuntime {
     fn new(name: &str) -> Self {
         let mut public_key_bytes = [0u8; 32];
@@ -1557,7 +1586,7 @@ impl LocalCommsRuntime {
             peer_id,
             public_key_bytes,
             address: format!("inproc://{name}"),
-            key: peer_id.to_string(),
+            key: encode_ed25519_public_key(&public_key_bytes),
             trusted: RwLock::new(HashSet::new()),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -3324,7 +3353,7 @@ mod tests {
                 peer_id,
                 public_key_bytes,
                 address: format!("inproc://{name}"),
-                key: peer_id.to_string(),
+                key: super::encode_ed25519_public_key(&public_key_bytes),
                 trusted: RwLock::new(HashSet::new()),
                 notify: Arc::new(Notify::new()),
             }

@@ -1447,6 +1447,9 @@ struct ProvisionerBindingPersistence {
 }
 
 #[cfg(feature = "runtime-adapter")]
+type PeerOnlyBindingParts<'a> = (&'a str, &'a str, Option<&'a str>, Option<[u8; 32]>);
+
+#[cfg(feature = "runtime-adapter")]
 impl MultiBackendProvisioner {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
@@ -1583,7 +1586,7 @@ impl MultiBackendProvisioner {
     async fn ensure_supervisor_authorized(
         &self,
         peer: &TrustedPeerDescriptor,
-        binding: Option<(&str, &str, Option<&str>, Option<[u8; 32]>)>,
+        binding: Option<PeerOnlyBindingParts<'_>>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let payload = self.bridge_supervisor_payload().await?;
         let protocol_version = payload.protocol_version;

@@ -9485,6 +9485,77 @@
         ],
         "type": "string"
       },
+      "ScheduleRuntimeTurnMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "additional_instructions": {
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "connection_ref": true,
+          "flow_tool_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keep_alive": true,
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": true,
+          "render_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RenderMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skill_references": {
+            "items": {
+              "$ref": "#/components/schemas/SkillKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "ScheduledMobAction": {
         "oneOf": [
           {
@@ -9543,7 +9614,16 @@
                   "null"
                 ]
               },
-              "turn_metadata": true,
+              "turn_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ScheduleRuntimeTurnMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": {
                 "const": "prompt",
                 "type": "string"
@@ -9887,7 +9967,9 @@
               "null"
             ]
           },
-          "turn_metadata": true
+          "turn_metadata": {
+            "$ref": "#/components/schemas/ScheduleRuntimeTurnMetadata"
+          }
         },
         "required": [
           "turn_metadata"

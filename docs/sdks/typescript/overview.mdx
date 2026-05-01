@@ -268,7 +268,11 @@ interface RuntimeTurnMetadata {
   model?: string;
   provider?: string;
   providerParams?: Record<string, unknown>;
+  clearProviderParams?: boolean;
+  connectionRef?: WireConnectionRef;
+  clearConnectionRef?: boolean;
   skillReferences?: SkillRef[];
+  flowToolOverlay?: TurnToolOverlay;
   additionalInstructions?: string[];
   keepAlive?: boolean;
 }

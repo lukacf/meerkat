@@ -3067,8 +3067,9 @@ async fn handle_meerkat_resume(
     // Decide the branch before moving any owned request fields.
     let needs_rebuild = existing_adapter.is_none() || mcp_resume_requires_rebuild(&input);
 
-    // Use empty prompt when only providing tool results
-    let prompt = if input.prompt.is_empty() && !input.tool_results.is_empty() {
+    let tool_result_only_resume = input.prompt.is_empty() && !input.tool_results.is_empty();
+    // Use empty prompt when only providing tool results.
+    let prompt = if tool_result_only_resume {
         String::new()
     } else {
         input.prompt
@@ -3133,9 +3134,11 @@ async fn handle_meerkat_resume(
         system_prompt: None,
         event_tx: event_tx.clone(),
         pre_turn_context_appends: Vec::new(),
-        turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
-            turn_metadata.clone(),
-        )),
+        turn_metadata: Some(if tool_result_only_resume {
+            meerkat_runtime::runtime_stamped_resume_pending_turn_metadata(turn_metadata.clone())
+        } else {
+            meerkat_runtime::runtime_stamped_prompt_turn_metadata(turn_metadata.clone())
+        }),
     };
 
     let mut session_rematerialized = false;
@@ -3740,6 +3743,23 @@ mod tests {
         assert!(
             !body.contains("keep_alive,\n        checkpointer"),
             "MCP resume must not project keep_alive into split build fields"
+        );
+    }
+
+    #[test]
+    fn mcp_tool_result_only_resume_stamps_resume_pending_turn_metadata() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn handle_meerkat_resume")
+            .expect("resume handler exists");
+        let end = source
+            .find("fn wrap_tool_payload")
+            .expect("resume handler end sentinel exists");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("runtime_stamped_resume_pending_turn_metadata"),
+            "tool-result-only MCP resume must stamp ResumePending, not a content turn"
         );
     }
 

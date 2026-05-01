@@ -1,8 +1,13 @@
 use chrono::{DateTime, Duration, Utc};
-use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata, TurnMetadataOverride};
+use meerkat_core::connection::ConnectionRef;
+use meerkat_core::lifecycle::run_primitive::{
+    KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata, TurnInstruction,
+    TurnMetadataOverride,
+};
 use meerkat_core::ops::ToolAccessPolicy;
-use meerkat_core::types::RenderMetadata;
-use meerkat_core::{ContentInput, OutputSchema, PeerMeta, SessionId};
+use meerkat_core::skills::SkillKey;
+use meerkat_core::types::{HandlingMode, RenderMetadata};
+use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId, TurnToolOverlay};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -418,8 +423,16 @@ pub enum ScheduledSessionAction {
         prompt: ContentInput,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "schema", schemars(with = "Option<serde_json::Value>"))]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_optional_schedule_runtime_turn_metadata",
+            deserialize_with = "deserialize_optional_schedule_runtime_turn_metadata"
+        )]
+        #[cfg_attr(
+            feature = "schema",
+            schemars(with = "Option<ScheduleRuntimeTurnMetadata>")
+        )]
         turn_metadata: Option<Box<RuntimeTurnMetadata>>,
     },
     Event {
@@ -431,10 +444,123 @@ pub enum ScheduledSessionAction {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ScheduleRuntimeTurnMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handling_mode: Option<HandlingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skill_references: Option<Vec<SkillKey>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    flow_tool_overlay: Option<TurnToolOverlay>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<Vec<serde_json::Value>>"))]
+    additional_instructions: Option<Vec<TurnInstruction>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<serde_json::Value>"))]
+    provider_params: Option<TurnMetadataOverride<ProviderParamsOverride>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<serde_json::Value>"))]
+    connection_ref: Option<TurnMetadataOverride<ConnectionRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<serde_json::Value>"))]
+    keep_alive: Option<TurnMetadataOverride<KeepAlivePolicy>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    render_metadata: Option<RenderMetadata>,
+}
+
+impl From<ScheduleRuntimeTurnMetadata> for RuntimeTurnMetadata {
+    fn from(value: ScheduleRuntimeTurnMetadata) -> Self {
+        Self {
+            handling_mode: value.handling_mode,
+            skill_references: value.skill_references,
+            flow_tool_overlay: value.flow_tool_overlay,
+            additional_instructions: value.additional_instructions,
+            model: value.model.map(ModelId::new),
+            provider: value.provider,
+            provider_params: value.provider_params,
+            connection_ref: value.connection_ref,
+            keep_alive: value.keep_alive,
+            render_metadata: value.render_metadata,
+            execution_kind: None,
+            peer_response_terminal_apply_intent: None,
+        }
+    }
+}
+
+impl From<RuntimeTurnMetadata> for ScheduleRuntimeTurnMetadata {
+    fn from(value: RuntimeTurnMetadata) -> Self {
+        Self {
+            handling_mode: value.handling_mode,
+            skill_references: value.skill_references,
+            flow_tool_overlay: value.flow_tool_overlay,
+            additional_instructions: value.additional_instructions,
+            model: value.model.map(|model| model.as_str().to_string()),
+            provider: value.provider,
+            provider_params: value.provider_params,
+            connection_ref: value.connection_ref,
+            keep_alive: value.keep_alive,
+            render_metadata: value.render_metadata,
+        }
+    }
+}
+
+fn deserialize_schedule_runtime_turn_metadata<'de, D>(
+    deserializer: D,
+) -> Result<RuntimeTurnMetadata, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    ScheduleRuntimeTurnMetadata::deserialize(deserializer).map(Into::into)
+}
+
+fn serialize_schedule_runtime_turn_metadata<S>(
+    metadata: &RuntimeTurnMetadata,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    ScheduleRuntimeTurnMetadata::from(metadata.clone()).serialize(serializer)
+}
+
+fn deserialize_optional_schedule_runtime_turn_metadata<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<RuntimeTurnMetadata>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<ScheduleRuntimeTurnMetadata>::deserialize(deserializer)
+        .map(|metadata| metadata.map(|metadata| Box::new(metadata.into())))
+}
+
+fn serialize_optional_schedule_runtime_turn_metadata<S>(
+    metadata: &Option<Box<RuntimeTurnMetadata>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    metadata
+        .as_deref()
+        .cloned()
+        .map(ScheduleRuntimeTurnMetadata::from)
+        .serialize(serializer)
+}
+
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionMaterializationSpec {
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    #[serde(
+        serialize_with = "serialize_schedule_runtime_turn_metadata",
+        deserialize_with = "deserialize_schedule_runtime_turn_metadata"
+    )]
+    #[cfg_attr(feature = "schema", schemars(with = "ScheduleRuntimeTurnMetadata"))]
     pub turn_metadata: RuntimeTurnMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
@@ -1573,6 +1699,44 @@ mod tests {
     }
 
     #[test]
+    fn session_materialization_rejects_runtime_owned_turn_metadata_stamps() {
+        let json = serde_json::json!({
+            "turn_metadata": {
+                "model": "claude-sonnet-4-6",
+                "execution_kind": "resume_pending"
+            }
+        });
+
+        let err = serde_json::from_value::<SessionMaterializationSpec>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("execution_kind") || err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn session_materialization_omits_runtime_owned_turn_metadata_stamps() {
+        let mut spec = fixture_session_materialization(vec![]);
+        spec.turn_metadata.execution_kind =
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending);
+        spec.turn_metadata.peer_response_terminal_apply_intent = Some(
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun,
+        );
+
+        let json = serde_json::to_value(&spec).unwrap();
+        assert!(
+            json["turn_metadata"].get("execution_kind").is_none(),
+            "schedule materialization must not publish runtime-owned execution stamps"
+        );
+        assert!(
+            json["turn_metadata"]
+                .get("peer_response_terminal_apply_intent")
+                .is_none(),
+            "schedule materialization must not publish peer terminal apply stamps"
+        );
+    }
+
+    #[test]
     fn scheduled_prompt_action_rejects_split_metadata_fields() {
         let json = serde_json::json!({
             "type": "prompt",
@@ -1590,6 +1754,26 @@ mod tests {
             err.to_string().contains("render_metadata")
                 || err.to_string().contains("skill_refs")
                 || err.to_string().contains("additional_instructions"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_action_rejects_runtime_owned_turn_metadata_stamps() {
+        let json = serde_json::json!({
+            "type": "prompt",
+            "prompt": "scheduled hello",
+            "turn_metadata": {
+                "model": "claude-sonnet-4-6",
+                "peer_response_terminal_apply_intent": "append_context_and_run"
+            }
+        });
+
+        let err = serde_json::from_value::<ScheduledSessionAction>(json).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("peer_response_terminal_apply_intent")
+                || err.to_string().contains("unknown field"),
             "unexpected error: {err}"
         );
     }

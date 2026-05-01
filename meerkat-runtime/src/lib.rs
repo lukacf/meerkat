@@ -159,6 +159,28 @@ pub fn runtime_stamped_prompt_turn_metadata(
     runtime_loop::for_input(&input, semantics)
 }
 
+/// Stamp turn metadata with explicit continuation semantics.
+///
+/// Runtime-backed surfaces use this when caller input has already materialized a
+/// pending boundary, such as MCP tool results, and the next service call must
+/// resume that boundary instead of starting an empty content turn.
+pub fn runtime_stamped_resume_pending_turn_metadata(
+    metadata: Option<RuntimeStampedTurnMetadata>,
+) -> RuntimeStampedTurnMetadata {
+    let input = Input::Continuation(ContinuationInput::detached_background_op_completed());
+    let policy = policy_table::DefaultPolicyTable::resolve(&input, true);
+    let semantics =
+        ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind());
+    let stamp = runtime_loop::for_input(&input, semantics);
+    if let Some(mut metadata) = metadata {
+        metadata.execution_kind = stamp.execution_kind;
+        metadata.peer_response_terminal_apply_intent = stamp.peer_response_terminal_apply_intent;
+        metadata
+    } else {
+        stamp
+    }
+}
+
 #[doc(hidden)]
 pub mod machine_schema_exports {
     pub fn meerkat_machine_schema() -> meerkat_machine_schema::MachineSchema {

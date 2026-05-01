@@ -72,13 +72,7 @@ Both use integer unix timestamps for `created_at` and `updated_at`.
 
 ### Turns and streaming
 
-`Session.turn(...)` and `Session.stream(...)` expose SDK convenience options that are resolved into the runtime `turn_metadata` carrier:
-
-- `skill_refs`, `flow_tool_overlay`
-- `additional_instructions`
-- `keep_alive`, `model`, `provider`, `provider_params`
-
-`DeferredSession.start_turn(...)` supports the same override set.
+`Session.turn(...)`, `Session.stream(...)`, and `DeferredSession.start_turn(...)` accept per-turn runtime facts through the single `turn_metadata` carrier. Put model, provider, provider parameters, skill references, flow tool overlay, additional instructions, and keep-alive overrides inside that object.
 
 ### Config APIs return envelopes
 

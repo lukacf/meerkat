@@ -10273,6 +10273,14 @@
           }
         ]
       },
+      "HandlingMode": {
+        "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
+      },
       "HelperOptionsSpec": {
         "additionalProperties": false,
         "properties": {
@@ -10569,6 +10577,17 @@
         },
         "type": "object"
       },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
         "enum": [
@@ -10734,6 +10753,77 @@
         ],
         "type": "string"
       },
+      "ScheduleRuntimeTurnMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "additional_instructions": {
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "connection_ref": true,
+          "flow_tool_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keep_alive": true,
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": true,
+          "render_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RenderMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skill_references": {
+            "items": {
+              "$ref": "#/$defs/SkillKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "ScheduledMobAction": {
         "oneOf": [
           {
@@ -10792,7 +10882,16 @@
                   "null"
                 ]
               },
-              "turn_metadata": true,
+              "turn_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ScheduleRuntimeTurnMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": {
                 "const": "prompt",
                 "type": "string"
@@ -10936,7 +11035,9 @@
               "null"
             ]
           },
-          "turn_metadata": true
+          "turn_metadata": {
+            "$ref": "#/$defs/ScheduleRuntimeTurnMetadata"
+          }
         },
         "required": [
           "turn_metadata"
@@ -11016,6 +11117,31 @@
             "type": "object"
           }
         ]
+      },
+      "SkillKey": {
+        "additionalProperties": false,
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
       },
       "TargetBinding": {
         "oneOf": [
@@ -11157,6 +11283,35 @@
             "type": "object"
           }
         ]
+      },
+      "TurnToolOverlay": {
+        "additionalProperties": false,
+        "description": "Ephemeral per-turn tool overlay for flow-dispatched turns.",
+        "properties": {
+          "allowed_tools": {
+            "default": null,
+            "description": "Optional allow-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "default": null,
+            "description": "Optional deny-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11524,6 +11679,14 @@
             "type": "object"
           }
         ]
+      },
+      "HandlingMode": {
+        "description": "Handling mode for ordinary content-bearing work.\n\n`Queue` means outer-loop / next-turn handling and leaves the current run\nuntouched.\n`Steer` means inner-loop handling and requests injection at the earliest\nadmissible cooperative boundary, while remaining ordinary work rather than\nan out-of-band control-plane command.",
+        "enum": [
+          "queue",
+          "steer"
+        ],
+        "type": "string"
       },
       "HelperOptionsSpec": {
         "additionalProperties": false,
@@ -11999,6 +12162,17 @@
         },
         "type": "object"
       },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
         "enum": [
@@ -12116,6 +12290,77 @@
         "description": "Opaque identifier for a persisted schedule.",
         "type": "string"
       },
+      "ScheduleRuntimeTurnMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "additional_instructions": {
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "connection_ref": true,
+          "flow_tool_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keep_alive": true,
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": true,
+          "render_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RenderMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skill_references": {
+            "items": {
+              "$ref": "#/$defs/SkillKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "ScheduledMobAction": {
         "oneOf": [
           {
@@ -12174,7 +12419,16 @@
                   "null"
                 ]
               },
-              "turn_metadata": true,
+              "turn_metadata": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ScheduleRuntimeTurnMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": {
                 "const": "prompt",
                 "type": "string"
@@ -12318,7 +12572,9 @@
               "null"
             ]
           },
-          "turn_metadata": true
+          "turn_metadata": {
+            "$ref": "#/$defs/ScheduleRuntimeTurnMetadata"
+          }
         },
         "required": [
           "turn_metadata"
@@ -12398,6 +12654,31 @@
             "type": "object"
           }
         ]
+      },
+      "SkillKey": {
+        "additionalProperties": false,
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
       },
       "TargetBinding": {
         "oneOf": [
@@ -12539,6 +12820,35 @@
             "type": "object"
           }
         ]
+      },
+      "TurnToolOverlay": {
+        "additionalProperties": false,
+        "description": "Ephemeral per-turn tool overlay for flow-dispatched turns.",
+        "properties": {
+          "allowed_tools": {
+            "default": null,
+            "description": "Optional allow-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "default": null,
+            "description": "Optional deny-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -27,6 +27,16 @@ use crate::identifiers::{
 };
 use meerkat_core::types::RenderMetadata;
 
+fn deserialize_public_runtime_turn_metadata<'de, D>(
+    deserializer: D,
+) -> Result<Option<RuntimeTurnMetadata>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>::deserialize(deserializer)
+        .map(|metadata| metadata.map(Into::into))
+}
+
 /// Common header for all input variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,7 +288,11 @@ pub struct PromptInput {
     /// text projection (backwards compat), and `blocks` carries the full content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_public_runtime_turn_metadata"
+    )]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 
@@ -464,7 +478,11 @@ pub struct FlowStepInput {
     /// full content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_public_runtime_turn_metadata"
+    )]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
 

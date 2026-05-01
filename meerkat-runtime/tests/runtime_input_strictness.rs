@@ -1,8 +1,11 @@
 use chrono::Utc;
+use meerkat_core::lifecycle::RuntimeExecutionKind;
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
 use meerkat_core::ops::{OpEvent, OperationId, WorkKind};
 use meerkat_runtime::{
-    ContinuationInput, ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin,
-    InputVisibility, OperationInput, PeerConvention, PeerInput,
+    ContinuationInput, ExternalEventInput, FlowStepInput, Input, InputDurability, InputHeader,
+    InputOrigin, InputVisibility, OperationInput, PeerConvention, PeerInput, PromptInput,
+    runtime_stamped_resume_pending_turn_metadata,
 };
 use serde_json::json;
 
@@ -31,6 +34,70 @@ fn assert_unknown_field_rejected(mut value: serde_json::Value, field: &str) {
     assert!(
         message.contains(field) || message.contains("unknown field"),
         "unexpected error for {field}: {message}"
+    );
+}
+
+#[test]
+fn resume_pending_stamp_preserves_public_metadata() {
+    let stamped = runtime_stamped_resume_pending_turn_metadata(Some(RuntimeTurnMetadata {
+        model: Some(ModelId::new("claude-sonnet-4-6")),
+        ..Default::default()
+    }));
+
+    assert_eq!(
+        stamped.execution_kind,
+        Some(RuntimeExecutionKind::ResumePending)
+    );
+    assert_eq!(
+        stamped.model.as_ref().map(ModelId::as_str),
+        Some("claude-sonnet-4-6")
+    );
+    assert!(stamped.peer_response_terminal_apply_intent.is_none());
+}
+
+#[test]
+fn runtime_prompt_and_flow_step_reject_runtime_owned_turn_metadata_stamps() {
+    let prompt = Input::Prompt(PromptInput {
+        header: header(InputOrigin::Operator),
+        text: "hello".to_string(),
+        blocks: None,
+        turn_metadata: None,
+    });
+    let mut prompt_value = serde_json::to_value(prompt).expect("serialize prompt");
+    prompt_value["turn_metadata"] = json!({
+        "model": "claude-sonnet-4-6",
+        "execution_kind": "resume_pending"
+    });
+    let err = serde_json::from_value::<Input>(prompt_value)
+        .expect_err("runtime prompt input must reject runtime-owned turn metadata stamps");
+    let message = err.to_string();
+    assert!(
+        message.contains("execution_kind") || message.contains("unknown field"),
+        "unexpected error: {message}"
+    );
+
+    let flow_step = Input::FlowStep(FlowStepInput {
+        header: header(InputOrigin::Flow {
+            flow_id: "flow-1".to_string(),
+            step_index: 0,
+        }),
+        step_id: "step-1".to_string(),
+        instructions: "continue".to_string(),
+        blocks: None,
+        turn_metadata: None,
+    });
+    let mut flow_value = serde_json::to_value(flow_step).expect("serialize flow step");
+    flow_value["turn_metadata"] = json!({
+        "model": "claude-sonnet-4-6",
+        "peer_response_terminal_apply_intent": "append_context_and_run"
+    });
+    let err = serde_json::from_value::<Input>(flow_value)
+        .expect_err("runtime flow-step input must reject runtime-owned turn metadata stamps");
+    let message = err.to_string();
+    assert!(
+        message.contains("peer_response_terminal_apply_intent")
+            || message.contains("unknown field"),
+        "unexpected error: {message}"
     );
 }
 

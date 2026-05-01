@@ -200,7 +200,7 @@ When a session is created with `--connection-ref prod:default`, its
 persisted `SessionMetadata.connection_ref` carries that binding through
 resume and hot-swap. Changing the model/provider mid-turn via the RPC
 `turn/start` override keeps the binding by default; pass an explicit
-`connection_ref` on the turn request to scope the swap to a different
+`connection_ref` inside `turn_metadata` to scope the swap to a different
 realm or binding.
 
 ```json
@@ -210,8 +210,13 @@ realm or binding.
   "params": {
     "session_id": "...",
     "prompt": "...",
-    "model": "gpt-5.4",
-    "connection_ref": {"realm": "prod", "binding": "openai"}
+    "turn_metadata": {
+      "model": "gpt-5.4",
+      "connection_ref": {
+        "action": "set",
+        "value": {"realm": "prod", "binding": "openai"}
+      }
+    }
   }
 }
 ```

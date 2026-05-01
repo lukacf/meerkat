@@ -122,9 +122,8 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | `options.peerMeta` | `Record<string, unknown>` | `undefined` | Metadata advertised to peer comms surfaces. |
 | `options.budgetLimits` | `Record<string, unknown>` | `undefined` | Runtime budget limits for the session. |
 | `options.providerParams` | `Record<string, unknown>` | `undefined` | Provider-specific parameters (e.g. thinking config). |
-| `options.preloadSkills` | `string[]` | `undefined` | Skill source UUIDs to load before the run. |
-| `options.skillRefs` | `SkillRef[]` | `undefined` | Canonical structured skill references. |
-| `options.skillReferences` | `string[]` | `undefined` | Legacy string skill references; prefer `skillRefs`. |
+| `options.preloadSkills` | `SkillRef[]` | `undefined` | Structured skill keys to preload before the run. |
+| `options.skillRefs` | `SkillRef[]` | `undefined` | Canonical structured skill references for the first turn. |
 | `options.labels` | `Record<string, string>` | `undefined` | Session labels used for filtering and metadata. |
 | `options.additionalInstructions` | `string[]` | `undefined` | Extra instruction blocks appended to the system prompt. |
 | `options.appContext` | `unknown` | `undefined` | Opaque app context passed to custom builders. |

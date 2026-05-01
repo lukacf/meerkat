@@ -309,9 +309,11 @@ Tool visibility can change during a session. Changes are staged and atomically a
       "params": {
         "session_id": "01936f8a-...",
         "prompt": "Execute the next step",
-        "flow_tool_overlay": {
-          "allowed_tools": ["shell", "read_file"],
-          "blocked_tools": ["task_create"]
+        "turn_metadata": {
+          "flow_tool_overlay": {
+            "allowed_tools": ["shell", "read_file"],
+            "blocked_tools": ["task_create"]
+          }
         }
       }
     }
@@ -324,9 +326,11 @@ Tool visibility can change during a session. Changes are staged and atomically a
       -d '{
         "session_id": "01936f8a-...",
         "prompt": "Execute the next step",
-        "flow_tool_overlay": {
-          "allowed_tools": ["shell", "read_file"],
-          "blocked_tools": ["task_create"]
+        "turn_metadata": {
+          "flow_tool_overlay": {
+            "allowed_tools": ["shell", "read_file"],
+            "blocked_tools": ["task_create"]
+          }
         }
       }'
     ```

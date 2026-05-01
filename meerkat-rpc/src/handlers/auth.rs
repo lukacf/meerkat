@@ -362,10 +362,15 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
 ) -> Result<(), RpcResponse> {
-    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-        tokens,
-        commit.lifecycle_transition,
-    );
+    let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
+    let committed_tokens = if current_lifecycle.credential_present {
+        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
+    } else {
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            tokens,
+            commit.lifecycle_transition,
+        )
+    };
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(store, auth_lease, commit).await {
             Ok(()) => {
@@ -2106,6 +2111,20 @@ mod tests {
             last_refresh: Some(chrono::Utc::now()),
             scopes: Vec::new(),
             account_id: Some("acct-1".into()),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn oauth_to_api_key_tokens_with_secret(secret: &str) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::OauthToApiKey,
+            primary_secret: Some(secret.to_string()),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: Some(chrono::Utc::now()),
+            scopes: Vec::new(),
+            account_id: None,
             metadata: serde_json::Value::Null,
         }
     }
@@ -4070,6 +4089,65 @@ mod tests {
         assert!(store.load(&key).await.unwrap().is_none());
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, None);
+    }
+
+    #[tokio::test]
+    async fn oauth_to_api_key_browser_consume_marks_current_lifecycle_snapshot() {
+        let runtime = test_runtime_with_config(config_with_anthropic_oauth_to_api_key_binding());
+        let store = runtime.token_store().expect("test token store");
+        let auth_lease = runtime.auth_lease_handle();
+        let authority = runtime.oauth_flow_authority();
+        let connection_ref = ConnectionRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("default_anthropic").unwrap(),
+            profile: None,
+        };
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = authority
+            .start(
+                connection_ref.clone(),
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::AnthropicConsoleApiKey,
+                redirect_uri.to_string(),
+                "console-verifier".to_string(),
+            )
+            .expect("console OAuth flow admitted");
+        let tokens = oauth_to_api_key_tokens_with_secret("sk-ant-api03-provisioned");
+
+        save_tokens_and_consume_browser_flow(
+            Some(RpcId::Num(1)),
+            &store,
+            &runtime,
+            &connection_ref,
+            &tokens,
+            BrowserFlowConsume {
+                authority: authority.as_ref(),
+                state: &state,
+                provider:
+                    meerkat_providers::oauth_flow::OAuthProviderIdentity::AnthropicConsoleApiKey,
+                redirect_uri,
+            },
+        )
+        .await
+        .expect("provisioned API key commit should consume its OAuth flow");
+
+        let stored = store.load(&key).await.unwrap().unwrap();
+        let marker = meerkat_core::tokens_lifecycle_publication(&stored)
+            .expect("committed token should have a lifecycle marker");
+        let snapshot = auth_lease.snapshot(&lease_key);
+        assert_eq!(marker.generation, Some(snapshot.generation));
+        assert_eq!(
+            marker.credential_published_at_millis,
+            snapshot.credential_published_at_millis
+        );
+        let projection = meerkat_core::project_published_auth_status(
+            chrono::Utc::now(),
+            Some(&stored),
+            &snapshot,
+        );
+        assert_eq!(projection.phase, meerkat_core::AuthStatusPhase::Valid);
+        assert!(projection.tokens.is_some());
     }
 
     #[tokio::test]

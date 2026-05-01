@@ -267,10 +267,15 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
 ) -> Result<(), (StatusCode, String)> {
-    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-        tokens,
-        commit.lifecycle_transition,
-    );
+    let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
+    let committed_tokens = if current_lifecycle.credential_present {
+        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
+    } else {
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            tokens,
+            commit.lifecycle_transition,
+        )
+    };
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(token_store, auth_lease, commit).await {
             Ok(()) => {

@@ -185,15 +185,30 @@ pub fn tokens_lifecycle_published_generation(tokens: &PersistedTokens) -> Option
 }
 
 pub fn tokens_lifecycle_publication(tokens: &PersistedTokens) -> Option<TokenLifecyclePublication> {
+    tokens_lifecycle_publication_inner(tokens, false)
+}
+
+pub fn tokens_lifecycle_publication_with_explicit_expiry(
+    tokens: &PersistedTokens,
+) -> Option<TokenLifecyclePublication> {
+    tokens_lifecycle_publication_inner(tokens, true)
+}
+
+fn tokens_lifecycle_publication_inner(
+    tokens: &PersistedTokens,
+    require_explicit_expiry: bool,
+) -> Option<TokenLifecyclePublication> {
     if !tokens_lifecycle_published(tokens) {
         return None;
     }
     let marker = tokens.metadata.get(TOKEN_LIFECYCLE_METADATA_KEY)?;
     let generation = marker.get("generation").and_then(serde_json::Value::as_u64);
-    let expires_at = marker
-        .get("expires_at")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| persisted_token_expires_at_epoch_secs(tokens));
+    let explicit_expires_at = marker.get("expires_at").and_then(serde_json::Value::as_u64);
+    let expires_at = match (explicit_expires_at, require_explicit_expiry) {
+        (Some(expires_at), _) => expires_at,
+        (None, true) => return None,
+        (None, false) => persisted_token_expires_at_epoch_secs(tokens),
+    };
     let credential_published_at_millis = marker
         .get("credential_published_at_millis")
         .and_then(serde_json::Value::as_u64);

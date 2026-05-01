@@ -304,7 +304,8 @@ pub use auth::{
     mark_tokens_lifecycle_published_for_transition, persisted_auth_mode_uses_oauth_login_lifecycle,
     persisted_token_expires_at_epoch_secs, project_published_auth_status,
     publish_token_lifecycle_acquired, publish_token_lifecycle_released,
-    restore_token_lifecycle_snapshot, tokens_lifecycle_publication, tokens_lifecycle_published,
+    restore_token_lifecycle_snapshot, tokens_lifecycle_publication,
+    tokens_lifecycle_publication_with_explicit_expiry, tokens_lifecycle_published,
     tokens_lifecycle_published_generation,
 };
 #[cfg(not(target_arch = "wasm32"))]

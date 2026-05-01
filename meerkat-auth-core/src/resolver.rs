@@ -590,14 +590,17 @@ pub fn mark_managed_store_oauth_refresh_failed(
     refresh_started: bool,
     permanent: bool,
 ) -> Result<(), ProviderAuthError> {
-    if !refresh_started {
-        return Ok(());
-    }
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    if !refresh_started
+        && auth_lease.snapshot(&lease_key).phase
+            != Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
+    {
+        return Ok(());
+    }
     auth_lease
         .refresh_failed(&lease_key, permanent)
         .map_err(|e| {
@@ -1414,12 +1417,16 @@ mod tests {
         fn refresh_failed(
             &self,
             _lease_key: &LeaseKey,
-            _permanent: bool,
+            permanent: bool,
         ) -> Result<(), DslTransitionError> {
             self.refresh_failed_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut snapshot = self.snapshot.lock().expect("snapshot lock");
-            snapshot.phase = Some(AuthLeasePhase::Expiring);
+            snapshot.phase = if permanent {
+                Some(AuthLeasePhase::ReauthRequired)
+            } else {
+                Some(AuthLeasePhase::Expiring)
+            };
             snapshot.generation += 1;
             Ok(())
         }
@@ -2386,6 +2393,53 @@ mod tests {
         assert_eq!(auth_lease.begin_refresh_count(), 1);
         assert_eq!(auth_lease.complete_refresh_count(), 1);
         assert_eq!(auth_lease.refresh_failed_count(), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn managed_store_oauth_adopted_refresh_failure_publishes_authmachine_failure() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let tokens = chatgpt_oauth_tokens("refreshing-access");
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Refreshing),
+            expires_at: Some(expires_at),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(2_000),
+        });
+        let mut previous = managed_store_tokens(
+            Arc::clone(&store),
+            key,
+            tokens,
+            Some(auth_lease.snapshot(&lease_key)),
+            ManagedStoreLifecycle::RefreshRequired,
+            None,
+        );
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+
+        let refresh_started =
+            begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
+                .expect("existing refreshing lifecycle can be adopted");
+        assert!(
+            !refresh_started,
+            "adopted refresh should not publish a second begin transition"
+        );
+        mark_managed_store_oauth_refresh_failed(&env, &binding, refresh_started, true)
+            .expect("adopted permanent failure should still publish AuthMachine failure");
+
+        assert_eq!(auth_lease.begin_refresh_count(), 0);
+        assert_eq!(auth_lease.refresh_failed_count(), 1);
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired)
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

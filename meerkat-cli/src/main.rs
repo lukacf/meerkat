@@ -4497,7 +4497,27 @@ async fn project_cli_auth_status(
     {
         stored = None;
     }
-    let projection = meerkat_core::project_published_auth_status(now, stored.as_ref(), &snapshot);
+    let oauth_source_rejected = expected_mode
+        .map(|mode| {
+            meerkat_providers::auth_store::persisted_auth_mode_is_oauth_login(mode)
+                && !source_uses_store
+        })
+        .unwrap_or(false);
+    let unknown_snapshot;
+    let (projection_tokens, projection_snapshot) = if oauth_source_rejected {
+        unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            credential_present: false,
+            generation: snapshot.generation,
+            credential_published_at_millis: None,
+        };
+        (None, &unknown_snapshot)
+    } else {
+        (stored.as_ref(), &snapshot)
+    };
+    let projection =
+        meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
     CliAuthStatusProjection {
         phase: projection.phase,
         expires_at: projection.expires_at,
@@ -10950,6 +10970,47 @@ mod tests {
         let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
         assert!(snapshot.credential_present);
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
+    async fn test_cli_auth_status_hides_non_store_oauth_lifecycle() {
+        use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
+        use meerkat_providers::auth_store::TokenStore;
+
+        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let connection_ref = openai_connection_ref();
+        auth_lease
+            .acquire_lease(
+                &LeaseKey::from_connection_ref(&connection_ref),
+                (chrono::Utc::now() + chrono::Duration::minutes(30)).timestamp() as u64,
+            )
+            .expect("lease acquire succeeds");
+        let config = openai_oauth_login_config(
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::Env {
+                env: "OPENAI_API_KEY".into(),
+                fallback: Vec::new(),
+            },
+        );
+        let section = config.realm.get("dev").expect("dev realm exists");
+        let realm = meerkat_core::RealmConnectionSet::from_config("dev", section)
+            .expect("realm config parses");
+        let (_, _, auth_profile) = realm
+            .lookup_connection_ref(&connection_ref)
+            .expect("binding resolves");
+
+        let projection = project_cli_auth_status(
+            &auth_lease,
+            None::<&dyn TokenStore>,
+            &connection_ref,
+            auth_profile,
+            chrono::Utc::now(),
+        )
+        .await;
+
+        assert_eq!(projection.phase, AuthStatusPhase::Unknown);
+        assert!(projection.expires_at.is_none());
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

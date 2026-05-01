@@ -976,7 +976,7 @@ mod tests {
         let (runtime, config_store) = build_test_runtime(&temp);
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
-        let writer = SharedBufferWriter(output);
+        let writer = SharedBufferWriter(Arc::clone(&output));
         let mut server = RpcServer::new(reader, writer, Arc::clone(&runtime), config_store);
         let request_id = RpcId::Num(36);
         let request_key = request_key(&request_id);
@@ -1012,17 +1012,12 @@ mod tests {
         };
         assert_eq!(tracked_key, request_key);
 
-        let _response =
-            tokio::time::timeout(Duration::from_secs(10), server.long_running_rx.recv())
-                .await
-                .expect("keep-alive create response should arrive")
-                .expect("tracked response channel should stay open");
-        task.await.expect("session/create task should complete");
-        server
-            .request_executor
-            .finish_unpublished(&tracked_key)
+        let response = tokio::time::timeout(Duration::from_secs(10), server.long_running_rx.recv())
             .await
-            .expect("pre-publication finish should run create rollback cleanup");
+            .expect("keep-alive create response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("session/create task should complete");
+        assert!(server.write_long_running_response(response).await);
         assert_eq!(server.request_executor.phase(&request_key), None);
 
         let sessions = runtime
@@ -1031,6 +1026,16 @@ mod tests {
         assert!(
             sessions.is_empty(),
             "keep-alive create must keep rollback cleanup armed until runtime admission commits"
+        );
+
+        let bytes = output.lock().expect("output should be readable").clone();
+        let line = String::from_utf8(bytes).expect("response should be utf8");
+        let response: RpcResponse =
+            serde_json::from_str(line.trim()).expect("response should parse");
+        assert_eq!(response.id, Some(request_id));
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some(crate::error::INVALID_PARAMS)
         );
     }
 
@@ -1455,7 +1460,9 @@ mod tests {
         let output = Arc::new(std::sync::Mutex::new(Vec::new()));
         let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
         let writer = SharedBufferWriter(Arc::clone(&output));
-        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let runtime_for_server = Arc::clone(&runtime);
+        let runtime_for_dispatch = Arc::clone(&runtime);
+        let mut server = RpcServer::new(reader, writer, runtime_for_server, config_store);
         let request_id = RpcId::Num(37);
         let request_key = request_key(&request_id);
         let request = RpcRequest {
@@ -1492,10 +1499,35 @@ mod tests {
                     .send(())
                     .expect("test should observe cancel action installation");
                 release_rx.await.expect("test should release dispatch");
-                crate::handlers::turn::reject_if_cancelled_before_runtime_admission(
+                let (event_tx, _event_rx) = tokio::sync::mpsc::channel::<
+                    meerkat_core::EventEnvelope<meerkat_core::event::AgentEvent>,
+                >(NOTIFICATION_CHANNEL_CAPACITY);
+                let context_for_boundary = context.clone();
+                let result = runtime_for_dispatch
+                    .start_turn_via_runtime_with_admission_controls(
+                        &session_id,
+                        meerkat_core::types::ContentInput::Text(
+                            "cancel before runtime admission".to_string(),
+                        ),
+                        event_tx,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(Box::new(move || {
+                            context_for_boundary.cancel_already_requested()
+                        })),
+                    )
+                    .await;
+                let err =
+                    result.expect_err("runtime admission boundary should reject cancellation");
+                let err = err.into_rpc_error();
+                Some(RpcResponse::error(
                     request.id.clone(),
-                    Some(&context),
-                )
+                    err.code,
+                    err.message,
+                ))
             })
             .expect("turn/start should be tracked");
         let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {

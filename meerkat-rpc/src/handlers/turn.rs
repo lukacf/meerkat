@@ -19,7 +19,7 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
-use crate::session_runtime::{InterruptNoopTarget, SessionRuntime};
+use crate::session_runtime::{InterruptNoopTarget, RuntimePreAdmissionCancelCheck, SessionRuntime};
 use meerkat::surface::{RequestContext, request_action};
 use meerkat_runtime::{RuntimeDriverError, RuntimeState, SessionServiceRuntimeExt};
 
@@ -279,8 +279,11 @@ pub async fn handle_start(
         return response;
     }
 
+    let pre_admission_cancel_check = request_context.clone().map(|context| {
+        Box::new(move || context.cancel_already_requested()) as RuntimePreAdmissionCancelCheck
+    });
     let result = match runtime
-        .start_turn_via_runtime(
+        .start_turn_via_runtime_with_admission_controls(
             &session_id,
             params.prompt,
             mcp_event_tx,
@@ -292,6 +295,8 @@ pub async fn handle_start(
             } else {
                 Some(overrides)
             },
+            None,
+            pre_admission_cancel_check,
         )
         .await
     {

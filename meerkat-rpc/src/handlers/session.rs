@@ -15,7 +15,7 @@ use meerkat_core::{
 use meerkat_runtime::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
@@ -24,7 +24,8 @@ use crate::error;
 use crate::protocol::{RpcError, RpcId, RpcResponse};
 use crate::router::NotificationSink;
 use crate::session_runtime::{
-    RuntimeTurnStartError, SessionRuntime, runtime_accept_error_to_turn_start,
+    RuntimePreAdmissionCancelCheck, RuntimeTurnStartError, SessionRuntime,
+    runtime_accept_error_to_turn_start,
 };
 use meerkat::surface::{RequestContext, request_action};
 
@@ -374,23 +375,28 @@ pub async fn handle_create(
         }
     };
 
-    // Immediate creates need a live runtime loop before the first turn starts.
-    // Deferred creates register on-demand through the session/* router entry
-    // points; eagerly attaching here is redundant and can recurse through the
-    // runtime control path before the pending session has ever been exercised.
-    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
-        && params.initial_turn != Some(InitialTurn::Deferred)
-    {
-        let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-            runtime.clone(),
-            session_id.clone(),
-        ));
-        runtime_adapter
-            .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
-    }
-
     if let Some(context) = request_context.as_ref() {
+        let runtime_for_cleanup = Arc::clone(&runtime);
+        let runtime_adapter_for_cleanup = Arc::clone(runtime_adapter);
+        let session_id_for_cleanup = session_id.clone();
+        context.set_unpublished_cleanup(request_action(move || {
+            let runtime = Arc::clone(&runtime_for_cleanup);
+            let runtime_adapter = Arc::clone(&runtime_adapter_for_cleanup);
+            let session_id = session_id_for_cleanup.clone();
+            async move {
+                let _ = runtime.archive_session(&session_id).await;
+                runtime_adapter.unregister_session(&session_id).await;
+            }
+        }));
+        if context.cancel_already_requested() {
+            let _ = runtime.archive_session(&session_id).await;
+            runtime_adapter.unregister_session(&session_id).await;
+            return RpcResponse::error(
+                id,
+                error::REQUEST_CANCELLED,
+                "request cancelled before start",
+            );
+        }
         if let Err(err) = context
             .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
             .await
@@ -417,15 +423,6 @@ pub async fn handle_create(
             }))
             .await;
 
-        let runtime_for_cleanup = Arc::clone(&runtime);
-        let session_id_for_cleanup = session_id.clone();
-        context.set_unpublished_cleanup(request_action(move || {
-            let runtime = Arc::clone(&runtime_for_cleanup);
-            let session_id = session_id_for_cleanup.clone();
-            async move {
-                let _ = runtime.archive_session(&session_id).await;
-            }
-        }));
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             let _ = runtime.archive_session(&session_id).await;
             runtime_adapter.unregister_session(&session_id).await;
@@ -435,6 +432,22 @@ pub async fn handle_create(
                 "request cancelled before start",
             );
         }
+    }
+
+    // Immediate creates need a live runtime loop before the first turn starts.
+    // Deferred creates register on-demand through the session/* router entry
+    // points; eagerly attaching here is redundant and can recurse through the
+    // runtime control path before the pending session has ever been exercised.
+    if runtime_adapter.runtime_mode() == meerkat_runtime::RuntimeMode::V9Compliant
+        && params.initial_turn != Some(InitialTurn::Deferred)
+    {
+        let executor = Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+            runtime.clone(),
+            session_id.clone(),
+        ));
+        runtime_adapter
+            .ensure_session_with_executor(session_id.clone(), executor)
+            .await;
     }
 
     if let Some(response) = super::turn::reject_if_cancelled_before_runtime_admission(
@@ -470,8 +483,13 @@ pub async fn handle_create(
     // Start the initial turn — route through runtime for V9 consistency
     let keep_alive = params.keep_alive;
     let result = if keep_alive {
+        let (admission_tx, mut admission_rx) = oneshot::channel::<()>();
+        let (pre_admission_error_tx, mut pre_admission_error_rx) =
+            oneshot::channel::<RuntimeTurnStartError>();
         let admission_cleanup_context = request_context.clone();
         let error_cleanup_context = request_context.clone();
+        let pre_admission_cancel_check =
+            runtime_pre_admission_cancel_check(request_context.clone());
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
@@ -479,7 +497,7 @@ pub async fn handle_create(
         let skill_refs_for_turn = skill_refs.clone();
         tokio::spawn(async move {
             if let Err(rpc_err) = runtime_for_turn
-                .start_turn_via_runtime_with_admission_hook(
+                .start_turn_via_runtime_with_admission_controls(
                     &sid_for_turn,
                     prompt_for_turn,
                     event_tx_for_turn,
@@ -487,12 +505,14 @@ pub async fn handle_create(
                     None,
                     None,
                     None,
-                    admission_cleanup_context.map(|context| {
-                        Box::new(move || {
+                    Some(Box::new(move || {
+                        if let Some(context) = admission_cleanup_context {
                             context.disarm_unpublished_cleanup();
-                        })
-                            as crate::session_runtime::RuntimeAdmissionCommittedHook
-                    }),
+                        }
+                        let _ = admission_tx.send(());
+                    })
+                        as crate::session_runtime::RuntimeAdmissionCommittedHook),
+                    pre_admission_cancel_check,
                 )
                 .await
             {
@@ -500,15 +520,49 @@ pub async fn handle_create(
                     error_cleanup_context.as_ref(),
                     &rpc_err,
                 );
-                let rpc_err = rpc_err.as_rpc_error();
+                let admitted = rpc_err.admission_committed();
+                let rpc_error = rpc_err.as_rpc_error().clone();
                 tracing::error!(
                     session_id = %sid_for_turn,
-                    error = %rpc_err.code,
+                    error = %rpc_error.code,
                     "Host-mode session start failed: {}",
-                    rpc_err.message
+                    rpc_error.message
                 );
+                if !admitted {
+                    let _ = pre_admission_error_tx.send(rpc_err);
+                }
             }
         });
+
+        let pre_admission_error = tokio::select! {
+            biased;
+
+            admitted = &mut admission_rx => match admitted {
+                Ok(()) => None,
+                Err(_) => match pre_admission_error_rx.await {
+                    Ok(rpc_err) => Some(rpc_err),
+                    Err(_) => Some(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: "host-mode session start ended before runtime admission".to_string(),
+                        data: None,
+                    }.into()),
+                },
+            },
+            pre_admission_error = &mut pre_admission_error_rx => match pre_admission_error {
+                Ok(rpc_err) => Some(rpc_err),
+                Err(_) => match admission_rx.await {
+                    Ok(()) => None,
+                    Err(_) => Some(RpcError {
+                        code: error::INTERNAL_ERROR,
+                        message: "host-mode session start ended before runtime admission".to_string(),
+                        data: None,
+                    }.into()),
+                },
+            },
+        };
+        if let Some(rpc_err) = pre_admission_error {
+            return rpc_response_from_error(id, rpc_err.into_rpc_error());
+        }
 
         if !await_comms_runtime_ready(&runtime, &session_id).await {
             tracing::warn!(
@@ -529,8 +583,10 @@ pub async fn handle_create(
         }
     } else {
         let admission_cleanup_context = request_context.clone();
+        let pre_admission_cancel_check =
+            runtime_pre_admission_cancel_check(request_context.clone());
         match runtime
-            .start_turn_via_runtime_with_admission_hook(
+            .start_turn_via_runtime_with_admission_controls(
                 &session_id,
                 params.prompt,
                 mcp_event_tx,
@@ -543,6 +599,7 @@ pub async fn handle_create(
                         context.disarm_unpublished_cleanup();
                     }) as crate::session_runtime::RuntimeAdmissionCommittedHook
                 }),
+                pre_admission_cancel_check,
             )
             .await
         {
@@ -577,6 +634,14 @@ fn disarm_unpublished_cleanup_after_admitted_turn_error(
     {
         context.disarm_unpublished_cleanup();
     }
+}
+
+fn runtime_pre_admission_cancel_check(
+    context: Option<RequestContext>,
+) -> Option<RuntimePreAdmissionCancelCheck> {
+    context.map(|context| {
+        Box::new(move || context.cancel_already_requested()) as RuntimePreAdmissionCancelCheck
+    })
 }
 
 fn rpc_response_from_error(id: Option<RpcId>, err: RpcError) -> RpcResponse {

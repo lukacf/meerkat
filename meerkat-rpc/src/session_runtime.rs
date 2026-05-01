@@ -69,6 +69,8 @@ use meerkat_core::ToolConfigChangeOperation;
 
 pub(crate) use meerkat_runtime::RuntimeAdmissionCommittedHook;
 
+pub(crate) type RuntimePreAdmissionCancelCheck = Box<dyn FnOnce() -> bool + Send + 'static>;
+
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -2261,7 +2263,7 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RuntimeTurnStartError> {
-        self.start_turn_via_runtime_with_admission_hook(
+        self.start_turn_via_runtime_with_admission_controls(
             session_id,
             prompt,
             mcp_event_tx,
@@ -2269,6 +2271,7 @@ impl SessionRuntime {
             flow_tool_overlay,
             additional_instructions,
             overrides,
+            None,
             None,
         )
         .await
@@ -2289,6 +2292,35 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
         on_admission_committed: Option<RuntimeAdmissionCommittedHook>,
+    ) -> Result<RunResult, RuntimeTurnStartError> {
+        self.start_turn_via_runtime_with_admission_controls(
+            session_id,
+            prompt,
+            mcp_event_tx,
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions,
+            overrides,
+            on_admission_committed,
+            None,
+        )
+        .await
+    }
+
+    /// Variant of [`Self::start_turn_via_runtime`] that also accepts lifecycle
+    /// controls for the exact runtime admission boundary.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    pub(crate) async fn start_turn_via_runtime_with_admission_controls(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        prompt: ContentInput,
+        mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+        on_admission_committed: Option<RuntimeAdmissionCommittedHook>,
+        pre_admission_cancelled: Option<RuntimePreAdmissionCancelCheck>,
     ) -> Result<RunResult, RuntimeTurnStartError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
@@ -2438,6 +2470,15 @@ impl SessionRuntime {
                     }
                 }
             }
+        }
+
+        if pre_admission_cancelled.is_some_and(|check| check()) {
+            return Err(RpcError {
+                code: error::REQUEST_CANCELLED,
+                message: "request cancelled before start".to_string(),
+                data: None,
+            }
+            .into());
         }
 
         let (outcome, handle) = self

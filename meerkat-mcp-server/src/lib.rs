@@ -2740,14 +2740,17 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     if let Some(context) = request_context.as_ref() {
-        context
+        if let Err(err) = context
             .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
             .await
-            .map_err(|err| {
-                ToolCallError::internal(format!(
-                    "request lifecycle rejected session binding: {err}"
-                ))
-            })?;
+        {
+            let _ = state.service.archive(&session_id).await;
+            state.runtime_adapter.unregister_session(&session_id).await;
+            ingress.clear_session(&session_id).await;
+            return Err(ToolCallError::internal(format!(
+                "request lifecycle rejected session binding: {err}"
+            )));
+        }
         let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -2762,19 +2765,23 @@ async fn handle_meerkat_run(
             }))
             .await;
         let service = state.service.clone();
+        let runtime_adapter_for_cleanup = state.runtime_adapter.clone();
         let session_id_for_cleanup = session_id.clone();
         let ingress_for_cleanup = ingress.clone();
         context.set_unpublished_cleanup(request_action(move || {
             let service = service.clone();
+            let runtime_adapter = runtime_adapter_for_cleanup.clone();
             let ingress = ingress_for_cleanup.clone();
             let session_id = session_id_for_cleanup.clone();
             async move {
                 let _ = service.archive(&session_id).await;
+                runtime_adapter.unregister_session(&session_id).await;
                 ingress.clear_session(&session_id).await;
             }
         }));
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             let _ = state.service.archive(&session_id).await;
+            state.runtime_adapter.unregister_session(&session_id).await;
             ingress.clear_session(&session_id).await;
             return Err(request_cancelled_tool_error());
         }
@@ -2919,6 +2926,7 @@ async fn handle_meerkat_run(
             if session_exists {
                 Err(post_commit_session_created_error(&session_id, &err))
             } else {
+                state.runtime_adapter.unregister_session(&session_id).await;
                 ingress.clear_session(&session_id).await;
                 format_agent_result_tool(Err(err), &session_id)
             }

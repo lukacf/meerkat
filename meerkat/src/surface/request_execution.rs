@@ -658,6 +658,36 @@ impl SurfaceRequestMechanics {
         Ok(outcome)
     }
 
+    fn finish_shutdown_straggler_decision(
+        &self,
+        key: &str,
+    ) -> Result<Option<RequestAsyncAction>, RequestTransitionError> {
+        let mut entries = lock_or_recover(&self.entries);
+        let entry = Self::matching_entry(&entries, key, None)?;
+        if let Some(lifecycle) = lock_or_recover(&entry.lifecycle).clone() {
+            let transition = lifecycle.finish_unpublished(&entry.lifecycle_key)?;
+            return Ok(Self::remove_with_cleanup_decision(
+                &mut entries,
+                key,
+                transition.run_unpublished_cleanup,
+            ));
+        }
+
+        // Shutdown may abort a request in the narrow pre-authority window after
+        // the surface staged rollback state but before runtime session binding
+        // could complete. There is no machine terminal to classify yet, so this
+        // only removes local bookkeeping and runs the rollback cleanup.
+        Ok(Self::remove_with_cleanup_decision(&mut entries, key, true))
+    }
+
+    async fn finish_shutdown_straggler(&self, key: &str) -> Result<(), RequestTransitionError> {
+        let cleanup = self.finish_shutdown_straggler_decision(key)?;
+        if let Some(cleanup) = cleanup {
+            cleanup().await;
+        }
+        Ok(())
+    }
+
     fn is_empty(&self) -> bool {
         lock_or_recover(&self.entries).is_empty()
     }
@@ -956,7 +986,7 @@ impl SurfaceRequestExecutor {
             if let Some(handle) = lock_or_recover(&entry.task_handle).take() {
                 handle.abort();
             }
-            let _ = self.finish_unpublished(&key).await;
+            let _ = self.mechanics.finish_shutdown_straggler(&key).await;
         }
     }
 }
@@ -2086,6 +2116,57 @@ mod tests {
             cleanup_count.load(Ordering::SeqCst),
             0,
             "shutdown must obey the lifecycle cleanup decision instead of re-reading phase locally"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_straggler_runs_pre_authority_cleanup_for_unbound_request() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let fail_closed_context = begin_test_request_with_kind(
+            &executor,
+            "shutdown-unbound-finish",
+            SurfaceRequestKind::SessionCreateWithTurn,
+            noop_request_action(),
+        );
+        assert_eq!(
+            executor.finish_unpublished(fail_closed_context.key()).await,
+            Err(RequestTransitionError::AuthorityUnavailable),
+            "normal terminals for unbound production requests still fail closed"
+        );
+        let terminal = fail_closed_context.classify_success_terminal(());
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(fail_closed_context.key()), terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable)
+        );
+
+        let context = begin_test_request_with_kind(
+            &executor,
+            "shutdown-unbound-create",
+            SurfaceRequestKind::SessionCreateWithTurn,
+            noop_request_action(),
+        );
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        executor.shutdown_and_abort_stragglers().await;
+
+        assert_eq!(executor.phase(context.key()), None);
+        assert_eq!(
+            cleanup_count.load(Ordering::SeqCst),
+            1,
+            "shutdown must rollback staging for requests aborted before session authority is bound"
         );
     }
 

@@ -4124,11 +4124,19 @@ async fn continue_session_inner(
         {
             Ok(pair) => pair,
             Err(err) => {
+                if err.is_post_admission_failure()
+                    && let Some(ctx) = req_ctx.as_ref()
+                {
+                    ctx.disarm_unpublished_cleanup();
+                }
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
                 return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
             }
         };
+        if let Some(ctx) = req_ctx.as_ref() {
+            ctx.disarm_unpublished_cleanup();
+        }
         match handle {
             Some(handle) => completion_outcome_to_api_result(
                 handle.wait().await,
@@ -6743,6 +6751,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rebuild_continue_disarms_cleanup_after_post_admission_accept_error() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("let final_result = if requires_rebuild")
+            .expect("continue_session_inner should have a rebuild path");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("    } else {\n        #[cfg(feature = \"comms\")]")
+                    .expect("rebuild path should end before live continue path")];
+        let submit = body
+            .find(".accept_input_with_completion(&create_result.session_id, input)")
+            .expect("rebuild continue should submit input to rebuilt runtime");
+        let branch = &body[submit
+            ..submit
+                + body[submit..]
+                    .find("match handle")
+                    .expect("rebuild continue should handle completion after submission")];
+        let classify = branch
+            .find("err.is_post_admission_failure()")
+            .expect("post-admission accept failures should be machine-classified");
+        let disarm = branch
+            .find("ctx.disarm_unpublished_cleanup()")
+            .expect("post-admission accept failure should disarm cleanup");
+        let fail = branch
+            .find("return failed_terminal")
+            .expect("accept failure should return a failed terminal");
+
+        assert!(
+            classify < disarm && disarm < fail,
+            "rebuild continue must preserve admitted sessions before returning accept errors"
+        );
+    }
+
     #[tokio::test]
     async fn test_continue_session_invalid_keep_alive_is_side_effect_free() {
         use axum::body::Body;
@@ -6922,6 +6965,101 @@ mod tests {
         assert!(
             !session_metadata_marks_archived(&session),
             "tracked post-commit failure must not run unpublished rollback cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tracked_rebuild_continue_post_admission_failure_preserves_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_service = state.session_service.clone();
+        let created = session_service
+            .create_session(SvcCreateSessionRequest {
+                model: state.default_model.to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(state.max_tokens),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: state
+                        .llm_client_override
+                        .clone()
+                        .map(encode_llm_client_override_for_service),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("deferred session create should succeed");
+        let session_id = created.session_id;
+        session_service
+            .discard_live_session(&session_id)
+            .await
+            .expect("test should evict the live handle before rebuild continue");
+        state.llm_client_override = Some(Arc::new(ErrorLlmClient));
+        let runtime_adapter = state.runtime_adapter.clone();
+        let app = router(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{session_id}/messages"))
+                    .header("content-type", "application/json")
+                    .header(
+                        "x-meerkat-request-id",
+                        "tracked-rebuild-post-admission-turn-failure",
+                    )
+                    .body(Body::from(
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "prompt": "Trigger rebuild failure",
+                            "max_tokens": 16
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("tracked rebuild continue route timed out")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("LLM error")),
+            "unexpected rebuild failure payload: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        let session = session_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("session load should not fail")
+            .expect("tracked rebuild post-admission failure must preserve the session");
+        assert!(
+            !session_metadata_marks_archived(&session),
+            "post-admission rebuild failure must not run unpublished rollback cleanup"
+        );
+        assert!(
+            runtime_adapter.contains_session(&session_id).await,
+            "post-admission rebuild failure must not unregister the admitted runtime session"
         );
     }
 

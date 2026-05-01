@@ -28,9 +28,40 @@ pub enum RuntimeDriverError {
     #[error("Runtime destroyed")]
     Destroyed,
 
+    /// The operation failed after input admission. Callers must treat runtime
+    /// side effects for the admitted input as already published.
+    #[error("{operation} failed after admission: {reason}")]
+    PostAdmissionFailure {
+        operation: RuntimeDriverPostAdmissionOperation,
+        reason: String,
+    },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
+}
+
+impl RuntimeDriverError {
+    /// Whether this error reports that input admission has already committed.
+    pub fn is_post_admission_failure(&self) -> bool {
+        matches!(self, Self::PostAdmissionFailure { .. })
+    }
+}
+
+/// Runtime operations that can report a failure after input admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeDriverPostAdmissionOperation {
+    AcceptWithCompletion,
+    AcceptWithoutWake,
+}
+
+impl std::fmt::Display for RuntimeDriverPostAdmissionOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AcceptWithCompletion => f.write_str("AcceptWithCompletion"),
+            Self::AcceptWithoutWake => f.write_str("AcceptWithoutWake"),
+        }
+    }
 }
 
 /// Errors from RuntimeControlPlane operations.
@@ -222,6 +253,20 @@ mod tests {
             reason: "bad input".into(),
         };
         assert!(err.to_string().contains("bad input"));
+
+        let err = RuntimeDriverError::PostAdmissionFailure {
+            operation: RuntimeDriverPostAdmissionOperation::AcceptWithCompletion,
+            reason: "canonical apply failed".into(),
+        };
+        assert!(err.is_post_admission_failure());
+        assert!(err.to_string().contains("after admission"));
+
+        let err = RuntimeDriverError::PostAdmissionFailure {
+            operation: RuntimeDriverPostAdmissionOperation::AcceptWithoutWake,
+            reason: "canonical apply failed".into(),
+        };
+        assert!(err.is_post_admission_failure());
+        assert!(err.to_string().contains("AcceptWithoutWake"));
     }
 
     #[test]

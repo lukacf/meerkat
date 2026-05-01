@@ -173,9 +173,10 @@ impl MeerkatMachine {
                         )
                         .await
                         .map_err(|reason| {
-                            RuntimeDriverError::Internal(format!(
-                                "canonical AcceptWithCompletion apply failed after admission: {reason}"
-                            ))
+                            RuntimeDriverError::PostAdmissionFailure {
+                                operation: crate::RuntimeDriverPostAdmissionOperation::AcceptWithCompletion,
+                                reason: format!("canonical apply failed: {reason}"),
+                            }
                         })?;
                     {
                         let mut driver = driver.lock().await;
@@ -187,9 +188,12 @@ impl MeerkatMachine {
                             &effects,
                         )
                         .map_err(|reason| {
-                            RuntimeDriverError::Internal(format!(
-                                "canonical AcceptWithCompletion emitted invalid runtime effect facts: {reason}"
-                            ))
+                            RuntimeDriverError::PostAdmissionFailure {
+                                operation: crate::RuntimeDriverPostAdmissionOperation::AcceptWithCompletion,
+                                reason: format!(
+                                    "canonical effects emitted invalid runtime facts: {reason}"
+                                ),
+                            }
                         })?;
                     (signal, runtime_effect)
                 } else {
@@ -303,10 +307,10 @@ impl MeerkatMachine {
                             "AcceptWithoutWake",
                         )
                         .await
-                        .map_err(|reason| {
-                            RuntimeDriverError::Internal(format!(
-                                "canonical AcceptWithoutWake apply failed after admission: {reason}"
-                            ))
+                        .map_err(|reason| RuntimeDriverError::PostAdmissionFailure {
+                            operation:
+                                crate::RuntimeDriverPostAdmissionOperation::AcceptWithoutWake,
+                            reason: format!("canonical apply failed: {reason}"),
                         })?;
                     {
                         let mut driver = driver.lock().await;

@@ -195,4 +195,5 @@ pub use store::{InMemoryRuntimeStore, RuntimeStore, RuntimeStoreError, SessionDe
 pub use traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport, RuntimeControlPlane,
     RuntimeControlPlaneError, RuntimeDriver, RuntimeDriverError,
+    RuntimeDriverPostAdmissionOperation,
 };

@@ -54,6 +54,24 @@ fn meerkat_semantic_model_keeps_internal_session_transport_domain() {
 }
 
 #[test]
+fn meerkat_semantic_model_rejects_missing_cancel_for_tracked_surface_requests() {
+    let rendered = render_machine_semantic_model(&meerkat_machine());
+    let action_start = rendered
+        .find("CancelSurfaceRequestMissingIdle(request_id) ==")
+        .expect("missing-cancel action should render");
+    let action = &rendered[action_start
+        ..action_start
+            + rendered[action_start..]
+                .find("\n\n")
+                .expect("missing-cancel action should be block-delimited")];
+
+    assert!(
+        action.contains("~((request_id \\in DOMAIN surface_request_phases))"),
+        "missing-request cancel must be disabled for tracked ids in generated authority artifacts:\n{action}"
+    );
+}
+
+#[test]
 fn meerkat_ci_cfg_uses_closed_string_enum_binding_domains() {
     let rendered = render_machine_ci_cfg(&meerkat_machine(), false);
 

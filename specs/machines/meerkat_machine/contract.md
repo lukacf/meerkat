@@ -3789,36 +3789,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `CancelSurfaceRequestMissingInitializing`
 - From: `Initializing`
 - On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_missing`
 - Emits: `SurfaceRequestCancelDecision`
 - To: `Initializing`
 
 ### `CancelSurfaceRequestMissingIdle`
 - From: `Idle`
 - On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_missing`
 - Emits: `SurfaceRequestCancelDecision`
 - To: `Idle`
 
 ### `CancelSurfaceRequestMissingAttached`
 - From: `Attached`
 - On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_missing`
 - Emits: `SurfaceRequestCancelDecision`
 - To: `Attached`
 
 ### `CancelSurfaceRequestMissingRunning`
 - From: `Running`
 - On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_missing`
 - Emits: `SurfaceRequestCancelDecision`
 - To: `Running`
 
 ### `CancelSurfaceRequestMissingRetired`
 - From: `Retired`
 - On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_missing`
 - Emits: `SurfaceRequestCancelDecision`
 - To: `Retired`
 
 ### `CancelSurfaceRequestMissingStopped`
 - From: `Stopped`
 - On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_missing`
 - Emits: `SurfaceRequestCancelDecision`
 - To: `Stopped`
 

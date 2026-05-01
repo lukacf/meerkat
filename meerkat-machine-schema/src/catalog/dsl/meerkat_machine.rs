@@ -7301,6 +7301,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition CancelSurfaceRequestMissing {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input CancelSurfaceRequest { request_id }
+            guard "request_missing" { !self.surface_request_phases.contains_key(request_id) }
             update {}
             to Idle
             emit SurfaceRequestCancelDecision {

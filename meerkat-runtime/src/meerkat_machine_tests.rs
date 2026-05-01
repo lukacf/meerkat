@@ -852,6 +852,33 @@ fn legacy_run_handler_does_not_string_match_commit_unregister_policy() {
     );
 }
 
+#[test]
+fn accept_without_wake_post_admission_apply_failure_is_typed() {
+    let source = include_str!("meerkat_machine/dispatch_ingress.rs");
+    let start = source
+        .find("MeerkatMachineCommand::AcceptWithoutWake")
+        .expect("AcceptWithoutWake ingress handler should exist");
+    let handler = &source[start
+        ..start
+            + source[start..]
+                .find("Ok(MeerkatMachineCommandResult::AcceptOutcome")
+                .expect("AcceptWithoutWake handler should return its command result")];
+    let canonical_apply = handler
+        .find("apply_session_dsl_input")
+        .expect("AcceptWithoutWake should apply canonical DSL after admission");
+    let post_admission = handler
+        .find("RuntimeDriverError::PostAdmissionFailure")
+        .expect("post-admission apply failures should be typed");
+    let operation = handler
+        .find("RuntimeDriverPostAdmissionOperation::AcceptWithoutWake")
+        .expect("post-admission failure should name AcceptWithoutWake");
+
+    assert!(
+        canonical_apply < post_admission && post_admission < operation,
+        "AcceptWithoutWake must not collapse post-admission canonical apply failure into Internal"
+    );
+}
+
 #[tokio::test]
 async fn provisional_dsl_stage_does_not_emit_routed_signal_until_authoritative_apply() {
     let machine = MeerkatMachine::ephemeral();
@@ -18840,6 +18867,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
             format!("validation_failed:{reason}")
         }
         RuntimeDriverError::Destroyed => "destroyed".to_string(),
+        RuntimeDriverError::PostAdmissionFailure { operation, reason } => {
+            format!("post_admission:{operation}:{reason}")
+        }
         RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
     }
 }

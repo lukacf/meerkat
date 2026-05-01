@@ -2397,6 +2397,18 @@ impl SessionRuntime {
 
         self.ensure_runtime_executor(session_id).await?;
 
+        if pre_admission_cancelled
+            .as_ref()
+            .is_some_and(|check| check())
+        {
+            return Err(RpcError {
+                code: error::REQUEST_CANCELLED,
+                message: "request cancelled before start".to_string(),
+                data: None,
+            }
+            .into());
+        }
+
         // Manage comms drain lifecycle based on keep_alive override.
         #[cfg(feature = "comms")]
         {
@@ -4878,6 +4890,7 @@ fn session_error_to_rpc(err: SessionError) -> RpcError {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         SessionError::Busy { .. } => error::SESSION_BUSY,
         SessionError::NotRunning { .. } => error::INTERNAL_ERROR,
+        SessionError::RequestCancelled { .. } => error::REQUEST_CANCELLED,
         SessionError::Agent(agent_err) => match agent_err {
             meerkat_core::AgentError::TokenBudgetExceeded { .. }
             | meerkat_core::AgentError::TimeBudgetExceeded { .. }
@@ -6610,7 +6623,7 @@ mod tests {
     #[tokio::test]
     async fn provider_supports_inline_video_requires_provider_owned_profile() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
         let gemini_video_model_on_openai = SessionLlmIdentity {
             model: "gemini-3-flash-preview".to_string(),
             provider: meerkat_core::Provider::OpenAI,
@@ -6640,7 +6653,7 @@ mod tests {
     #[tokio::test]
     async fn reconfigure_capability_lookup_rejects_provider_model_mismatch() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
         let host = runtime.llm_reconfigure_host();
         let current = SessionLlmIdentity {
             model: "claude-sonnet-4-5".to_string(),
@@ -8490,6 +8503,64 @@ mod tests {
         assert!(
             result.is_ok(),
             "keep_alive override should succeed on materialized session"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_start_pre_cancel_does_not_persist_keep_alive_override() {
+        use crate::handlers::turn::TurnOverrides;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let mut build = mock_build_config();
+        build.keep_alive = true;
+        build.comms_name = Some("keep-alive-cancel-test".to_string());
+
+        let session_id = runtime.create_session(build, None, None).await.unwrap();
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "First".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (event_tx, _rx) = mpsc::channel(100);
+        let err = runtime
+            .start_turn_via_runtime_with_admission_controls(
+                &session_id,
+                meerkat_core::types::ContentInput::Text("Second".to_string()),
+                event_tx,
+                None,
+                None,
+                None,
+                Some(TurnOverrides {
+                    keep_alive: Some(false),
+                    ..Default::default()
+                }),
+                None,
+                Some(Box::new(|| true)),
+            )
+            .await
+            .expect_err("pre-admission cancellation should reject before keep_alive mutation");
+        assert_eq!(err.as_rpc_error().code, error::REQUEST_CANCELLED);
+
+        let persisted = runtime
+            .load_persisted_session(&session_id)
+            .await
+            .expect("session load should succeed")
+            .expect("session should remain persisted");
+        assert_eq!(
+            persisted.session_metadata().map(|meta| meta.keep_alive),
+            Some(true),
+            "pre-admission cancellation must not persist the keep_alive override"
         );
     }
 

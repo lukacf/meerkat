@@ -564,6 +564,10 @@ fn err_session(e: meerkat_core::SessionError) -> JsValue {
         meerkat_core::SessionError::NotRunning { .. } => {
             err_js("SESSION_NOT_RUNNING", "session is not running")
         }
+        meerkat_core::SessionError::RequestCancelled { .. } => err_js(
+            "REQUEST_CANCELLED",
+            "request cancelled before session admission",
+        ),
         meerkat_core::SessionError::Unsupported(message) => err_js("SESSION_UNSUPPORTED", &message),
         meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
         meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),

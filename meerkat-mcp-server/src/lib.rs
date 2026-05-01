@@ -1192,6 +1192,7 @@ fn format_agent_result(
             });
             Ok(wrap_tool_payload(payload))
         }
+        Err(SessionError::RequestCancelled { .. }) => Err("request cancelled before start".into()),
         Err(e) => Err(format!("Agent error: {e}")),
     }
 }
@@ -1200,6 +1201,9 @@ fn format_agent_result_tool(
     result: Result<meerkat_core::types::RunResult, SessionError>,
     session_id: &meerkat::SessionId,
 ) -> Result<Value, ToolCallError> {
+    if matches!(&result, Err(SessionError::RequestCancelled { .. })) {
+        return Err(request_cancelled_tool_error());
+    }
     format_agent_result(result, session_id).map_err(ToolCallError::internal)
 }
 
@@ -2849,6 +2853,10 @@ async fn handle_meerkat_run(
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
+        pre_admission_cancel_check: request_context.clone().map(|context| {
+            Arc::new(move || context.cancel_already_requested())
+                as Arc<dyn Fn() -> bool + Send + Sync + 'static>
+        }),
         override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(enable_shell_override),
         override_memory: ToolCategoryOverride::from_override(input.enable_memory),
@@ -3227,6 +3235,10 @@ async fn handle_meerkat_resume(
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
         initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
+        pre_admission_cancel_check: request_context.clone().map(|context| {
+            Arc::new(move || context.cancel_already_requested())
+                as Arc<dyn Fn() -> bool + Send + Sync + 'static>
+        }),
         override_builtins: ToolCategoryOverride::from_override(enable_builtins_override),
         override_shell: ToolCategoryOverride::from_override(enable_shell_override),
         override_memory: ToolCategoryOverride::from_override(input.enable_memory),

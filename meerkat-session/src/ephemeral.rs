@@ -1472,9 +1472,16 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         )
     }
 
-    fn request_start_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
+    fn request_start_turn(
+        id: &SessionId,
+        handle: &SessionHandle,
+        pre_admission_cancel_check: Option<&Arc<dyn Fn() -> bool + Send + Sync + 'static>>,
+    ) -> Result<(), SessionError> {
         let phase = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
+            if pre_admission_cancel_check.is_some_and(|check| check()) {
+                return Err(SessionError::RequestCancelled { id: id.clone() });
+            }
             let phase = slot
                 .claim()
                 .map_err(|_| SessionError::Busy { id: id.clone() })?;
@@ -1709,11 +1716,24 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     "fresh session handle missing for eager first turn: {session_id}"
                 )))
             })?;
-            Self::request_start_turn(&session_id, handle).map_err(|error| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
-                    "fresh session failed to admit eager first turn: {error}"
-                )))
-            })?;
+            let pre_admission_cancel_check = req
+                .build
+                .as_ref()
+                .and_then(|build| build.pre_admission_cancel_check.as_ref());
+            if let Err(error) =
+                Self::request_start_turn(&session_id, handle, pre_admission_cancel_check)
+            {
+                drop(sessions);
+                let _ = command_tx.send(SessionCommand::Shutdown).await;
+                let mut sessions = self.sessions.write().await;
+                sessions.swap_remove(&session_id);
+                return Err(match error {
+                    SessionError::RequestCancelled { .. } => error,
+                    other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                        format!("fresh session failed to admit eager first turn: {other}"),
+                    )),
+                });
+            }
         }
 
         let initial_turn_metadata = req
@@ -1808,7 +1828,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
 
             // Atomic busy check via compare-and-swap. This is the single
             // point of admission — if two callers race, exactly one wins.
-            Self::request_start_turn(id, handle)?;
+            Self::request_start_turn(id, handle, None)?;
 
             if let Some(system_prompt) = req.system_prompt {
                 let allows_override = {
@@ -3628,6 +3648,7 @@ mod admission_window_tests {
             EphemeralSessionService::<AdmissionProbeBuilder>::request_start_turn(
                 &result.session_id,
                 handle,
+                None,
             )
             .expect("admit turn before command delivery");
             handle.command_tx.clone()
@@ -3746,6 +3767,49 @@ mod admission_window_tests {
         ));
         assert_eq!(run_calls.load(Ordering::SeqCst), 1);
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn eager_create_checks_cancel_inside_first_turn_admission_slot() {
+        let run_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let service = EphemeralSessionService::new(
+            probe_builder(
+                Arc::clone(&run_calls),
+                Arc::clone(&cancel_calls),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            1,
+        );
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let cancelled_for_check = Arc::clone(&cancelled);
+        let mut request = create_request();
+        request.initial_turn = InitialTurnPolicy::RunImmediately;
+        request
+            .build
+            .as_mut()
+            .expect("test request should carry build options")
+            .pre_admission_cancel_check =
+            Some(Arc::new(move || cancelled_for_check.load(Ordering::SeqCst)));
+
+        let err = service
+            .create_session(request)
+            .await
+            .expect_err("cancelled eager create should reject before first-turn admission");
+
+        assert!(
+            matches!(err, SessionError::RequestCancelled { .. }),
+            "expected request-cancelled service error, got {err:?}"
+        );
+        assert_eq!(
+            run_calls.load(Ordering::SeqCst),
+            0,
+            "first turn must not reach the agent after pre-admission cancellation"
+        );
+        assert!(
+            service.sessions.read().await.is_empty(),
+            "cancelled eager create must remove the pre-registered session handle"
+        );
     }
 
     #[tokio::test]

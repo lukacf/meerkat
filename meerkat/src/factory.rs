@@ -607,6 +607,7 @@ impl AgentBuildConfig {
             override_mob: self.override_mob,
             schedule_tools: self.schedule_tools.clone(),
             mob_tool_authority_context: self.mob_tool_authority_context.clone(),
+            pre_admission_cancel_check: None,
             mob_tools: self.mob_tools.clone(),
             preload_skills: self.preload_skills.clone(),
             realm_id: self.realm_id.clone(),

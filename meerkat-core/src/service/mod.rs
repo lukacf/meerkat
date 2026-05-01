@@ -73,6 +73,10 @@ pub enum SessionError {
     #[error("no turn running on session: {id}")]
     NotRunning { id: SessionId },
 
+    /// The request was cancelled before service turn admission.
+    #[error("request cancelled before session admission: {id}")]
+    RequestCancelled { id: SessionId },
+
     /// A session store operation failed.
     #[error("store error: {0}")]
     Store(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -95,6 +99,7 @@ impl SessionError {
             Self::PersistenceDisabled => "SESSION_PERSISTENCE_DISABLED",
             Self::CompactionDisabled => "SESSION_COMPACTION_DISABLED",
             Self::NotRunning { .. } => "SESSION_NOT_RUNNING",
+            Self::RequestCancelled { .. } => "REQUEST_CANCELLED",
             Self::Store(_) => "SESSION_STORE_ERROR",
             Self::Unsupported(_) => "SESSION_UNSUPPORTED",
             Self::Agent(_) => "AGENT_ERROR",
@@ -300,6 +305,9 @@ pub struct SessionBuildOptions {
     /// authorization must still re-check the typed create/scope fields on
     /// every operator call.
     pub mob_tool_authority_context: Option<MobToolAuthorityContext>,
+    /// Request lifecycle cancellation gate checked inside service-owned first-turn
+    /// admission immediately before the turn slot is claimed.
+    pub pre_admission_cancel_check: Option<Arc<dyn Fn() -> bool + Send + Sync + 'static>>,
 }
 
 /// Opaque principal token carried through mob tool authority and provenance.
@@ -673,6 +681,7 @@ impl Default for SessionBuildOptions {
             runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral,
             initial_turn_metadata: None,
             mob_tool_authority_context: None,
+            pre_admission_cancel_check: None,
         }
     }
 }
@@ -724,6 +733,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field(
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
+            )
+            .field(
+                "pre_admission_cancel_check",
+                &self.pre_admission_cancel_check.is_some(),
             )
             .field("runtime_build_mode", &self.runtime_build_mode)
             .finish()

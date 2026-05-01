@@ -2229,6 +2229,67 @@ async fn accept_with_completion_checks_cancellation_inside_admission_path() {
 }
 
 #[tokio::test]
+async fn persistent_accept_does_not_commit_admission_before_blob_persistence() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent_without_blobs(
+        store as Arc<dyn crate::store::RuntimeStore>,
+    ));
+    let session_id = SessionId::new();
+    adapter.register_session(session_id.clone()).await;
+
+    let input = Input::Prompt(crate::input::PromptInput::from_content_input(
+        meerkat_core::types::ContentInput::Blocks(vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "persist image before admission".to_string(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: meerkat_core::types::ImageData::Inline {
+                    data: "AAAA".to_string(),
+                },
+            },
+        ]),
+        None,
+    ));
+    let input_id = input.id().clone();
+    let admission_fired = Arc::new(AtomicBool::new(false));
+    let admission_fired_for_hook = Arc::clone(&admission_fired);
+
+    let err = adapter
+        .accept_input_with_completion_and_admission_hook(
+            &session_id,
+            input,
+            Some(Box::new(move || {
+                admission_fired_for_hook.store(true, Ordering::SeqCst);
+            })),
+        )
+        .await
+        .expect_err("blob persistence failure should reject before admission commits");
+
+    assert!(
+        matches!(err, RuntimeDriverError::Internal(ref message) if message.contains("failed to externalize runtime input images")),
+        "expected blob persistence failure, got {err:?}"
+    );
+    assert!(
+        !admission_fired.load(Ordering::SeqCst),
+        "persistent admission hook must not fire until durable input persistence succeeds"
+    );
+    let snapshot = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("snapshot should exist for registered session");
+    assert!(
+        !snapshot
+            .inputs
+            .admission_order
+            .iter()
+            .any(|admitted| admitted.input_id == input_id),
+        "rolled-back persistent accept must not leave admitted input state"
+    );
+    assert!(!snapshot.inputs.queue.contains(&input_id));
+}
+
+#[tokio::test]
 async fn realtime_attachment_status_defaults_to_unattached() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

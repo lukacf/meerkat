@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn rpc_session_create_persistent_accept_storage_wait_preserves_admitted_session() {
+    async fn rpc_session_create_persistent_accept_storage_wait_keeps_cleanup_armed() {
         let temp = tempfile::tempdir().unwrap();
         let blob_externalization_entered = Arc::new(tokio::sync::Notify::new());
         let release_blob_externalization = Arc::new(tokio::sync::Notify::new());
@@ -1199,12 +1199,15 @@ mod tests {
             .expect("request lifecycle should bind to the session authority");
 
         let runtime_for_cleanup = Arc::clone(&runtime);
+        let runtime_adapter_for_cleanup = Arc::clone(&runtime_adapter);
         let session_id_for_cleanup = session_id.clone();
         context.set_unpublished_cleanup(meerkat::surface::request_action(move || {
             let runtime = Arc::clone(&runtime_for_cleanup);
+            let runtime_adapter = Arc::clone(&runtime_adapter_for_cleanup);
             let session_id = session_id_for_cleanup.clone();
             async move {
                 let _ = runtime.archive_session(&session_id).await;
+                runtime_adapter.unregister_session(&session_id).await;
             }
         }));
 
@@ -1248,9 +1251,16 @@ mod tests {
         )
         .await
         .expect("persistent driver should block in blob externalization after inner admission");
-        hook_entered_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("runtime admission hook must fire before persistent accept awaits storage");
+        assert!(
+            hook_entered_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "runtime admission hook must wait for durable blob/input persistence"
+        );
+        task.abort();
+        release_blob_externalization.notify_waiters();
+        let _ = task.await;
+
         request_executor
             .finish_unpublished(&request_key)
             .await
@@ -1262,13 +1272,9 @@ mod tests {
             .await;
         assert_eq!(
             sessions.len(),
-            1,
-            "persistent accept cleanup must be disarmed before storage awaits can be aborted"
+            0,
+            "persistent accept cleanup must remain armed before durable admission commits"
         );
-
-        task.abort();
-        release_blob_externalization.notify_waiters();
-        let _ = task.await;
     }
 
     #[tokio::test]

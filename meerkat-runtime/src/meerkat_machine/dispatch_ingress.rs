@@ -93,7 +93,10 @@ impl MeerkatMachine {
                         );
                         Self::classify_ingress_dsl_rejection(state, reason)
                     })?;
-                    if pre_admission_cancel_check.is_some_and(|check| check()) {
+                    if pre_admission_cancel_check
+                        .as_ref()
+                        .is_some_and(|check| check())
+                    {
                         return Err(RuntimeDriverError::RequestCancelled);
                     }
                     let result = match driver

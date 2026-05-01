@@ -56,7 +56,7 @@ pub type RuntimeAdmissionCommittedHook = Box<dyn FnOnce() + Send + 'static>;
 /// immediately before an input can commit. Surfaces use this to project a
 /// machine-tracked cancellation decision into the same critical path that owns
 /// admission.
-pub type RuntimePreAdmissionCancelCheck = Box<dyn FnOnce() -> bool + Send + 'static>;
+pub type RuntimePreAdmissionCancelCheck = Box<dyn Fn() -> bool + Send + 'static>;
 
 pub(crate) struct RuntimeAdmissionCommitSignal {
     hook: Option<RuntimeAdmissionCommittedHook>,

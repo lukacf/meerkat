@@ -201,6 +201,7 @@ impl McpScheduleContext {
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings),
             initial_turn_metadata: None,
+            pre_admission_cancel_check: None,
         };
 
         let request = CreateSessionRequest {

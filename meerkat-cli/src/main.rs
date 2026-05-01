@@ -6526,6 +6526,7 @@ async fn run_agent(
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
+            pre_admission_cancel_check: None,
             resume_override_mask: Default::default(),
             call_timeout_override: Default::default(),
             blob_store_override: None,

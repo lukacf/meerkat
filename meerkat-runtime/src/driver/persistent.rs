@@ -254,12 +254,6 @@ impl PersistentRuntimeDriver {
 
         let mut outcome = self.inner.accept_resolved_input(input, resolved).await?;
 
-        if matches!(outcome, AcceptOutcome::Accepted { .. })
-            && let Some(signal) = admission_signal
-        {
-            signal.fire();
-        }
-
         if let AcceptOutcome::Accepted {
             ref input_id,
             ref mut state,
@@ -283,6 +277,12 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
             *state = bundle.state;
+        }
+
+        if matches!(outcome, AcceptOutcome::Accepted { .. })
+            && let Some(signal) = admission_signal
+        {
+            signal.fire();
         }
 
         Ok(outcome)

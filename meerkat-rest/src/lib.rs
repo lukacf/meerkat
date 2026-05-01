@@ -3127,6 +3127,7 @@ async fn create_session_inner(
         mob_tools: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         initial_turn_metadata: None,
+        pre_admission_cancel_check: None,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -3178,6 +3179,9 @@ async fn create_session_inner(
             let api_err = match err {
                 SessionError::NotFound { .. } => ApiError::NotFound(err.to_string()),
                 SessionError::Busy { .. } => ApiError::BadRequest(err.to_string()),
+                SessionError::RequestCancelled { .. } => {
+                    ApiError::RequestCancelled { details: None }
+                }
                 SessionError::Agent(meerkat_core::error::AgentError::ConfigError(_)) => {
                     ApiError::BadRequest(err.to_string())
                 }
@@ -4010,6 +4014,7 @@ async fn continue_session_inner(
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
+            pre_admission_cancel_check: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let create_req = SvcCreateSessionRequest {

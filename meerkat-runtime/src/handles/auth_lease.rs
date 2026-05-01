@@ -95,10 +95,24 @@ fn run_release_after_accept_hook(lease_key: &LeaseKey) {
 #[derive(Default)]
 struct AuthLeaseRegistry {
     authorities: HashMap<LeaseKey, auth_dsl::AuthMachineAuthority>,
-    // Projection version for AuthLeaseHandle::snapshot consumers. This is not
-    // lifecycle state; it is retained after release so authorizer-side token
+    // Projection versions for AuthLeaseHandle::snapshot consumers. These are not
+    // lifecycle state; they are retained after release so authorizer-side token
     // material can detect a later reacquire even when the expiry is identical.
-    generations: HashMap<LeaseKey, u64>,
+    generations: HashMap<LeaseKey, LeaseGenerationState>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LeaseGenerationState {
+    material: u64,
+    latest: u64,
+}
+
+#[derive(Clone, Copy)]
+enum LeaseGenerationUpdate {
+    PreserveMaterial,
+    RefreshOwner,
+    NewMaterial,
+    InvalidateMaterial,
 }
 
 impl std::fmt::Debug for RuntimeAuthLeaseHandle {
@@ -130,18 +144,34 @@ impl RuntimeAuthLeaseHandle {
     }
 
     fn snapshot_locked(guard: &AuthLeaseRegistry, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
-        let generation = guard.generations.get(lease_key).copied().unwrap_or(0);
+        let generations = guard
+            .generations
+            .get(lease_key)
+            .copied()
+            .unwrap_or_default();
         match guard.authorities.get(lease_key) {
-            Some(machine) => AuthLeaseSnapshot {
-                phase: Some(map_phase(machine.state.lifecycle_phase)),
-                expires_at: machine.state.expires_at,
-                generation,
-            },
+            Some(machine) => {
+                let phase = map_phase(machine.state.lifecycle_phase);
+                AuthLeaseSnapshot {
+                    phase: Some(phase),
+                    expires_at: machine.state.expires_at,
+                    generation: Self::snapshot_generation(generations, phase),
+                }
+            }
             None => AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
-                generation,
+                generation: generations.latest,
             },
+        }
+    }
+
+    fn snapshot_generation(generations: LeaseGenerationState, phase: AuthLeasePhase) -> u64 {
+        match phase {
+            AuthLeasePhase::Valid | AuthLeasePhase::Expiring => generations.material,
+            AuthLeasePhase::Refreshing
+            | AuthLeasePhase::ReauthRequired
+            | AuthLeasePhase::Released => generations.latest,
         }
     }
 
@@ -153,6 +183,7 @@ impl RuntimeAuthLeaseHandle {
         create_if_missing: bool,
     ) -> Result<(u64, &'static str, AuthLeasePhase, AuthLeasePhase), DslTransitionError> {
         let action = Self::audit_action_for(&input);
+        let generation_update = Self::generation_update_for(&input);
         let remove_after_accept = matches!(&input, auth_dsl::AuthMachineInput::Release);
         let (from_phase, to_phase) = {
             let entry = if create_if_missing {
@@ -181,9 +212,21 @@ impl RuntimeAuthLeaseHandle {
             let to_phase = map_phase(entry.state.lifecycle_phase);
             (from_phase, to_phase)
         };
-        let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
-        *generation = generation.saturating_add(1);
-        let accepted_generation = *generation;
+        let generations = guard.generations.entry(lease_key.clone()).or_default();
+        let accepted_generation = match generation_update {
+            LeaseGenerationUpdate::PreserveMaterial => {
+                Self::snapshot_generation(*generations, to_phase)
+            }
+            LeaseGenerationUpdate::RefreshOwner => {
+                generations.latest = generations.latest.saturating_add(1);
+                generations.latest
+            }
+            LeaseGenerationUpdate::NewMaterial | LeaseGenerationUpdate::InvalidateMaterial => {
+                generations.latest = generations.latest.saturating_add(1);
+                generations.material = generations.latest;
+                generations.latest
+            }
+        };
         if remove_after_accept {
             guard.authorities.remove(lease_key);
         }
@@ -217,6 +260,23 @@ impl RuntimeAuthLeaseHandle {
             auth_dsl::AuthMachineInput::RefreshFailedPermanent => "refresh_failed_permanent",
             auth_dsl::AuthMachineInput::MarkReauthRequired => "mark_reauth_required",
             auth_dsl::AuthMachineInput::Release => "release_lease",
+        }
+    }
+
+    fn generation_update_for(input: &auth_dsl::AuthMachineInput) -> LeaseGenerationUpdate {
+        match input {
+            auth_dsl::AuthMachineInput::Acquire { .. }
+            | auth_dsl::AuthMachineInput::CompleteRefresh { .. } => {
+                LeaseGenerationUpdate::NewMaterial
+            }
+            auth_dsl::AuthMachineInput::BeginRefresh => LeaseGenerationUpdate::RefreshOwner,
+            auth_dsl::AuthMachineInput::MarkExpiring
+            | auth_dsl::AuthMachineInput::RefreshFailedTransient => {
+                LeaseGenerationUpdate::PreserveMaterial
+            }
+            auth_dsl::AuthMachineInput::RefreshFailedPermanent
+            | auth_dsl::AuthMachineInput::MarkReauthRequired
+            | auth_dsl::AuthMachineInput::Release => LeaseGenerationUpdate::InvalidateMaterial,
         }
     }
 }
@@ -628,6 +688,72 @@ mod tests {
         h.refresh_failed(&k, false).unwrap();
 
         assert_eq!(h.snapshot(&k).phase, Some(AuthLeasePhase::Expiring));
+    }
+
+    #[test]
+    fn transient_refresh_states_preserve_bound_token_generation() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = lease("dev", "transient_generation");
+
+        let acquired = h.acquire_lease(&k, 1_800_000_000).unwrap();
+        assert_eq!(h.snapshot(&k).generation, acquired.generation);
+
+        h.mark_expiring(&k).unwrap();
+        let expiring = h.snapshot(&k);
+        assert_eq!(expiring.phase, Some(AuthLeasePhase::Expiring));
+        assert_eq!(
+            expiring.generation, acquired.generation,
+            "mark_expiring must not make the current token binding stale"
+        );
+
+        let refresh = h.begin_refresh(&k).unwrap();
+        let refreshing = h.snapshot(&k);
+        assert_eq!(refreshing.phase, Some(AuthLeasePhase::Refreshing));
+        assert!(
+            refresh.generation > acquired.generation,
+            "begin_refresh claims a distinct refresh-owner generation"
+        );
+        assert_eq!(refreshing.generation, refresh.generation);
+
+        h.refresh_failed(&k, false).unwrap();
+        let retryable = h.snapshot(&k);
+        assert_eq!(retryable.phase, Some(AuthLeasePhase::Expiring));
+        assert_eq!(
+            retryable.generation, acquired.generation,
+            "transient refresh failure must preserve the still-current token binding"
+        );
+    }
+
+    #[test]
+    fn replacement_and_terminal_transitions_advance_bound_token_generation() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let k = lease("dev", "owned_generation");
+
+        let first = h.acquire_lease(&k, 1_800_000_000).unwrap();
+        h.begin_refresh(&k).unwrap();
+        let refreshed = h
+            .complete_refresh(&k, 1_900_000_000, 1_800_000_000)
+            .unwrap();
+        assert!(
+            refreshed.generation > first.generation,
+            "completed refresh publishes replacement token material"
+        );
+
+        h.mark_reauth_required(&k).unwrap();
+        let reauth = h.snapshot(&k);
+        assert_eq!(reauth.phase, Some(AuthLeasePhase::ReauthRequired));
+        assert!(
+            reauth.generation > refreshed.generation,
+            "reauth invalidates the previously bound token material"
+        );
+
+        h.release_lease(&k).unwrap();
+        let released = h.snapshot(&k);
+        assert_eq!(released.phase, None);
+        assert!(
+            released.generation > reauth.generation,
+            "release must distinguish a later same-expiry reacquire"
+        );
     }
 
     #[test]

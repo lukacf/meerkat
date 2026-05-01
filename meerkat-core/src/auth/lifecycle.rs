@@ -400,28 +400,24 @@ pub enum TokenLifecycleClearError {
     TokenStoreLoad(TokenStoreError),
     #[error("TokenStore clear failed: {0}")]
     TokenStoreClear(TokenStoreError),
-    #[error("TokenStore load failed: {load_error}; TokenStore clear failed: {clear_error}")]
-    TokenStoreLoadAndClear {
-        load_error: TokenStoreError,
-        clear_error: TokenStoreError,
-    },
+    #[error("TokenStore material changed before AuthMachine lifecycle release")]
+    TokenStoreClearRace,
     #[error(
-        "TokenStore clear failed: {clear_error}; AuthMachine lifecycle restore failed: {restore_error}"
+        "AuthMachine lifecycle release failed after TokenStore clear: {release_error}; TokenStore restore failed: {restore_error}"
     )]
-    TokenStoreClearAndLifecycleRestore {
-        clear_error: TokenStoreError,
-        restore_error: DslTransitionError,
+    TokenStoreRestoreAfterAuthMachineRelease {
+        release_error: DslTransitionError,
+        restore_error: TokenStoreError,
     },
 }
 
 /// Clear persisted token material and release the AuthMachine lifecycle as one
 /// fail-closed boundary.
 ///
-/// When the previous token snapshot can be loaded, the AuthMachine release
-/// happens first. If the token clear then fails, the previous lifecycle snapshot
-/// is restored so public status does not commit a split "token exists but
-/// lifecycle is gone" state. When token material is unreadable, there is no
-/// durable token snapshot to restore, so release is delayed until clear succeeds.
+/// When the previous token snapshot can be loaded, the TokenStore conditional
+/// clear must win before the AuthMachine release is attempted. `Ok(false)` from
+/// the clear path means newer durable material exists, so the lease remains
+/// untouched and the caller sees a race instead of a false logout success.
 pub async fn clear_tokens_and_publish_lifecycle_released(
     store: &dyn TokenStore,
     handle: &dyn AuthLeaseHandle,
@@ -434,35 +430,170 @@ pub async fn clear_tokens_and_publish_lifecycle_released(
         Ok(previous) => previous,
         Err(load_error) => return Err(TokenLifecycleClearError::TokenStoreLoad(load_error)),
     };
-    let released = handle
-        .release_lease_if_snapshot(&lease_key, &previous_lifecycle)
-        .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
-    if !released {
-        return Ok(());
-    }
     let Some(previous_tokens) = previous.as_ref() else {
-        return Ok(());
+        let released = handle
+            .release_lease_if_snapshot(&lease_key, &previous_lifecycle)
+            .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
+        if released {
+            return Ok(());
+        }
+        if store
+            .load(&key)
+            .await
+            .map_err(TokenLifecycleClearError::TokenStoreLoad)?
+            .is_some()
+        {
+            return Err(TokenLifecycleClearError::TokenStoreClearRace);
+        }
+        if handle.snapshot(&lease_key).phase.is_none() {
+            return Ok(());
+        }
+        return Err(TokenLifecycleClearError::TokenStoreClearRace);
     };
     match store.clear_if_current(&key, previous_tokens).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Ok(()),
-        Err(clear_error) => {
-            if let Err(restore_error) = restore_token_lifecycle_snapshot(
-                handle,
-                &lease_key,
-                &previous_lifecycle,
-                Some(previous_tokens),
-            ) {
-                return Err(
-                    TokenLifecycleClearError::TokenStoreClearAndLifecycleRestore {
-                        clear_error,
-                        restore_error,
-                    },
-                );
-            }
-            Err(TokenLifecycleClearError::TokenStoreClear(clear_error))
+        Ok(true) => {}
+        Ok(false) => return Err(TokenLifecycleClearError::TokenStoreClearRace),
+        Err(clear_error) => return Err(TokenLifecycleClearError::TokenStoreClear(clear_error)),
+    }
+
+    match handle.release_lease_if_snapshot(&lease_key, &previous_lifecycle) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(release_error) => {
+            restore_cleared_tokens_after_release_error(
+                store,
+                &key,
+                previous_tokens,
+                release_error.clone(),
+            )
+            .await?;
+            return Err(TokenLifecycleClearError::AuthMachineRelease(release_error));
         }
     }
+
+    if store
+        .load(&key)
+        .await
+        .map_err(TokenLifecycleClearError::TokenStoreLoad)?
+        .is_some()
+    {
+        return Err(TokenLifecycleClearError::TokenStoreClearRace);
+    }
+
+    let current_lifecycle = handle.snapshot(&lease_key);
+    if current_lifecycle.phase.is_some() {
+        if !snapshot_represents_cleared_token_material(previous_tokens, &key, &current_lifecycle) {
+            restore_cleared_tokens_after_lost_release(
+                store,
+                &key,
+                previous_tokens,
+                &previous_lifecycle,
+                &current_lifecycle,
+            )
+            .await?;
+            return Err(TokenLifecycleClearError::TokenStoreClearRace);
+        }
+        let released = match handle.release_lease_if_snapshot(&lease_key, &current_lifecycle) {
+            Ok(released) => released,
+            Err(release_error) => {
+                restore_cleared_tokens_after_release_error(
+                    store,
+                    &key,
+                    previous_tokens,
+                    release_error.clone(),
+                )
+                .await?;
+                return Err(TokenLifecycleClearError::AuthMachineRelease(release_error));
+            }
+        };
+        if !released {
+            if store
+                .load(&key)
+                .await
+                .map_err(TokenLifecycleClearError::TokenStoreLoad)?
+                .is_some()
+            {
+                return Err(TokenLifecycleClearError::TokenStoreClearRace);
+            }
+            let latest_lifecycle = handle.snapshot(&lease_key);
+            if latest_lifecycle.phase.is_none() {
+                return Ok(());
+            }
+            restore_cleared_tokens_after_lost_release(
+                store,
+                &key,
+                previous_tokens,
+                &previous_lifecycle,
+                &latest_lifecycle,
+            )
+            .await?;
+            return Err(TokenLifecycleClearError::TokenStoreClearRace);
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_represents_cleared_token_material(
+    tokens: &PersistedTokens,
+    key: &TokenKey,
+    snapshot: &AuthLeaseSnapshot,
+) -> bool {
+    matches!(
+        snapshot.phase,
+        Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+    ) && persisted_tokens_match_lifecycle_snapshot(tokens, key, snapshot)
+}
+
+async fn restore_cleared_tokens_after_release_error(
+    store: &dyn TokenStore,
+    key: &TokenKey,
+    previous_tokens: &PersistedTokens,
+    release_error: DslTransitionError,
+) -> Result<(), TokenLifecycleClearError> {
+    store
+        .save_if_current_optional(key, None, previous_tokens)
+        .await
+        .map(|_| ())
+        .map_err(|restore_error| {
+            TokenLifecycleClearError::TokenStoreRestoreAfterAuthMachineRelease {
+                release_error,
+                restore_error,
+            }
+        })
+}
+
+async fn restore_cleared_tokens_after_lost_release(
+    store: &dyn TokenStore,
+    key: &TokenKey,
+    previous_tokens: &PersistedTokens,
+    previous_lifecycle: &AuthLeaseSnapshot,
+    current_lifecycle: &AuthLeaseSnapshot,
+) -> Result<(), TokenLifecycleClearError> {
+    if !snapshot_can_still_use_cleared_token_material(
+        previous_tokens,
+        key,
+        previous_lifecycle,
+        current_lifecycle,
+    ) {
+        return Ok(());
+    }
+    store
+        .save_if_current_optional(key, None, previous_tokens)
+        .await
+        .map(|_| ())
+        .map_err(TokenLifecycleClearError::TokenStoreClear)
+}
+
+fn snapshot_can_still_use_cleared_token_material(
+    tokens: &PersistedTokens,
+    key: &TokenKey,
+    previous_lifecycle: &AuthLeaseSnapshot,
+    current_lifecycle: &AuthLeaseSnapshot,
+) -> bool {
+    snapshot_represents_cleared_token_material(tokens, key, current_lifecycle)
+        || (matches!(current_lifecycle.phase, Some(AuthLeasePhase::Refreshing))
+            && current_lifecycle.expires_at == previous_lifecycle.expires_at
+            && persisted_tokens_match_lifecycle_snapshot(tokens, key, previous_lifecycle))
 }
 
 /// Clear unreadable token material and release the AuthMachine lifecycle only
@@ -482,55 +613,22 @@ pub async fn clear_unreadable_tokens_and_publish_lifecycle_released(
     if !cleared {
         return Ok(false);
     }
-    handle
+    let released = handle
         .release_lease_if_snapshot(&lease_key, &previous_lifecycle)
         .map_err(TokenLifecycleClearError::AuthMachineRelease)?;
+    if !released {
+        if handle.snapshot(&lease_key).phase.is_none()
+            && store
+                .load(&key)
+                .await
+                .map_err(TokenLifecycleClearError::TokenStoreLoad)?
+                .is_none()
+        {
+            return Ok(true);
+        }
+        return Err(TokenLifecycleClearError::TokenStoreClearRace);
+    }
     Ok(true)
-}
-
-fn restore_token_lifecycle_snapshot(
-    handle: &dyn AuthLeaseHandle,
-    lease_key: &LeaseKey,
-    snapshot: &AuthLeaseSnapshot,
-    previous: Option<&PersistedTokens>,
-) -> Result<(), DslTransitionError> {
-    let Some(phase) = snapshot.phase else {
-        return Ok(());
-    };
-    if phase == AuthLeasePhase::Released {
-        return Ok(());
-    }
-
-    let expires_at = snapshot
-        .expires_at
-        .or_else(|| previous.map(persisted_token_expires_at_epoch_secs))
-        .unwrap_or(u64::MAX);
-    let expected = handle.snapshot(lease_key);
-    if expected.phase.is_some() {
-        return Ok(());
-    }
-    let Some(transition) = handle.acquire_lease_if_snapshot(lease_key, &expected, expires_at)?
-    else {
-        return Ok(());
-    };
-    let acquired_snapshot = AuthLeaseSnapshot {
-        phase: Some(AuthLeasePhase::Valid),
-        expires_at: (expires_at != u64::MAX).then_some(expires_at),
-        generation: transition.generation,
-    };
-    match phase {
-        AuthLeasePhase::Valid => Ok(()),
-        AuthLeasePhase::Expiring => handle
-            .mark_expiring_if_snapshot(lease_key, &acquired_snapshot)
-            .map(|_| ()),
-        AuthLeasePhase::Refreshing => handle
-            .begin_refresh_if_snapshot(lease_key, &acquired_snapshot)
-            .map(|_| ()),
-        AuthLeasePhase::ReauthRequired => handle
-            .mark_reauth_required_if_snapshot(lease_key, &acquired_snapshot)
-            .map(|_| ()),
-        AuthLeasePhase::Released => Ok(()),
-    }
 }
 
 pub fn lease_snapshot_expires_at_datetime(snapshot: &AuthLeaseSnapshot) -> Option<DateTime<Utc>> {
@@ -579,10 +677,15 @@ mod tests {
     use crate::handles::{AuthLeasePhase, AuthLeaseTransition, DslTransitionError};
     use async_trait::async_trait;
 
+    type ConditionalReleaseHook = Arc<dyn Fn(&LeaseKey, &AuthLeaseSnapshot) + Send + Sync>;
+
     struct RecordingAuthLeaseHandle {
         acquired: Mutex<Vec<(LeaseKey, u64)>>,
         released: Mutex<Vec<LeaseKey>>,
         snapshot: Mutex<AuthLeaseSnapshot>,
+        material_generation: Mutex<u64>,
+        reject_release: Mutex<bool>,
+        conditional_release_hook: Mutex<Option<ConditionalReleaseHook>>,
     }
 
     impl Default for RecordingAuthLeaseHandle {
@@ -595,6 +698,9 @@ mod tests {
                     expires_at: None,
                     generation: 1,
                 }),
+                material_generation: Mutex::new(1),
+                reject_release: Mutex::new(false),
+                conditional_release_hook: Mutex::new(None),
             }
         }
     }
@@ -615,10 +721,33 @@ mod tests {
         }
 
         fn force_snapshot(&self, snapshot: AuthLeaseSnapshot) {
+            if matches!(
+                snapshot.phase,
+                Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+            ) {
+                *self
+                    .material_generation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.generation;
+            }
             *self
                 .snapshot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+        }
+
+        fn reject_release(&self) {
+            *self
+                .reject_release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        }
+
+        fn set_conditional_release_hook(&self, hook: ConditionalReleaseHook) {
+            *self
+                .conditional_release_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
         }
     }
 
@@ -639,6 +768,10 @@ mod tests {
             snapshot.phase = Some(AuthLeasePhase::Valid);
             snapshot.expires_at = (expires_at != u64::MAX).then_some(expires_at);
             snapshot.generation += 1;
+            *self
+                .material_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.generation;
             Ok(AuthLeaseTransition {
                 generation: snapshot.generation,
             })
@@ -662,7 +795,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             snapshot.phase = Some(AuthLeasePhase::Expiring);
-            snapshot.generation += 1;
+            snapshot.generation = *self
+                .material_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(())
         }
 
@@ -720,6 +856,10 @@ mod tests {
             snapshot.phase = Some(AuthLeasePhase::Valid);
             snapshot.expires_at = (new_expires_at != u64::MAX).then_some(new_expires_at);
             snapshot.generation += 1;
+            *self
+                .material_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.generation;
             Ok(AuthLeaseTransition {
                 generation: snapshot.generation,
             })
@@ -748,12 +888,20 @@ mod tests {
                 .snapshot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            snapshot.phase = Some(if permanent {
-                AuthLeasePhase::ReauthRequired
+            if permanent {
+                snapshot.phase = Some(AuthLeasePhase::ReauthRequired);
+                snapshot.generation += 1;
+                *self
+                    .material_generation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.generation;
             } else {
-                AuthLeasePhase::Expiring
-            });
-            snapshot.generation += 1;
+                snapshot.phase = Some(AuthLeasePhase::Expiring);
+                snapshot.generation = *self
+                    .material_generation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
             Ok(())
         }
 
@@ -777,6 +925,10 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             snapshot.phase = Some(AuthLeasePhase::ReauthRequired);
             snapshot.generation += 1;
+            *self
+                .material_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.generation;
             Ok(())
         }
 
@@ -798,16 +950,52 @@ mod tests {
         }
 
         fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+            if *self
+                .reject_release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+            {
+                return Err(DslTransitionError::guard_rejected(
+                    "release_lease",
+                    "test rejection",
+                ));
+            }
             self.released
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(lease_key.clone());
-            self.force_snapshot(AuthLeaseSnapshot {
-                phase: None,
-                expires_at: None,
-                generation: 0,
-            });
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            snapshot.phase = None;
+            snapshot.expires_at = None;
+            snapshot.generation += 1;
+            *self
+                .material_generation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot.generation;
             Ok(())
+        }
+
+        fn release_lease_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+        ) -> Result<bool, DslTransitionError> {
+            let hook = self
+                .conditional_release_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                hook(lease_key, expected);
+            }
+            if self.snapshot(lease_key) != *expected {
+                return Ok(false);
+            }
+            self.release_lease(lease_key)?;
+            Ok(true)
         }
 
         fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
@@ -867,14 +1055,31 @@ mod tests {
         clear_error: bool,
     }
 
+    struct EmptyTokenStore {
+        on_load: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    }
+
     struct UnreadableClearingTokenStore {
         cleared: Mutex<bool>,
+        tokens_after_clear: Mutex<Option<PersistedTokens>>,
         on_clear: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
 
     struct ReplacingOnClearTokenStore {
         tokens: Mutex<Option<PersistedTokens>>,
         replacement: PersistedTokens,
+    }
+
+    struct ClearingTokenStore {
+        tokens: Mutex<Option<PersistedTokens>>,
+        on_clear: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    }
+
+    struct ReplacingAfterLoadTokenStore {
+        tokens: Mutex<Option<PersistedTokens>>,
+        replacement: PersistedTokens,
+        replace_on_next_load: Mutex<bool>,
+        on_replace: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
 
     type SaveObserver = Box<dyn Fn(&PersistedTokens) + Send + Sync>;
@@ -907,14 +1112,30 @@ mod tests {
         }
     }
 
+    impl EmptyTokenStore {
+        fn new_with_on_load(on_load: Option<Box<dyn Fn() + Send + Sync>>) -> Self {
+            Self {
+                on_load: Mutex::new(on_load),
+            }
+        }
+    }
+
     impl UnreadableClearingTokenStore {
         fn new() -> Self {
             Self::new_with_on_clear(None)
         }
 
         fn new_with_on_clear(on_clear: Option<Box<dyn Fn() + Send + Sync>>) -> Self {
+            Self::new_with_on_clear_and_tokens_after_clear(on_clear, None)
+        }
+
+        fn new_with_on_clear_and_tokens_after_clear(
+            on_clear: Option<Box<dyn Fn() + Send + Sync>>,
+            tokens_after_clear: Option<PersistedTokens>,
+        ) -> Self {
             Self {
                 cleared: Mutex::new(false),
+                tokens_after_clear: Mutex::new(tokens_after_clear),
                 on_clear: Mutex::new(on_clear),
             }
         }
@@ -932,6 +1153,29 @@ mod tests {
             Self {
                 tokens: Mutex::new(Some(previous)),
                 replacement,
+            }
+        }
+    }
+
+    impl ClearingTokenStore {
+        fn new(tokens: PersistedTokens, on_clear: Option<Box<dyn Fn() + Send + Sync>>) -> Self {
+            Self {
+                tokens: Mutex::new(Some(tokens)),
+                on_clear: Mutex::new(on_clear),
+            }
+        }
+    }
+
+    impl ReplacingAfterLoadTokenStore {
+        fn new(
+            replacement: PersistedTokens,
+            on_replace: Option<Box<dyn Fn() + Send + Sync>>,
+        ) -> Self {
+            Self {
+                tokens: Mutex::new(None),
+                replacement,
+                replace_on_next_load: Mutex::new(true),
+                on_replace: Mutex::new(on_replace),
             }
         }
     }
@@ -994,8 +1238,58 @@ mod tests {
     }
 
     #[async_trait]
+    impl TokenStore for EmptyTokenStore {
+        async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            if let Some(on_load) = self
+                .on_load
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                on_load();
+            }
+            Ok(None)
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            _tokens: &PersistedTokens,
+        ) -> Result<(), TokenStoreError> {
+            Ok(())
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            Ok(())
+        }
+
+        async fn clear_if_current(
+            &self,
+            _key: &TokenKey,
+            _expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            Ok(false)
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "empty"
+        }
+    }
+
+    #[async_trait]
     impl TokenStore for UnreadableClearingTokenStore {
         async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            if self.cleared() {
+                return Ok(self
+                    .tokens_after_clear
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone());
+            }
             Err(TokenStoreError::Serde("corrupt token".into()))
         }
 
@@ -1159,6 +1453,153 @@ mod tests {
 
         fn backend_name(&self) -> &'static str {
             "replacing_on_clear"
+        }
+    }
+
+    #[async_trait]
+    impl TokenStore for ClearingTokenStore {
+        async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            Ok(self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone())
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokens.clone());
+            Ok(())
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            Ok(())
+        }
+
+        async fn clear_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let cleared = {
+                let mut tokens = self
+                    .tokens
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if tokens.as_ref() != Some(expected) {
+                    return Ok(false);
+                }
+                *tokens = None;
+                true
+            };
+            if cleared
+                && let Some(on_clear) = self
+                    .on_clear
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+            {
+                on_clear();
+            }
+            Ok(cleared)
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "clearing"
+        }
+    }
+
+    #[async_trait]
+    impl TokenStore for ReplacingAfterLoadTokenStore {
+        async fn load(&self, _key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+            let current = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let should_replace = {
+                let mut replace_on_next_load = self
+                    .replace_on_next_load
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let should_replace = *replace_on_next_load;
+                *replace_on_next_load = false;
+                should_replace
+            };
+            if should_replace {
+                *self
+                    .tokens
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(self.replacement.clone());
+                if let Some(on_replace) = self
+                    .on_replace
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    on_replace();
+                }
+            }
+            Ok(current)
+        }
+
+        async fn save(
+            &self,
+            _key: &TokenKey,
+            tokens: &PersistedTokens,
+        ) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tokens.clone());
+            Ok(())
+        }
+
+        async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
+            *self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            Ok(())
+        }
+
+        async fn clear_if_current(
+            &self,
+            _key: &TokenKey,
+            expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            let mut tokens = self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if tokens.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            *tokens = None;
+            Ok(true)
+        }
+
+        async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "replacing_after_load"
         }
     }
 
@@ -1394,7 +1835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_boundary_restores_lifecycle_when_token_clear_fails() {
+    async fn clear_boundary_does_not_release_lifecycle_when_token_clear_fails() {
         let handle = RecordingAuthLeaseHandle::default();
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let tokens = tokens_with_expiry(Some(expires_at));
@@ -1408,15 +1849,10 @@ mod tests {
         assert!(matches!(err, TokenLifecycleClearError::TokenStoreClear(_)));
         assert_eq!(
             handle.released(),
-            vec![LeaseKey::from_connection_ref(&connection_ref)]
+            Vec::<LeaseKey>::new(),
+            "failed durable clear must leave AuthMachine truth untouched"
         );
-        assert_eq!(
-            handle.acquired(),
-            vec![(
-                LeaseKey::from_connection_ref(&connection_ref),
-                persisted_token_expires_at_epoch_secs(&tokens),
-            )]
-        );
+        assert!(handle.acquired().is_empty());
         assert!(
             store
                 .load(&TokenKey::from_connection_ref(&connection_ref))
@@ -1427,7 +1863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_boundary_does_not_restore_over_concurrent_reacquire_when_clear_fails() {
+    async fn clear_boundary_does_not_release_or_restore_when_clear_fails() {
         let handle = Arc::new(RecordingAuthLeaseHandle::default());
         let expires_at = DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap();
         let tokens = tokens_with_expiry(Some(expires_at));
@@ -1454,15 +1890,57 @@ mod tests {
         assert!(matches!(err, TokenLifecycleClearError::TokenStoreClear(_)));
         assert_eq!(
             handle.released(),
-            vec![LeaseKey::from_connection_ref(&connection_ref)]
+            Vec::<LeaseKey>::new(),
+            "failed durable clear must not release AuthMachine truth"
         );
         assert!(
             handle.acquired().is_empty(),
-            "restore must not overwrite a lease reacquired after the logout release"
+            "clear failure must not attempt lifecycle restore over concurrent truth"
         );
         assert_eq!(
             handle.snapshot(&LeaseKey::from_connection_ref(&connection_ref)),
             expected_concurrent_snapshot
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_boundary_restores_token_material_when_release_fails_after_clear() {
+        let handle = RecordingAuthLeaseHandle::default();
+        handle.reject_release();
+        let connection_ref = connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(1_800_000_000),
+            generation: 7,
+        });
+        let previous = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
+        ))
+        .with_auth_lease_binding(key.clone(), 7);
+        let store = ClearingTokenStore::new(previous.clone(), None);
+
+        let err = clear_tokens_and_publish_lifecycle_released(&store, &handle, &connection_ref)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            TokenLifecycleClearError::AuthMachineRelease(_)
+        ));
+        assert_eq!(
+            store.load(&key).await.unwrap(),
+            Some(previous),
+            "release failure after durable clear must restore the cleared token material"
+        );
+        assert_eq!(
+            handle.snapshot(&lease_key),
+            AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: Some(1_800_000_000),
+                generation: 7,
+            }
         );
     }
 
@@ -1507,6 +1985,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_boundary_reports_race_when_token_appears_before_release() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        let replacement = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
+        ));
+        let concurrent_snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(1_900_000_000),
+            generation: 42,
+        };
+        let expected_snapshot = concurrent_snapshot.clone();
+        let hook_handle = Arc::clone(&handle);
+        let hook_key = lease_key.clone();
+        let store = ReplacingAfterLoadTokenStore::new(
+            replacement.clone(),
+            Some(Box::new(move || {
+                hook_handle.force_snapshot(concurrent_snapshot.clone());
+            })),
+        );
+
+        let err =
+            clear_tokens_and_publish_lifecycle_released(&store, handle.as_ref(), &connection_ref)
+                .await
+                .unwrap_err();
+
+        assert!(matches!(err, TokenLifecycleClearError::TokenStoreClearRace));
+        assert!(
+            handle.released().is_empty(),
+            "lost conditional release must not report logout success over newer material"
+        );
+        assert_eq!(handle.snapshot(&hook_key), expected_snapshot);
+        assert_eq!(
+            store
+                .load(&TokenKey::from_connection_ref(&connection_ref))
+                .await
+                .unwrap(),
+            Some(replacement)
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_boundary_reports_race_when_lease_appears_without_token_material() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            generation: 0,
+        });
+        let concurrent_snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(1_900_000_000),
+            generation: 42,
+        };
+        let expected_snapshot = concurrent_snapshot.clone();
+        let hook_handle = Arc::clone(&handle);
+        let store = EmptyTokenStore::new_with_on_load(Some(Box::new(move || {
+            hook_handle.force_snapshot(concurrent_snapshot.clone());
+        })));
+
+        let err =
+            clear_tokens_and_publish_lifecycle_released(&store, handle.as_ref(), &connection_ref)
+                .await
+                .unwrap_err();
+
+        assert!(matches!(err, TokenLifecycleClearError::TokenStoreClearRace));
+        assert_eq!(handle.snapshot(&lease_key), expected_snapshot);
+    }
+
+    #[tokio::test]
     async fn unreadable_clear_boundary_releases_after_malformed_material_is_cleared() {
         let handle = RecordingAuthLeaseHandle::default();
         let store = UnreadableClearingTokenStore::new();
@@ -1543,15 +2094,16 @@ mod tests {
             handle_for_clear.force_snapshot(concurrent_snapshot.clone());
         })));
 
-        let cleared = clear_unreadable_tokens_and_publish_lifecycle_released(
+        let err = clear_unreadable_tokens_and_publish_lifecycle_released(
             &store,
             handle.as_ref(),
             &connection_ref,
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert!(cleared);
+        assert!(matches!(err, TokenLifecycleClearError::TokenStoreClearRace));
+        assert!(store.cleared());
         assert!(
             handle.released().is_empty(),
             "malformed-token cleanup must not release a lease reacquired after the clear began"
@@ -1563,7 +2115,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_boundary_does_not_clear_token_replaced_after_release() {
+    async fn unreadable_clear_boundary_reports_race_when_token_appears_after_clear() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let key = TokenKey::from_connection_ref(&connection_ref);
+        let concurrent_tokens = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_900_000_000, 0).unwrap(),
+        ))
+        .with_auth_lease_binding(key.clone(), 42);
+        let concurrent_snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(1_900_000_000),
+            generation: 42,
+        };
+        let handle_for_clear = Arc::clone(&handle);
+        let store = UnreadableClearingTokenStore::new_with_on_clear_and_tokens_after_clear(
+            Some(Box::new(move || {
+                handle_for_clear.force_snapshot(concurrent_snapshot.clone());
+            })),
+            Some(concurrent_tokens.clone()),
+        );
+
+        let err = clear_unreadable_tokens_and_publish_lifecycle_released(
+            &store,
+            handle.as_ref(),
+            &connection_ref,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, TokenLifecycleClearError::TokenStoreClearRace));
+        assert_eq!(store.load(&key).await.unwrap(), Some(concurrent_tokens));
+    }
+
+    #[tokio::test]
+    async fn clear_boundary_does_not_release_lifecycle_when_token_was_replaced() {
         let handle = RecordingAuthLeaseHandle::default();
         let previous = tokens_with_expiry(Some(
             DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
@@ -1574,13 +2160,17 @@ mod tests {
         let store = ReplacingOnClearTokenStore::new(previous, replacement.clone());
         let connection_ref = connection_ref();
 
-        clear_tokens_and_publish_lifecycle_released(&store, &handle, &connection_ref)
+        let err = clear_tokens_and_publish_lifecycle_released(&store, &handle, &connection_ref)
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(
-            handle.released(),
-            vec![LeaseKey::from_connection_ref(&connection_ref)]
+        assert!(
+            matches!(err, TokenLifecycleClearError::TokenStoreClearRace),
+            "conditional clear races must fail closed instead of reporting logout success"
+        );
+        assert!(
+            handle.released().is_empty(),
+            "logout must not release AuthMachine truth when newer durable material remains"
         );
         let stored = store
             .load(&TokenKey::from_connection_ref(&connection_ref))
@@ -1591,6 +2181,87 @@ mod tests {
             stored.expires_at, replacement.expires_at,
             "logout must not clear token material that no longer matches the loaded snapshot"
         );
+    }
+
+    #[tokio::test]
+    async fn clear_boundary_releases_current_lifecycle_after_transient_phase_change() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let token_key = TokenKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(1_800_000_000),
+            generation: 7,
+        });
+        let previous = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
+        ))
+        .with_auth_lease_binding(token_key.clone(), 7);
+        let hook_handle = Arc::clone(&handle);
+        let hook_key = lease_key.clone();
+        let store = ClearingTokenStore::new(
+            previous,
+            Some(Box::new(move || {
+                hook_handle.mark_expiring(&hook_key).unwrap();
+            })),
+        );
+
+        clear_tokens_and_publish_lifecycle_released(&store, handle.as_ref(), &connection_ref)
+            .await
+            .unwrap();
+
+        assert_eq!(handle.released(), vec![lease_key]);
+        assert!(
+            store.load(&token_key).await.unwrap().is_none(),
+            "the old durable material must remain cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_boundary_restores_tokens_when_fallback_release_loses_to_refreshing_owner() {
+        let handle = Arc::new(RecordingAuthLeaseHandle::default());
+        let connection_ref = connection_ref();
+        let token_key = TokenKey::from_connection_ref(&connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        handle.force_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(1_800_000_000),
+            generation: 7,
+        });
+        let previous = tokens_with_expiry(Some(
+            DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap(),
+        ))
+        .with_auth_lease_binding(token_key.clone(), 7);
+        let hook_handle = Arc::clone(&handle);
+        handle.set_conditional_release_hook(Arc::new(move |key, expected| {
+            if expected.phase == Some(AuthLeasePhase::Expiring) {
+                hook_handle.begin_refresh(key).unwrap();
+            }
+        }));
+        let clear_hook_handle = Arc::clone(&handle);
+        let clear_hook_key = lease_key.clone();
+        let store = ClearingTokenStore::new(
+            previous.clone(),
+            Some(Box::new(move || {
+                clear_hook_handle.mark_expiring(&clear_hook_key).unwrap();
+            })),
+        );
+
+        let err =
+            clear_tokens_and_publish_lifecycle_released(&store, handle.as_ref(), &connection_ref)
+                .await
+                .unwrap_err();
+
+        assert!(matches!(err, TokenLifecycleClearError::TokenStoreClearRace));
+        assert_eq!(
+            store.load(&token_key).await.unwrap(),
+            Some(previous),
+            "old material must be restored when a new refresh owner still depends on it"
+        );
+        let snapshot = handle.snapshot(&lease_key);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Refreshing));
+        assert_eq!(snapshot.expires_at, Some(1_800_000_000));
     }
 
     #[test]

@@ -1013,10 +1013,13 @@ impl std::fmt::Display for LeaseKey {
 /// Observable snapshot of an auth lease's DSL state for a given [`LeaseKey`].
 ///
 /// Returned by [`AuthLeaseHandle::snapshot`]. If the binding is not tracked
-/// at all, `phase` is `None` and `expires_at` is `None`. `generation`
-/// advances whenever the lease lifecycle accepts a transition, so consumers
-/// can distinguish a stale projection from a freshly reacquired lease even
-/// when the expiry timestamp is unchanged.
+/// at all, `phase` is `None` and `expires_at` is `None`. `generation` versions
+/// the credential material or refresh owner represented by the snapshot:
+/// transient `Expiring` projections keep the current material generation, while
+/// `Refreshing` uses a distinct owner generation and completed replacement
+/// material advances again. Consumers can distinguish stale projections from a
+/// freshly reacquired lease even when the expiry timestamp is unchanged without
+/// treating transient retry states as new token material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,

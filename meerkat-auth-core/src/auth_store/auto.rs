@@ -106,16 +106,18 @@ impl AutoTokenStore {
         &self,
         key: &TokenKey,
         expected: &PersistedTokens,
-    ) -> Result<(), TokenStoreError> {
+    ) -> Result<bool, TokenStoreError> {
         let should_clear = match self.file.load_unlocked(key).await {
-            Ok(present) => present.as_ref() == Some(expected),
+            Ok(Some(present)) if &present == expected => true,
+            Ok(Some(_)) => return Ok(false),
+            Ok(None) => return Ok(true),
             Err(TokenStoreError::Serde(_)) => true,
             Err(e) => return Err(e),
         };
         if should_clear {
             self.file.clear_unlocked(key).await?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -243,8 +245,12 @@ impl TokenStore for AutoTokenStore {
                 Ok(Some(keyring_tokens)) => {
                     let mut cleared = false;
                     if &keyring_tokens == expected {
-                        self.clear_file_shadow_if_current_or_unreadable(key, expected)
-                            .await?;
+                        if !self
+                            .clear_file_shadow_if_current_or_unreadable(key, expected)
+                            .await?
+                        {
+                            return Ok(false);
+                        }
                         self.keyring.clear_unlocked(key)?;
                         cleared = true;
                     }
@@ -333,10 +339,11 @@ mod tests {
         let expected = token("expected");
 
         write_malformed_shadow(temp.path(), &key);
-        store
+        let cleared = store
             .clear_file_shadow_if_current_or_unreadable(&key, &expected)
             .await
             .expect("malformed shadow clear");
+        assert!(cleared);
 
         assert_eq!(
             store.file.load_unlocked(&key).await.expect("file load"),
@@ -366,10 +373,14 @@ mod tests {
             Some(other.clone())
         );
 
-        store
+        let cleared = store
             .clear_file_shadow_if_current_or_unreadable(&key, &expected)
             .await
             .expect("different material is left alone");
+        assert!(
+            !cleared,
+            "different readable file fallback means the auto store was not fully cleared"
+        );
         assert_eq!(
             store.file.load_unlocked(&key).await.expect("file load"),
             Some(other)

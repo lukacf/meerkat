@@ -343,8 +343,8 @@ mod tests {
     ))]
     use async_trait::async_trait;
     use meerkat_client::TestClient;
-    use meerkat_core::SessionBuildOptions;
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+    use meerkat_core::{HandlingMode, SessionBuildOptions};
     #[cfg(all(
         feature = "openai",
         feature = "openai-realtime",

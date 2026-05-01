@@ -204,12 +204,13 @@ impl OpenAiOAuthRuntime {
     async fn get_or_refresh_tokens_with_commit_slot(
         &self,
         commit_fn: Option<TokenCommitFn>,
+        force_refresh: bool,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
             .await?
             .ok_or(OpenAiOAuthError::InteractiveLoginRequired)?;
-        if Self::token_is_fresh(&persisted) && commit_fn.is_none() {
+        if Self::token_is_fresh(&persisted) && commit_fn.is_none() && !force_refresh {
             return Ok(persisted);
         }
         let commit_slot = Arc::new(Mutex::new(commit_fn));
@@ -238,7 +239,7 @@ impl OpenAiOAuthRuntime {
                                         "persisted tokens disappeared before OAuth refresh".into(),
                                     )
                                 })?;
-                            if OpenAiOAuthRuntime::token_is_fresh(&current) {
+                            if OpenAiOAuthRuntime::token_is_fresh(&current) && !force_refresh {
                                 let commit = commit_slot
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -288,14 +289,23 @@ impl OpenAiOAuthRuntime {
     pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(None).await
+        self.get_or_refresh_tokens_with_commit_slot(None, false)
+            .await
     }
 
     pub async fn get_or_refresh_tokens_with_commit(
         &self,
         commit_fn: TokenCommitFn,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn))
+        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), false)
+            .await
+    }
+
+    pub async fn force_refresh_tokens_with_commit(
+        &self,
+        commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
+        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), true)
             .await
     }
 

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use meerkat_core::{AuthProfile, BackendProfile, ConnectionRef, CredentialSourceSpec, Provider};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 use crate::auth_oauth::OAuthEndpoints;
 use crate::auth_store::{
@@ -77,6 +78,7 @@ impl OAuthProviderIdentity {
     pub fn from_alias(alias: &str) -> Option<Self> {
         match alias {
             "anthropic" | "claude" | "claude.ai" => Some(Self::AnthropicClaudeAi),
+            "anthropic_console_api_key" => Some(Self::AnthropicConsoleApiKey),
             "openai" | "chatgpt" => Some(Self::OpenAiChatGpt),
             "google" | "gemini" | "code_assist" => Some(Self::GoogleCodeAssist),
             _ => None,
@@ -375,6 +377,34 @@ impl OAuthPrunedFlows {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthFlowRegistrySnapshot {
+    #[serde(default)]
+    pub browser: Vec<PersistedOAuthBrowserFlow>,
+    #[serde(default)]
+    pub device: Vec<PersistedOAuthDeviceFlow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedOAuthBrowserFlow {
+    pub state: String,
+    pub target: ConnectionRef,
+    pub provider: String,
+    pub redirect_uri: String,
+    pub pkce_verifier: String,
+    pub created_at_millis: u64,
+    pub expires_at_millis: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedOAuthDeviceFlow {
+    pub target: ConnectionRef,
+    pub provider: String,
+    pub device_code: String,
+    pub created_at_millis: u64,
+    pub expires_at_millis: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OAuthDeviceFlowState {
     record: OAuthDeviceFlowRecord,
@@ -417,6 +447,11 @@ pub enum OAuthFlowError {
         operation: &'static str,
         detail: String,
     },
+    #[error("oauth flow durable persistence failed during {operation}: {detail}")]
+    PersistenceFailed {
+        operation: &'static str,
+        detail: String,
+    },
 }
 
 pub trait OAuthDevicePollLifecycle: Send + Sync {
@@ -438,6 +473,10 @@ pub trait OAuthDevicePollLifecycle: Send + Sync {
         target: &ConnectionRef,
         device_code: &str,
     ) -> Result<(), OAuthFlowError>;
+
+    fn device_flow_payloads_changed(&self) -> Result<(), OAuthFlowError> {
+        Ok(())
+    }
 }
 
 pub struct OAuthDevicePollLease {
@@ -523,6 +562,9 @@ impl OAuthDevicePollLease {
         };
         if result.is_ok() {
             self.active = false;
+            if let Some(lifecycle) = &self.lifecycle {
+                lifecycle.device_flow_payloads_changed()?;
+            }
         } else if matches!(result, Err(OAuthFlowError::Missing))
             && let Some(lifecycle) = &self.lifecycle
         {
@@ -815,6 +857,116 @@ impl OAuthFlowRegistry {
         device_flows.retain(|device_code, state| device_active(&state.record.target, device_code));
     }
 
+    pub fn snapshot_for_persistence(&self, now_millis: u64) -> OAuthFlowRegistrySnapshot {
+        let flows = self.flows.lock();
+        let browser = flows
+            .iter()
+            .filter_map(|(state, record)| {
+                let elapsed = record.created_at.elapsed();
+                if elapsed > self.ttl {
+                    return None;
+                }
+                let elapsed_millis = duration_millis_u64(elapsed);
+                let ttl_millis = duration_millis_u64(self.ttl);
+                Some(PersistedOAuthBrowserFlow {
+                    state: state.clone(),
+                    target: record.target.clone(),
+                    provider: record.provider.canonical_alias().to_string(),
+                    redirect_uri: record.redirect_uri.clone(),
+                    pkce_verifier: record.pkce_verifier.clone(),
+                    created_at_millis: now_millis.saturating_sub(elapsed_millis),
+                    expires_at_millis: now_millis
+                        .saturating_add(ttl_millis.saturating_sub(elapsed_millis)),
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(flows);
+
+        let device_flows = self.device_flows.lock();
+        let now = Instant::now();
+        let device = device_flows
+            .values()
+            .filter_map(|state| {
+                let remaining = state.record.expires_at.checked_duration_since(now)?;
+                let created_elapsed = state.record.created_at.elapsed();
+                Some(PersistedOAuthDeviceFlow {
+                    target: state.record.target.clone(),
+                    provider: state.record.provider.canonical_alias().to_string(),
+                    device_code: state.record.device_code.clone(),
+                    created_at_millis: now_millis
+                        .saturating_sub(duration_millis_u64(created_elapsed)),
+                    expires_at_millis: now_millis.saturating_add(duration_millis_u64(remaining)),
+                })
+            })
+            .collect();
+
+        OAuthFlowRegistrySnapshot { browser, device }
+    }
+
+    pub fn insert_restored_browser_flow(
+        &self,
+        state: String,
+        target: ConnectionRef,
+        provider: OAuthProviderIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        created_at: Instant,
+    ) -> Result<(), OAuthFlowError> {
+        let mut flows = self.flows.lock();
+        let device_flows = self.device_flows.lock();
+        if flows.len() + device_flows.len() >= self.max_outstanding {
+            return Err(OAuthFlowError::CapacityExceeded {
+                max_outstanding: self.max_outstanding,
+            });
+        }
+        flows.insert(
+            state,
+            OAuthFlowRecord {
+                target,
+                provider,
+                redirect_uri,
+                pkce_verifier,
+                created_at,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn insert_restored_device_flow(
+        &self,
+        target: ConnectionRef,
+        provider: OAuthProviderIdentity,
+        device_code: String,
+        created_at: Instant,
+        expires_at: Instant,
+    ) -> Result<(), OAuthFlowError> {
+        let flows = self.flows.lock();
+        let mut device_flows = self.device_flows.lock();
+        if device_flows.contains_key(&device_code) {
+            return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted);
+        }
+        if flows.len() + device_flows.len() >= self.max_outstanding {
+            return Err(OAuthFlowError::CapacityExceeded {
+                max_outstanding: self.max_outstanding,
+            });
+        }
+        let record = OAuthDeviceFlowRecord {
+            target,
+            provider,
+            device_code: device_code.clone(),
+            created_at,
+            expires_at,
+        };
+        device_flows.insert(
+            device_code,
+            OAuthDeviceFlowState {
+                record,
+                poll_lease: None,
+            },
+        );
+        Ok(())
+    }
+
     pub fn start_with_pruned(
         &self,
         target: ConnectionRef,
@@ -1071,6 +1223,10 @@ fn new_state_token() -> Result<String, OAuthFlowError> {
         "st-{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     ))
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn prune_expired_locked(flows: &mut HashMap<String, OAuthFlowRecord>, ttl: Duration) {

@@ -94,6 +94,28 @@ pub trait RuntimeStore: Send + Sync {
         None
     }
 
+    /// Persist the runtime-owned OAuth login-flow payload snapshot.
+    ///
+    /// The AuthMachine owns admission/consume semantics; this payload snapshot
+    /// carries the PKCE verifier and device-code correlation data needed to
+    /// rehydrate active flows after a persistent runtime process restart.
+    fn persist_auth_oauth_flow_snapshot(
+        &self,
+        snapshot_json: &[u8],
+    ) -> Result<(), RuntimeStoreError> {
+        let _ = snapshot_json;
+        Err(RuntimeStoreError::Unsupported(
+            "persist_auth_oauth_flow_snapshot".into(),
+        ))
+    }
+
+    /// Load the runtime-owned OAuth login-flow payload snapshot, if present.
+    fn load_auth_oauth_flow_snapshot(&self) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        Err(RuntimeStoreError::Unsupported(
+            "load_auth_oauth_flow_snapshot".into(),
+        ))
+    }
+
     /// Atomically persist session delta + authoritative receipt + input state updates.
     ///
     /// The receipt MUST be minted by the durable commit seam itself, not by the

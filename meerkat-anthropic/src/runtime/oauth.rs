@@ -231,6 +231,7 @@ impl AnthropicOAuthRuntime {
     async fn get_or_refresh_tokens_with_commit_slot(
         &self,
         commit_fn: Option<TokenCommitFn>,
+        force_refresh: bool,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
         let persisted = self
             .load_persisted()
@@ -238,7 +239,7 @@ impl AnthropicOAuthRuntime {
             .ok_or(AnthropicOAuthError::InteractiveLoginRequired)?;
 
         // Fresh enough? Use cached.
-        if Self::token_is_fresh(&persisted) && commit_fn.is_none() {
+        if Self::token_is_fresh(&persisted) && commit_fn.is_none() && !force_refresh {
             return Ok(persisted);
         }
 
@@ -268,7 +269,7 @@ impl AnthropicOAuthRuntime {
                                         "persisted tokens disappeared before OAuth refresh".into(),
                                     )
                                 })?;
-                            if AnthropicOAuthRuntime::token_is_fresh(&current) {
+                            if AnthropicOAuthRuntime::token_is_fresh(&current) && !force_refresh {
                                 let commit = commit_slot
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -318,14 +319,23 @@ impl AnthropicOAuthRuntime {
     pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(None).await
+        self.get_or_refresh_tokens_with_commit_slot(None, false)
+            .await
     }
 
     pub async fn get_or_refresh_tokens_with_commit(
         &self,
         commit_fn: TokenCommitFn,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
-        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn))
+        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), false)
+            .await
+    }
+
+    pub async fn force_refresh_tokens_with_commit(
+        &self,
+        commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
+        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn), true)
             .await
     }
 

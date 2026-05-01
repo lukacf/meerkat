@@ -6,16 +6,18 @@
 //! membership and terminal transitions are routed through generated
 //! AuthMachine inputs keyed by the target binding.
 
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use meerkat_auth_core::oauth_flow::{
     OAuthDeviceFlowRecord, OAuthDevicePollLease, OAuthDevicePollLifecycle, OAuthFlowAuthority,
-    OAuthFlowError, OAuthFlowRecord, OAuthFlowRegistry, OAuthProviderIdentity, OAuthPrunedFlows,
+    OAuthFlowError, OAuthFlowRecord, OAuthFlowRegistry, OAuthFlowRegistrySnapshot,
+    OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow, PersistedOAuthDeviceFlow,
 };
 use meerkat_core::ConnectionRef;
 
 use crate::auth_machine::dsl as auth_dsl;
+use crate::store::RuntimeStore;
 
 use super::RuntimeAuthLeaseHandle;
 
@@ -36,8 +38,9 @@ fn expires_at_millis(duration: Duration) -> Result<u64, OAuthFlowError> {
 
 #[derive(Debug)]
 pub struct RuntimeOAuthFlowHandle {
-    registry: OAuthFlowRegistry,
+    registry: Arc<OAuthFlowRegistry>,
     lifecycle: Arc<RuntimeAuthLeaseHandle>,
+    store: Option<Weak<dyn RuntimeStore>>,
 }
 
 impl RuntimeOAuthFlowHandle {
@@ -47,8 +50,9 @@ impl RuntimeOAuthFlowHandle {
 
     pub fn new_with_auth_lease(ttl: Duration, lifecycle: Arc<RuntimeAuthLeaseHandle>) -> Self {
         Self {
-            registry: OAuthFlowRegistry::new(ttl),
+            registry: Arc::new(OAuthFlowRegistry::new(ttl)),
             lifecycle,
+            store: None,
         }
     }
 
@@ -66,9 +70,38 @@ impl RuntimeOAuthFlowHandle {
         lifecycle: Arc<RuntimeAuthLeaseHandle>,
     ) -> Self {
         Self {
-            registry: OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding),
+            registry: Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding)),
             lifecycle,
+            store: None,
         }
+    }
+
+    pub fn new_with_persistent_store_and_auth_lease(
+        ttl: Duration,
+        lifecycle: Arc<RuntimeAuthLeaseHandle>,
+        store: &Arc<dyn RuntimeStore>,
+    ) -> Self {
+        Self::new_with_capacity_auth_lease_and_store(
+            ttl,
+            1024,
+            lifecycle,
+            Some(Arc::downgrade(store)),
+        )
+    }
+
+    fn new_with_capacity_auth_lease_and_store(
+        ttl: Duration,
+        max_outstanding: usize,
+        lifecycle: Arc<RuntimeAuthLeaseHandle>,
+        store: Option<Weak<dyn RuntimeStore>>,
+    ) -> Self {
+        let handle = Self {
+            registry: Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding)),
+            lifecycle,
+            store,
+        };
+        handle.rehydrate_persisted_payloads();
+        handle
     }
 
     fn apply(
@@ -237,6 +270,150 @@ impl RuntimeOAuthFlowHandle {
             let _ = self.lifecycle.expire_device_flow(&target, &device_code);
         }
     }
+
+    fn store(&self) -> Option<Arc<dyn RuntimeStore>> {
+        self.store.as_ref().and_then(Weak::upgrade)
+    }
+
+    fn persist_registry_payloads(&self, operation: &'static str) -> Result<(), OAuthFlowError> {
+        persist_registry_payloads(&self.registry, self.store.as_ref(), operation)
+    }
+
+    fn rehydrate_persisted_payloads(&self) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        let Ok(Some(bytes)) = store.load_auth_oauth_flow_snapshot() else {
+            return;
+        };
+        let Ok(snapshot) = serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&bytes) else {
+            return;
+        };
+        let now_millis = current_time_millis();
+        let now_instant = Instant::now();
+
+        for persisted in snapshot.browser {
+            self.restore_browser_payload(persisted, now_millis, now_instant);
+        }
+        for persisted in snapshot.device {
+            self.restore_device_payload(persisted, now_millis, now_instant);
+        }
+        let _ = self.persist_registry_payloads("rehydrate_oauth_flows");
+    }
+
+    fn restore_browser_payload(
+        &self,
+        persisted: PersistedOAuthBrowserFlow,
+        now_millis: u64,
+        now_instant: Instant,
+    ) {
+        if persisted.expires_at_millis <= now_millis {
+            return;
+        }
+        let Some(provider) = OAuthProviderIdentity::from_alias(&persisted.provider) else {
+            return;
+        };
+        let remaining = Duration::from_millis(persisted.expires_at_millis - now_millis);
+        let elapsed = self.registry.ttl().saturating_sub(remaining);
+        let created_at = now_instant.checked_sub(elapsed).unwrap_or(now_instant);
+        if self
+            .admit_browser(
+                &persisted.target,
+                &persisted.state,
+                provider,
+                &persisted.redirect_uri,
+                persisted.expires_at_millis,
+            )
+            .is_err()
+        {
+            return;
+        }
+        if self
+            .registry
+            .insert_restored_browser_flow(
+                persisted.state.clone(),
+                persisted.target.clone(),
+                provider,
+                persisted.redirect_uri.clone(),
+                persisted.pkce_verifier.clone(),
+                created_at,
+            )
+            .is_err()
+        {
+            let _ = self.expire_browser(&persisted.target, &persisted.state);
+        }
+    }
+
+    fn restore_device_payload(
+        &self,
+        persisted: PersistedOAuthDeviceFlow,
+        now_millis: u64,
+        now_instant: Instant,
+    ) {
+        if persisted.expires_at_millis <= now_millis {
+            return;
+        }
+        let Some(provider) = OAuthProviderIdentity::from_alias(&persisted.provider) else {
+            return;
+        };
+        let remaining = Duration::from_millis(persisted.expires_at_millis - now_millis);
+        let expires_at = now_instant.checked_add(remaining).unwrap_or(now_instant);
+        let elapsed = Duration::from_millis(now_millis.saturating_sub(persisted.created_at_millis));
+        let created_at = now_instant.checked_sub(elapsed).unwrap_or(now_instant);
+        if self
+            .admit_device(
+                &persisted.target,
+                &persisted.device_code,
+                provider,
+                persisted.expires_at_millis,
+            )
+            .is_err()
+        {
+            return;
+        }
+        if self
+            .registry
+            .insert_restored_device_flow(
+                persisted.target.clone(),
+                provider,
+                persisted.device_code.clone(),
+                created_at,
+                expires_at,
+            )
+            .is_err()
+        {
+            let _ = self
+                .lifecycle
+                .expire_device_flow(&persisted.target, &persisted.device_code);
+        }
+    }
+}
+
+fn persist_registry_payloads(
+    registry: &OAuthFlowRegistry,
+    store: Option<&Weak<dyn RuntimeStore>>,
+    operation: &'static str,
+) -> Result<(), OAuthFlowError> {
+    let Some(store) = store.and_then(Weak::upgrade) else {
+        return Ok(());
+    };
+    let snapshot = registry.snapshot_for_persistence(current_time_millis());
+    let bytes = serde_json::to_vec(&snapshot).map_err(|err| OAuthFlowError::PersistenceFailed {
+        operation,
+        detail: err.to_string(),
+    })?;
+    store
+        .persist_auth_oauth_flow_snapshot(&bytes)
+        .map_err(|err| OAuthFlowError::PersistenceFailed {
+            operation,
+            detail: err.to_string(),
+        })
+}
+
+struct RuntimeOAuthDevicePollLifecycle {
+    lifecycle: Arc<RuntimeAuthLeaseHandle>,
+    registry: Arc<OAuthFlowRegistry>,
+    store: Option<Weak<dyn RuntimeStore>>,
 }
 
 impl Default for RuntimeOAuthFlowHandle {
@@ -307,6 +484,42 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
     }
 }
 
+impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
+    fn finish_device_poll(
+        &self,
+        target: &ConnectionRef,
+        device_code: &str,
+    ) -> Result<(), OAuthFlowError> {
+        self.lifecycle.finish_device_poll(target, device_code)
+    }
+
+    fn consume_device_flow(
+        &self,
+        target: &ConnectionRef,
+        device_code: &str,
+        provider: OAuthProviderIdentity,
+    ) -> Result<(), OAuthFlowError> {
+        self.lifecycle
+            .consume_device_flow(target, device_code, provider)
+    }
+
+    fn expire_device_flow(
+        &self,
+        target: &ConnectionRef,
+        device_code: &str,
+    ) -> Result<(), OAuthFlowError> {
+        self.lifecycle.expire_device_flow(target, device_code)
+    }
+
+    fn device_flow_payloads_changed(&self) -> Result<(), OAuthFlowError> {
+        persist_registry_payloads(
+            &self.registry,
+            self.store.as_ref(),
+            "persist_oauth_device_flow_payloads",
+        )
+    }
+}
+
 impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
     fn start(
         &self,
@@ -344,6 +557,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             }
         };
         self.expire_collected_flows(pruned);
+        self.persist_registry_payloads("admit_oauth_browser_flow")?;
         Ok(state)
     }
 
@@ -403,6 +617,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         self.consume_browser(target, state, provider, redirect_uri)?;
         self.registry
             .consume(state, target, provider, redirect_uri)?;
+        self.persist_registry_payloads("consume_oauth_browser_flow")?;
         Ok(record)
     }
 
@@ -461,6 +676,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 return Err(err);
             }
         }
+        self.persist_registry_payloads("admit_oauth_device_flow")?;
         Ok(())
     }
 
@@ -525,7 +741,12 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 return Err(err);
             }
         };
-        let lifecycle: Arc<dyn OAuthDevicePollLifecycle> = self.lifecycle.clone();
+        let lifecycle: Arc<dyn OAuthDevicePollLifecycle> =
+            Arc::new(RuntimeOAuthDevicePollLifecycle {
+                lifecycle: Arc::clone(&self.lifecycle),
+                registry: Arc::clone(&self.registry),
+                store: self.store.clone(),
+            });
         Ok(poll.with_lifecycle(lifecycle))
     }
 }

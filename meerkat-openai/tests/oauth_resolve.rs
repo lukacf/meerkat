@@ -910,6 +910,99 @@ async fn openai_chatgpt_oauth_runtime_refresh_is_uncommitted() {
 }
 
 #[tokio::test]
+async fn openai_chatgpt_oauth_runtime_force_refresh_hits_endpoint_for_fresh_tokens() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let endpoint_calls = Arc::clone(&calls);
+    let app = Router::new().route(
+        "/oauth/token",
+        post(move |Form(_form): Form<serde_json::Value>| {
+            let endpoint_calls = Arc::clone(&endpoint_calls);
+            async move {
+                endpoint_calls.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({
+                    "access_token": "forced-chatgpt-access",
+                    "refresh_token": "forced-chatgpt-refresh",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                    "scope": "openid profile email offline_access",
+                }))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &key,
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ChatgptOauth,
+                primary_secret: Some("fresh-chatgpt-access".into()),
+                refresh_token: Some("refresh-chatgpt".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: vec![],
+                account_id: Some("acct-1".into()),
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let endpoints = OAuthEndpoints {
+        client_id: o_oauth::CHATGPT_CLIENT_ID.into(),
+        authorize_url: o_oauth::CHATGPT_AUTHORIZE_URL.into(),
+        token_url: format!("http://{addr}/oauth/token"),
+        device_code_url: None,
+        redirect_uri: "http://127.0.0.1:0/callback".into(),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect(),
+        extra_headers: vec![],
+    };
+    let runtime = o_oauth::OpenAiOAuthRuntime::new(
+        Arc::clone(&store),
+        Arc::new(meerkat_auth_core::auth_store::InMemoryCoordinator::new()),
+        endpoints,
+        key.clone(),
+    );
+    let commit_store = Arc::clone(&store);
+    let commit_key = key.clone();
+    let refreshed = runtime
+        .force_refresh_tokens_with_commit(Box::new(move |tokens| {
+            Box::pin(async move {
+                commit_store
+                    .save(&commit_key, &tokens)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                Ok(tokens)
+            })
+        }))
+        .await
+        .expect(
+            "manual force refresh must exchange with provider even when cached tokens are fresh",
+        );
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        refreshed.primary_secret.as_deref(),
+        Some("forced-chatgpt-access")
+    );
+    let stored = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        stored.primary_secret.as_deref(),
+        Some("forced-chatgpt-access")
+    );
+}
+
+#[tokio::test]
 async fn openai_chatgpt_oauth_runtime_reloads_store_after_refresh_coordination() {
     let calls = Arc::new(AtomicUsize::new(0));
     let endpoint_calls = Arc::clone(&calls);

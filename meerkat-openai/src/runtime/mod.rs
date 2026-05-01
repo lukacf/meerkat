@@ -214,53 +214,51 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                 );
                                 let commit_env = env.clone();
                                 let commit_binding = binding.clone();
-                                runtime
-                                    .get_or_refresh_tokens_with_commit(Box::new(move |tokens| {
-                                        Box::pin(async move {
-                                            publish_managed_store_tokens_lifecycle_and_save(
-                                                &commit_env,
-                                                &commit_binding,
-                                                &managed,
-                                                &tokens,
-                                            )
-                                            .await
-                                            .map_err(
-                                                |e| {
-                                                    meerkat_auth_core::RefreshError::Refresh(
-                                                        e.to_string(),
-                                                    )
-                                                },
-                                            )
-                                        })
-                                    }))
-                                    .await
-                                    .map_err(|e| {
-                                        let permanent =
-                                            openai_oauth_refresh_failure_is_permanent(&e);
-                                        let failure = mark_managed_store_oauth_refresh_failed(
-                                            env,
-                                            binding,
-                                            refresh_started,
-                                            permanent,
+                                let commit: oauth::TokenCommitFn = Box::new(move |tokens| {
+                                    Box::pin(async move {
+                                        publish_managed_store_tokens_lifecycle_and_save(
+                                            &commit_env,
+                                            &commit_binding,
+                                            &managed,
+                                            &tokens,
                                         )
-                                        .err()
-                                        .map(|err| format!("; {err}"))
-                                        .unwrap_or_default();
-                                        match e {
-                                            oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                                let mut err = interactive_login_error(binding);
-                                                if !failure.is_empty() {
-                                                    err = ProviderAuthError::SourceResolutionFailed(
-                                                        format!("{err}{failure}"),
-                                                    );
-                                                }
-                                                err
+                                        .await
+                                        .map_err(|e| {
+                                            meerkat_auth_core::RefreshError::Refresh(e.to_string())
+                                        })
+                                    })
+                                });
+                                let refreshed = if env.force_refresh {
+                                    runtime.force_refresh_tokens_with_commit(commit).await
+                                } else {
+                                    runtime.get_or_refresh_tokens_with_commit(commit).await
+                                };
+                                refreshed.map_err(|e| {
+                                    let permanent = openai_oauth_refresh_failure_is_permanent(&e);
+                                    let failure = mark_managed_store_oauth_refresh_failed(
+                                        env,
+                                        binding,
+                                        refresh_started,
+                                        permanent,
+                                    )
+                                    .err()
+                                    .map(|err| format!("; {err}"))
+                                    .unwrap_or_default();
+                                    match e {
+                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
+                                            let mut err = interactive_login_error(binding);
+                                            if !failure.is_empty() {
+                                                err = ProviderAuthError::SourceResolutionFailed(
+                                                    format!("{err}{failure}"),
+                                                );
                                             }
-                                            other => ProviderAuthError::SourceResolutionFailed(
-                                                format!("{other}{failure}"),
-                                            ),
+                                            err
                                         }
-                                    })?
+                                        other => ProviderAuthError::SourceResolutionFailed(
+                                            format!("{other}{failure}"),
+                                        ),
+                                    }
+                                })?
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),

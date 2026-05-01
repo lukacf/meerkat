@@ -218,6 +218,62 @@ fn persistent_oauth_flow_authority_survives_adapter_recreation_for_same_store() 
     assert_eq!(flow.pkce_verifier, "verifier");
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[test]
+fn persistent_oauth_flow_authority_survives_process_cache_restart_for_sqlite_store() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path.clone()).expect("sqlite runtime store"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let browser_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let device_provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist;
+    let state = first
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            browser_provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits browser OAuth state");
+    first
+        .oauth_flow_authority()
+        .admit_device_code(
+            target.clone(),
+            device_provider,
+            "device-code".to_string(),
+            Duration::from_secs(120),
+        )
+        .expect("persistent runtime authority admits device OAuth state");
+    drop(first);
+    drop(store);
+
+    crate::meerkat_machine::clear_persistent_auth_authorities_for_test();
+
+    let restarted_store = Arc::new(
+        crate::store::SqliteRuntimeStore::new(path).expect("sqlite runtime store reopens"),
+    ) as Arc<dyn crate::store::RuntimeStore>;
+    let recovered = MeerkatMachine::persistent(restarted_store, memory_blob_store());
+    let browser_flow = recovered
+        .oauth_flow_authority()
+        .consume(&state, &target, browser_provider, redirect_uri)
+        .expect("browser OAuth payload survives process cache restart");
+    assert_eq!(browser_flow.pkce_verifier, "verifier");
+
+    let device_poll = recovered
+        .oauth_flow_authority()
+        .begin_device_code_poll("device-code", &target, device_provider)
+        .expect("device OAuth payload survives process cache restart");
+    let device_flow = device_poll
+        .consume()
+        .expect("recovered device OAuth payload consumes once");
+    assert_eq!(device_flow.device_code, "device-code");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn oauth_flow_lifecycle_uses_runtime_authority_seam() {

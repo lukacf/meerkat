@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
@@ -47,12 +48,14 @@ struct Inner {
 #[derive(Debug, Clone)]
 pub struct InMemoryRuntimeStore {
     inner: Arc<Mutex<Inner>>,
+    auth_oauth_flow_snapshot: Arc<StdMutex<Option<Vec<u8>>>>,
 }
 
 impl InMemoryRuntimeStore {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
+            auth_oauth_flow_snapshot: Arc::new(StdMutex::new(None)),
         }
     }
 }
@@ -66,6 +69,25 @@ impl Default for InMemoryRuntimeStore {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeStore for InMemoryRuntimeStore {
+    fn persist_auth_oauth_flow_snapshot(
+        &self,
+        snapshot_json: &[u8],
+    ) -> Result<(), RuntimeStoreError> {
+        *self
+            .auth_oauth_flow_snapshot
+            .lock()
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))? =
+            Some(snapshot_json.to_vec());
+        Ok(())
+    }
+
+    fn load_auth_oauth_flow_snapshot(&self) -> Result<Option<Vec<u8>>, RuntimeStoreError> {
+        self.auth_oauth_flow_snapshot
+            .lock()
+            .map(|snapshot| snapshot.clone())
+            .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+    }
+
     async fn commit_session_boundary(
         &self,
         runtime_id: &LogicalRuntimeId,

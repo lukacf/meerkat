@@ -129,10 +129,13 @@ fn persistent_auth_authorities(
         }
     }
     let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
-    let oauth_flows = Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-        std::time::Duration::from_secs(10 * 60),
-        Arc::clone(&auth_lease),
-    ));
+    let oauth_flows = Arc::new(
+        crate::handles::RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            std::time::Duration::from_secs(10 * 60),
+            Arc::clone(&auth_lease),
+            store,
+        ),
+    );
     let bundle = Arc::new(PersistentAuthAuthorityBundle {
         store: Arc::downgrade(store),
         auth_lease,
@@ -140,6 +143,16 @@ fn persistent_auth_authorities(
     });
     authorities.insert(key, Arc::clone(&bundle));
     bundle
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn clear_persistent_auth_authorities_for_test() {
+    if let Some(authorities) = PERSISTENT_AUTH_AUTHORITIES.get() {
+        authorities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]

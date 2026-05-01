@@ -118,19 +118,83 @@ pub(crate) struct MobMachineFlowAuthorityToken {
     source: MobMachineFlowAuthoritySource,
 }
 
+macro_rules! non_flow_reducer_authority_mob_machine_inputs {
+    () => {
+        mob_dsl::MobMachineInput::RunFlow { .. }
+            | mob_dsl::MobMachineInput::CancelFlow { .. }
+            | mob_dsl::MobMachineInput::FlowStatus
+            | mob_dsl::MobMachineInput::Spawn { .. }
+            | mob_dsl::MobMachineInput::EnsureMember { .. }
+            | mob_dsl::MobMachineInput::Reconcile { .. }
+            | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::Respawn { .. }
+            | mob_dsl::MobMachineInput::RetireAll
+            | mob_dsl::MobMachineInput::WireMembers { .. }
+            | mob_dsl::MobMachineInput::UnwireMembers { .. }
+            | mob_dsl::MobMachineInput::WireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::SessionIngressDetachedForMobDestroy { .. }
+            | mob_dsl::MobMachineInput::SessionIngressDetachFailedForMobDestroy { .. }
+            | mob_dsl::MobMachineInput::SubmitWork { .. }
+            | mob_dsl::MobMachineInput::CancelWork { .. }
+            | mob_dsl::MobMachineInput::CancelAllWork { .. }
+            | mob_dsl::MobMachineInput::Stop
+            | mob_dsl::MobMachineInput::Resume
+            | mob_dsl::MobMachineInput::Complete
+            | mob_dsl::MobMachineInput::Reset
+            | mob_dsl::MobMachineInput::Destroy
+            | mob_dsl::MobMachineInput::TaskCreate { .. }
+            | mob_dsl::MobMachineInput::TaskUpdate { .. }
+            | mob_dsl::MobMachineInput::TaskList
+            | mob_dsl::MobMachineInput::TaskGet
+            | mob_dsl::MobMachineInput::McpServerStates
+            | mob_dsl::MobMachineInput::RosterSnapshot
+            | mob_dsl::MobMachineInput::ListMembers
+            | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
+            | mob_dsl::MobMachineInput::ListAllMembers
+            | mob_dsl::MobMachineInput::MemberStatus
+            | mob_dsl::MobMachineInput::SubscribeAgentEvents
+            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents
+            | mob_dsl::MobMachineInput::SubscribeMobEvents
+            | mob_dsl::MobMachineInput::PollEvents
+            | mob_dsl::MobMachineInput::ReplayAllEvents
+            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance
+            | mob_dsl::MobMachineInput::GetMember
+            | mob_dsl::MobMachineInput::SetSpawnPolicy
+            | mob_dsl::MobMachineInput::Shutdown
+            | mob_dsl::MobMachineInput::ForceCancel
+            | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
+            | mob_dsl::MobMachineInput::KickoffMarkStarting { .. }
+            | mob_dsl::MobMachineInput::StartupMarkReady { .. }
+            | mob_dsl::MobMachineInput::KickoffResolveStarted { .. }
+            | mob_dsl::MobMachineInput::KickoffResolveCallbackPending { .. }
+            | mob_dsl::MobMachineInput::KickoffResolveFailed { .. }
+            | mob_dsl::MobMachineInput::KickoffCancelRequested { .. }
+            | mob_dsl::MobMachineInput::KickoffClear { .. }
+    };
+}
+
 impl MobMachineFlowAuthorityToken {
     pub(crate) fn from_accepted_mob_machine_input(
         input: &mob_dsl::MobMachineInput,
     ) -> Result<Self, MobError> {
+        let catalog_input = input_catalog(input)?;
+        let input_variant = catalog_input.input_variant();
+        if !canonical_flow_authority_input_variant_manifest().contains(&input_variant) {
+            return Err(MobError::Internal(format!(
+                "MobMachine input variant {input_variant:?} is not in the typed flow authority manifest"
+            )));
+        }
+
         match input {
             mob_dsl::MobMachineInput::CreateRunSeed { .. } => Ok(Self::new(
                 MobMachineFlowAuthorityKind::FlowRun(mob_dsl::FlowRunReducerCommandKind::CreateRun),
-                MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
+                MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input),
             )),
             mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand { command, .. } => {
                 let source = match command {
                     mob_dsl::FlowRunReducerCommandKind::CreateRun => {
-                        MobMachineFlowAuthoritySource::AuthorizationOnlyInput(input_catalog(input)?)
+                        MobMachineFlowAuthoritySource::AuthorizationOnlyInput(catalog_input)
                     }
                     mob_dsl::FlowRunReducerCommandKind::StartRun
                     | mob_dsl::FlowRunReducerCommandKind::DispatchStep
@@ -156,7 +220,7 @@ impl MobMachineFlowAuthorityToken {
                     | mob_dsl::FlowRunReducerCommandKind::TerminalizeCompleted
                     | mob_dsl::FlowRunReducerCommandKind::TerminalizeFailed
                     | mob_dsl::FlowRunReducerCommandKind::TerminalizeCanceled => {
-                        MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?)
+                        MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input)
                     }
                 };
                 Ok(Self::new(
@@ -173,13 +237,13 @@ impl MobMachineFlowAuthorityToken {
                         mob_dsl::FlowFrameReducerCommandKind::StartBodyFrame
                     }
                 }),
-                MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
+                MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input),
             )),
             mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand { command, .. } => {
                 let source = match command {
                     mob_dsl::FlowFrameReducerCommandKind::StartRootFrame
                     | mob_dsl::FlowFrameReducerCommandKind::StartBodyFrame => {
-                        MobMachineFlowAuthoritySource::AuthorizationOnlyInput(input_catalog(input)?)
+                        MobMachineFlowAuthoritySource::AuthorizationOnlyInput(catalog_input)
                     }
                     mob_dsl::FlowFrameReducerCommandKind::AdmitNextReadyNode
                     | mob_dsl::FlowFrameReducerCommandKind::CompleteNode
@@ -188,7 +252,7 @@ impl MobMachineFlowAuthorityToken {
                     | mob_dsl::FlowFrameReducerCommandKind::SkipNode
                     | mob_dsl::FlowFrameReducerCommandKind::CancelNode
                     | mob_dsl::FlowFrameReducerCommandKind::SealFrame => {
-                        MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?)
+                        MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input)
                     }
                 };
                 Ok(Self::new(
@@ -200,25 +264,25 @@ impl MobMachineFlowAuthorityToken {
                 MobMachineFlowAuthorityKind::LoopIteration(
                     mob_dsl::LoopIterationReducerCommandKind::StartLoop,
                 ),
-                MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
+                MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input),
             )),
             mob_dsl::MobMachineInput::RecordLoopBodyFrameCompleted { .. } => Ok(Self::new(
                 MobMachineFlowAuthorityKind::LoopIteration(
                     mob_dsl::LoopIterationReducerCommandKind::BodyFrameCompleted,
                 ),
-                MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
+                MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input),
             )),
             mob_dsl::MobMachineInput::RecordLoopUntilConditionMet { .. } => Ok(Self::new(
                 MobMachineFlowAuthorityKind::LoopIteration(
                     mob_dsl::LoopIterationReducerCommandKind::UntilConditionMet,
                 ),
-                MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
+                MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input),
             )),
             mob_dsl::MobMachineInput::RecordLoopUntilConditionFailed { .. } => Ok(Self::new(
                 MobMachineFlowAuthorityKind::LoopIteration(
                     mob_dsl::LoopIterationReducerCommandKind::UntilConditionFailed,
                 ),
-                MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
+                MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input),
             )),
             mob_dsl::MobMachineInput::AuthorizeLoopIterationReducerCommand { command, .. } => {
                 let source = match command {
@@ -227,12 +291,12 @@ impl MobMachineFlowAuthorityToken {
                     | mob_dsl::LoopIterationReducerCommandKind::BodyFrameCompleted
                     | mob_dsl::LoopIterationReducerCommandKind::UntilConditionMet
                     | mob_dsl::LoopIterationReducerCommandKind::UntilConditionFailed => {
-                        MobMachineFlowAuthoritySource::AuthorizationOnlyInput(input_catalog(input)?)
+                        MobMachineFlowAuthoritySource::AuthorizationOnlyInput(catalog_input)
                     }
                     mob_dsl::LoopIterationReducerCommandKind::BodyFrameFailed
                     | mob_dsl::LoopIterationReducerCommandKind::BodyFrameCanceled
                     | mob_dsl::LoopIterationReducerCommandKind::CancelLoop => {
-                        MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?)
+                        MobMachineFlowAuthoritySource::MachineOwnedInput(catalog_input)
                     }
                 };
                 Ok(Self::new(
@@ -240,7 +304,7 @@ impl MobMachineFlowAuthorityToken {
                     source,
                 ))
             }
-            _ => Err(MobError::Internal(format!(
+            non_flow_reducer_authority_mob_machine_inputs!() => Err(MobError::Internal(format!(
                 "MobMachine input {input:?} is not a flow reducer authority input"
             ))),
         }
@@ -259,9 +323,25 @@ impl MobMachineFlowAuthorityToken {
                 ),
                 MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
             )),
-            _ => Err(MobError::Internal(format!(
+            non_flow_reducer_authority_mob_machine_inputs!() => Err(MobError::Internal(format!(
                 "MobMachine input {input:?} is not a body-frame seed authority input"
             ))),
+            mob_dsl::MobMachineInput::CreateFrameSeed {
+                frame_scope: mob_dsl::FrameScope::Root,
+                ..
+            }
+            | mob_dsl::MobMachineInput::CreateRunSeed { .. }
+            | mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand { .. }
+            | mob_dsl::MobMachineInput::AuthorizeFlowFrameReducerCommand { .. }
+            | mob_dsl::MobMachineInput::CreateLoopSeed { .. }
+            | mob_dsl::MobMachineInput::RecordLoopBodyFrameCompleted { .. }
+            | mob_dsl::MobMachineInput::RecordLoopUntilConditionMet { .. }
+            | mob_dsl::MobMachineInput::RecordLoopUntilConditionFailed { .. }
+            | mob_dsl::MobMachineInput::AuthorizeLoopIterationReducerCommand { .. } => {
+                Err(MobError::Internal(format!(
+                    "MobMachine input {input:?} is not a body-frame seed authority input"
+                )))
+            }
         }
     }
 
@@ -1108,9 +1188,58 @@ impl FlowAuthorityInputRecord {
                 body_frame_id,
                 body_frame_iteration,
             },
-            other => {
+            mob_dsl::MobMachineInput::CancelFlow { .. }
+            | mob_dsl::MobMachineInput::FlowStatus
+            | mob_dsl::MobMachineInput::Spawn { .. }
+            | mob_dsl::MobMachineInput::EnsureMember { .. }
+            | mob_dsl::MobMachineInput::Reconcile { .. }
+            | mob_dsl::MobMachineInput::Retire { .. }
+            | mob_dsl::MobMachineInput::Respawn { .. }
+            | mob_dsl::MobMachineInput::RetireAll
+            | mob_dsl::MobMachineInput::WireMembers { .. }
+            | mob_dsl::MobMachineInput::UnwireMembers { .. }
+            | mob_dsl::MobMachineInput::WireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
+            | mob_dsl::MobMachineInput::SessionIngressDetachedForMobDestroy { .. }
+            | mob_dsl::MobMachineInput::SessionIngressDetachFailedForMobDestroy { .. }
+            | mob_dsl::MobMachineInput::SubmitWork { .. }
+            | mob_dsl::MobMachineInput::CancelWork { .. }
+            | mob_dsl::MobMachineInput::CancelAllWork { .. }
+            | mob_dsl::MobMachineInput::Stop
+            | mob_dsl::MobMachineInput::Resume
+            | mob_dsl::MobMachineInput::Complete
+            | mob_dsl::MobMachineInput::Reset
+            | mob_dsl::MobMachineInput::Destroy
+            | mob_dsl::MobMachineInput::TaskCreate { .. }
+            | mob_dsl::MobMachineInput::TaskUpdate { .. }
+            | mob_dsl::MobMachineInput::TaskList
+            | mob_dsl::MobMachineInput::TaskGet
+            | mob_dsl::MobMachineInput::McpServerStates
+            | mob_dsl::MobMachineInput::RosterSnapshot
+            | mob_dsl::MobMachineInput::ListMembers
+            | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
+            | mob_dsl::MobMachineInput::ListAllMembers
+            | mob_dsl::MobMachineInput::MemberStatus
+            | mob_dsl::MobMachineInput::SubscribeAgentEvents
+            | mob_dsl::MobMachineInput::SubscribeAllAgentEvents
+            | mob_dsl::MobMachineInput::SubscribeMobEvents
+            | mob_dsl::MobMachineInput::PollEvents
+            | mob_dsl::MobMachineInput::ReplayAllEvents
+            | mob_dsl::MobMachineInput::RecordOperatorActionProvenance
+            | mob_dsl::MobMachineInput::GetMember
+            | mob_dsl::MobMachineInput::SetSpawnPolicy
+            | mob_dsl::MobMachineInput::Shutdown
+            | mob_dsl::MobMachineInput::ForceCancel
+            | mob_dsl::MobMachineInput::KickoffMarkPending { .. }
+            | mob_dsl::MobMachineInput::KickoffMarkStarting { .. }
+            | mob_dsl::MobMachineInput::StartupMarkReady { .. }
+            | mob_dsl::MobMachineInput::KickoffResolveStarted { .. }
+            | mob_dsl::MobMachineInput::KickoffResolveCallbackPending { .. }
+            | mob_dsl::MobMachineInput::KickoffResolveFailed { .. }
+            | mob_dsl::MobMachineInput::KickoffCancelRequested { .. }
+            | mob_dsl::MobMachineInput::KickoffClear { .. } => {
                 return Err(MobError::Internal(format!(
-                    "MobMachine input {other:?} is not a flow authority input"
+                    "MobMachine input {input:?} is not a flow authority input"
                 )));
             }
         };
@@ -3418,7 +3547,7 @@ fn input_catalog(input: &mob_dsl::MobMachineInput) -> Result<MobMachineCatalogIn
         mob_dsl::MobMachineInput::AuthorizeLoopIterationReducerCommand { .. } => {
             Ok(MobMachineCatalogInput::AuthorizeLoopIterationReducerCommand)
         }
-        _ => Err(MobError::Internal(format!(
+        non_flow_reducer_authority_mob_machine_inputs!() => Err(MobError::Internal(format!(
             "MobMachine input {input:?} is not a flow reducer authority input"
         ))),
     }

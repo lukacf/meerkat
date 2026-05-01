@@ -55,7 +55,7 @@ use meerkat_machine_schema::catalog::dsl::{
         MobMachineInputVariant as SchemaMobMachineInputVariant,
     },
 };
-use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind};
+use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind, identity::InputVariantId};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde::Serialize;
@@ -25332,6 +25332,7 @@ struct MobRuntimeParityPairSummary {
     mismatched_rows: usize,
     unprobed_rows: usize,
     surface_only_unprobed_rows: usize,
+    runtime_internal_unprobed_rows: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -25351,6 +25352,7 @@ struct MobRuntimeParityAuditSummary {
     mismatched_rows: usize,
     unprobed_rows: usize,
     surface_only_unprobed_rows: usize,
+    runtime_internal_unprobed_rows: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -25627,6 +25629,41 @@ fn mob_runtime_parity_target_pairs() -> &'static [(MobRuntimeParityPhase, MobRun
         ),
     ]
 }
+
+fn mob_schema_input_variant_id(input_variant: SchemaMobMachineInputVariant) -> InputVariantId {
+    InputVariantId::parse(input_variant.as_str()).expect("schema MobMachine input variant id")
+}
+
+fn mob_schema_input_variant_set(
+    input_ids: &[InputVariantId],
+) -> BTreeSet<SchemaMobMachineInputVariant> {
+    let input_ids = input_ids.iter().cloned().collect::<BTreeSet<_>>();
+    SchemaMobMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .filter(|input_variant| input_ids.contains(&mob_schema_input_variant_id(*input_variant)))
+        .collect()
+}
+
+fn mob_runtime_internal_input_variant_set() -> BTreeSet<SchemaMobMachineInputVariant> {
+    crate::canonical_mob_machine_runtime_internal_input_variant_manifest()
+        .into_iter()
+        .collect()
+}
+
+fn mob_runtime_parity_probe_required(
+    input_variant: SchemaMobMachineInputVariant,
+    surface_only_inputs: &BTreeSet<SchemaMobMachineInputVariant>,
+    runtime_internal_inputs: &BTreeSet<SchemaMobMachineInputVariant>,
+) -> bool {
+    !surface_only_inputs.contains(&input_variant)
+        && !runtime_internal_inputs.contains(&input_variant)
+}
+
+const MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED: &str =
+    "surface-only input: runtime probe not required";
+const MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED: &str =
+    "runtime-internal input: runtime probe not required";
 
 fn mob_runtime_parity_probe_for_input_variant(
     input_variant: SchemaMobMachineInputVariant,
@@ -26975,11 +27012,8 @@ async fn build_mob_runtime_parity_pair_report(
     right_phase: MobRuntimeParityPhase,
 ) -> MobRuntimeParityPairReport {
     let mut rows = Vec::new();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
 
     for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
         let input_variant_name = input_variant.as_str();
@@ -26989,7 +27023,11 @@ async fn build_mob_runtime_parity_pair_report(
             right_phase.schema_name(),
             input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant_name);
+        let probe_required = mob_runtime_parity_probe_required(
+            input_variant,
+            &surface_only_inputs,
+            &runtime_internal_inputs,
+        );
         let (mut probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
             Some(probe_input) => {
                 match probe_mob_runtime_parity_row(
@@ -27011,11 +27049,20 @@ async fn build_mob_runtime_parity_pair_report(
                         .to_string(),
                 ),
             ),
+            None if surface_only_inputs.contains(&input_variant) => (
+                None,
+                Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED.to_string()),
+            ),
             None => (
                 None,
-                Some("surface-only input: runtime probe not required".to_string()),
+                Some(MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED.to_string()),
             ),
         };
+
+        assert!(
+            !probe_required || probe.is_some(),
+            "required MobMachine runtime parity probe for {input_variant_name} was missing or failed setup before schema row classification: {note:?}"
+        );
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
@@ -27060,10 +27107,19 @@ async fn build_mob_runtime_parity_pair_report(
                     }
                 }
                 None if row.probe_required => summary.unprobed_rows += 1,
-                None => summary.surface_only_unprobed_rows += 1,
+                None if row.note.as_deref()
+                    == Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED) =>
+                {
+                    summary.surface_only_unprobed_rows += 1;
+                }
+                None => summary.runtime_internal_unprobed_rows += 1,
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime parity audit must fail closed when a required typed probe is missing"
     );
 
     MobRuntimeParityPairReport {
@@ -27080,11 +27136,8 @@ async fn build_mob_runtime_full_pair_report(
     right_phase: MobRuntimeParityPhase,
 ) -> MobRuntimeParityPairReport {
     let mut rows = Vec::new();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
 
     for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
         let input_variant_name = input_variant.as_str();
@@ -27094,7 +27147,11 @@ async fn build_mob_runtime_full_pair_report(
             right_phase.schema_name(),
             input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant_name);
+        let probe_required = mob_runtime_parity_probe_required(
+            input_variant,
+            &surface_only_inputs,
+            &runtime_internal_inputs,
+        );
         let (probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
             Some(probe_input) => {
                 match probe_mob_runtime_full_parity_row(
@@ -27116,11 +27173,20 @@ async fn build_mob_runtime_full_pair_report(
                         .to_string(),
                 ),
             ),
+            None if surface_only_inputs.contains(&input_variant) => (
+                None,
+                Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED.to_string()),
+            ),
             None => (
                 None,
-                Some("surface-only input: runtime probe not required".to_string()),
+                Some(MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED.to_string()),
             ),
         };
+
+        assert!(
+            !probe_required || probe.is_some(),
+            "required MobMachine full runtime parity probe for {input_variant_name} was missing or failed setup before schema row classification: {note:?}"
+        );
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
@@ -27174,10 +27240,19 @@ async fn build_mob_runtime_full_pair_report(
                     }
                 }
                 None if row.probe_required => summary.unprobed_rows += 1,
-                None => summary.surface_only_unprobed_rows += 1,
+                None if row.note.as_deref()
+                    == Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED) =>
+                {
+                    summary.surface_only_unprobed_rows += 1;
+                }
+                None => summary.runtime_internal_unprobed_rows += 1,
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime full parity audit must fail closed when a required typed probe is missing"
     );
 
     MobRuntimeParityPairReport {
@@ -27257,6 +27332,74 @@ fn mob_runtime_parity_probe_manifest_round_trips_through_typed_generated_variant
             "mob runtime parity probe mapping must round-trip through typed generated input variants"
         );
     }
+}
+
+#[test]
+fn mob_runtime_parity_probe_inventory_closes_required_executable_probes() {
+    let schema = schema_mob_machine();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
+    let unprobed_required = SchemaMobMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .filter(|input_variant| {
+            mob_runtime_parity_probe_required(
+                *input_variant,
+                &surface_only_inputs,
+                &runtime_internal_inputs,
+            ) && mob_runtime_parity_probe_for_input_variant(*input_variant).is_none()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        unprobed_required.is_empty(),
+        "every non-surface MobMachine input that requires a runtime parity probe must be backed by the executable typed probe map; missing {unprobed_required:?}"
+    );
+}
+
+#[tokio::test]
+async fn mob_runtime_parity_pair_report_executes_required_probe_inventory() {
+    let schema = schema_mob_machine();
+    let report = build_mob_runtime_parity_pair_report(
+        &schema,
+        MobRuntimeParityPhase::Running,
+        MobRuntimeParityPhase::Stopped,
+    )
+    .await;
+
+    assert_eq!(
+        report.summary.unprobed_rows, 0,
+        "mob runtime parity report must fail closed on required probes that are missing or fail setup"
+    );
+    assert!(
+        report.summary.probed_rows > 0,
+        "mob runtime parity report must execute the typed probe map, not only inspect it"
+    );
+}
+
+#[tokio::test]
+async fn mob_runtime_parity_audit_writers_execute_required_probe_inventory() {
+    let full_report =
+        write_mob_runtime_full_parity_audit_report(mob_runtime_parity_full_report_path()).await;
+    assert_eq!(
+        full_report.summary.unprobed_rows, 0,
+        "full mob runtime parity audit must execute or explicitly exempt every typed input"
+    );
+    assert!(
+        full_report.summary.probed_rows > 0,
+        "full mob runtime parity audit must execute the typed probe map, not only inspect it"
+    );
+
+    let modeled_report =
+        write_mob_runtime_modeled_state_audit_report(mob_modeled_state_report_path()).await;
+    assert_eq!(
+        modeled_report.summary.unprobed_rows, 0,
+        "modeled-state audit must execute or explicitly exempt every typed input"
+    );
+    assert!(
+        modeled_report.summary.row_count > 0,
+        "modeled-state audit must exercise required typed runtime probes"
+    );
 }
 
 fn mob_modeled_normalize_json_value(value: serde_json::Value) -> serde_json::Value {
@@ -27985,11 +28128,8 @@ fn mob_modeled_runtime_report(
 
 async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModeledStateAuditReport {
     let schema = meerkat_machine_kernels::generated::mob::schema();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
     let mut rows = Vec::new();
 
     for phase in [
@@ -27999,7 +28139,11 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
     ] {
         for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
             let input_variant_name = input_variant.as_str();
-            if surface_only_inputs.contains(input_variant_name) {
+            if !mob_runtime_parity_probe_required(
+                input_variant,
+                &surface_only_inputs,
+                &runtime_internal_inputs,
+            ) {
                 continue;
             }
             let Some(probe) = mob_runtime_parity_probe_for_input_variant(input_variant) else {
@@ -28066,6 +28210,10 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
             summary
         },
     );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob modeled-state audit must fail closed when a required typed probe is missing"
+    );
 
     let report = MobModeledStateAuditReport {
         machine: "MobMachine".to_string(),
@@ -28103,8 +28251,13 @@ async fn write_mob_runtime_full_parity_audit_report(path: PathBuf) -> MobRuntime
             summary.mismatched_rows += pair.summary.mismatched_rows;
             summary.unprobed_rows += pair.summary.unprobed_rows;
             summary.surface_only_unprobed_rows += pair.summary.surface_only_unprobed_rows;
+            summary.runtime_internal_unprobed_rows += pair.summary.runtime_internal_unprobed_rows;
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime full parity audit must fail closed when a required typed probe is missing"
     );
 
     let report = MobRuntimeParityAuditReport {

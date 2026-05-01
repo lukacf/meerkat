@@ -20,7 +20,8 @@ use meerkat_mob::{
 };
 use meerkat_runtime::{
     MeerkatMachineCatalogInput as MeerkatInput, MeerkatMachineCommandClassification,
-    MeerkatMachineCommandClassificationRecord, canonical_meerkat_machine_command_classifications,
+    MeerkatMachineCommandClassificationRecord, MeerkatMachineFieldlessRuntimeInternalInput,
+    canonical_meerkat_machine_command_classifications,
     canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,
     canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest,
@@ -314,6 +315,41 @@ fn function_body(source: &str, start_marker: &str, _end_marker: &str) -> String 
     panic!("missing classifier body end for `{start_marker}`")
 }
 
+fn is_identifier_pattern(pattern: &str) -> bool {
+    let mut pattern = pattern
+        .split(" if ")
+        .next()
+        .unwrap_or(pattern)
+        .trim()
+        .trim_end_matches('{')
+        .trim();
+    if let Some(stripped) = pattern.strip_prefix("mut ") {
+        pattern = stripped.trim();
+    }
+    if let Some(stripped) = pattern.strip_prefix("ref ") {
+        pattern = stripped.trim();
+    }
+    let mut chars = pattern.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn assert_body_has_no_catch_all_match_arms(path: &str, body: &str, context: &str) {
+    for line in body.lines() {
+        let Some((pattern, _arm_body)) = line.split_once("=>") else {
+            continue;
+        };
+        let pattern = pattern.trim().trim_start_matches('|').trim();
+        assert!(
+            pattern != "_" && !is_identifier_pattern(pattern),
+            "{path} {context} must enumerate variants without wildcard or named catch-all arm `{pattern} =>`"
+        );
+    }
+}
+
 fn assert_classifier_body_uses_typed_variants(path: &str, start_marker: &str, end_marker: &str) {
     let source = std::fs::read_to_string(repo_root().join(path)).expect("read classifier source");
     let body = function_body(&source, start_marker, end_marker);
@@ -326,9 +362,10 @@ fn assert_classifier_body_uses_typed_variants(path: &str, start_marker: &str, en
         "{path} command classifier must not classify by stringified command names"
     );
     assert!(
-        !body.contains("=> _") && !body.contains("_ =>"),
-        "{path} command classifier must enumerate variants without wildcard fallback"
+        !body.contains("=> _"),
+        "{path} command classifier must not discard typed classification results with `=> _`"
     );
+    assert_body_has_no_catch_all_match_arms(path, &body, "command classifier");
     assert!(
         !body.contains('"'),
         "{path} command classifier must not contain string-literal command/input whitelists"
@@ -380,6 +417,17 @@ fn assert_flow_authority_record_conversion_uses_typed_manifest(path: &str, start
         !body.contains(".as_str()") && !body.contains("InputVariantId::parse"),
         "{path} flow authority input conversion must not gate through string names"
     );
+    assert_body_has_no_catch_all_match_arms(path, &body, "flow authority conversion");
+}
+
+fn assert_flow_authority_body_has_no_catch_all(path: &str, start_marker: &str, context: &str) {
+    let source = std::fs::read_to_string(repo_root().join(path)).expect("read authority source");
+    let body = function_body(&source, start_marker, "");
+    assert!(
+        !body.contains(".as_str()") && !body.contains("InputVariantId::parse"),
+        "{path} {context} must not gate through string names"
+    );
+    assert_body_has_no_catch_all_match_arms(path, &body, context);
 }
 
 fn assert_meerkat_runtime_internal_manifest_body_uses_typed_records(
@@ -399,6 +447,22 @@ fn assert_meerkat_runtime_internal_manifest_body_uses_typed_records(
     assert!(
         body.contains("input.input_variant()"),
         "{path} typed runtime-internal manifest must expose typed generated input variants"
+    );
+}
+
+fn assert_meerkat_runtime_internal_classification_body_uses_typed_records(
+    path: &str,
+    start_marker: &str,
+) {
+    let source = std::fs::read_to_string(repo_root().join(path)).expect("read manifest source");
+    let body = function_body(&source, start_marker, "");
+    assert!(
+        body.contains("MeerkatMachineRuntimeInternalInput::CLASSIFICATIONS"),
+        "{path} runtime-internal classifications must be backed by typed classification records"
+    );
+    assert!(
+        !body.contains("MeerkatMachineRuntimeInternalInput::ALL") && !body.contains(".map(|input|"),
+        "{path} runtime-internal classifications must not walk a local input manifest and attach reasons afterward"
     );
 }
 
@@ -603,6 +667,10 @@ fn canonical_command_manifests_do_not_project_through_strings() {
         "meerkat-runtime/src/meerkat_machine_types.rs",
         "pub fn canonical_meerkat_machine_runtime_internal_input_variant_manifest",
     );
+    assert_meerkat_runtime_internal_classification_body_uses_typed_records(
+        "meerkat-runtime/src/meerkat_machine_types.rs",
+        "pub fn canonical_meerkat_machine_runtime_internal_classifications",
+    );
     assert_command_manifest_body_uses_typed_variants(
         "meerkat-mob/src/mob_machine.rs",
         "pub fn canonical_mob_machine_command_input_variant_manifest",
@@ -617,7 +685,16 @@ fn flow_authority_manifest_does_not_project_through_strings() {
     );
     assert_flow_authority_record_conversion_uses_typed_manifest(
         "meerkat-mob/src/run.rs",
+        "pub(crate) fn from_accepted_mob_machine_input",
+    );
+    assert_flow_authority_record_conversion_uses_typed_manifest(
+        "meerkat-mob/src/run.rs",
         "pub(crate) fn from_machine_input",
+    );
+    assert_flow_authority_body_has_no_catch_all(
+        "meerkat-mob/src/run.rs",
+        "pub(crate) fn from_accepted_mob_machine_body_frame_seed",
+        "body-frame seed flow authority conversion",
     );
 }
 
@@ -634,35 +711,27 @@ fn user_interrupt_path_uses_typed_runtime_internal_authority() {
 
 #[test]
 fn fieldless_runtime_internal_inputs_are_typed_generated_manifest() {
-    let schema = meerkat_machine();
-    let runtime_internal_inputs = schema
-        .runtime_internal_inputs
+    let typed_owner_manifest = MeerkatMachineFieldlessRuntimeInternalInput::ALL
         .iter()
-        .map(InputVariantId::as_str)
-        .collect::<BTreeSet<_>>();
-    let generated_fieldless_runtime_internal_inputs = schema
-        .inputs
-        .variants
-        .iter()
-        .filter(|variant| {
-            variant.fields.is_empty() && runtime_internal_inputs.contains(variant.name.as_str())
-        })
-        .map(|variant| {
-            MeerkatMachineInput::variant_manifest()
-                .iter()
-                .copied()
-                .find(|input_variant| input_variant.as_str() == variant.name.as_str())
-                .expect("fieldless runtime-internal input must exist in generated manifest")
-        })
+        .copied()
+        .map(MeerkatMachineFieldlessRuntimeInternalInput::input_variant)
         .collect::<BTreeSet<_>>();
     let typed_fieldless_manifest =
         canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
             .into_iter()
             .collect::<BTreeSet<_>>();
+    let typed_runtime_internal_manifest =
+        canonical_meerkat_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
 
     assert_eq!(
-        typed_fieldless_manifest, generated_fieldless_runtime_internal_inputs,
-        "fieldless runtime-internal inputs must be owned by the typed fieldless manifest"
+        typed_fieldless_manifest, typed_owner_manifest,
+        "fieldless runtime-internal inputs must be owned by the typed fieldless runtime-internal manifest"
+    );
+    assert!(
+        typed_fieldless_manifest.is_subset(&typed_runtime_internal_manifest),
+        "fieldless runtime-internal inputs must be a subset of the typed runtime-internal manifest"
     );
 }
 

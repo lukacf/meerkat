@@ -637,6 +637,15 @@ macro_rules! meerkat_machine_runtime_internal_inputs {
                 $($(Self::$variant),+),+
             ];
 
+            pub const CLASSIFICATIONS: &'static [MeerkatMachineRuntimeInternalClassificationRecord] = &[
+                $($(
+                    MeerkatMachineRuntimeInternalClassificationRecord {
+                        input: Self::$variant,
+                        reason: MeerkatMachineRuntimeInternalReason::$reason,
+                    },
+                )+)+
+            ];
+
             #[must_use]
             pub const fn input_variant(self) -> MeerkatMachineInputVariant {
                 match self {
@@ -654,6 +663,32 @@ macro_rules! meerkat_machine_runtime_internal_inputs {
             }
         }
     };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeerkatMachineRuntimeInternalReason {
+    InputQueueLifecycle,
+    OperationLifecycle,
+    RunExecutionLifecycle,
+    CancellationLifecycle,
+    LiveTopologyReconfiguration,
+    RealtimeBindingLifecycle,
+    CommsIngressLifecycle,
+    SupervisorTrustLifecycle,
+    PeerRequestLifecycle,
+    VisibilityAuthorityLifecycle,
+    ExtractionLifecycle,
+    McpServerLifecycle,
+    ModelRoutingLifecycle,
+    ExternalSurfaceLifecycle,
+    FailureRecoveryLifecycle,
+    UserInterruptDispatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeerkatMachineRuntimeInternalClassificationRecord {
+    pub input: MeerkatMachineRuntimeInternalInput,
+    pub reason: MeerkatMachineRuntimeInternalReason,
 }
 
 meerkat_machine_runtime_internal_inputs!(
@@ -839,26 +874,6 @@ meerkat_machine_runtime_internal_inputs!(
     ],
 );
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeerkatMachineRuntimeInternalReason {
-    InputQueueLifecycle,
-    OperationLifecycle,
-    RunExecutionLifecycle,
-    CancellationLifecycle,
-    LiveTopologyReconfiguration,
-    RealtimeBindingLifecycle,
-    CommsIngressLifecycle,
-    SupervisorTrustLifecycle,
-    PeerRequestLifecycle,
-    VisibilityAuthorityLifecycle,
-    ExtractionLifecycle,
-    McpServerLifecycle,
-    ModelRoutingLifecycle,
-    ExternalSurfaceLifecycle,
-    FailureRecoveryLifecycle,
-    UserInterruptDispatch,
-}
-
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {
     ($($authority:ident => [$($variant:ident),+ $(,)?]),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -994,24 +1009,11 @@ pub enum MeerkatMachineFieldlessRuntimeInternalAuthority {
     UserInterruptDispatch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MeerkatMachineRuntimeInternalClassificationRecord {
-    pub input: MeerkatMachineRuntimeInternalInput,
-    pub reason: MeerkatMachineRuntimeInternalReason,
-}
-
 #[doc(hidden)]
 #[must_use]
 pub fn canonical_meerkat_machine_runtime_internal_classifications()
 -> Vec<MeerkatMachineRuntimeInternalClassificationRecord> {
-    MeerkatMachineRuntimeInternalInput::ALL
-        .iter()
-        .copied()
-        .map(|input| MeerkatMachineRuntimeInternalClassificationRecord {
-            input,
-            reason: input.reason(),
-        })
-        .collect()
+    MeerkatMachineRuntimeInternalInput::CLASSIFICATIONS.to_vec()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

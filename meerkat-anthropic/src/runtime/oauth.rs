@@ -255,11 +255,12 @@ impl AnthropicOAuthRuntime {
                             exchange_refresh_token(&http, &endpoints, &refresh_token, None)
                                 .await
                                 .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        Ok(oauth_result_to_persisted(
+                        oauth_result_to_persisted(
                             result,
                             PersistedAuthMode::ClaudeAiOauth,
                             Some(refresh_token),
-                        ))
+                        )
+                        .map_err(|e| RefreshError::Refresh(e.to_string()))
                     })
                 }),
             )
@@ -290,7 +291,7 @@ impl AnthropicOAuthRuntime {
         let result =
             exchange_authorization_code(&self.http, &self.endpoints, code, pkce_verifier, None)
                 .await?;
-        let tokens = oauth_result_to_persisted(result, PersistedAuthMode::ClaudeAiOauth, None);
+        let tokens = oauth_result_to_persisted(result, PersistedAuthMode::ClaudeAiOauth, None)?;
         self.save_persisted(&tokens).await?;
         Ok(tokens)
     }
@@ -348,26 +349,25 @@ fn oauth_result_to_persisted(
     result: OAuthTokenResult,
     mode: PersistedAuthMode,
     fallback_refresh: Option<String>,
-) -> PersistedTokens {
-    let expires_at = result
-        .expires_in_secs
-        .map(|s| Utc::now() + Duration::seconds(s as i64));
+) -> Result<PersistedTokens, OAuthError> {
+    let now = Utc::now();
+    let expires_at = result.expires_at_from(now)?;
     let scopes = result
         .scope
         .as_deref()
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
-    PersistedTokens {
+    Ok(PersistedTokens {
         auth_mode: mode,
         primary_secret: Some(result.access_token),
         refresh_token: result.refresh_token.or(fallback_refresh),
         id_token: result.id_token,
         expires_at,
-        last_refresh: Some(Utc::now()),
+        last_refresh: Some(now),
         scopes,
         account_id: None,
         metadata: serde_json::Value::Null,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -400,5 +400,34 @@ impl AnthropicLoginSession {
 impl Default for AnthropicLoginSession {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_result_to_persisted_rejects_expiry_overflow() {
+        let err = oauth_result_to_persisted(
+            OAuthTokenResult {
+                access_token: "access-token".into(),
+                refresh_token: Some("refresh-token".into()),
+                id_token: None,
+                expires_in_secs: Some(u64::MAX),
+                scope: None,
+            },
+            PersistedAuthMode::ClaudeAiOauth,
+            None,
+        )
+        .expect_err("oversized expires_in must not be persisted");
+
+        assert!(matches!(
+            err,
+            OAuthError::TokenExpiryOutOfRange {
+                expires_in_secs: u64::MAX
+            }
+        ));
     }
 }

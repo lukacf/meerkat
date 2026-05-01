@@ -224,12 +224,13 @@ impl OpenAiOAuthRuntime {
                             exchange_refresh_token(&http, &endpoints, &refresh_token, None)
                                 .await
                                 .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                        Ok(oauth_result_to_persisted(
+                        oauth_result_to_persisted(
                             result,
                             PersistedAuthMode::ChatgptOauth,
                             Some(refresh_token),
                             account_id,
-                        ))
+                        )
+                        .map_err(|e| RefreshError::Refresh(e.to_string()))
                     })
                 }),
             )
@@ -265,7 +266,7 @@ impl OpenAiOAuthRuntime {
             None
         };
         let tokens =
-            oauth_result_to_persisted(result, PersistedAuthMode::ChatgptOauth, None, account_id);
+            oauth_result_to_persisted(result, PersistedAuthMode::ChatgptOauth, None, account_id)?;
         self.save(&tokens).await?;
         Ok(tokens)
     }
@@ -276,26 +277,25 @@ fn oauth_result_to_persisted(
     mode: PersistedAuthMode,
     fallback_refresh: Option<String>,
     account_id: Option<String>,
-) -> PersistedTokens {
-    let expires_at = result
-        .expires_in_secs
-        .map(|s| Utc::now() + Duration::seconds(s as i64));
+) -> Result<PersistedTokens, OAuthError> {
+    let now = Utc::now();
+    let expires_at = result.expires_at_from(now)?;
     let scopes = result
         .scope
         .as_deref()
         .map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default();
-    PersistedTokens {
+    Ok(PersistedTokens {
         auth_mode: mode,
         primary_secret: Some(result.access_token),
         refresh_token: result.refresh_token.or(fallback_refresh),
         id_token: result.id_token,
         expires_at,
-        last_refresh: Some(Utc::now()),
+        last_refresh: Some(now),
         scopes,
         account_id,
         metadata: serde_json::Value::Null,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -355,6 +355,30 @@ mod tests {
         );
         assert_eq!(CHATGPT_ACCOUNT_HEADER, "ChatGPT-Account-ID");
         assert_eq!(FEDRAMP_HEADER, "X-OpenAI-Fedramp");
+    }
+
+    #[test]
+    fn oauth_result_to_persisted_rejects_expiry_overflow() {
+        let err = oauth_result_to_persisted(
+            OAuthTokenResult {
+                access_token: "access-token".into(),
+                refresh_token: Some("refresh-token".into()),
+                id_token: None,
+                expires_in_secs: Some(u64::MAX),
+                scope: None,
+            },
+            PersistedAuthMode::ChatgptOauth,
+            None,
+            None,
+        )
+        .expect_err("oversized expires_in must not be persisted");
+
+        assert!(matches!(
+            err,
+            OAuthError::TokenExpiryOutOfRange {
+                expires_in_secs: u64::MAX
+            }
+        ));
     }
 
     #[test]

@@ -94,7 +94,8 @@ use meerkat::{
     AgentFactory, Config, CreateSessionRequest, SessionService,
     build_persistent_service, open_realm_persistence_in,
 };
-use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_store::RealmBackend;
 
 #[tokio::main]
@@ -118,7 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
-        build: None,
+        build: Some(SessionBuildOptions {
+            initial_turn_metadata: Some(RuntimeTurnMetadata {
+                model: Some(ModelId::new("claude-sonnet-4-6")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         labels: None,
     }).await?;
 
@@ -140,7 +147,8 @@ For **testing or embedded use** where runtime semantics are intentionally not ne
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
@@ -151,7 +159,13 @@ let result = service.create_session(CreateSessionRequest {
     event_tx: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
     deferred_prompt_policy: DeferredPromptPolicy::Discard,
-    build: None,
+    build: Some(SessionBuildOptions {
+        initial_turn_metadata: Some(RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-sonnet-4-6")),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }),
     labels: None,
 }).await?;
 
@@ -177,7 +191,8 @@ service.archive(&session_id).await?;
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 
 let created = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
@@ -187,7 +202,13 @@ let created = service.create_session(CreateSessionRequest {
     event_tx: None,
     initial_turn: InitialTurnPolicy::Defer,
     deferred_prompt_policy: DeferredPromptPolicy::Retain,
-    build: None,
+    build: Some(SessionBuildOptions {
+        initial_turn_metadata: Some(RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-sonnet-4-6")),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }),
     labels: None,
 }).await?;
 

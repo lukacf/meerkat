@@ -367,7 +367,9 @@ History is returned oldest-to-newest and reflects the last committed session sna
   ```json Request
   {
     "prompt": "Extract the capital of France",
-    "model": "claude-opus-4-6",
+    "turn_metadata": {
+      "model": "claude-opus-4-6"
+    },
     "output_schema": {
       "schema": {
         "type": "object",

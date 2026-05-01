@@ -119,7 +119,13 @@ Built-in tool categories: builtins, shell, semantic memory, and mob orchestratio
         event_tx: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
-        build: None,
+        build: Some(SessionBuildOptions {
+            initial_turn_metadata: Some(RuntimeTurnMetadata {
+                model: Some(ModelId::new("claude-sonnet-4-6")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         labels: None,
     }).await?;
     ```

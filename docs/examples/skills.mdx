@@ -392,6 +392,7 @@ first turn rather than preloaded into the session system prompt. SDKs keep
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(SessionBuildOptions {
             initial_turn_metadata: Some(RuntimeTurnMetadata {
+                model: Some(ModelId::new("claude-sonnet-4-6")),
                 skill_references: Some(vec![
                     SkillKey {
                         source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,

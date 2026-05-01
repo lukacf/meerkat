@@ -21,7 +21,8 @@
 use meerkat::{
     AgentFactory, Config, CreateSessionRequest, SessionService, build_ephemeral_service,
 };
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use meerkat_store::realm_paths;
 
 #[tokio::main]
@@ -39,8 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: Some(512),
             event_tx: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
-            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-            build: None,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("claude-sonnet-4-6")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             labels: None,
         })
         .await?;

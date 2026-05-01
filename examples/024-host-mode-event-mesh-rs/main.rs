@@ -33,7 +33,8 @@ use meerkat::{
     FactoryAgentBuilder, SessionService, StartTurnRequest,
 };
 use meerkat_core::EventEnvelope;
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -116,8 +117,14 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
             max_tokens: Some(256),
             event_tx: Some(event_tx),
             initial_turn: InitialTurnPolicy::RunImmediately,
-            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
-            build: None,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("claude-sonnet-4-6")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             labels: None,
         })
         .await?;

@@ -5,6 +5,10 @@ use serde_json::{json, Value};
 
 use meerkat::surface::{request_action, RequestContext};
 use meerkat::SessionService;
+use meerkat_core::lifecycle::run_primitive::{
+    ModelId, ProviderParamsOverride, RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind,
+    TurnMetadataOverride,
+};
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
 };
@@ -126,17 +130,46 @@ pub async fn handle(
         .skills
         .as_deref()
         .map(crate::state::resolve_skills)
+        .map(|instructions| {
+            instructions
+                .into_iter()
+                .filter_map(|body| {
+                    let body = body.trim();
+                    (!body.is_empty()).then(|| TurnInstruction {
+                        kind: TurnInstructionKind::Host,
+                        body: body.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
         .filter(|v| !v.is_empty());
 
-    let mut build = SessionBuildOptions {
+    let provider_hint = if model.starts_with("claude") {
+        "anthropic"
+    } else if model.starts_with("gemini") {
+        "gemini"
+    } else {
+        "openai"
+    };
+    let provider_params = input.provider_params.as_ref().map(|value| {
+        TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
+            provider_hint,
+            value,
+        ))
+    });
+
+    let build = SessionBuildOptions {
         resume_session: Some(session),
         override_shell: meerkat_core::ToolCategoryOverride::from_override(input.shell),
-        additional_instructions,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
-        initial_turn_metadata: None,
+        initial_turn_metadata: Some(RuntimeTurnMetadata {
+            model: Some(ModelId::new(model.clone())),
+            provider_params,
+            additional_instructions,
+            ..Default::default()
+        }),
         ..SessionBuildOptions::default()
     };
-    build.provider_params = input.provider_params;
 
     let req = CreateSessionRequest {
         model,

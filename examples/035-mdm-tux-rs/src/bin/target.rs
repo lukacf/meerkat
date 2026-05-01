@@ -2379,6 +2379,10 @@ mod tests {
                 override_builtins: meerkat_core::ToolCategoryOverride::Enable,
                 override_shell: meerkat_core::ToolCategoryOverride::Enable,
                 override_mob: meerkat_core::ToolCategoryOverride::Enable,
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("gpt-5.2")),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             labels: None,
@@ -2520,6 +2524,10 @@ mod tests {
                 override_builtins: meerkat_core::ToolCategoryOverride::Enable,
                 override_shell: meerkat_core::ToolCategoryOverride::Enable,
                 override_mob: meerkat_core::ToolCategoryOverride::Enable,
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("gpt-5.2")),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             labels: None,
@@ -2738,6 +2746,10 @@ mod tests {
                 override_builtins: meerkat_core::ToolCategoryOverride::Enable,
                 override_shell: meerkat_core::ToolCategoryOverride::Enable,
                 override_mob: meerkat_core::ToolCategoryOverride::Enable,
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("gpt-5.2")),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             labels: None,
@@ -2884,6 +2896,10 @@ mod tests {
                 override_shell: meerkat_core::ToolCategoryOverride::Enable,
                 override_mob: meerkat_core::ToolCategoryOverride::Enable,
                 resume_session: Some(loaded),
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("gpt-5.2")),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             labels: None,

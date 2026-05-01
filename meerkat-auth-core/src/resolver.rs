@@ -603,17 +603,14 @@ pub fn mark_managed_store_oauth_refresh_failed(
     refresh_started: bool,
     permanent: bool,
 ) -> Result<(), ProviderAuthError> {
+    if !refresh_started {
+        return Ok(());
+    }
     let auth_lease = env
         .auth_lease_handle
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
-    if !refresh_started
-        && auth_lease.snapshot(&lease_key).phase
-            != Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
-    {
-        return Ok(());
-    }
     auth_lease
         .refresh_failed(&lease_key, permanent)
         .map_err(|e| {
@@ -2523,7 +2520,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn managed_store_oauth_adopted_refresh_failure_publishes_authmachine_failure() {
+    fn adopted_refresh_failure_does_not_poison_inflight_owner_lifecycle() {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
             simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
@@ -2557,10 +2554,62 @@ mod tests {
             !refresh_started,
             "adopted refresh should not publish a second begin transition"
         );
+
         mark_managed_store_oauth_refresh_failed(&env, &binding, refresh_started, true)
-            .expect("adopted permanent failure should still publish AuthMachine failure");
+            .expect("non-owner refresh failure should not mutate shared lifecycle");
 
         assert_eq!(auth_lease.begin_refresh_count(), 0);
+        assert_eq!(
+            auth_lease.refresh_failed_count(),
+            0,
+            "a non-owner refresh failure must not poison the in-flight owner's lifecycle"
+        );
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::Refreshing)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn managed_store_oauth_owned_refresh_failure_publishes_authmachine_failure() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let tokens = chatgpt_oauth_tokens("refreshing-access");
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(expires_at),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(2_000),
+        });
+        let mut previous = managed_store_tokens(
+            Arc::clone(&store),
+            key,
+            tokens,
+            Some(auth_lease.snapshot(&lease_key)),
+            ManagedStoreLifecycle::RefreshRequired,
+            None,
+        );
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+
+        let refresh_started =
+            begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
+                .expect("valid lifecycle can enter refreshing");
+        assert!(
+            refresh_started,
+            "owned refresh should publish a begin transition"
+        );
+        mark_managed_store_oauth_refresh_failed(&env, &binding, refresh_started, true)
+            .expect("owned permanent failure should publish AuthMachine failure");
+
+        assert_eq!(auth_lease.begin_refresh_count(), 1);
         assert_eq!(auth_lease.refresh_failed_count(), 1);
         assert_eq!(
             auth_lease.snapshot(&lease_key).phase,

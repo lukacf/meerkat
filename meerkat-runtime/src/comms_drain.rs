@@ -508,6 +508,7 @@ fn bridge_capabilities() -> BridgeCapabilities {
         deliver_member_input: true,
         observe_member: true,
         interrupt_member: true,
+        hard_cancel_member: true,
         retire_member: true,
         destroy_member: true,
         wire_member: true,
@@ -1543,6 +1544,43 @@ async fn try_handle_supervisor_bridge_command(
                         candidate,
                         BridgeRejectionCause::Internal,
                         format!("interrupt member failed: {error}"),
+                    )
+                    .await;
+                }
+            }
+            true
+        }
+        BridgeCommand::HardCancelMember(payload) => {
+            let sup_payload = BridgeSupervisorPayload {
+                supervisor: payload.supervisor.clone(),
+                epoch: payload.epoch,
+                protocol_version: payload.protocol_version,
+            };
+            if let Err((cause, reason)) =
+                require_authorized_supervisor(sender, &sup_payload, &current_binding)
+            {
+                send_bridge_failure(comms_runtime, candidate, cause, reason).await;
+                return true;
+            }
+            match adapter
+                .hard_cancel_current_run(session_id, payload.reason)
+                .await
+            {
+                Ok(()) => {
+                    send_bridge_response(
+                        comms_runtime,
+                        candidate,
+                        meerkat_core::interaction::ResponseStatus::Completed,
+                        BridgeReply::Ack(BridgeAck { ok: true }),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    send_bridge_failure(
+                        comms_runtime,
+                        candidate,
+                        BridgeRejectionCause::Internal,
+                        format!("hard-cancel member failed: {error}"),
                     )
                     .await;
                 }

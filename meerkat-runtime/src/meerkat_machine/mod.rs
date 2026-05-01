@@ -155,7 +155,7 @@ pub use comms_drain::{
     SupervisorBinding, SupervisorBindingStageError,
 };
 pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
-pub(crate) use dsl_effects::DslTransitionEffects;
+pub(crate) use dsl_effects::{DslTransitionEffects, apply_dsl_transition_on_authority};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 
 struct StagedSessionDslInput {

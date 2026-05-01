@@ -20,6 +20,19 @@ impl DslTransitionEffects {
     }
 }
 
+pub(crate) fn apply_dsl_transition_on_authority(
+    authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+    input: dsl::MeerkatMachineInput,
+    context: &str,
+) -> Result<DslTransitionEffects, String> {
+    let mut authority = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+        .map(|transition| DslTransitionEffects::new(transition.effects))
+        .map_err(|err| dsl_authority::map_error(err, context))
+}
+
 impl std::ops::Deref for DslTransitionEffects {
     type Target = [dsl::MeerkatMachineEffect];
 

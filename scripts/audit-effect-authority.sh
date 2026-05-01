@@ -210,6 +210,22 @@ EOF
   trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-runtime/src"
   cat >"$tmpdir/meerkat-runtime/src/runtime_loop.rs" <<'EOF'
+async fn bad(executor: &mut dyn CoreExecutor) {
+    let _ = executor
+        .stop_runtime_executor("bad".to_string())
+        .await;
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: direct runtime-loop executor stop fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/runtime_loop.rs" <<'EOF'
 fn bad(fact: RuntimeEffectFact) {
     let _ = RuntimeEffect::from_fact(fact);
 }
@@ -874,7 +890,25 @@ done <<<"$peer_admission_files"
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
 if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
-  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner|dispatch_user_interrupt|apply_user_interrupt_live_cancel)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
+  strip_hard_cancel_bridge_handler() {
+    "$AWK_BIN" '
+      /BridgeCommand::HardCancelMember/ {
+        in_hard_cancel = 1
+        next
+      }
+      in_hard_cancel && /BridgeCommand::RetireMember/ {
+        in_hard_cancel = 0
+        print
+        next
+      }
+      in_hard_cancel {
+        next
+      }
+      { print }
+    ' "$1"
+  }
+  comms_drain_body="$(strip_hard_cancel_bridge_handler "$root/meerkat-runtime/src/comms_drain.rs")"
+  comms_drain_matches="$(filter_rg "$comms_drain_body" -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for|interrupt_current_run_with_reason|interrupt_current_run_inner|dispatch_user_interrupt|apply_user_interrupt_live_cancel)\b|MeerkatMachineCommand::InterruptCurrentRun|\.interrupt_current_run(_with_reason)?\(|\b(runtime|adapter|session_service)\.interrupt\(')"
   report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
 fi
 
@@ -989,6 +1023,11 @@ report_matches "direct RuntimeEffect constructor helpers are forbidden" \
 
 runtime_effect_assoc="$(run_rg 'RuntimeEffect::[A-Za-z_][A-Za-z0-9_]*' --glob '!**/effect.rs')"
 report_matches "RuntimeEffect associated constructors must stay inside the sealed effect module" "$runtime_effect_assoc"
+
+if [[ -f "$root/meerkat-runtime/src/runtime_loop.rs" ]]; then
+  runtime_loop_direct_stop="$(capture_rg -n 'stop_runtime_executor[[:space:]]*\(' "$root/meerkat-runtime/src/runtime_loop.rs")"
+  report_matches "runtime_loop must not call executor stop_runtime_executor directly" "$runtime_loop_direct_stop"
+fi
 
 if [[ -f "$root/meerkat-runtime/src/effect.rs" ]]; then
   visible_runtime_effect_fact="$(capture_rg -n 'pub(\([^)]*\))?[[:space:]]+enum[[:space:]]+RuntimeEffectFact|pub(\([^)]*\))?[[:space:]]+fn[[:space:]]+from_fact[[:space:]]*\(' "$root/meerkat-runtime/src/effect.rs")"

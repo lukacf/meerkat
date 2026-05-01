@@ -113,6 +113,69 @@ fn resolve_completion_waiters(
     }
 }
 
+async fn stop_runtime_loop_executor_from_dsl_effect(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    reason: String,
+) -> bool {
+    let authority = {
+        let driver = driver.lock().await;
+        driver.shared_dsl_authority()
+    };
+
+    let effects = match crate::meerkat_machine::apply_dsl_transition_on_authority(
+        &authority,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor { reason },
+        "RuntimeLoopStopRuntimeExecutor",
+    ) {
+        Ok(effects) => effects,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to apply DSL stop-runtime-executor transition after runtime loop snapshot failure"
+            );
+            if let Err(stop_error) =
+                crate::control_plane::terminalize_async_stop(driver, completions).await
+            {
+                tracing::warn!(
+                    error = %stop_error,
+                    "failed to terminalize runtime loop after stop-runtime-executor DSL rejection"
+                );
+            }
+            return true;
+        }
+    };
+
+    let projected_effect = match crate::effect::runtime_effect_projection_from_dsl_effects(&effects)
+    {
+        Ok(effect) => effect,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "DSL stop-runtime-executor transition did not emit a runtime effect fact"
+            );
+            if let Err(stop_error) =
+                crate::control_plane::terminalize_async_stop(driver, completions).await
+            {
+                tracing::warn!(
+                    error = %stop_error,
+                    "failed to terminalize runtime loop after missing stop-runtime-executor effect"
+                );
+            }
+            return true;
+        }
+    };
+
+    crate::control_plane::apply_executor_effect(
+        driver,
+        completions,
+        executor,
+        projected_effect.into_effect(),
+    )
+    .await
+}
+
 fn primitive_admitted_content_shape(primitive: &RunPrimitive) -> TurnContentShape {
     match primitive {
         RunPrimitive::StagedInput(staged) => TurnContentShape::from_staged_presence(
@@ -745,12 +808,13 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
-                            let _ = executor
-                                .stop_runtime_executor(format!(
-                                    "runtime loop commit failed for run {run_id}: {err}"
-                                ))
-                                .await;
-                            return true;
+                            return stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
+                                executor,
+                                format!("runtime loop commit failed for run {run_id}: {err}"),
+                            )
+                            .await;
                         }
 
                         // Resolve completion waiters unconditionally
@@ -772,11 +836,13 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(error = %err, "failed to record run-failed event");
-                            let _ = executor
-                                .stop_runtime_executor(format!(
-                                    "runtime failure snapshot failed: {err}"
-                                ))
-                                .await;
+                            let should_stop = stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
+                                executor,
+                                format!("runtime failure snapshot failed: {err}"),
+                            )
+                            .await;
                             // Resolve waiter before breaking so callers don't hang.
                             if let Some(completions) = completions.as_ref() {
                                 let mut completions = completions.lock().await;
@@ -787,7 +853,7 @@ async fn process_queue(
                                     );
                                 }
                             }
-                            return true;
+                            return should_stop;
                         }
                         // Resolve completion waiter so callers don't hang.
                         if let Some(completions) = completions.as_ref() {

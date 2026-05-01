@@ -2964,6 +2964,7 @@ struct LiveExternalPeerHarness {
     bind_count: Arc<std::sync::atomic::AtomicUsize>,
     bind_protocol_versions: Arc<RwLock<Vec<super::bridge_protocol::BridgeProtocolVersion>>>,
     delivered_inputs: Arc<RwLock<Vec<String>>>,
+    hard_cancel_reasons: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
     fail_next_authorize: Arc<AtomicBool>,
@@ -3012,6 +3013,10 @@ impl LiveExternalPeerHarness {
 
     async fn delivered_input_ids(&self) -> Vec<String> {
         self.delivered_inputs.read().await.clone()
+    }
+
+    async fn hard_cancel_reasons(&self) -> Vec<String> {
+        self.hard_cancel_reasons.read().await.clone()
     }
 
     async fn received_intents(&self) -> Vec<String> {
@@ -3070,6 +3075,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_bind_protocol_versions = bind_protocol_versions.clone();
     let delivered_inputs = Arc::new(RwLock::new(Vec::new()));
     let responder_delivered_inputs = delivered_inputs.clone();
+    let hard_cancel_reasons = Arc::new(RwLock::new(Vec::new()));
+    let responder_hard_cancel_reasons = hard_cancel_reasons.clone();
     let delivery_responses = Arc::new(RwLock::new(HashMap::new()));
     let responder_delivery_responses = delivery_responses.clone();
     let received_intents = Arc::new(RwLock::new(Vec::new()));
@@ -3216,6 +3223,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                                 deliver_member_input: true,
                                                                 observe_member: true,
                                                                 interrupt_member: true,
+                                                                hard_cancel_member: true,
                                                                 retire_member: true,
                                                                 destroy_member: true,
                                                                 wire_member: true,
@@ -3330,6 +3338,18 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                         ok: true,
                                     })
                                     .expect("interrupt ack")
+                                }
+                                super::bridge_protocol::BridgeCommand::HardCancelMember(
+                                    payload,
+                                ) => {
+                                    responder_hard_cancel_reasons
+                                        .write()
+                                        .await
+                                        .push(payload.reason);
+                                    serde_json::to_value(super::bridge_protocol::BridgeAck {
+                                        ok: true,
+                                    })
+                                    .expect("hard-cancel ack")
                                 }
                                 super::bridge_protocol::BridgeCommand::DeliverMemberInput(
                                     payload,
@@ -3545,6 +3565,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         bind_count,
         bind_protocol_versions,
         delivered_inputs,
+        hard_cancel_reasons,
         received_intents,
         supervisor_state,
         fail_next_authorize,
@@ -16012,6 +16033,7 @@ fn test_top_level_mob_schema_does_not_duplicate_bridge_protocol_effects() {
         "BridgeDeliverMemberInput",
         "BridgeObserveMember",
         "BridgeInterruptMember",
+        "BridgeHardCancelMember",
         "BridgeRetireMember",
         "BridgeDestroyMember",
         "BridgeWireMember",
@@ -22344,6 +22366,37 @@ async fn test_external_spawn_with_binding_uses_real_identity() {
         }
         other => panic!("expected BackendPeer member ref, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_force_cancel_peer_only_external_member_sends_hard_cancel_bridge_command() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-force-cancel",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-cancel")).await;
+
+    let mut spec = SpawnMemberSpec::new("worker", "w-cancel");
+    spec.binding = Some(external.binding());
+    let spawn = handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn peer-only external member");
+
+    handle
+        .force_cancel_member(spawn.agent_identity.clone())
+        .await
+        .expect("force-cancel peer-only external member");
+
+    assert_eq!(
+        external.hard_cancel_reasons().await,
+        vec!["mob force-cancel member".to_string()],
+        "peer-only force-cancel must use the explicit hard-cancel bridge command"
+    );
 }
 
 #[tokio::test]

@@ -2296,6 +2296,12 @@ impl AgentFactory {
         connection_ref: &ConnectionRef,
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
     ) -> Result<(), FactoryError> {
+        if matches!(
+            connection.auth_lease.kind(),
+            meerkat_core::ResolvedAuthKind::None
+        ) {
+            return Ok(());
+        }
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
         let expires_at = connection
             .auth_lease
@@ -4714,6 +4720,7 @@ mod tests {
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     struct RecordingSelfHostedRuntime {
         calls: Arc<std::sync::Mutex<Vec<RecordedSelfHostedResolve>>>,
+        authless: bool,
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
@@ -4765,18 +4772,28 @@ mod tests {
                 token_store_present: env.token_store.is_some(),
                 auth_lease_handle_present: env.auth_lease_handle.is_some(),
             });
-            Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
-                provider: Provider::SelfHosted,
-                backend: binding.backend,
-                backend_profile: Arc::clone(&binding.backend_profile),
-                auth_lease: Arc::new(
+            let auth_lease: Arc<dyn meerkat_core::AuthLease> = if self.authless {
+                Arc::new(
+                    meerkat_llm_core::provider_runtime::StaticLease::empty_lease(
+                        meerkat_core::AuthMetadata::default(),
+                        "test-self-hosted-none",
+                    ),
+                )
+            } else {
+                Arc::new(
                     meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
                         "resolved-self-hosted-token".to_string(),
                         meerkat_core::AuthMetadata::default(),
                         None,
                         "test-self-hosted",
                     ),
-                ),
+                )
+            };
+            Ok(meerkat_llm_core::provider_runtime::ResolvedConnection {
+                provider: Provider::SelfHosted,
+                backend: binding.backend,
+                backend_profile: Arc::clone(&binding.backend_profile),
+                auth_lease,
             })
         }
 
@@ -4798,6 +4815,23 @@ mod tests {
             meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty().with_runtime(
                 Arc::new(RecordingSelfHostedRuntime {
                     calls: Arc::clone(&calls),
+                    authless: false,
+                }),
+            ),
+        );
+        calls
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    fn install_authless_self_hosted_runtime(
+        factory: &mut AgentFactory,
+    ) -> Arc<std::sync::Mutex<Vec<RecordedSelfHostedResolve>>> {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        factory.provider_registry = Arc::new(
+            meerkat_llm_core::provider_runtime::ProviderRuntimeRegistry::empty().with_runtime(
+                Arc::new(RecordingSelfHostedRuntime {
+                    calls: Arc::clone(&calls),
+                    authless: true,
                 }),
             ),
         );
@@ -5086,6 +5120,60 @@ mod tests {
             Some(meerkat_core::handles::AuthLeasePhase::Valid),
             "self-hosted runtime resolution must publish the resolved lease to AuthMachine"
         );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn self_hosted_authless_realm_resolution_does_not_publish_credential_lifecycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        let calls = install_authless_self_hosted_runtime(&mut factory);
+        let mut config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
+            transport: SelfHostedTransport::OpenAiCompatible,
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_style: SelfHostedApiStyle::ChatCompletions,
+            bearer_token: None,
+            bearer_token_env: None,
+        });
+        insert_self_hosted_realm_binding(
+            &mut config,
+            "dev",
+            "dev_local",
+            "http://realm.example/v1",
+            CredentialSourceSpec::ManagedStore,
+        );
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .auth
+            .get_mut("dev_local_auth")
+            .unwrap()
+            .auth_method = "none".to_string();
+
+        let session = Session::new();
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .unwrap();
+        let mut build = AgentBuildConfig::new("gemma-4-e2b");
+        build.provider = Some(Provider::SelfHosted);
+        build.realm_id = Some("dev".to_string());
+        build.resume_session = Some(session);
+        build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        factory.build_agent(build, &config).await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let lease_key =
+            meerkat_core::handles::LeaseKey::from_connection_ref(&calls[0].connection_ref);
+        let snapshot = bindings.auth_lease.snapshot(&lease_key);
+        assert_eq!(snapshot.phase, None);
+        assert!(!snapshot.credential_present);
+        assert_eq!(snapshot.generation, 0);
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]

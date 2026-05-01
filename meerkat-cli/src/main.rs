@@ -3767,12 +3767,24 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         }
         anyhow::bail!("AuthMachine lifecycle acquire failed: {e}");
     }
-    Ok(CliTokenCommitSnapshot {
+    let commit = CliTokenCommitSnapshot {
         key,
         lease_key,
         previous,
         previous_lifecycle,
-    })
+    };
+    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
+    if let Err(e) = store.save(&commit.key, &committed_tokens).await {
+        match rollback_cli_token_commit(store, auth_lease, &commit).await {
+            Ok(()) => anyhow::bail!(
+                "TokenStore lifecycle marker save failed: {e}; token commit rolled back"
+            ),
+            Err(rollback_error) => anyhow::bail!(
+                "TokenStore lifecycle marker save failed: {e}; token commit rollback failed: {rollback_error}"
+            ),
+        }
+    }
+    Ok(commit)
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

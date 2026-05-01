@@ -57,14 +57,7 @@ pub fn credential_source_uses_persisted_store(source: &CredentialSourceSpec) -> 
 }
 
 pub fn persisted_auth_mode_is_oauth_login(mode: PersistedAuthMode) -> bool {
-    matches!(
-        mode,
-        PersistedAuthMode::ChatgptOauth
-            | PersistedAuthMode::ExternalTokens
-            | PersistedAuthMode::ClaudeAiOauth
-            | PersistedAuthMode::OauthToApiKey
-            | PersistedAuthMode::GoogleOauth
-    )
+    meerkat_core::persisted_auth_mode_uses_oauth_login_lifecycle(mode)
 }
 
 /// Backend selector for `TokenStore::open()`.

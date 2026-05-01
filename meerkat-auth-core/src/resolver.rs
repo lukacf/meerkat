@@ -148,6 +148,7 @@ pub struct ManagedStoreTokens {
     pub store: Arc<dyn TokenStore>,
     pub key: TokenKey,
     pub tokens: PersistedTokens,
+    pub lifecycle_snapshot: Option<meerkat_core::handles::AuthLeaseSnapshot>,
     pub lifecycle: ManagedStoreLifecycle,
 }
 
@@ -190,13 +191,14 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     };
 
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
-        let snapshot = auth_lease.snapshot(&lease_key);
+        let mut snapshot = auth_lease.snapshot(&lease_key);
         let mut phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
         if is_oauth_login
             && phase == AuthStatusPhase::Unknown
             && snapshot.generation == 0
             && snapshot.phase.is_none()
             && !snapshot.credential_present
+            && meerkat_core::tokens_lifecycle_published(&tokens)
         {
             meerkat_core::publish_token_lifecycle_acquired(
                 auth_lease.as_ref(),
@@ -208,7 +210,8 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                     "AuthMachine lifecycle acquire failed: {e}"
                 ))
             })?;
-            phase = AuthStatusPhase::from_lease_snapshot(now, &auth_lease.snapshot(&lease_key));
+            snapshot = auth_lease.snapshot(&lease_key);
+            phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
         }
         if !is_oauth_login
             && phase == AuthStatusPhase::Unknown
@@ -216,17 +219,28 @@ pub async fn load_managed_store_tokens_with_lifecycle(
             && snapshot.phase.is_none()
             && !snapshot.credential_present
         {
-            return Ok(managed_store_tokens(store, key, tokens, lifecycle));
+            return Ok(managed_store_tokens(
+                store,
+                key,
+                tokens,
+                Some(snapshot),
+                lifecycle,
+            ));
         }
 
         return match phase {
-            AuthStatusPhase::Valid | AuthStatusPhase::Expiring => {
-                Ok(managed_store_tokens(store, key, tokens, lifecycle))
-            }
+            AuthStatusPhase::Valid | AuthStatusPhase::Expiring => Ok(managed_store_tokens(
+                store,
+                key,
+                tokens,
+                Some(snapshot),
+                lifecycle,
+            )),
             AuthStatusPhase::Expired => Ok(managed_store_tokens(
                 store,
                 key,
                 tokens,
+                Some(snapshot),
                 ManagedStoreLifecycle::RefreshRequired,
             )),
             AuthStatusPhase::ReauthRequired
@@ -238,7 +252,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     if is_oauth_login {
         Err(interactive_login_error(binding))
     } else {
-        Ok(managed_store_tokens(store, key, tokens, lifecycle))
+        Ok(managed_store_tokens(store, key, tokens, None, lifecycle))
     }
 }
 
@@ -270,12 +284,14 @@ fn managed_store_tokens(
     store: Arc<dyn TokenStore>,
     key: TokenKey,
     tokens: PersistedTokens,
+    lifecycle_snapshot: Option<meerkat_core::handles::AuthLeaseSnapshot>,
     lifecycle: ManagedStoreLifecycle,
 ) -> ManagedStoreTokens {
     ManagedStoreTokens {
         store,
         key,
         tokens,
+        lifecycle_snapshot,
         lifecycle,
     }
 }
@@ -311,27 +327,48 @@ pub fn publish_managed_store_tokens_lifecycle(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn publish_managed_store_tokens_lifecycle_or_restore(
+pub async fn publish_managed_store_tokens_lifecycle_and_save(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     previous: &ManagedStoreTokens,
     refreshed: &PersistedTokens,
-) -> Result<(), ProviderAuthError> {
-    match publish_managed_store_tokens_lifecycle(env, binding, refreshed) {
-        Ok(()) => Ok(()),
-        Err(publish_error) => {
-            previous
-                .store
-                .save(&previous.key, &previous.tokens)
-                .await
-                .map_err(|restore_error| {
-                    ProviderAuthError::SourceResolutionFailed(format!(
-                        "{publish_error}; TokenStore restore failed after AuthMachine lifecycle rejection: {restore_error}"
-                    ))
-                })?;
-            Err(publish_error)
+) -> Result<PersistedTokens, ProviderAuthError> {
+    publish_managed_store_tokens_lifecycle(env, binding, refreshed)?;
+    let committed = meerkat_core::mark_tokens_lifecycle_published(refreshed);
+    if let Err(save_error) = previous.store.save(&previous.key, &committed).await {
+        let mut rollback_errors = Vec::new();
+        if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
+            let lease_key =
+                meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+            if let Err(err) = auth_lease.release_credential_lifecycle(&lease_key) {
+                rollback_errors.push(format!(
+                    "AuthMachine lifecycle rollback release failed: {err}"
+                ));
+            }
+            if let Some(snapshot) = previous.lifecycle_snapshot.as_ref()
+                && let Err(err) = meerkat_core::restore_token_lifecycle_snapshot(
+                    auth_lease.as_ref(),
+                    &lease_key,
+                    snapshot,
+                    Some(&previous.tokens),
+                )
+            {
+                rollback_errors.push(format!("AuthMachine lifecycle rollback failed: {err}"));
+            }
         }
+        if let Err(err) = previous.store.save(&previous.key, &previous.tokens).await {
+            rollback_errors.push(format!("TokenStore rollback save failed: {err}"));
+        }
+        let rollback_suffix = if rollback_errors.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", rollback_errors.join("; "))
+        };
+        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "TokenStore save failed after AuthMachine lifecycle acquire: {save_error}{rollback_suffix}"
+        )));
     }
+    Ok(committed)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

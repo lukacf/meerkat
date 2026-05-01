@@ -16,7 +16,7 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, load_managed_store_tokens_with_lifecycle,
-    publish_managed_store_tokens_lifecycle_or_restore, refresh_allowed,
+    publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
@@ -273,20 +273,20 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             endpoints,
                             managed.key.clone(),
                         );
-                        let refreshed =
-                            runtime.get_or_refresh_tokens().await.map_err(|e| match e {
+                        let refreshed = runtime.get_or_refresh_tokens_uncommitted().await.map_err(
+                            |e| match e {
                                 oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired => {
                                     interactive_login_error(binding)
                                 }
                                 other => {
                                     ProviderAuthError::SourceResolutionFailed(other.to_string())
                                 }
-                            })?;
-                        publish_managed_store_tokens_lifecycle_or_restore(
+                            },
+                        )?;
+                        publish_managed_store_tokens_lifecycle_and_save(
                             env, binding, &managed, &refreshed,
                         )
-                        .await?;
-                        refreshed
+                        .await?
                     };
                     let access = effective_tokens
                         .primary_secret

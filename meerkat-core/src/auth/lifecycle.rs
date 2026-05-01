@@ -15,7 +15,9 @@ use std::{
 };
 
 use super::status::AuthStatusPhase;
-use super::token_store::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
+use super::token_store::{
+    PersistedAuthMode, PersistedTokens, TokenKey, TokenStore, TokenStoreError,
+};
 use crate::connection::ConnectionRef;
 use crate::handles::{
     AuthLeaseHandle, AuthLeasePhase, AuthLeaseSnapshot, DslTransitionError, LeaseKey,
@@ -64,6 +66,59 @@ pub fn persisted_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
         .expires_at
         .map(|ts| ts.timestamp().max(0) as u64)
         .unwrap_or(u64::MAX)
+}
+
+const TOKEN_LIFECYCLE_METADATA_KEY: &str = "meerkat_auth_lifecycle";
+const TOKEN_LIFECYCLE_PREVIOUS_METADATA_KEY: &str = "meerkat_previous_metadata";
+
+pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -> bool {
+    matches!(
+        mode,
+        PersistedAuthMode::ChatgptOauth
+            | PersistedAuthMode::ExternalTokens
+            | PersistedAuthMode::ClaudeAiOauth
+            | PersistedAuthMode::OauthToApiKey
+            | PersistedAuthMode::GoogleOauth
+    )
+}
+
+pub fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
+    if !persisted_auth_mode_uses_oauth_login_lifecycle(tokens.auth_mode) {
+        return tokens.clone();
+    }
+
+    let mut marked = tokens.clone();
+    let marker = serde_json::json!({
+        "published": true,
+        "version": 1,
+    });
+    match &mut marked.metadata {
+        serde_json::Value::Object(map) => {
+            map.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
+        }
+        serde_json::Value::Null => {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
+            marked.metadata = serde_json::Value::Object(metadata);
+        }
+        _ => {
+            let previous = std::mem::replace(&mut marked.metadata, serde_json::Value::Null);
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(TOKEN_LIFECYCLE_METADATA_KEY.to_string(), marker);
+            metadata.insert(TOKEN_LIFECYCLE_PREVIOUS_METADATA_KEY.to_string(), previous);
+            marked.metadata = serde_json::Value::Object(metadata);
+        }
+    }
+    marked
+}
+
+pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
+    tokens
+        .metadata
+        .get(TOKEN_LIFECYCLE_METADATA_KEY)
+        .and_then(|marker| marker.get("published"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub fn publish_token_lifecycle_acquired(
@@ -344,6 +399,20 @@ mod tests {
         }
     }
 
+    fn oauth_tokens_with_metadata(metadata: serde_json::Value) -> PersistedTokens {
+        PersistedTokens {
+            auth_mode: PersistedAuthMode::ChatgptOauth,
+            primary_secret: Some("access".into()),
+            refresh_token: Some("refresh".into()),
+            id_token: None,
+            expires_at: None,
+            last_refresh: None,
+            scopes: Vec::new(),
+            account_id: None,
+            metadata,
+        }
+    }
+
     struct ClearFailingTokenStore {
         tokens: Mutex<Option<PersistedTokens>>,
     }
@@ -480,6 +549,29 @@ mod tests {
         publish_token_lifecycle_acquired(&handle, &connection_ref(), &tokens).unwrap();
 
         assert_eq!(handle.acquired()[0].1, u64::MAX);
+    }
+
+    #[test]
+    fn lifecycle_marker_is_only_added_to_oauth_login_tokens() {
+        let api_key = PersistedTokens::api_key("sk-test");
+        assert_eq!(mark_tokens_lifecycle_published(&api_key), api_key);
+
+        let oauth = oauth_tokens_with_metadata(serde_json::Value::Null);
+        let marked = mark_tokens_lifecycle_published(&oauth);
+        assert!(tokens_lifecycle_published(&marked));
+        assert!(!tokens_lifecycle_published(&oauth));
+    }
+
+    #[test]
+    fn lifecycle_marker_preserves_existing_object_metadata() {
+        let oauth = oauth_tokens_with_metadata(serde_json::json!({
+            "provider": "openai",
+        }));
+
+        let marked = mark_tokens_lifecycle_published(&oauth);
+
+        assert!(tokens_lifecycle_published(&marked));
+        assert_eq!(marked.metadata["provider"], "openai");
     }
 
     #[tokio::test]

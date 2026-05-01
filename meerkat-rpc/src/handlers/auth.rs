@@ -324,7 +324,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         ));
     }
     publish_saved_tokens_and_restore_on_lifecycle_failure(
-        id,
+        id.clone(),
         store.as_ref(),
         auth_lease.as_ref(),
         connection_ref,
@@ -333,12 +333,29 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         previous.as_ref(),
     )
     .await?;
-    Ok(TokenCommitSnapshot {
+    let commit = TokenCommitSnapshot {
         key,
         lease_key,
         previous,
         previous_lifecycle,
-    })
+    };
+    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
+    if let Err(e) = store.save(&commit.key, &committed_tokens).await {
+        let message = match rollback_token_commit(store.as_ref(), auth_lease.as_ref(), &commit)
+            .await
+        {
+            Ok(()) => {
+                format!("TokenStore lifecycle marker save failed: {e}; token commit rolled back")
+            }
+            Err(rollback_error) => {
+                format!(
+                    "TokenStore lifecycle marker save failed: {e}; token commit rollback failed: {rollback_error}"
+                )
+            }
+        };
+        return Err(RpcResponse::error(id, error::INTERNAL_ERROR, message));
+    }
+    Ok(commit)
 }
 
 async fn save_tokens_and_publish_lifecycle(

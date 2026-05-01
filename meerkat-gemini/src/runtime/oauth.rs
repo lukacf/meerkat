@@ -189,7 +189,7 @@ impl GoogleCodeAssistOAuthRuntime {
             .map_err(|e| GoogleCodeAssistOAuthError::Store(e.to_string()))
     }
 
-    pub async fn get_or_refresh_tokens(
+    pub async fn get_or_refresh_tokens_uncommitted(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
         let persisted = self
@@ -235,6 +235,13 @@ impl GoogleCodeAssistOAuthRuntime {
                 }),
             )
             .await?;
+        Ok(refreshed)
+    }
+
+    pub async fn get_or_refresh_tokens(
+        &self,
+    ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
+        let refreshed = self.get_or_refresh_tokens_uncommitted().await?;
         self.save(&refreshed).await?;
         Ok(refreshed)
     }

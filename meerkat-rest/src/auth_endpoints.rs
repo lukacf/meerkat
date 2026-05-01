@@ -240,12 +240,27 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
             format!("AuthMachine lifecycle acquire failed: {e}"),
         ));
     }
-    Ok(TokenCommitSnapshot {
+    let commit = TokenCommitSnapshot {
         key,
         lease_key,
         previous,
         previous_lifecycle,
-    })
+    };
+    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
+    if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
+        let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
+            Ok(()) => {
+                format!("TokenStore lifecycle marker save failed: {e}; token commit rolled back")
+            }
+            Err(rollback_error) => {
+                format!(
+                    "TokenStore lifecycle marker save failed: {e}; token commit rollback failed: {rollback_error}"
+                )
+            }
+        };
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+    }
+    Ok(commit)
 }
 
 fn publish_resolved_auth_lease(
@@ -253,6 +268,12 @@ fn publish_resolved_auth_lease(
     connection_ref: &ConnectionRef,
     connection: &meerkat_providers::ResolvedConnection,
 ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+    if matches!(
+        connection.auth_lease.kind(),
+        meerkat_core::ResolvedAuthKind::None
+    ) {
+        return Ok(());
+    }
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
     let expires_at = connection
         .auth_lease

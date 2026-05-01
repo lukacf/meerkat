@@ -221,7 +221,9 @@ impl AnthropicOAuthRuntime {
     /// Return a valid token bundle, refreshing if the persisted token is
     /// within 60s of expiry. Returns `InteractiveLoginRequired` if no
     /// tokens are persisted yet.
-    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
+    pub async fn get_or_refresh_tokens_uncommitted(
+        &self,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
         let persisted = self
             .load_persisted()
             .await?
@@ -266,6 +268,11 @@ impl AnthropicOAuthRuntime {
             )
             .await?;
 
+        Ok(refreshed)
+    }
+
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
+        let refreshed = self.get_or_refresh_tokens_uncommitted().await?;
         self.save_persisted(&refreshed).await?;
         Ok(refreshed)
     }

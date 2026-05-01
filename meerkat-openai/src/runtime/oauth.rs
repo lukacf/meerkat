@@ -194,7 +194,9 @@ impl OpenAiOAuthRuntime {
             .map_err(|e| OpenAiOAuthError::Store(e.to_string()))
     }
 
-    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+    pub async fn get_or_refresh_tokens_uncommitted(
+        &self,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
             .await?
@@ -235,6 +237,11 @@ impl OpenAiOAuthRuntime {
                 }),
             )
             .await?;
+        Ok(refreshed)
+    }
+
+    pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+        let refreshed = self.get_or_refresh_tokens_uncommitted().await?;
         self.save(&refreshed).await?;
         Ok(refreshed)
     }

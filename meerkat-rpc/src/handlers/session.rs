@@ -508,8 +508,9 @@ pub async fn handle_create(
             skill_diagnostics: None,
         }
     } else {
+        let admission_cleanup_context = request_context.clone();
         match runtime
-            .start_turn_via_runtime(
+            .start_turn_via_runtime_with_admission_hook(
                 &session_id,
                 params.prompt,
                 mcp_event_tx,
@@ -517,6 +518,11 @@ pub async fn handle_create(
                 None,
                 None,
                 None,
+                admission_cleanup_context.map(|context| {
+                    Box::new(move || {
+                        context.disarm_unpublished_cleanup();
+                    }) as crate::session_runtime::RuntimeAdmissionCommittedHook
+                }),
             )
             .await
         {

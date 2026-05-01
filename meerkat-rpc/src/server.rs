@@ -850,6 +850,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_session_create_abort_after_admission_preserves_admitted_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let stream_started = Arc::new(tokio::sync::Notify::new());
+        let (runtime, config_store) = build_test_runtime_with_llm(
+            &temp,
+            Arc::new(HangingLlmClient {
+                stream_started: Arc::clone(&stream_started),
+            }),
+        );
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(output);
+        let server = RpcServer::new(reader, writer, Arc::clone(&runtime), config_store);
+        let request_id = RpcId::Num(34);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "session/create".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": "this turn admits and then waits forever"
+            }))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request(&request)
+            .expect("session/create should be tracked");
+        let SpawnedTrackedRequest::Tracked {
+            request_key: tracked_key,
+            task,
+        } = spawned
+        else {
+            panic!("session/create should use tracked request lifecycle");
+        };
+        assert_eq!(tracked_key, request_key);
+
+        tokio::time::timeout(Duration::from_secs(10), stream_started.notified())
+            .await
+            .expect("LLM stream should start after runtime admission");
+        task.abort();
+        let _ = server
+            .request_executor
+            .finish_unpublished(&tracked_key)
+            .await;
+        assert_eq!(server.request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "aborting after runtime admission must not run create rollback cleanup"
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_session_create_pre_admission_turn_failure_archives_pending_session() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);
@@ -1169,6 +1226,31 @@ mod tests {
             Box::pin(stream::iter(vec![Err(LlmError::InvalidRequest {
                 message: "forced turn failure".to_string(),
             })]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    struct HangingLlmClient {
+        stream_started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl LlmClient for HangingLlmClient {
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            self.stream_started.notify_waiters();
+            Box::pin(stream::pending())
         }
 
         fn provider(&self) -> &'static str {

@@ -287,6 +287,8 @@ pub(crate) enum InterruptNoopTarget {
     NotInterruptible(RuntimeState),
 }
 
+pub(crate) type RuntimeAdmissionCommittedHook = Box<dyn FnOnce() + Send + 'static>;
+
 fn persisted_runtime_state_blocks_interrupt_noop(state: RuntimeState) -> bool {
     matches!(state, RuntimeState::Retired | RuntimeState::Stopped)
 }
@@ -2259,6 +2261,35 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
     ) -> Result<RunResult, RuntimeTurnStartError> {
+        self.start_turn_via_runtime_with_admission_hook(
+            session_id,
+            prompt,
+            mcp_event_tx,
+            skill_references,
+            flow_tool_overlay,
+            additional_instructions,
+            overrides,
+            None,
+        )
+        .await
+    }
+
+    /// Variant of [`Self::start_turn_via_runtime`] that notifies the caller as
+    /// soon as the runtime accepts the input, before waiting for turn
+    /// completion. Surfaces use this to disarm create rollback cleanup at the
+    /// durable admission point.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    pub(crate) async fn start_turn_via_runtime_with_admission_hook(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        prompt: ContentInput,
+        mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+        mut on_admission_committed: Option<RuntimeAdmissionCommittedHook>,
+    ) -> Result<RunResult, RuntimeTurnStartError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
         #[allow(unused_mut)]
@@ -2414,6 +2445,10 @@ impl SessionRuntime {
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(runtime_accept_error_to_turn_start)?;
+        let admission_committed = outcome.is_accepted();
+        if admission_committed && let Some(hook) = on_admission_committed.take() {
+            hook();
+        }
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())
@@ -2424,12 +2459,16 @@ impl SessionRuntime {
                 AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.to_string(),
                 _ => "unknown".to_string(),
             };
-            return Err(RpcError {
+            let err = RpcError {
                 code: error::DUPLICATE_INPUT,
                 message: "input already processed".to_string(),
                 data: Some(serde_json::json!({ "existing_id": existing_id })),
-            }
-            .into());
+            };
+            return Err(if admission_committed {
+                RuntimeTurnStartError::after_admission(err)
+            } else {
+                err.into()
+            });
         };
 
         completion_outcome_to_rpc_result(handle.wait().await, session_id)

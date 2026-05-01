@@ -3277,7 +3277,8 @@ async fn refresh_auth_profile(
     let env = ResolverEnvironment::with_process_env()
         .with_token_store(store.clone())
         .with_refresh_coordinator(coord)
-        .with_auth_lease_handle(Arc::clone(&scope.auth_lease));
+        .with_auth_lease_handle(Arc::clone(&scope.auth_lease))
+        .with_force_refresh(true);
     let registry = cli_provider_registry();
     let connection_ref = meerkat_core::ConnectionRef {
         realm: meerkat_core::RealmId::parse(realm)
@@ -4467,6 +4468,9 @@ async fn project_cli_auth_status(
     );
     let source_uses_store =
         meerkat_providers::auth_store::credential_source_uses_persisted_store(&auth_profile.source);
+    let oauth_mode = expected_mode
+        .map(meerkat_providers::auth_store::persisted_auth_mode_is_oauth_login)
+        .unwrap_or(false);
     let mut stored = None;
     if source_uses_store && let Some(store) = token_store {
         let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
@@ -4503,8 +4507,10 @@ async fn project_cli_auth_status(
                 && !source_uses_store
         })
         .unwrap_or(false);
+    let oauth_store_missing = source_uses_store && oauth_mode && stored.is_none();
     let unknown_snapshot;
-    let (projection_tokens, projection_snapshot) = if oauth_source_rejected {
+    let marker_projection_snapshot;
+    let (projection_tokens, projection_snapshot) = if oauth_source_rejected || oauth_store_missing {
         unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
             phase: None,
             expires_at: None,
@@ -4514,7 +4520,13 @@ async fn project_cli_auth_status(
         };
         (None, &unknown_snapshot)
     } else {
-        (stored.as_ref(), &snapshot)
+        marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
+            meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
+        });
+        (
+            stored.as_ref(),
+            marker_projection_snapshot.as_ref().unwrap_or(&snapshot),
+        )
     };
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);

@@ -1546,6 +1546,9 @@ pub async fn get_auth_status(
     let now = chrono::Utc::now();
     let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
+    let oauth_mode = expected_mode
+        .map(persisted_auth_mode_is_oauth_login)
+        .unwrap_or(false);
     let mut phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
     let rehydrated = if phase == meerkat_core::AuthStatusPhase::Unknown && source_uses_store {
         if let Some(expected_mode) = expected_mode {
@@ -1585,14 +1588,15 @@ pub async fn get_auth_status(
         .map(|mode| persisted_auth_mode_is_oauth_login(mode) && !source_uses_store)
         .unwrap_or(false);
     let token_matches_binding = if source_uses_store {
-        stored
-            .as_ref()
-            .map(|tokens| Some(tokens.auth_mode) == expected_mode)
-            .unwrap_or(true)
+        match stored.as_ref() {
+            Some(tokens) => Some(tokens.auth_mode) == expected_mode,
+            None => !oauth_mode,
+        }
     } else {
         true
     };
     let unknown_snapshot;
+    let marker_projection_snapshot;
     let (projection_tokens, projection_snapshot) = if oauth_source_rejected {
         unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {
             phase: None,
@@ -1603,13 +1607,16 @@ pub async fn get_auth_status(
         };
         (None, &unknown_snapshot)
     } else if token_matches_binding {
+        marker_projection_snapshot = stored.as_ref().filter(|_| oauth_mode).and_then(|tokens| {
+            meerkat_core::oauth_status_projection_snapshot_from_newer_marker(&snapshot, tokens)
+        });
         (
             if source_uses_store {
                 stored.as_ref()
             } else {
                 None
             },
-            &snapshot,
+            marker_projection_snapshot.as_ref().unwrap_or(&snapshot),
         )
     } else {
         unknown_snapshot = meerkat_core::handles::AuthLeaseSnapshot {

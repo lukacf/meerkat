@@ -277,6 +277,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     let effective_tokens = if lifecycle == ManagedStoreLifecycle::Authorized
                         && fresh
                         && persisted.primary_secret.is_some()
+                        && !env.force_refresh
                     {
                         persisted
                     } else {

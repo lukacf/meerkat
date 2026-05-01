@@ -222,6 +222,13 @@ impl RuntimeOAuthFlowHandle {
         });
     }
 
+    fn retain_registry_payloads_with_lifecycle(&self) {
+        self.registry.retain_flows_with_lifecycle(
+            |target, flow_id| self.lifecycle.has_oauth_browser_flow(target, flow_id),
+            |target, flow_id| self.lifecycle.has_oauth_device_flow(target, flow_id),
+        );
+    }
+
     fn expire_collected_flows(&self, pruned: OAuthPrunedFlows) {
         for (flow_id, target) in pruned.browser {
             let _ = self.expire_browser(&target, &flow_id);
@@ -312,13 +319,24 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         let state = OAuthFlowRegistry::new_state()?;
         let expires_at = expires_at_millis(self.registry.ttl())?;
         self.admit_browser(&target, &state, provider, &redirect_uri, expires_at)?;
-        let pruned = match self.registry.insert_browser_flow_with_pruned(
+        let mut inserted = self.registry.insert_browser_flow_with_pruned(
             state.clone(),
             target.clone(),
             provider,
-            redirect_uri,
-            pkce_verifier,
-        ) {
+            redirect_uri.clone(),
+            pkce_verifier.clone(),
+        );
+        if matches!(inserted, Err(OAuthFlowError::CapacityExceeded { .. })) {
+            self.retain_registry_payloads_with_lifecycle();
+            inserted = self.registry.insert_browser_flow_with_pruned(
+                state.clone(),
+                target.clone(),
+                provider,
+                redirect_uri,
+                pkce_verifier,
+            );
+        }
+        let pruned = match inserted {
             Ok(pruned) => pruned,
             Err(err) => {
                 let _ = self.expire_browser(&target, &state);
@@ -421,12 +439,22 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 Err(_) => return Err(err),
             }
         }
-        match self.registry.admit_device_code_with_pruned(
+        let mut inserted = self.registry.admit_device_code_with_pruned(
             target.clone(),
             provider,
             device_code.clone(),
             expires_in,
-        ) {
+        );
+        if matches!(inserted, Err(OAuthFlowError::CapacityExceeded { .. })) {
+            self.retain_registry_payloads_with_lifecycle();
+            inserted = self.registry.admit_device_code_with_pruned(
+                target.clone(),
+                provider,
+                device_code.clone(),
+                expires_in,
+            );
+        }
+        match inserted {
             Ok(pruned) => self.expire_collected_flows(pruned),
             Err(err) => {
                 let _ = self.lifecycle.expire_device_flow(&target, &device_code);
@@ -571,6 +599,42 @@ mod tests {
         assert_eq!(
             snapshot_phase(&lifecycle, &target),
             Some(AuthLeasePhase::ReauthRequired)
+        );
+    }
+
+    #[test]
+    fn oauth_flow_membership_does_not_advance_credential_generation() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let lease_key = LeaseKey::from_connection_ref(&target);
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let transition = lifecycle
+            .acquire_lease(&lease_key, 4_200)
+            .expect("credential lifecycle acquired");
+
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+        authority
+            .verify(&state, &target, provider, redirect_uri)
+            .expect("browser flow verifies");
+        authority
+            .consume(&state, &target, provider, redirect_uri)
+            .expect("browser flow consumes");
+
+        let snapshot = lifecycle.snapshot(&lease_key);
+        assert_eq!(snapshot.generation, transition.generation);
+        assert_eq!(
+            snapshot.credential_published_at_millis,
+            transition.credential_published_at_millis
         );
     }
 
@@ -747,15 +811,14 @@ mod tests {
             .release_lease(&LeaseKey::from_connection_ref(&target))
             .expect("credential lifecycle release succeeds");
 
-        assert_eq!(
-            authority.start(
+        authority
+            .start(
                 alternate_target(),
                 provider,
                 "http://127.0.0.1/other-callback".to_string(),
                 "verifier-2".to_string(),
-            ),
-            Err(OAuthFlowError::CapacityExceeded { max_outstanding: 1 })
-        );
+            )
+            .expect("AuthMachine release must clear stale registry payload capacity");
     }
 
     #[test]

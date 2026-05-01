@@ -190,6 +190,36 @@ fn oauth_flow_authority_is_owned_by_meerkat_machine() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn persistent_oauth_flow_authority_survives_adapter_recreation_for_same_store() {
+    let store =
+        Arc::new(crate::store::InMemoryRuntimeStore::new()) as Arc<dyn crate::store::RuntimeStore>;
+    let first = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store());
+    let redirect_uri = "http://127.0.0.1/callback";
+    let target = oauth_target();
+    let provider = meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt;
+    let state = first
+        .oauth_flow_authority()
+        .start(
+            target.clone(),
+            provider,
+            redirect_uri.to_string(),
+            "verifier".to_string(),
+        )
+        .expect("persistent runtime authority admits OAuth state");
+
+    let recovered = MeerkatMachine::persistent(store, memory_blob_store());
+    let flow = recovered
+        .oauth_flow_authority()
+        .consume(&state, &target, provider, redirect_uri)
+        .expect(
+            "persistent runtime authority keeps active OAuth payloads across adapter recreation",
+        );
+
+    assert_eq!(flow.pkce_verifier, "verifier");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn oauth_flow_lifecycle_uses_runtime_authority_seam() {
     let source = include_str!("meerkat_machine/mod.rs");
     assert!(

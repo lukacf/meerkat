@@ -464,6 +464,34 @@ pub fn project_published_auth_status<'a>(
     }
 }
 
+pub fn oauth_status_projection_snapshot_from_newer_marker(
+    snapshot: &AuthLeaseSnapshot,
+    tokens: &PersistedTokens,
+) -> Option<AuthLeaseSnapshot> {
+    if !snapshot.credential_present {
+        return None;
+    }
+    let publication = tokens_lifecycle_publication_with_explicit_expiry(tokens)?;
+    if publication.expires_at != persisted_token_expires_at_epoch_secs(tokens) {
+        return None;
+    }
+    let snapshot_published_at = snapshot.credential_published_at_millis?;
+    let token_published_at = publication.credential_published_at_millis?;
+    if token_published_at < snapshot_published_at {
+        return None;
+    }
+    if token_published_at == snapshot_published_at {
+        return None;
+    }
+    Some(AuthLeaseSnapshot {
+        phase: Some(AuthLeasePhase::Valid),
+        expires_at: (publication.expires_at != u64::MAX).then_some(publication.expires_at),
+        credential_present: true,
+        generation: publication.generation.unwrap_or(snapshot.generation),
+        credential_published_at_millis: Some(token_published_at),
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

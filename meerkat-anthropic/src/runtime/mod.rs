@@ -375,6 +375,7 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                             if lifecycle == ManagedStoreLifecycle::Authorized
                                 && fresh
                                 && persisted.primary_secret.is_some()
+                                && !env.force_refresh
                             {
                                 persisted
                             } else {

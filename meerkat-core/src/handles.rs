@@ -1014,14 +1014,15 @@ impl std::fmt::Display for LeaseKey {
 ///
 /// Returned by [`AuthLeaseHandle::snapshot`]. If the binding is not tracked
 /// at all, `phase` is `None` and `expires_at` is `None`. `generation`
-/// advances whenever the lease lifecycle accepts a transition, so consumers
-/// can distinguish a stale projection from a freshly reacquired lease even
-/// when the expiry timestamp is unchanged. `credential_present` distinguishes
-/// credential lifecycle authority from OAuth login-flow membership that may
-/// keep an AuthMachine instance alive after credential rollback.
+/// advances whenever the credential lease lifecycle accepts a transition, so
+/// consumers can distinguish a stale projection from a freshly reacquired lease
+/// even when the expiry timestamp is unchanged. OAuth login-flow membership
+/// transitions do not advance this credential marker generation.
+/// `credential_present` distinguishes credential lifecycle authority from
+/// OAuth login-flow membership that may keep an AuthMachine instance alive
+/// after credential rollback.
 /// `credential_published_at_millis` advances only when credential material is
-/// acquired/refreshed, so durable TokenStore markers do not become stale when
-/// OAuth flow membership transitions advance the broader machine generation.
+/// acquired/refreshed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,

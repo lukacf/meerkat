@@ -189,6 +189,7 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                             if lifecycle == ManagedStoreLifecycle::Authorized
                                 && fresh
                                 && persisted.primary_secret.is_some()
+                                && !env.force_refresh
                             {
                                 persisted
                             } else {

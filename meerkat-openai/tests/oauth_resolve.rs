@@ -458,6 +458,69 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
 }
 
 #[tokio::test]
+async fn openai_managed_chatgpt_oauth_force_refresh_bypasses_fresh_token() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    let persisted = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("fresh-chatgpt-access".into()),
+        refresh_token: Some("rt".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+    };
+    store
+        .save(
+            &key,
+            &meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &persisted,
+                AuthLeaseTransition {
+                    generation: 1,
+                    credential_published_at_millis: Some(1_000),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let refreshed = PersistedTokens {
+        primary_secret: Some("forced-refresh-chatgpt-access".into()),
+        refresh_token: Some("rotated-rt".into()),
+        last_refresh: Some(Utc::now()),
+        ..persisted.clone()
+    };
+
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&persisted))
+        .with_force_refresh(true);
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    let connection = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .expect("forced refresh should resolve through OAuth refresh path");
+
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("forced-refresh-chatgpt-access".to_string())
+    );
+    let stored = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        stored.primary_secret.as_deref(),
+        Some("forced-refresh-chatgpt-access")
+    );
+    assert!(meerkat_core::tokens_lifecycle_published(&stored));
+}
+
+#[tokio::test]
 async fn openai_managed_chatgpt_oauth_rejects_token_without_auth_lifecycle() {
     let store = Arc::new(EphemeralTokenStore::new());
     let persisted = PersistedTokens {

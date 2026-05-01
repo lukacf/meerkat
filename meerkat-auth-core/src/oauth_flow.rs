@@ -803,6 +803,18 @@ impl OAuthFlowRegistry {
             .collect()
     }
 
+    pub fn retain_flows_with_lifecycle(
+        &self,
+        mut browser_active: impl FnMut(&ConnectionRef, &str) -> bool,
+        mut device_active: impl FnMut(&ConnectionRef, &str) -> bool,
+    ) {
+        let mut flows = self.flows.lock();
+        flows.retain(|flow_id, record| browser_active(&record.target, flow_id));
+
+        let mut device_flows = self.device_flows.lock();
+        device_flows.retain(|device_code, state| device_active(&state.record.target, device_code));
+    }
+
     pub fn start_with_pruned(
         &self,
         target: ConnectionRef,

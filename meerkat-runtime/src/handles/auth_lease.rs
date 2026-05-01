@@ -292,18 +292,12 @@ impl RuntimeAuthLeaseHandle {
             let to_phase = map_phase(entry.state.lifecycle_phase);
             (from_phase, to_phase)
         };
-        let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
-        *generation = generation.saturating_add(1);
         emit_audit(&lease_key, action, from_phase, to_phase);
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_oauth_browser_flow_for_test(
-        &self,
-        target: &ConnectionRef,
-        flow_id: &str,
-    ) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn has_oauth_browser_flow(&self, target: &ConnectionRef, flow_id: &str) -> bool {
         let lease_key = LeaseKey::from_connection_ref(target);
         self.machines
             .lock()
@@ -313,12 +307,8 @@ impl RuntimeAuthLeaseHandle {
             .is_some_and(|authority| authority.state.oauth_browser_flow_ids.contains(flow_id))
     }
 
-    #[cfg(test)]
-    pub(crate) fn has_oauth_device_flow_for_test(
-        &self,
-        target: &ConnectionRef,
-        flow_id: &str,
-    ) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn has_oauth_device_flow(&self, target: &ConnectionRef, flow_id: &str) -> bool {
         let lease_key = LeaseKey::from_connection_ref(target);
         self.machines
             .lock()
@@ -326,6 +316,24 @@ impl RuntimeAuthLeaseHandle {
             .authorities
             .get(&lease_key)
             .is_some_and(|authority| authority.state.oauth_device_flow_ids.contains(flow_id))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_oauth_browser_flow_for_test(
+        &self,
+        target: &ConnectionRef,
+        flow_id: &str,
+    ) -> bool {
+        self.has_oauth_browser_flow(target, flow_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_oauth_device_flow_for_test(
+        &self,
+        target: &ConnectionRef,
+        flow_id: &str,
+    ) -> bool {
+        self.has_oauth_device_flow(target, flow_id)
     }
 
     fn audit_action_for(input: &auth_dsl::AuthMachineInput) -> &'static str {
@@ -671,15 +679,6 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = guard.generations.get(lease_key).copied().unwrap_or(0);
-        if generation == 0 {
-            return AuthLeaseSnapshot {
-                phase: None,
-                expires_at: None,
-                credential_present: false,
-                generation,
-                credential_published_at_millis: None,
-            };
-        }
         match guard.authorities.get(lease_key) {
             Some(machine) => AuthLeaseSnapshot {
                 phase: Some(map_phase(machine.state.lifecycle_phase)),

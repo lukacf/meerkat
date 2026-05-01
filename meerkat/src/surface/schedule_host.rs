@@ -12,6 +12,7 @@ use meerkat_schedule::{
     ScheduleDriver, ScheduleDriverConfig, ScheduleService, ScheduleStoreKind,
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
+    public_runtime_turn_metadata,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -279,7 +280,9 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
                                 occurrence,
                                 ScheduledPromptDispatch {
                                     prompt: prompt.clone(),
-                                    turn_metadata: turn_metadata.as_deref().cloned(),
+                                    turn_metadata: turn_metadata
+                                        .as_deref()
+                                        .map(public_runtime_turn_metadata),
                                     materialized_session_id: resolved.materialized_session_id,
                                 },
                             )

@@ -49,7 +49,7 @@ pub use types::{
     RuntimeDeliveryOutcome, Schedule, ScheduleConfig, ScheduleId, SchedulePhase, ScheduleRevision,
     ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
     ScheduledSessionAction, SessionMaterializationSpec, SessionTargetBinding, TargetBinding,
-    TriggerSpec, UpdateScheduleRequest,
+    TriggerSpec, UpdateScheduleRequest, public_runtime_turn_metadata,
 };
 
 #[doc(hidden)]

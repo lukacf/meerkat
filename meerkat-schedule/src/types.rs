@@ -409,8 +409,13 @@ impl SessionTargetBinding {
 
     pub fn validate_public_api(&self) -> Result<(), String> {
         match self {
-            Self::MaterializeOnDemandSession { create, .. } => create.validate_public_api(),
-            Self::ExactSession { .. } | Self::ResumableSession { .. } => Ok(()),
+            Self::ExactSession { action, .. } | Self::ResumableSession { action, .. } => {
+                action.validate_public_api()
+            }
+            Self::MaterializeOnDemandSession { create, action, .. } => {
+                create.validate_public_api()?;
+                action.validate_public_api()
+            }
         }
     }
 }
@@ -441,6 +446,22 @@ pub enum ScheduledSessionAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         render_metadata: Option<RenderMetadata>,
     },
+}
+
+impl ScheduledSessionAction {
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        match self {
+            Self::Prompt {
+                turn_metadata: Some(metadata),
+                ..
+            } => validate_public_runtime_turn_metadata(metadata),
+            Self::Prompt {
+                turn_metadata: None,
+                ..
+            }
+            | Self::Event { .. } => Ok(()),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -507,6 +528,22 @@ impl From<RuntimeTurnMetadata> for ScheduleRuntimeTurnMetadata {
             render_metadata: value.render_metadata,
         }
     }
+}
+
+fn validate_public_runtime_turn_metadata(metadata: &RuntimeTurnMetadata) -> Result<(), String> {
+    if metadata.execution_kind.is_some() {
+        return Err("turn_metadata.execution_kind is runtime-owned".to_string());
+    }
+    if metadata.peer_response_terminal_apply_intent.is_some() {
+        return Err(
+            "turn_metadata.peer_response_terminal_apply_intent is runtime-owned".to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub fn public_runtime_turn_metadata(metadata: &RuntimeTurnMetadata) -> RuntimeTurnMetadata {
+    ScheduleRuntimeTurnMetadata::from(metadata.clone()).into()
 }
 
 fn deserialize_schedule_runtime_turn_metadata<'de, D>(
@@ -612,11 +649,13 @@ impl SessionMaterializationSpec {
     }
 
     pub fn validate_public_api(&self) -> Result<(), String> {
-        self.require_model_name().map(|_| ())
+        self.require_model_name()?;
+        validate_public_runtime_turn_metadata(&self.turn_metadata)
     }
 
     pub fn initial_turn_metadata(&self) -> Option<RuntimeTurnMetadata> {
-        (!self.turn_metadata.is_empty()).then(|| self.turn_metadata.clone())
+        let metadata = public_runtime_turn_metadata(&self.turn_metadata);
+        (!metadata.is_empty()).then_some(metadata)
     }
 
     pub fn requests_keep_alive(&self) -> bool {
@@ -1737,6 +1776,35 @@ mod tests {
     }
 
     #[test]
+    fn session_materialization_validate_public_api_rejects_rust_runtime_owned_stamps() {
+        let mut spec = fixture_session_materialization(vec![]);
+        spec.turn_metadata.execution_kind =
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending);
+
+        let err = spec.validate_public_api().unwrap_err();
+        assert!(
+            err.contains("execution_kind") || err.contains("runtime-owned"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn session_materialization_initial_turn_metadata_strips_rust_runtime_owned_stamps() {
+        let mut spec = fixture_session_materialization(vec![]);
+        spec.turn_metadata.execution_kind =
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending);
+        spec.turn_metadata.peer_response_terminal_apply_intent = Some(
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun,
+        );
+
+        let metadata = spec
+            .initial_turn_metadata()
+            .expect("fixture has public model metadata");
+        assert!(metadata.execution_kind.is_none());
+        assert!(metadata.peer_response_terminal_apply_intent.is_none());
+    }
+
+    #[test]
     fn scheduled_prompt_action_rejects_split_metadata_fields() {
         let json = serde_json::json!({
             "type": "prompt",
@@ -1774,6 +1842,29 @@ mod tests {
             err.to_string()
                 .contains("peer_response_terminal_apply_intent")
                 || err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn session_target_binding_rejects_prompt_action_runtime_owned_turn_metadata_stamps() {
+        let binding = SessionTargetBinding::ExactSession {
+            session_id: SessionId::new(),
+            action: ScheduledSessionAction::Prompt {
+                prompt: ContentInput::from("scheduled hello"),
+                system_prompt: None,
+                turn_metadata: Some(Box::new(RuntimeTurnMetadata {
+                    peer_response_terminal_apply_intent: Some(
+                        meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                    ),
+                    ..Default::default()
+                })),
+            },
+        };
+
+        let err = binding.validate_public_api().unwrap_err();
+        assert!(
+            err.contains("peer_response_terminal_apply_intent") || err.contains("runtime-owned"),
             "unexpected error: {err}"
         );
     }

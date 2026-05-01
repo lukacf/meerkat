@@ -42,9 +42,7 @@ fn sample_occurrence(attempt_count: u32) -> Occurrence {
             action: ScheduledSessionAction::Prompt {
                 prompt: ContentInput::Text("hi".into()),
                 system_prompt: None,
-                render_metadata: None,
-                skill_refs: Vec::new(),
-                additional_instructions: Vec::new(),
+                turn_metadata: None,
             },
         }),
         misfire_policy: MisfirePolicy::Skip,

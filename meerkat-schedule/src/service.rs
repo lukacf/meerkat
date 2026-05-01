@@ -383,6 +383,9 @@ mod tests {
     };
     use crate::{MemoryScheduleStore, OverlapPolicy};
     use chrono::Duration;
+    use meerkat_core::lifecycle::run_primitive::{
+        KeepAliveMode, KeepAlivePolicy, ModelId, RuntimeTurnMetadata, TurnMetadataOverride,
+    };
     use meerkat_core::{ContentInput, ToolNameSet};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -880,31 +883,31 @@ mod tests {
     fn materialize_on_demand_target(prompt: &str) -> TargetBinding {
         TargetBinding::session(SessionTargetBinding::materialize_on_demand(
             SessionMaterializationSpec {
-                model: "claude-sonnet-4-6".into(),
+                turn_metadata: RuntimeTurnMetadata {
+                    model: Some(ModelId::new("claude-sonnet-4-6")),
+                    keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                        ttl: std::time::Duration::from_secs(30),
+                        policy: KeepAliveMode::Pinned,
+                    })),
+                    ..Default::default()
+                },
                 system_prompt: None,
                 max_tokens: None,
-                provider: None,
                 output_schema: None,
                 structured_output_retries: 0,
-                provider_params: None,
                 comms_name: Some("scheduled-worker".into()),
                 peer_meta: None,
                 labels: BTreeMap::new(),
-                preload_skills: Vec::new(),
-                additional_instructions: Vec::new(),
                 realm_id: None,
                 instance_id: None,
                 backend: None,
                 config_generation: None,
-                keep_alive: true,
                 app_context: None,
             },
             ScheduledSessionAction::Prompt {
                 prompt: ContentInput::from(prompt),
                 system_prompt: None,
-                render_metadata: None,
-                skill_refs: Vec::new(),
-                additional_instructions: Vec::new(),
+                turn_metadata: None,
             },
         ))
     }
@@ -941,6 +944,6 @@ mod tests {
             return;
         };
 
-        assert_eq!(spec.model, "claude-sonnet-4-6");
+        assert_eq!(spec.model_name(), Some("claude-sonnet-4-6"));
     }
 }

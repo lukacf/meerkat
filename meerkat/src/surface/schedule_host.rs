@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
-use meerkat_core::{ContentInput, SessionId, skills::SkillRef, types::RenderMetadata};
+use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+use meerkat_core::{ContentInput, SessionId, types::RenderMetadata};
 use meerkat_runtime::CompletionHandle;
 use meerkat_schedule::{
     DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
@@ -51,9 +52,7 @@ pub struct AcceptedScheduledInput {
 #[derive(Debug, Clone)]
 pub struct ScheduledPromptDispatch {
     pub prompt: ContentInput,
-    pub render_metadata: Option<RenderMetadata>,
-    pub skill_refs: Vec<SkillRef>,
-    pub additional_instructions: Vec<String>,
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
     pub materialized_session_id: Option<SessionId>,
 }
 
@@ -262,9 +261,7 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
                     ScheduledSessionAction::Prompt {
                         prompt,
                         system_prompt,
-                        render_metadata,
-                        skill_refs,
-                        additional_instructions,
+                        turn_metadata,
                     } => {
                         if system_prompt.is_some() && !resolved.allow_system_prompt_override {
                             return Ok(immediate_delivery_failure(
@@ -282,9 +279,7 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
                                 occurrence,
                                 ScheduledPromptDispatch {
                                     prompt: prompt.clone(),
-                                    render_metadata: render_metadata.clone(),
-                                    skill_refs: skill_refs.clone(),
-                                    additional_instructions: additional_instructions.clone(),
+                                    turn_metadata: turn_metadata.as_deref().cloned(),
                                     materialized_session_id: resolved.materialized_session_id,
                                 },
                             )
@@ -508,9 +503,7 @@ mod tests {
                 action: ScheduledSessionAction::Prompt {
                     prompt: ContentInput::Text("hello".to_string()),
                     system_prompt: None,
-                    render_metadata: None,
-                    skill_refs: Vec::new(),
-                    additional_instructions: Vec::new(),
+                    turn_metadata: None,
                 },
             }),
             misfire_policy: meerkat_schedule::MisfirePolicy::Skip,

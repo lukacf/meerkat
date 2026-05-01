@@ -7225,28 +7225,6 @@ fn cli_session_metadata_marks_archived(session: &Session) -> bool {
         .unwrap_or(false)
 }
 
-fn scheduled_skill_keys(
-    skill_refs: &[meerkat_core::skills::SkillRef],
-) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, meerkat::ScheduleDomainError> {
-    if skill_refs.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(
-        skill_refs
-            .iter()
-            .map(|reference| reference.key().clone())
-            .collect(),
-    ))
-}
-
-#[cfg(test)]
-fn materialized_preload_skills(
-    preload_skills: &[meerkat_core::skills::SkillKey],
-) -> Option<Vec<meerkat_core::skills::SkillKey>> {
-    (!preload_skills.is_empty()).then(|| preload_skills.to_vec())
-}
-
 #[cfg(feature = "session-store")]
 #[async_trait::async_trait]
 impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
@@ -7288,6 +7266,10 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         create: &meerkat::SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, meerkat::ScheduleDomainError> {
+        let model = create
+            .require_model_name()
+            .map_err(meerkat::ScheduleDomainError::InvalidSchedule)?
+            .to_string();
         let session = Session::new();
         let session_id = session.id().clone();
         let bindings = self
@@ -7319,7 +7301,7 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         let result = self
             .service
             .create_session(CreateSessionRequest {
-                model: create.model.clone(),
+                model,
                 prompt: "".into(),
                 system_prompt: prompt_system_prompt
                     .map(str::to_owned)
@@ -7352,43 +7334,8 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
     ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
 
-        let mut prompt_input = PromptInput::from_content_input(
-            dispatch.prompt,
-            Some(
-                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                    handling_mode: None,
-                    keep_alive: None,
-                    skill_references: scheduled_skill_keys(&dispatch.skill_refs)?,
-                    flow_tool_overlay: None,
-                    // Post-wave-a: `RuntimeTurnMetadata.additional_instructions`
-                    // is typed `Vec<TurnInstruction>`; project the scheduled
-                    // dispatch's `Vec<String>` into typed instructions with
-                    // `System` kind (scheduled prompts originate from the
-                    // runtime's schedule driver, not the user).
-                    additional_instructions: (!dispatch.additional_instructions.is_empty())
-                        .then(|| {
-                            dispatch
-                                .additional_instructions
-                                .iter()
-                                .cloned()
-                                .map(|body| {
-                                    meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System,
-                                        body,
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    model: None,
-                    provider: None,
-                    provider_params: None,
-                    render_metadata: dispatch.render_metadata.clone(),
-                    execution_kind: None,
-                    peer_response_terminal_apply_intent: None,
-                    connection_ref: None,
-                },
-            ),
-        );
+        let mut prompt_input =
+            PromptInput::from_content_input(dispatch.prompt, dispatch.turn_metadata);
         prompt_input.header.source = InputOrigin::System;
         prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
             schedule_attempt_idempotency_key(occurrence),
@@ -10167,29 +10114,6 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/hooks/run_override.json")
     }
 
-    fn fixture_skill_key(name: &str) -> meerkat_core::skills::SkillKey {
-        let skill_name = meerkat_core::skills::SkillName::parse(name)
-            .expect("fixture skill name should be valid");
-        meerkat_core::skills::SkillKey::new(meerkat_core::skills::SourceUuid::builtin(), skill_name)
-    }
-
-    #[test]
-    fn materialized_preload_skills_preserves_typed_skill_keys() {
-        let key = fixture_skill_key("email");
-
-        assert_eq!(
-            materialized_preload_skills(std::slice::from_ref(&key)),
-            Some(vec![key])
-        );
-    }
-
-    #[test]
-    fn materialized_preload_skills_leaves_empty_preload_unset() {
-        let preload_skills: Vec<meerkat_core::skills::SkillKey> = Vec::new();
-
-        assert_eq!(materialized_preload_skills(&preload_skills), None);
-    }
-
     #[test]
     fn runtime_owned_first_run_does_not_duplicate_additional_instructions_carrier() {
         let source = include_str!("main.rs");
@@ -10249,6 +10173,7 @@ mod tests {
             "preload_skills: materialized_preload_skills",
             "additional_instructions: (!create.additional_instructions.is_empty())",
             "keep_alive: create.keep_alive",
+            "model: create.model.clone()",
         ] {
             assert!(
                 !build_block.contains(split),

@@ -201,7 +201,10 @@ impl SessionRuntime {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        let mut build_config = AgentBuildConfig::new(create.model.clone());
+        let model = create
+            .require_model_name()
+            .map_err(ScheduleDomainError::InvalidSchedule)?;
+        let mut build_config = AgentBuildConfig::new(model.to_string());
         build_config.initial_turn_metadata = create.initial_turn_metadata();
         build_config.max_tokens = create.max_tokens;
         build_config.system_prompt = prompt_system_prompt
@@ -261,43 +264,10 @@ impl SessionRuntime {
                 .await;
         }
 
-        let turn_metadata = Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: None,
-                keep_alive: None,
-                skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
-                    dispatch
-                        .skill_refs
-                        .iter()
-                        .map(|skill_ref| skill_ref.key().clone())
-                        .collect()
-                }),
-                flow_tool_overlay: None,
-                additional_instructions: (!dispatch.additional_instructions.is_empty()).then(
-                    || {
-                        dispatch
-                            .additional_instructions
-                            .iter()
-                            .map(|body| {
-                                meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
-                                    body: body.clone(),
-                                }
-                            })
-                            .collect()
-                    },
-                ),
-                model: None,
-                provider: None,
-                provider_params: None,
-                render_metadata: dispatch.render_metadata.clone(),
-                execution_kind: None,
-                peer_response_terminal_apply_intent: None,
-                connection_ref: None,
-            },
+        let mut prompt_input = meerkat_runtime::PromptInput::from_content_input(
+            dispatch.prompt,
+            dispatch.turn_metadata,
         );
-        let mut prompt_input =
-            meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, turn_metadata);
         prompt_input.header.source = meerkat_runtime::InputOrigin::System;
         prompt_input.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
             schedule_attempt_idempotency_key(occurrence),

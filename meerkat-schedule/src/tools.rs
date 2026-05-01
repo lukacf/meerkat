@@ -101,9 +101,9 @@ pub fn schedule_tools_list() -> Vec<Value> {
                 "{\"target_kind\":\"session\",\"type\":\"resumable_session\",\"session_id\":\"<UUID>\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Daily standup reminder\"}}\n",
                 "```\n",
                 "\n",
-                "**materialize_on_demand_session** -- create a brand-new session on first fire, then reuse it for subsequent occurrences. Use when no session exists yet. Requires a \"create\" spec with at least a model.\n",
+                "**materialize_on_demand_session** -- create a brand-new session on first fire, then reuse it for subsequent occurrences. Use when no session exists yet. Requires a \"create\" spec with turn_metadata.model.\n",
                 "```json\n",
-                "{\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run daily report\"},\"create\":{\"model\":\"claude-sonnet-4-6\",\"system_prompt\":\"You are a reporting assistant.\"}}\n",
+                "{\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run daily report\"},\"create\":{\"turn_metadata\":{\"model\":\"claude-sonnet-4-6\"},\"system_prompt\":\"You are a reporting assistant.\"}}\n",
                 "```\n",
                 "\n",
                 "## Policies\n",
@@ -551,7 +551,7 @@ fn calendar_field_schema(description: &'static str) -> Value {
 
 fn target_binding_schema() -> Value {
     json!({
-        "description": "Where the schedule delivers. Uses target_kind to select session or mob. Session targets: exact_session (deliver to a known session_id; fails if session is gone), resumable_session (deliver to a session_id that may be idle; runtime resumes it -- best for long-lived TUX sessions), materialize_on_demand_session (create a new session on first fire using a \"create\" spec, then reuse it -- use when no session exists yet). Mob targets: member, flow, spawn_helper, fork_helper (deliver to a mob member or flow). Examples: {\"target_kind\":\"session\",\"type\":\"resumable_session\",\"session_id\":\"<UUID>\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | {\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run report\"},\"create\":{\"model\":\"claude-sonnet-4-6\"}}.",
+        "description": "Where the schedule delivers. Uses target_kind to select session or mob. Session targets: exact_session (deliver to a known session_id; fails if session is gone), resumable_session (deliver to a session_id that may be idle; runtime resumes it -- best for long-lived TUX sessions), materialize_on_demand_session (create a new session on first fire using a \"create\" spec, then reuse it -- use when no session exists yet). Mob targets: member, flow, spawn_helper, fork_helper (deliver to a mob member or flow). Examples: {\"target_kind\":\"session\",\"type\":\"resumable_session\",\"session_id\":\"<UUID>\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Check in\"}} | {\"target_kind\":\"session\",\"type\":\"materialize_on_demand_session\",\"action\":{\"type\":\"prompt\",\"prompt\":\"Run report\"},\"create\":{\"turn_metadata\":{\"model\":\"claude-sonnet-4-6\"}}}.",
         "oneOf": [
             {
                 "type": "object",
@@ -624,15 +624,9 @@ fn scheduled_session_action_schema() -> Value {
                         "type": "string",
                         "description": "Only supported when materializing a new session."
                     },
-                    "render_metadata": { "type": "object" },
-                    "skill_refs": {
-                        "type": "array",
-                        "items": { "type": "object" },
-                        "description": "Structured skill references."
-                    },
-                    "additional_instructions": {
-                        "type": "array",
-                        "items": { "type": "string" }
+                    "turn_metadata": {
+                        "type": "object",
+                        "description": "Canonical RuntimeTurnMetadata carrier for scheduled prompt metadata, including render_metadata, skill_references, additional_instructions, model/provider overrides, and keep_alive."
                     }
                 },
                 "required": ["type", "prompt"],
@@ -653,51 +647,31 @@ fn scheduled_session_action_schema() -> Value {
     })
 }
 
-fn skill_key_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "source_uuid": { "type": "string" },
-            "skill_name": { "type": "string" }
-        },
-        "required": ["source_uuid", "skill_name"],
-        "additionalProperties": false
-    })
-}
-
 fn session_materialization_spec_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "model": { "type": "string" },
+            "turn_metadata": {
+                "type": "object",
+                "description": "Canonical RuntimeTurnMetadata carrier for the materialized session's first turn. Set turn_metadata.model here."
+            },
             "system_prompt": { "type": "string" },
             "max_tokens": { "type": "integer", "minimum": 1 },
-            "provider": { "enum": ["anthropic", "openai", "gemini", "other"] },
             "output_schema": { "type": "object" },
             "structured_output_retries": { "type": "integer", "minimum": 0 },
-            "provider_params": { "type": "object" },
             "comms_name": { "type": "string" },
             "peer_meta": { "type": "object" },
             "labels": {
                 "type": "object",
                 "additionalProperties": { "type": "string" }
             },
-            "preload_skills": {
-                "type": "array",
-                "items": skill_key_schema()
-            },
-            "additional_instructions": {
-                "type": "array",
-                "items": { "type": "string" }
-            },
             "realm_id": { "type": "string" },
             "instance_id": { "type": "string" },
             "backend": { "type": "string" },
             "config_generation": { "type": "integer", "minimum": 0 },
-            "keep_alive": { "type": "boolean" },
             "app_context": { "type": "object" }
         },
-        "required": ["model"],
+        "required": ["turn_metadata"],
         "additionalProperties": false
     })
 }
@@ -867,9 +841,7 @@ mod tests {
                 action: ScheduledSessionAction::Prompt {
                     prompt: ContentInput::from("tool surface"),
                     system_prompt: None,
-                    render_metadata: None,
-                    skill_refs: Vec::new(),
-                    additional_instructions: Vec::new(),
+                    turn_metadata: None,
                 },
             }),
             misfire_policy: MisfirePolicy::Skip,

@@ -153,7 +153,7 @@ impl RuntimeBackedScheduleSessionHost {
             // `false` — matches the pre-retype `.unwrap_or(false)`
             // fallback. Sessions that legitimately need
             // comms-driven keep-alive configure it through the
-            // canonical `SessionBuildOptions.keep_alive` on create.
+            // canonical `RuntimeTurnMetadata.keep_alive` on create.
             let keep_alive = false;
             configure_peer_ingress(&self.runtime_adapter, &self.service, session_id, keep_alive)
                 .await;
@@ -166,11 +166,15 @@ impl RuntimeBackedScheduleSessionHost {
         &self,
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
-    ) -> CreateSessionRequest {
+    ) -> Result<CreateSessionRequest, ScheduleDomainError> {
+        let model = create
+            .require_model_name()
+            .map_err(ScheduleDomainError::InvalidSchedule)?
+            .to_string();
         let build = materialized_build_options(&self.build_template, create);
 
-        CreateSessionRequest {
-            model: create.model.clone(),
+        Ok(CreateSessionRequest {
+            model,
             prompt: ContentInput::Text(String::new()),
             system_prompt: prompt_system_prompt
                 .map(str::to_owned)
@@ -181,7 +185,7 @@ impl RuntimeBackedScheduleSessionHost {
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: Some(create.labels.clone()),
-        }
+        })
     }
 }
 
@@ -216,7 +220,7 @@ impl SurfaceScheduleSessionHost for RuntimeBackedScheduleSessionHost {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
-        let request = self.build_materialized_request(create, prompt_system_prompt);
+        let request = self.build_materialized_request(create, prompt_system_prompt)?;
         let keep_alive = request.build.as_ref().is_some_and(|build| build.keep_alive);
         let result = Box::pin(materialize_session(
             &self.service,
@@ -279,6 +283,7 @@ fn schedule_internal(error: impl std::fmt::Display) -> ScheduleDomainError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
     use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
 
     fn fixture_skill_key(name: &str) -> SkillKey {
@@ -293,23 +298,22 @@ mod tests {
     fn materialized_build_options_forwards_preload_skill_keys_through_metadata() {
         let key = fixture_skill_key("email");
         let create = SessionMaterializationSpec {
-            model: "claude-sonnet-4-6".to_string(),
+            turn_metadata: RuntimeTurnMetadata {
+                model: Some(ModelId::new("claude-sonnet-4-6")),
+                skill_references: Some(vec![key.clone()]),
+                ..Default::default()
+            },
             system_prompt: None,
             max_tokens: None,
-            provider: None,
             output_schema: None,
             structured_output_retries: 0,
-            provider_params: None,
             comms_name: None,
             peer_meta: None,
             labels: Default::default(),
-            preload_skills: vec![key.clone()],
-            additional_instructions: Vec::new(),
             realm_id: None,
             instance_id: None,
             backend: None,
             config_generation: None,
-            keep_alive: false,
             app_context: None,
         };
 

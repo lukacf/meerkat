@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
 use meerkat_core::ops::ToolAccessPolicy;
-use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::types::RenderMetadata;
-use meerkat_core::{ContentInput, OutputSchema, PeerMeta, Provider, SessionId};
+use meerkat_core::{ContentInput, OutputSchema, PeerMeta, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -307,7 +307,7 @@ impl TargetBinding {
 
     pub fn validate_public_api(&self) -> Result<(), String> {
         match self {
-            Self::Session(_) => Ok(()),
+            Self::Session(binding) => binding.validate_public_api(),
             Self::Mob(binding) => binding.validate_public_api(),
         }
     }
@@ -357,10 +357,9 @@ impl SessionTargetBinding {
                 ..
             } => bound_session_id.as_ref().map_or_else(
                 || {
-                    let name = create
-                        .comms_name
-                        .clone()
-                        .unwrap_or_else(|| create.model.clone());
+                    let name = create.comms_name.clone().unwrap_or_else(|| {
+                        create.model_name().unwrap_or("missing-model").to_string()
+                    });
                     format!("session:materialize:{name}")
                 },
                 |session_id| format!("session:materialize:{session_id}"),
@@ -402,22 +401,26 @@ impl SessionTargetBinding {
             Self::ExactSession { .. } | Self::ResumableSession { .. } => false,
         }
     }
+
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        match self {
+            Self::MaterializeOnDemandSession { create, .. } => create.validate_public_api(),
+            Self::ExactSession { .. } | Self::ResumableSession { .. } => Ok(()),
+        }
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScheduledSessionAction {
     Prompt {
         prompt: ContentInput,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        render_metadata: Option<RenderMetadata>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        skill_refs: Vec<SkillRef>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        additional_instructions: Vec<String>,
+        #[cfg_attr(feature = "schema", schemars(with = "Option<serde_json::Value>"))]
+        turn_metadata: Option<Box<RuntimeTurnMetadata>>,
     },
     Event {
         event_type: String,
@@ -428,15 +431,15 @@ pub enum ScheduledSessionAction {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionMaterializationSpec {
-    pub model: String,
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    pub turn_metadata: RuntimeTurnMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<Provider>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -446,17 +449,11 @@ pub struct SessionMaterializationSpec {
     #[serde(default)]
     pub structured_output_retries: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comms_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_meta: Option<PeerMeta>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preload_skills: Vec<SkillKey>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub additional_instructions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realm_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -465,8 +462,6 @@ pub struct SessionMaterializationSpec {
     pub backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_generation: Option<u64>,
-    #[serde(default)]
-    pub keep_alive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
 }
@@ -477,80 +472,42 @@ impl SessionMaterializationSpec {
         self
     }
 
-    pub fn initial_turn_metadata(
-        &self,
-    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
-        use meerkat_core::lifecycle::run_primitive::{
-            KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
-            TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
-        };
+    pub fn model(&self) -> Option<&ModelId> {
+        self.turn_metadata.model.as_ref()
+    }
 
-        let provider = self
-            .provider
-            .or_else(|| Provider::infer_from_model(&self.model));
-        let provider_for_params = provider.unwrap_or(Provider::Other);
-        let mut metadata = RuntimeTurnMetadata {
-            model: Some(ModelId::new(self.model.clone())),
-            provider,
-            provider_params: self.provider_params.as_ref().map(|params| {
-                TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
-                    provider_for_params.as_str(),
-                    params,
-                ))
-            }),
-            skill_references: (!self.preload_skills.is_empty())
-                .then(|| self.preload_skills.clone()),
-            keep_alive: self.keep_alive.then(|| {
-                TurnMetadataOverride::Set(KeepAlivePolicy {
-                    ttl: std::time::Duration::from_secs(30),
-                    policy: KeepAliveMode::Pinned,
-                })
-            }),
-            additional_instructions: (!self.additional_instructions.is_empty()).then(|| {
-                self.additional_instructions
-                    .iter()
-                    .filter_map(|body| {
-                        let body = body.trim();
-                        (!body.is_empty()).then(|| TurnInstruction {
-                            kind: TurnInstructionKind::System,
-                            body: body.to_string(),
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            }),
-            ..Default::default()
-        };
-        if metadata
-            .additional_instructions
-            .as_ref()
-            .is_some_and(Vec::is_empty)
-        {
-            metadata.additional_instructions = None;
-        }
+    pub fn model_name(&self) -> Option<&str> {
+        self.model().map(ModelId::as_str)
+    }
 
-        (!metadata.is_empty()).then_some(metadata)
+    pub fn require_model_name(&self) -> Result<&str, String> {
+        self.model_name()
+            .ok_or_else(|| "session materialization requires turn_metadata.model".to_string())
+    }
+
+    pub fn validate_public_api(&self) -> Result<(), String> {
+        self.require_model_name().map(|_| ())
+    }
+
+    pub fn initial_turn_metadata(&self) -> Option<RuntimeTurnMetadata> {
+        (!self.turn_metadata.is_empty()).then(|| self.turn_metadata.clone())
     }
 }
 
 impl PartialEq for SessionMaterializationSpec {
     fn eq(&self, other: &Self) -> bool {
-        self.model == other.model
+        self.turn_metadata == other.turn_metadata
             && self.system_prompt == other.system_prompt
             && self.max_tokens == other.max_tokens
-            && self.provider == other.provider
             && self.output_schema == other.output_schema
             && self.structured_output_retries == other.structured_output_retries
-            && self.provider_params == other.provider_params
             && self.comms_name == other.comms_name
             && self.peer_meta == other.peer_meta
             && self.labels == other.labels
-            && self.preload_skills == other.preload_skills
-            && self.additional_instructions == other.additional_instructions
             && self.realm_id == other.realm_id
             && self.instance_id == other.instance_id
             && self.backend == other.backend
             && self.config_generation == other.config_generation
-            && self.keep_alive == other.keep_alive
             && self.app_context == other.app_context
     }
 }
@@ -1266,7 +1223,7 @@ pub fn default_planning_horizon_occurrences() -> u32 {
 mod tests {
     use super::*;
     use meerkat_core::ToolNameSet;
-    use meerkat_core::skills::{SkillName, SourceUuid};
+    use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
 
     fn fixture_source_uuid() -> SourceUuid {
         SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").unwrap()
@@ -1280,23 +1237,22 @@ mod tests {
         preload_skills: Vec<SkillKey>,
     ) -> SessionMaterializationSpec {
         SessionMaterializationSpec {
-            model: "claude-sonnet-4-6".into(),
+            turn_metadata: RuntimeTurnMetadata {
+                model: Some(ModelId::new("claude-sonnet-4-6")),
+                skill_references: (!preload_skills.is_empty()).then_some(preload_skills),
+                ..Default::default()
+            },
             system_prompt: None,
             max_tokens: None,
-            provider: None,
             output_schema: None,
             structured_output_retries: 0,
-            provider_params: None,
             comms_name: None,
             peer_meta: None,
             labels: BTreeMap::new(),
-            preload_skills,
-            additional_instructions: Vec::new(),
             realm_id: None,
             instance_id: None,
             backend: None,
             config_generation: None,
-            keep_alive: false,
             app_context: None,
         }
     }
@@ -1559,17 +1515,19 @@ mod tests {
     }
 
     #[test]
-    fn session_materialization_preload_skills_round_trip_typed_skill_keys() {
+    fn session_materialization_turn_metadata_round_trip_typed_skill_keys() {
         let key = fixture_skill_key("email");
         let spec = fixture_session_materialization(vec![key.clone()]);
 
         let json = serde_json::to_value(&spec).unwrap();
+        assert!(json.get("preload_skills").is_none());
+        assert!(json.get("model").is_none());
         assert_eq!(
-            json["preload_skills"][0]["source_uuid"],
+            json["turn_metadata"]["skill_references"][0]["source_uuid"],
             key.source_uuid.to_string()
         );
         assert_eq!(
-            json["preload_skills"][0]["skill_name"],
+            json["turn_metadata"]["skill_references"][0]["skill_name"],
             key.skill_name.to_string()
         );
 
@@ -1580,13 +1538,51 @@ mod tests {
     #[test]
     fn session_materialization_rejects_legacy_string_preload_skills() {
         let json = serde_json::json!({
-            "model": "claude-sonnet-4-6",
+            "turn_metadata": {
+                "model": "claude-sonnet-4-6"
+            },
             "preload_skills": ["email"]
         });
 
         let err = serde_json::from_value::<SessionMaterializationSpec>(json).unwrap_err();
         assert!(
-            err.to_string().contains("invalid type: string"),
+            err.to_string().contains("preload_skills"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn session_materialization_rejects_split_metadata_fields() {
+        let json = serde_json::json!({
+            "model": "split-model",
+            "provider": "anthropic",
+            "turn_metadata": {
+                "model": "canonical-model"
+            }
+        });
+
+        let err = serde_json::from_value::<SessionMaterializationSpec>(json).unwrap_err();
+        assert!(err.to_string().contains("model"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn scheduled_prompt_action_rejects_split_metadata_fields() {
+        let json = serde_json::json!({
+            "type": "prompt",
+            "prompt": "scheduled hello",
+            "render_metadata": {},
+            "skill_refs": [],
+            "additional_instructions": ["legacy"],
+            "turn_metadata": {
+                "render_metadata": {}
+            }
+        });
+
+        let err = serde_json::from_value::<ScheduledSessionAction>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("render_metadata")
+                || err.to_string().contains("skill_refs")
+                || err.to_string().contains("additional_instructions"),
             "unexpected error: {err}"
         );
     }
@@ -1602,9 +1598,7 @@ mod tests {
             action: ScheduledSessionAction::Prompt {
                 prompt: ContentInput::from("scheduled hello"),
                 system_prompt: None,
-                render_metadata: None,
-                skill_refs: Vec::new(),
-                additional_instructions: Vec::new(),
+                turn_metadata: None,
             },
         });
 

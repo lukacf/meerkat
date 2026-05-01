@@ -102,9 +102,7 @@ mod tests {
                 action: ScheduledSessionAction::Prompt {
                     prompt: meerkat_core::ContentInput::from("tool surface"),
                     system_prompt: None,
-                    render_metadata: None,
-                    skill_refs: Vec::new(),
-                    additional_instructions: Vec::new(),
+                    turn_metadata: None,
                 },
             }),
             misfire_policy: MisfirePolicy::Skip,

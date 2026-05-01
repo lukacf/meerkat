@@ -9563,31 +9563,10 @@
       "ScheduledSessionAction": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
-              "additional_instructions": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
               "prompt": {
                 "$ref": "#/components/schemas/ContentInput"
-              },
-              "render_metadata": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/RenderMetadata"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skill_refs": {
-                "items": {
-                  "$ref": "#/components/schemas/SkillRef"
-                },
-                "type": "array"
               },
               "system_prompt": {
                 "type": [
@@ -9595,6 +9574,7 @@
                   "null"
                 ]
               },
+              "turn_metadata": true,
               "type": {
                 "const": "prompt",
                 "type": "string"
@@ -9607,6 +9587,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "event_type": {
                 "type": "string"
@@ -9856,13 +9837,8 @@
         "type": "string"
       },
       "SessionMaterializationSpec": {
+        "additionalProperties": false,
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "app_context": true,
           "backend": {
             "type": [
@@ -9890,10 +9866,6 @@
               "null"
             ]
           },
-          "keep_alive": {
-            "default": false,
-            "type": "boolean"
-          },
           "labels": {
             "additionalProperties": {
               "type": "string"
@@ -9907,9 +9879,6 @@
               "integer",
               "null"
             ]
-          },
-          "model": {
-            "type": "string"
           },
           "output_schema": {
             "anyOf": [
@@ -9931,23 +9900,6 @@
               }
             ]
           },
-          "preload_skills": {
-            "items": {
-              "$ref": "#/components/schemas/SkillKey"
-            },
-            "type": "array"
-          },
-          "provider": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Provider"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "provider_params": true,
           "realm_id": {
             "type": [
               "string",
@@ -9965,10 +9917,11 @@
               "string",
               "null"
             ]
-          }
+          },
+          "turn_metadata": true
         },
         "required": [
-          "model"
+          "turn_metadata"
         ],
         "type": "object"
       },

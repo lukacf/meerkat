@@ -58,7 +58,9 @@ Inside an agent session, the scheduler is exposed through typed schedule tools s
           "target_kind": "session",
           "type": "materialize_on_demand_session",
           "create": {
-            "model": "claude-sonnet-4-6",
+            "turn_metadata": {
+              "model": "claude-sonnet-4-6"
+            },
             "system_prompt": "You are a health-check assistant."
           },
           "action": {
@@ -88,7 +90,9 @@ Inside an agent session, the scheduler is exposed through typed schedule tools s
           "target_kind": "session",
           "type": "materialize_on_demand_session",
           "create": {
-            "model": "claude-sonnet-4-6",
+            "turn_metadata": {
+              "model": "claude-sonnet-4-6"
+            },
             "system_prompt": "You are a health-check assistant."
           },
           "action": {
@@ -105,6 +109,7 @@ Inside an agent session, the scheduler is exposed through typed schedule tools s
   <Tab title="Rust SDK">
     ```rust
     use chrono::Utc;
+    use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata};
     use meerkat_schedule::{
         CreateScheduleRequest, IntervalTriggerSpec, MissingTargetPolicy,
         MisfirePolicy, OverlapPolicy, ScheduleService, SessionMaterializationSpec,
@@ -122,16 +127,17 @@ Inside an agent session, the scheduler is exposed through typed schedule tools s
         }),
         target: TargetBinding::session(SessionTargetBinding::materialize_on_demand(
             SessionMaterializationSpec {
-                model: "claude-sonnet-4-6".into(),
+                turn_metadata: RuntimeTurnMetadata {
+                    model: Some(ModelId::new("claude-sonnet-4-6")),
+                    ..Default::default()
+                },
                 system_prompt: Some("You are a health-check assistant.".into()),
                 ..Default::default()
             },
             ScheduledSessionAction::Prompt {
                 prompt: "Check system health and report anomalies.".into(),
                 system_prompt: None,
-                render_metadata: None,
-                skill_refs: Vec::new(),
-                additional_instructions: Vec::new(),
+                turn_metadata: None,
             },
         )),
         misfire_policy: MisfirePolicy::Skip,

@@ -97,13 +97,17 @@ impl RestScheduleContext {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
+        let model = create
+            .require_model_name()
+            .map_err(ScheduleDomainError::InvalidSchedule)?
+            .to_string();
         let prepared = meerkat::surface::prepare_surface_session(&self.runtime.runtime_adapter)
             .await
             .map_err(ScheduleDomainError::Internal)?;
         let pre_session = prepared.session;
         let runtime_bindings = prepared.bindings;
 
-        let mut build_config = AgentBuildConfig::new(create.model.clone());
+        let mut build_config = AgentBuildConfig::new(model);
         build_config.initial_turn_metadata = create.initial_turn_metadata();
         build_config.max_tokens = create.max_tokens;
         build_config.system_prompt = prompt_system_prompt
@@ -317,7 +321,7 @@ async fn update_peer_ingress_context(context: &RestScheduleContext, session_id: 
     // `keep_alive`, so we default to `false` — matches the pre-retype
     // `.unwrap_or(false)` fallback. Sessions that need comms-driven
     // keep-alive configure it through the canonical
-    // `SessionBuildOptions.keep_alive` on create.
+    // `RuntimeTurnMetadata.keep_alive` on create.
     let keep_alive = false;
     let comms_rt = context
         .runtime

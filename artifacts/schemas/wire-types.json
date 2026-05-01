@@ -10569,17 +10569,6 @@
         },
         "type": "object"
       },
-      "Provider": {
-        "description": "Supported LLM providers.",
-        "enum": [
-          "anthropic",
-          "openai",
-          "gemini",
-          "self_hosted",
-          "other"
-        ],
-        "type": "string"
-      },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
         "enum": [
@@ -10792,31 +10781,10 @@
       "ScheduledSessionAction": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
-              "additional_instructions": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
               "prompt": {
                 "$ref": "#/$defs/ContentInput"
-              },
-              "render_metadata": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RenderMetadata"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skill_refs": {
-                "items": {
-                  "$ref": "#/$defs/SkillRef"
-                },
-                "type": "array"
               },
               "system_prompt": {
                 "type": [
@@ -10824,6 +10792,7 @@
                   "null"
                 ]
               },
+              "turn_metadata": true,
               "type": {
                 "const": "prompt",
                 "type": "string"
@@ -10836,6 +10805,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "event_type": {
                 "type": "string"
@@ -10885,13 +10855,8 @@
         "type": "string"
       },
       "SessionMaterializationSpec": {
+        "additionalProperties": false,
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "app_context": true,
           "backend": {
             "type": [
@@ -10919,10 +10884,6 @@
               "null"
             ]
           },
-          "keep_alive": {
-            "default": false,
-            "type": "boolean"
-          },
           "labels": {
             "additionalProperties": {
               "type": "string"
@@ -10936,9 +10897,6 @@
               "integer",
               "null"
             ]
-          },
-          "model": {
-            "type": "string"
           },
           "output_schema": {
             "anyOf": [
@@ -10960,23 +10918,6 @@
               }
             ]
           },
-          "preload_skills": {
-            "items": {
-              "$ref": "#/$defs/SkillKey"
-            },
-            "type": "array"
-          },
-          "provider": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Provider"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "provider_params": true,
           "realm_id": {
             "type": [
               "string",
@@ -10994,10 +10935,11 @@
               "string",
               "null"
             ]
-          }
+          },
+          "turn_metadata": true
         },
         "required": [
-          "model"
+          "turn_metadata"
         ],
         "type": "object"
       },
@@ -11074,58 +11016,6 @@
             "type": "object"
           }
         ]
-      },
-      "SkillKey": {
-        "additionalProperties": false,
-        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
-        "properties": {
-          "skill_name": {
-            "$ref": "#/$defs/SkillName"
-          },
-          "source_uuid": {
-            "$ref": "#/$defs/SourceUuid"
-          }
-        },
-        "required": [
-          "source_uuid",
-          "skill_name"
-        ],
-        "type": "object"
-      },
-      "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
-        "type": "string"
-      },
-      "SkillRef": {
-        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
-            "properties": {
-              "kind": {
-                "const": "structured",
-                "type": "string"
-              },
-              "skill_name": {
-                "$ref": "#/$defs/SkillName"
-              },
-              "source_uuid": {
-                "$ref": "#/$defs/SourceUuid"
-              }
-            },
-            "required": [
-              "kind",
-              "source_uuid",
-              "skill_name"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "SourceUuid": {
-        "description": "Canonical source identifier.",
-        "type": "string"
       },
       "TargetBinding": {
         "oneOf": [
@@ -12109,17 +11999,6 @@
         },
         "type": "object"
       },
-      "Provider": {
-        "description": "Supported LLM providers.",
-        "enum": [
-          "anthropic",
-          "openai",
-          "gemini",
-          "self_hosted",
-          "other"
-        ],
-        "type": "string"
-      },
       "RenderClass": {
         "description": "Standardized rendering class for injected ordinary work.\n\nThis metadata is for normalization/injection rendering, not for core\nruntime scheduling. It lets the system consistently frame peer messages,\nexternal events, tool-scope notices, and similar inputs when they are\nrendered into model-visible context.",
         "enum": [
@@ -12284,31 +12163,10 @@
       "ScheduledSessionAction": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
-              "additional_instructions": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
               "prompt": {
                 "$ref": "#/$defs/ContentInput"
-              },
-              "render_metadata": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/RenderMetadata"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "skill_refs": {
-                "items": {
-                  "$ref": "#/$defs/SkillRef"
-                },
-                "type": "array"
               },
               "system_prompt": {
                 "type": [
@@ -12316,6 +12174,7 @@
                   "null"
                 ]
               },
+              "turn_metadata": true,
               "type": {
                 "const": "prompt",
                 "type": "string"
@@ -12328,6 +12187,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "event_type": {
                 "type": "string"
@@ -12377,13 +12237,8 @@
         "type": "string"
       },
       "SessionMaterializationSpec": {
+        "additionalProperties": false,
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "app_context": true,
           "backend": {
             "type": [
@@ -12411,10 +12266,6 @@
               "null"
             ]
           },
-          "keep_alive": {
-            "default": false,
-            "type": "boolean"
-          },
           "labels": {
             "additionalProperties": {
               "type": "string"
@@ -12428,9 +12279,6 @@
               "integer",
               "null"
             ]
-          },
-          "model": {
-            "type": "string"
           },
           "output_schema": {
             "anyOf": [
@@ -12452,23 +12300,6 @@
               }
             ]
           },
-          "preload_skills": {
-            "items": {
-              "$ref": "#/$defs/SkillKey"
-            },
-            "type": "array"
-          },
-          "provider": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Provider"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "provider_params": true,
           "realm_id": {
             "type": [
               "string",
@@ -12486,10 +12317,11 @@
               "string",
               "null"
             ]
-          }
+          },
+          "turn_metadata": true
         },
         "required": [
-          "model"
+          "turn_metadata"
         ],
         "type": "object"
       },
@@ -12566,58 +12398,6 @@
             "type": "object"
           }
         ]
-      },
-      "SkillKey": {
-        "additionalProperties": false,
-        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
-        "properties": {
-          "skill_name": {
-            "$ref": "#/$defs/SkillName"
-          },
-          "source_uuid": {
-            "$ref": "#/$defs/SourceUuid"
-          }
-        },
-        "required": [
-          "source_uuid",
-          "skill_name"
-        ],
-        "type": "object"
-      },
-      "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
-        "type": "string"
-      },
-      "SkillRef": {
-        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
-            "properties": {
-              "kind": {
-                "const": "structured",
-                "type": "string"
-              },
-              "skill_name": {
-                "$ref": "#/$defs/SkillName"
-              },
-              "source_uuid": {
-                "$ref": "#/$defs/SourceUuid"
-              }
-            },
-            "required": [
-              "kind",
-              "source_uuid",
-              "skill_name"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "SourceUuid": {
-        "description": "Canonical source identifier.",
-        "type": "string"
       },
       "TargetBinding": {
         "oneOf": [

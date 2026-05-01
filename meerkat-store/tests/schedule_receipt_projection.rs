@@ -25,9 +25,7 @@ fn sample_schedule() -> Schedule {
             action: ScheduledSessionAction::Prompt {
                 prompt: ContentInput::from("scheduled prompt"),
                 system_prompt: None,
-                render_metadata: None,
-                skill_refs: Vec::new(),
-                additional_instructions: Vec::new(),
+                turn_metadata: None,
             },
         }),
         misfire_policy: MisfirePolicy::Skip,

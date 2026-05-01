@@ -254,6 +254,10 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         create: &meerkat::SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, meerkat::ScheduleDomainError> {
+        let model = create
+            .require_model_name()
+            .map_err(meerkat::ScheduleDomainError::InvalidSchedule)?
+            .to_string();
         let session = Session::new();
         let session_id = session.id().clone();
         let bindings = self
@@ -285,7 +289,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         let result = self
             .service
             .create_session(CreateSessionRequest {
-                model: create.model.clone(),
+                model,
                 prompt: ContentInput::Text(String::new()),
                 system_prompt: prompt_system_prompt
                     .map(str::to_owned)
@@ -319,41 +323,8 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
         self.ensure_runtime_session_registered(session_id).await?;
         self.update_peer_ingress_context(session_id).await;
 
-        let turn_metadata = Some(
-            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: None,
-                keep_alive: None,
-                skill_references: (!dispatch.skill_refs.is_empty()).then(|| {
-                    dispatch
-                        .skill_refs
-                        .iter()
-                        .map(|skill_ref| skill_ref.key().clone())
-                        .collect()
-                }),
-                flow_tool_overlay: None,
-                additional_instructions: (!dispatch.additional_instructions.is_empty())
-                    .then(|| {
-                        dispatch
-                            .additional_instructions
-                            .iter()
-                            .map(|body| {
-                                meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
-                                    body: body.clone(),
-                                }
-                            })
-                            .collect()
-                    }),
-                model: None,
-                provider: None,
-                provider_params: None,
-                render_metadata: dispatch.render_metadata.clone(),
-                execution_kind: None,
-                peer_response_terminal_apply_intent: None,
-                connection_ref: None,
-            },
-        );
-        let mut prompt_input = PromptInput::from_content_input(dispatch.prompt, turn_metadata);
+        let mut prompt_input =
+            PromptInput::from_content_input(dispatch.prompt, dispatch.turn_metadata);
         prompt_input.header.source = InputOrigin::System;
         prompt_input.header.idempotency_key = Some(IdempotencyKey::new(
             schedule_attempt_idempotency_key(occurrence),
@@ -2486,9 +2457,7 @@ mod tests {
                     action: ScheduledSessionAction::Prompt {
                         prompt: "scheduled ping".into(),
                         system_prompt: None,
-                        render_metadata: None,
-                        skill_refs: Vec::new(),
-                        additional_instructions: Vec::new(),
+                        turn_metadata: None,
                     },
                 }),
                 misfire_policy: MisfirePolicy::Skip,

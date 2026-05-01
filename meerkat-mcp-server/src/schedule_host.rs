@@ -31,13 +31,6 @@ use crate::{
     MeerkatMcpState, canonical_skill_keys, compose_external_tool_dispatchers, runtime_ingress,
 };
 
-#[cfg(test)]
-fn materialized_preload_skills(
-    preload_skills: &[meerkat_core::skills::SkillKey],
-) -> Option<Vec<meerkat_core::skills::SkillKey>> {
-    (!preload_skills.is_empty()).then(|| preload_skills.to_vec())
-}
-
 #[derive(Clone)]
 struct McpScheduleContext {
     service: Arc<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>,
@@ -129,6 +122,10 @@ impl McpScheduleContext {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
+        let model = create
+            .require_model_name()
+            .map_err(ScheduleDomainError::InvalidSchedule)?
+            .to_string();
         let prepared = prepare_surface_session(&self.runtime_adapter)
             .await
             .map_err(ScheduleDomainError::Internal)?;
@@ -204,7 +201,7 @@ impl McpScheduleContext {
         };
 
         let request = CreateSessionRequest {
-            model: create.model.clone(),
+            model,
             prompt: ContentInput::Text(String::new()),
             system_prompt: prompt_system_prompt
                 .map(str::to_owned)
@@ -282,12 +279,6 @@ impl McpScheduleTargetAdapter {
     fn new(context: McpScheduleContext) -> Self {
         Self { context }
     }
-}
-
-fn scheduled_materialization_preload_skills(
-    create: &SessionMaterializationSpec,
-) -> Option<Vec<meerkat_core::skills::SkillKey>> {
-    (!create.preload_skills.is_empty()).then(|| create.preload_skills.clone())
 }
 
 #[async_trait]
@@ -444,7 +435,7 @@ async fn update_peer_ingress_context(_context: &McpScheduleContext, _session_id:
         // `keep_alive`, so we default to `false` — matches the
         // pre-retype `.unwrap_or(false)` fallback. Sessions that need
         // comms-driven keep-alive configure it through the canonical
-        // `SessionBuildOptions.keep_alive` on create.
+        // `RuntimeTurnMetadata.keep_alive` on create.
         let keep_alive = false;
         let comms_rt = _context.service.comms_runtime(_session_id).await;
         _context
@@ -460,32 +451,4 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .get("session_archived")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
-
-    fn fixture_skill_key(name: &str) -> SkillKey {
-        let skill_name = SkillName::parse(name).expect("fixture skill name should be valid");
-        SkillKey::new(SourceUuid::builtin(), skill_name)
-    }
-
-    #[test]
-    fn materialized_preload_skills_preserves_typed_skill_keys() {
-        let key = fixture_skill_key("email");
-
-        assert_eq!(
-            materialized_preload_skills(std::slice::from_ref(&key)),
-            Some(vec![key])
-        );
-    }
-
-    #[test]
-    fn materialized_preload_skills_leaves_empty_preload_unset() {
-        let preload_skills: Vec<SkillKey> = Vec::new();
-
-        assert_eq!(materialized_preload_skills(&preload_skills), None);
-    }
 }

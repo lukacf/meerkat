@@ -172,10 +172,10 @@ fn recovery_initial_turn_metadata(
     }
 
     let mut metadata = turn_metadata.unwrap_or_default();
-    if let Some(preload_skills) = preload_skills {
-        if metadata.skill_references.is_none() {
-            metadata.skill_references = Some(preload_skills);
-        }
+    if let Some(preload_skills) = preload_skills
+        && metadata.skill_references.is_none()
+    {
+        metadata.skill_references = Some(preload_skills);
     }
     if let Some(additional_instructions) = additional_instructions {
         let instructions = additional_instructions

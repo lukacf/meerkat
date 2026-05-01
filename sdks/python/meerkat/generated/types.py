@@ -118,7 +118,7 @@ class CommsParams:
 @dataclass
 class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
-    skills_enabled: bool = False
+    preload_skills: list[dict[str, str]] = field(default_factory=list)
     skill_refs: list[dict[str, str]] = field(default_factory=list)
 
 

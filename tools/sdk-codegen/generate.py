@@ -649,7 +649,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     if has_skills:
         types_content += "\n@dataclass\nclass SkillsParams:\n"
         types_content += '    """Skills parameters (available because skills capability is compiled)."""\n'
-        types_content += "    skills_enabled: bool = False\n"
+        types_content += "    preload_skills: list[dict[str, str]] = field(default_factory=list)\n"
         types_content += "    skill_refs: list[dict[str, str]] = field(default_factory=list)\n\n"
 
     params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))
@@ -1023,8 +1023,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     if has_skills:
         types_content += "\nexport interface SkillsParams {\n"
-        types_content += "  skills_enabled: boolean;\n"
-        types_content += "  skill_refs: Array<{ source_uuid: string; skill_name: string }>;\n"
+        types_content += "  preload_skills?: Array<{ source_uuid: string; skill_name: string }>;\n"
+        types_content += "  skill_refs?: Array<{ kind: \"structured\"; source_uuid: string; skill_name: string }>;\n"
         types_content += "}\n"
 
     params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))

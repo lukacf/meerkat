@@ -84,8 +84,8 @@ export interface CommsParams {
 }
 
 export interface SkillsParams {
-  skills_enabled: boolean;
-  skill_refs: Array<{ source_uuid: string; skill_name: string }>;
+  preload_skills?: Array<{ source_uuid: string; skill_name: string }>;
+  skill_refs?: Array<{ kind: "structured"; source_uuid: string; skill_name: string }>;
 }
 
 export interface McpAddParams {

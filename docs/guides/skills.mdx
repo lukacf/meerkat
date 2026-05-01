@@ -262,9 +262,9 @@ rkat run "Extract emails" --skill email-extractor
 
 Use typed keys for API and tool surfaces.
 
-### 2. Programmatic typed `skill_refs` (per-turn, recommended)
+### 2. Programmatic per-turn skill injection
 
-Pass tagged `skill_refs` in API requests to resolve and inject skills for a specific turn:
+Pass `turn_metadata.skill_references` in raw API requests to resolve and inject skills for a specific turn. SDKs expose `skill_refs` convenience options that serialize into this runtime metadata carrier:
 
 ```json
 {
@@ -272,18 +272,19 @@ Pass tagged `skill_refs` in API requests to resolve and inject skills for a spec
   "params": {
     "session_id": "...",
     "prompt": "Extract emails from this text",
-    "skill_refs": [
-      {
-        "kind": "structured",
-        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-        "skill_name": "email-extractor"
-      }
-    ]
+    "turn_metadata": {
+      "skill_references": [
+        {
+          "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+          "skill_name": "email-extractor"
+        }
+      ]
+    }
   }
 }
 ```
 
-Legacy `skill_references` strings are retired and rejected; use structured `skill_refs`.
+Legacy top-level per-turn `skill_refs` and `skill_references` strings are retired and rejected; use typed keys in `turn_metadata.skill_references`.
 
 ### 3. Preloading at session creation
 

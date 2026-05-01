@@ -8583,7 +8583,7 @@
           },
           "preload_skills": {
             "items": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/SkillKey"
             },
             "type": "array"
           },
@@ -8611,7 +8611,7 @@
           },
           "skill_refs": {
             "items": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/SkillRef"
             },
             "type": "array"
           },
@@ -10273,13 +10273,13 @@
         "type": "object"
       },
       "SkillKey": {
-        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "additionalProperties": false,
         "properties": {
           "skill_name": {
-            "$ref": "#/components/schemas/SkillName"
+            "type": "string"
           },
           "source_uuid": {
-            "$ref": "#/components/schemas/SourceUuid"
+            "type": "string"
           }
         },
         "required": [
@@ -10349,22 +10349,25 @@
         "type": "object"
       },
       "SkillRef": {
-        "description": "Structured skill reference for wire/surface input.\n\nPost-V4 this has exactly one variant — `Structured` — and is kept only as a\ntyped enum to leave room for future source-scoped variants (e.g. alias or\ncapability-scoped forms) without changing the trait surface. No legacy\nstring form, no slash-delimited path, no untagged fallback.",
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/SkillKey",
-            "properties": {
-              "kind": {
-                "const": "structured",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "structured",
+            "type": "string"
+          },
+          "skill_name": {
+            "type": "string"
+          },
+          "source_uuid": {
+            "type": "string"
           }
-        ]
+        },
+        "required": [
+          "kind",
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
       },
       "SkillRuntimeDiagnostics": {
         "description": "Runtime-visible diagnostics for skill health and quarantined entries.",

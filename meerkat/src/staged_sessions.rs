@@ -170,6 +170,29 @@ impl StagedSessionRegistry {
         }
     }
 
+    /// Validate a keep-alive override against a staged slot without mutating it.
+    pub async fn validate_keep_alive_override(
+        &self,
+        id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<bool, StagedLifecycleError> {
+        let slots = self.slots.read().await;
+        let Some(slot) = slots.get(id) else {
+            return Ok(false);
+        };
+        match &slot.phase {
+            StagedPhase::Staged { build_config } => {
+                if keep_alive && build_config.comms_name.is_none() {
+                    return Err(StagedLifecycleError::KeepAliveRequiresCommsName);
+                }
+                Ok(true)
+            }
+            StagedPhase::Promoting { .. } => {
+                Err(StagedLifecycleError::AlreadyPromoting(id.clone()))
+            }
+        }
+    }
+
     /// All slots, optionally filtered by labels, as (id, info) pairs.
     pub async fn list(
         &self,
@@ -241,14 +264,18 @@ impl StagedSessionRegistry {
     pub async fn take_promoting_system_context_state(
         &self,
         id: &SessionId,
-    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
+    ) -> Option<(SessionSystemContextState, SessionSystemContextState, u64)> {
         let mut slots = self.slots.write().await;
         let slot = slots.remove(id)?;
         match slot.phase {
             StagedPhase::Promoting {
                 starting_system_context_state,
                 current_system_context_state,
-            } => Some((starting_system_context_state, current_system_context_state)),
+            } => Some((
+                starting_system_context_state,
+                current_system_context_state,
+                slot.updated_at_secs,
+            )),
             StagedPhase::Staged { build_config } => {
                 // Should not happen on the success path; put it back.
                 slots.insert(

@@ -2173,27 +2173,30 @@ impl SessionRuntime {
 
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata.as_ref());
 
+        #[cfg(feature = "comms")]
+        let pending_keep_alive_override_validated = if let Some(keep_alive) = keep_alive_override {
+            self.validate_pending_keep_alive_override(session_id, keep_alive)
+                .await?
+        } else {
+            false
+        };
+
         self.ensure_runtime_executor(session_id).await?;
 
         // Manage comms drain lifecycle based on keep_alive override.
         #[cfg(feature = "comms")]
         {
-            let pending_keep_alive_override_applied = if let Some(keep_alive) = keep_alive_override
+            if !pending_keep_alive_override_validated
+                && !self.staged_sessions.contains(session_id).await
             {
-                self.apply_pending_keep_alive_override(session_id, keep_alive)
-                    .await?
-            } else {
-                false
-            };
-            let keep_alive = match keep_alive_override {
-                Some(val) => val,
-                None => self
-                    .load_persisted_session(session_id)
-                    .await?
-                    .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
-                    .unwrap_or(false),
-            };
-            if !pending_keep_alive_override_applied {
+                let keep_alive = match keep_alive_override {
+                    Some(val) => val,
+                    None => self
+                        .load_persisted_session(session_id)
+                        .await?
+                        .and_then(|s| s.session_metadata().map(|m| m.keep_alive))
+                        .unwrap_or(false),
+                };
                 let comms_rt = self.service.comms_runtime(session_id).await;
                 if keep_alive && comms_rt.is_none() {
                     // Check if the runtime adapter already has comms configured
@@ -2440,7 +2443,9 @@ impl SessionRuntime {
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata);
 
         #[cfg(feature = "comms")]
-        if let Some(keep_alive) = keep_alive_override {
+        if let Some(keep_alive) = keep_alive_override
+            && !self.staged_sessions.contains(session_id).await
+        {
             self.apply_runtime_turn_keep_alive_override_before_validation(session_id, keep_alive)
                 .await?;
         }
@@ -2726,8 +2731,11 @@ impl SessionRuntime {
                     primitive.contributing_input_ids().to_vec(),
                 )
                 .await;
-            if let Some((starting_system_context_state, current_system_context_state)) =
-                self.take_promoting_system_context_state(session_id).await
+            if let Some((
+                starting_system_context_state,
+                current_system_context_state,
+                _updated_at_secs,
+            )) = self.take_promoting_system_context_state(session_id).await
                 && let Err(err) = self
                     .replay_promoted_system_context(
                         session_id,
@@ -3133,8 +3141,11 @@ impl SessionRuntime {
                             },
                         )
                         .await;
-                    if let Some((starting_system_context_state, current_system_context_state)) =
-                        self.take_promoting_system_context_state(session_id).await
+                    if let Some((
+                        starting_system_context_state,
+                        current_system_context_state,
+                        _updated_at_secs,
+                    )) = self.take_promoting_system_context_state(session_id).await
                         && let Err(err) = self
                             .replay_promoted_system_context(
                                 session_id,
@@ -3266,11 +3277,15 @@ impl SessionRuntime {
         labels: Option<BTreeMap<String, String>>,
         deferred_prompt: Option<ContentInput>,
         created_at_secs: u64,
-        updated_at_secs: u64,
+        mut updated_at_secs: u64,
     ) {
-        if let Some((_starting_system_context_state, current_system_context_state)) =
-            self.take_promoting_system_context_state(session_id).await
+        if let Some((
+            _starting_system_context_state,
+            current_system_context_state,
+            promoting_updated_at_secs,
+        )) = self.take_promoting_system_context_state(session_id).await
         {
+            updated_at_secs = updated_at_secs.max(promoting_updated_at_secs);
             let session = build_config
                 .resume_session
                 .get_or_insert_with(|| Session::with_id(session_id.clone()));
@@ -3386,7 +3401,7 @@ impl SessionRuntime {
     async fn take_promoting_system_context_state(
         &self,
         session_id: &SessionId,
-    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
+    ) -> Option<(SessionSystemContextState, SessionSystemContextState, u64)> {
         self.staged_sessions
             .take_promoting_system_context_state(session_id)
             .await
@@ -3533,6 +3548,36 @@ impl SessionRuntime {
             .await
         {
             Ok(applied) => Ok(applied),
+            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!("session {session_id} is already being materialized"),
+                data: None,
+            }),
+            Err(meerkat::StagedLifecycleError::KeepAliveRequiresCommsName) => Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "keep_alive requires a session created with comms_name".to_string(),
+                data: None,
+            }),
+            Err(err) => Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("staged session lifecycle error: {err}"),
+                data: None,
+            }),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    async fn validate_pending_keep_alive_override(
+        &self,
+        session_id: &SessionId,
+        keep_alive: bool,
+    ) -> Result<bool, RpcError> {
+        match self
+            .staged_sessions
+            .validate_keep_alive_override(session_id, keep_alive)
+            .await
+        {
+            Ok(validated) => Ok(validated),
             Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => Err(RpcError {
                 code: error::SESSION_BUSY,
                 message: format!("session {session_id} is already being materialized"),
@@ -7736,7 +7781,7 @@ mod tests {
             .llm_identity_from_pending_build(&build_config)
             .await
             .expect("valid pending identity");
-        let now = now_unix_secs();
+        let original_updated_at_secs = 1;
         runtime
             .staged_sessions
             .stage(
@@ -7748,8 +7793,8 @@ mod tests {
                     },
                     labels: None,
                     deferred_prompt: None,
-                    created_at_secs: now,
-                    updated_at_secs: now,
+                    created_at_secs: original_updated_at_secs,
+                    updated_at_secs: original_updated_at_secs,
                 },
             )
             .await
@@ -7786,6 +7831,16 @@ mod tests {
                 slot.updated_at_secs,
             )
             .await;
+
+        let restored_info = runtime
+            .staged_sessions
+            .info(&session_id)
+            .await
+            .expect("pending session should be restored");
+        assert!(
+            restored_info.updated_at_secs > original_updated_at_secs,
+            "rollback must preserve the timestamp from appends accepted during promotion"
+        );
 
         let duplicate = runtime
             .append_system_context(&session_id, append_req)
@@ -8704,6 +8759,58 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[tokio::test]
+    async fn runtime_turn_pending_keep_alive_rolls_back_when_materialization_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let mut build = mock_build_config();
+        build.comms_name = Some("runtime-rollback-agent".to_string());
+        build.keep_alive = false;
+
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create staged session");
+
+        let mut turn_metadata = keep_alive_metadata(true);
+        turn_metadata.provider_params = Some(provider_params_override(
+            "anthropic",
+            serde_json::json!({ "unsupported_provider_param": true }),
+        ));
+        let (tx, _rx) = mpsc::channel(100);
+        let err = runtime
+            .start_turn_via_runtime(&session_id, "test".into(), tx, Some(turn_metadata))
+            .await
+            .expect_err("invalid provider_params should fail pending materialization");
+        assert!(
+            err.message.contains("invalid provider_params"),
+            "unexpected error: {err:?}"
+        );
+
+        let slot = runtime
+            .staged_sessions
+            .begin_promotion(&session_id)
+            .await
+            .expect("pending session should remain staged")
+            .expect("pending session should be restored");
+        assert!(
+            !slot.build_config.keep_alive,
+            "rejected runtime keep_alive override must not persist in the staged build config"
+        );
+        runtime
+            .restore_pending_from_promoting(
+                &session_id,
+                *slot.build_config,
+                slot.effective_llm_identity,
+                slot.labels,
+                slot.deferred_prompt,
+                slot.created_at_secs,
+                slot.updated_at_secs,
+            )
+            .await;
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
     async fn turn_start_inherits_persisted_keep_alive_when_live_session_is_missing() {
         let temp = tempfile::tempdir().unwrap();
         let mut runtime = make_runtime(temp_factory(&temp), 10);
@@ -8881,7 +8988,7 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[tokio::test]
-    async fn runtime_submitted_keep_alive_set_persists_before_staged_turn_validation_failure() {
+    async fn runtime_submitted_keep_alive_set_rolls_back_before_staged_turn_validation_failure() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let mut build = mock_build_config();
@@ -8922,8 +9029,8 @@ mod tests {
             .expect("session should persist after materialization");
         let metadata = stored.session_metadata().expect("session metadata");
         assert!(
-            metadata.keep_alive,
-            "runtime-submitted keep_alive Set must persist through staged validation failure"
+            !metadata.keep_alive,
+            "rejected runtime-submitted keep_alive Set must not persist through staged validation failure"
         );
     }
 

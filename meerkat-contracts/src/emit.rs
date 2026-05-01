@@ -478,6 +478,30 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
 
         components.insert("JsonValue".to_string(), json_value_schema());
         components.insert(
+            "SkillKey".to_string(),
+            closed_object_schema(
+                vec![
+                    ("source_uuid", string_schema()),
+                    ("skill_name", string_schema()),
+                ],
+                vec!["source_uuid", "skill_name"],
+            ),
+        );
+        components.insert(
+            "SkillRef".to_string(),
+            closed_object_schema(
+                vec![
+                    (
+                        "kind",
+                        serde_json::json!({ "type": "string", "const": "structured" }),
+                    ),
+                    ("source_uuid", string_schema()),
+                    ("skill_name", string_schema()),
+                ],
+                vec!["kind", "source_uuid", "skill_name"],
+            ),
+        );
+        components.insert(
             "PlainTextResponse".to_string(),
             serde_json::json!({ "type": "string" }),
         );
@@ -576,14 +600,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                         "preload_skills",
                         serde_json::json!({
                             "type": "array",
-                            "items": json_value
+                            "items": schema_ref("SkillKey")
                         }),
                     ),
                     (
                         "skill_refs",
                         serde_json::json!({
                             "type": "array",
-                            "items": json_value
+                            "items": schema_ref("SkillRef")
                         }),
                     ),
                     ("labels", labels),

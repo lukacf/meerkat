@@ -22,6 +22,11 @@ use std::any::{Any, TypeId};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tokio::sync::mpsc;
 
 use super::{
@@ -269,7 +274,7 @@ impl AgentFactoryPolicyBridgeRegistration {
                 matches!(self.package_name, "meerkat" | "meerkat_unit_test")
                     && manifest_dir_matches(self.manifest_dir, expected_facade_manifest_dir())
                     && source_file_matches(self.source_file, "meerkat", "src/factory.rs")
-                    && self.source_fingerprint == FACADE_FACTORY_SOURCE_FINGERPRINT
+                    && self.source_content_fingerprint_matches(FACADE_FACTORY_SOURCE_FINGERPRINT)
             }
             AgentFactoryPolicyBridgeRegistrationKind::CoreHooksTest => {
                 cfg!(debug_assertions)
@@ -282,9 +287,17 @@ impl AgentFactoryPolicyBridgeRegistration {
                         "meerkat-core",
                         "tests/hooks_behavior.rs",
                     )
-                    && self.source_fingerprint == CORE_HOOKS_TEST_SOURCE_FINGERPRINT
+                    && self.source_content_fingerprint_matches(CORE_HOOKS_TEST_SOURCE_FINGERPRINT)
             }
         }
+    }
+
+    fn source_content_fingerprint_matches(&self, expected: u64) -> bool {
+        if self.source_fingerprint != expected {
+            return false;
+        }
+        source_file_content_fingerprint(self.manifest_dir, self.source_file)
+            .is_none_or(|actual| actual == expected)
     }
 }
 
@@ -318,6 +331,39 @@ fn source_file_matches(source_file: &str, package_dir_name: &str, relative_file:
     source_file == relative_file
         || source_file == format!("{package_dir_name}/{relative_file}")
         || source_file.ends_with(&format!("/{package_dir_name}/{relative_file}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn source_file_content_fingerprint(manifest_dir: &str, source_file: &str) -> Option<u64> {
+    source_file_content_candidates(manifest_dir, source_file)
+        .into_iter()
+        .find_map(|path| {
+            fs::read(path)
+                .ok()
+                .map(|bytes| __meerkat_agent_factory_policy_source_fingerprint(&bytes))
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn source_file_content_fingerprint(_manifest_dir: &str, _source_file: &str) -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn source_file_content_candidates(manifest_dir: &str, source_file: &str) -> Vec<PathBuf> {
+    let source = Path::new(source_file);
+    if source.is_absolute() {
+        return vec![source.to_path_buf()];
+    }
+
+    let manifest = Path::new(manifest_dir);
+    let mut candidates = Vec::with_capacity(3);
+    candidates.push(manifest.join(source));
+    if let Some(workspace) = manifest.parent() {
+        candidates.push(workspace.join(source));
+    }
+    candidates.push(source.to_path_buf());
+    candidates
 }
 
 fn normalized_path(path: &str) -> String {

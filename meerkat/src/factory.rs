@@ -37,48 +37,27 @@ fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactor
     struct AuthorityRepr {
         guard_type: TypeId,
         source_type: TypeId,
+        witness_type: TypeId,
     }
 
     let guard_type = agent_factory_build_authority_guard_type();
     let source_type = agent_factory_build_authority_source_type();
+    let witness_type = meerkat_agent_build_authority::AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE();
     let authority = AuthorityRepr {
         guard_type,
         source_type,
+        witness_type,
     };
 
-    // SAFETY: the authority crate validates both private marker TypeIds
-    // against the single facade registration above. The concrete authority
-    // representation is intentionally opaque to downstream dependents.
+    // SAFETY: the facade stamps private marker TypeIds plus the
+    // authority-crate witness. The concrete authority representation is
+    // intentionally opaque to downstream dependents.
     unsafe {
         std::mem::transmute::<
             AuthorityRepr,
             meerkat_agent_build_authority::AgentFactoryBuildAuthority,
         >(authority)
     }
-}
-
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn __meerkat_agent_factory_build_authority_validate(
-    authority: *const std::ffi::c_void,
-) -> bool {
-    #[allow(dead_code)]
-    #[derive(Clone, Copy)]
-    struct AuthorityRepr {
-        guard_type: TypeId,
-        source_type: TypeId,
-    }
-
-    let Some(authority) = ({
-        // SAFETY: core passes a reference-derived pointer when validating the
-        // typed factory authority. Null or invalid pointers fail closed.
-        unsafe { authority.cast::<AuthorityRepr>().as_ref() }
-    }) else {
-        return false;
-    };
-
-    authority.guard_type == agent_factory_build_authority_guard_type()
-        && authority.source_type == agent_factory_build_authority_source_type()
 }
 
 /// Default system prompt for wasm32 builds.

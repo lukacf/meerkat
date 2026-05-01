@@ -165,11 +165,12 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("CANONICAL_AUTHORITY")
         && !source.contains("AuthoritySeal")
         && !source.contains("words: [u64; 4]")
+        && !source.contains("__meerkat_agent_factory_build_authority_validate")
         && source.matches("pub fn ").count() == 1
         && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
         && source.contains("guard_type: TypeId")
         && source.contains("source_type: TypeId")
-        && source.contains("__meerkat_agent_factory_build_authority_validate")
+        && source.contains("witness_type: TypeId")
         && !source.contains("AgentFactoryBuildAuthorityRegistration")
         && !source.contains("inventory::collect!")
         && !source.contains("inventory::iter")
@@ -452,6 +453,69 @@ meerkat-core = {{ path = "{}" }}
             || stderr.contains("is_canonical_factory_authority")
             || stderr.contains("assertion failed"),
         "downstream direct-authority transmute fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_direct_authority_dep_cannot_spoof_validator_symbol_for_factory_policy_finalizer()
+-> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_direct_authority_dep_cannot_spoof_validator_symbol_for_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-validator-symbol"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat-agent-build-authority = {{ path = "{}" }}
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat-agent-build-authority").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!(
+            "fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs"
+        ),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream validator-symbol fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        (stderr.contains("assertion failed") && stderr.contains("is_canonical_factory_authority"))
+            || stderr.contains("InvalidBuildAuthority"),
+        "downstream validator-symbol fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }

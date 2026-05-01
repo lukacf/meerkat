@@ -414,7 +414,7 @@ fn first_system_prompt_content(session: &Session) -> Option<&str> {
 }
 
 fn runtime_context_base_differs(stored: &Session, live: &Session) -> bool {
-    stored.system_context_state() != live.system_context_state()
+    stored.metadata() != live.metadata()
         || first_system_prompt_content(stored) != first_system_prompt_content(live)
 }
 
@@ -5426,6 +5426,113 @@ mod tests {
         assert!(
             !system_text.contains("context that must wait for rematerialization"),
             "failed context append must not be committed before rematerialization: {system_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_context_append_evicts_same_length_runtime_metadata_drift() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request_with_metadata(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+
+        service
+            .apply_runtime_turn(
+                &result.session_id,
+                RunId::new(),
+                runtime_content_turn_request("runtime committed turn"),
+                RunApplyBoundary::Immediate,
+                vec![],
+            )
+            .await
+            .expect("runtime-backed turn should succeed");
+        let live_before = service
+            .export_live_session(&result.session_id)
+            .await
+            .expect("live session should export");
+
+        let mut newer_runtime_session = live_before.clone();
+        let mut metadata = newer_runtime_session
+            .session_metadata()
+            .expect("fixture should seed session metadata");
+        metadata.model = "newer-runtime-model".to_string();
+        metadata.provider_params = Some(serde_json::json!({ "temperature": 0.2 }));
+        metadata.keep_alive = true;
+        newer_runtime_session
+            .set_session_metadata(metadata)
+            .expect("runtime metadata should serialize");
+        assert_eq!(
+            newer_runtime_session.messages().len(),
+            live_before.messages().len(),
+            "test must seed same-length runtime metadata drift"
+        );
+        assert_ne!(
+            newer_runtime_session.metadata(),
+            live_before.metadata(),
+            "test must seed newer runtime-owned metadata map state"
+        );
+
+        let session_snapshot =
+            serde_json::to_vec(&newer_runtime_session).expect("runtime snapshot should serialize");
+        runtime_store
+            .commit_session_boundary(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
+                    &result.session_id,
+                ),
+                SessionDelta { session_snapshot },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("runtime snapshot commit should succeed");
+
+        let error = service
+            .apply_runtime_context_appends(
+                &result.session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "context that must wait for metadata rematerialization".to_string(),
+                    source: Some("runtime:test".to_string()),
+                    idempotency_key: Some("stale-live-metadata-context".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect_err("same-length runtime metadata drift should evict stale live handle");
+
+        assert!(
+            error.to_string().contains("session not found"),
+            "unexpected error after stale live eviction: {error}"
+        );
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should remain present");
+        let authoritative_metadata = authoritative
+            .session_metadata()
+            .expect("authoritative metadata should remain present");
+        assert_eq!(authoritative_metadata.model, "newer-runtime-model");
+        assert!(authoritative_metadata.keep_alive);
+        assert_eq!(
+            authoritative_metadata.provider_params,
+            Some(serde_json::json!({ "temperature": 0.2 }))
         );
     }
 

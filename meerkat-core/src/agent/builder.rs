@@ -870,7 +870,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         assert_eq!(agent.runtime_execution_kind, None);
@@ -888,7 +888,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         let err = agent
@@ -917,7 +917,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
 
         let err = agent
@@ -942,7 +942,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
         agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
 
@@ -973,7 +973,7 @@ mod tests {
                 crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
             ))
             .require_runtime_execution_kind_stamp()
-            .build(client, tools, store)
+            .build_standalone(client, tools, store)
             .await;
         agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
 

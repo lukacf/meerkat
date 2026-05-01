@@ -65,7 +65,7 @@ enum RequestTerminalKind<T> {
     /// Inline terminal classified by the lifecycle authority. Cancellation
     /// requests are ignored for this response because the machine classified
     /// the tracked request as inline.
-    Inline(T),
+    Inline { lifecycle_key: String, payload: T },
     /// Inline terminal for untracked observation work. Supplying a tracked key
     /// with this terminal is rejected so public callers cannot bypass
     /// lifecycle classification.
@@ -77,16 +77,17 @@ enum RequestTerminalKind<T> {
     /// Failure produced before a session-owned lifecycle authority could be
     /// bound. This may only carry a failed terminal; successful terminals still
     /// fail closed without authority.
-    PreAuthorityFailure(T),
+    PreAuthorityFailure { lifecycle_key: String, payload: T },
     /// Committed terminal. The request's side effects have been persisted and
     /// the client must observe the result; late cancel does not override this.
-    Publish(T),
+    Publish { lifecycle_key: String, payload: T },
     /// Uncommitted terminal. Side effects did not land; a late cancel can
     /// supersede this via [`CompleteOutcome::SupersededByCancel`].
-    RespondWithoutPublish(T),
+    RespondWithoutPublish { lifecycle_key: String, payload: T },
     /// Semantic classification failed because the request lifecycle authority
-    /// rejected the transition or was unavailable.
+    /// rejected the transition or was unavailable for a tracked request.
     LifecycleError {
+        lifecycle_key: String,
         error: RequestTransitionError,
         payload: T,
     },
@@ -106,13 +107,13 @@ impl<T> RequestTerminal<T> {
     }
 
     pub fn is_publish(&self) -> bool {
-        matches!(self.kind, RequestTerminalKind::Publish(_))
+        matches!(self.kind, RequestTerminalKind::Publish { .. })
     }
 
     pub fn is_respond_without_publish(&self) -> bool {
         matches!(
             self.kind,
-            RequestTerminalKind::RespondWithoutPublish(_)
+            RequestTerminalKind::RespondWithoutPublish { .. }
                 | RequestTerminalKind::UntrackedRespondWithoutPublish(_)
         )
     }
@@ -121,12 +122,12 @@ impl<T> RequestTerminal<T> {
     /// committed or observational.
     pub fn payload(&self) -> &T {
         match &self.kind {
-            RequestTerminalKind::Inline(payload)
+            RequestTerminalKind::Inline { payload, .. }
             | RequestTerminalKind::UntrackedInline(payload)
             | RequestTerminalKind::UntrackedRespondWithoutPublish(payload)
-            | RequestTerminalKind::PreAuthorityFailure(payload)
-            | RequestTerminalKind::Publish(payload)
-            | RequestTerminalKind::RespondWithoutPublish(payload)
+            | RequestTerminalKind::PreAuthorityFailure { payload, .. }
+            | RequestTerminalKind::Publish { payload, .. }
+            | RequestTerminalKind::RespondWithoutPublish { payload, .. }
             | RequestTerminalKind::LifecycleError { payload, .. } => payload,
         }
     }
@@ -278,11 +279,15 @@ impl RequestContext {
         let Some(lifecycle) = self.bound_lifecycle() else {
             if matches!(outcome, SurfaceRequestTerminalOutcome::Failed) {
                 return RequestTerminal {
-                    kind: RequestTerminalKind::PreAuthorityFailure(response),
+                    kind: RequestTerminalKind::PreAuthorityFailure {
+                        lifecycle_key: self.entry.lifecycle_key.clone(),
+                        payload: response,
+                    },
                 };
             }
             return RequestTerminal {
                 kind: RequestTerminalKind::LifecycleError {
+                    lifecycle_key: self.entry.lifecycle_key.clone(),
                     error: RequestTransitionError::AuthorityUnavailable,
                     payload: response,
                 },
@@ -293,6 +298,7 @@ impl RequestContext {
             Err(error) => {
                 return RequestTerminal {
                     kind: RequestTerminalKind::LifecycleError {
+                        lifecycle_key: self.entry.lifecycle_key.clone(),
                         error,
                         payload: response,
                     },
@@ -301,13 +307,22 @@ impl RequestContext {
         };
         match disposition {
             SurfaceRequestTerminalDisposition::Publish => RequestTerminal {
-                kind: RequestTerminalKind::Publish(response),
+                kind: RequestTerminalKind::Publish {
+                    lifecycle_key: self.entry.lifecycle_key.clone(),
+                    payload: response,
+                },
             },
             SurfaceRequestTerminalDisposition::RespondWithoutPublish => RequestTerminal {
-                kind: RequestTerminalKind::RespondWithoutPublish(response),
+                kind: RequestTerminalKind::RespondWithoutPublish {
+                    lifecycle_key: self.entry.lifecycle_key.clone(),
+                    payload: response,
+                },
             },
             SurfaceRequestTerminalDisposition::Inline => RequestTerminal {
-                kind: RequestTerminalKind::Inline(response),
+                kind: RequestTerminalKind::Inline {
+                    lifecycle_key: self.entry.lifecycle_key.clone(),
+                    payload: response,
+                },
             },
         }
     }
@@ -420,6 +435,7 @@ impl RequestContext {
 #[derive(Clone)]
 struct SurfaceRequestMechanics {
     namespace: Arc<str>,
+    next_lifecycle_id: Arc<AtomicU64>,
     entries: Arc<Mutex<HashMap<String, Arc<RequestEntry>>>>,
 }
 
@@ -427,12 +443,14 @@ impl SurfaceRequestMechanics {
     fn new() -> Self {
         Self {
             namespace: next_executor_namespace(),
+            next_lifecycle_id: Arc::new(AtomicU64::new(1)),
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn lifecycle_key(&self, key: &str) -> String {
-        format!("{}:{key}", self.namespace.as_ref())
+    fn next_lifecycle_key(&self, key: &str) -> String {
+        let lifecycle_id = self.next_lifecycle_id.fetch_add(1, Ordering::Relaxed);
+        format!("{}:{lifecycle_id}:{key}", self.namespace.as_ref())
     }
 
     fn try_begin_request(
@@ -446,7 +464,7 @@ impl SurfaceRequestMechanics {
         if entries.contains_key(&key) {
             return Err(RequestAlreadyExists);
         }
-        let lifecycle_key = self.lifecycle_key(&key);
+        let lifecycle_key = self.next_lifecycle_key(&key);
         let entry = Arc::new(RequestEntry::new(kind, lifecycle_key, initial_cancel));
         entries.insert(key.clone(), Arc::clone(&entry));
         Ok(RequestContext { key, entry })
@@ -498,60 +516,146 @@ impl SurfaceRequestMechanics {
         context.cancel_bound_lifecycle(lifecycle).await
     }
 
-    fn bound_lifecycle(
-        &self,
+    fn matching_entry(
+        entries: &HashMap<String, Arc<RequestEntry>>,
         key: &str,
-    ) -> Option<(Arc<RequestEntry>, Arc<dyn SurfaceRequestLifecycleHandle>)> {
-        let entry = lock_or_recover(&self.entries).get(key).cloned()?;
-        let lifecycle = lock_or_recover(&entry.lifecycle).clone()?;
-        Some((entry, lifecycle))
-    }
-
-    fn require_bound_lifecycle(
-        &self,
-        key: &str,
-    ) -> Result<(Arc<RequestEntry>, Arc<dyn SurfaceRequestLifecycleHandle>), RequestTransitionError>
-    {
-        let entry = lock_or_recover(&self.entries)
+        expected_lifecycle_key: Option<&str>,
+    ) -> Result<Arc<RequestEntry>, RequestTransitionError> {
+        let entry = entries
             .get(key)
             .cloned()
             .ok_or(RequestTransitionError::NotFound)?;
-        let lifecycle = lock_or_recover(&entry.lifecycle)
+        if expected_lifecycle_key.is_some_and(|expected| entry.lifecycle_key != expected) {
+            return Err(RequestTransitionError::NotFound);
+        }
+        Ok(entry)
+    }
+
+    fn entry_lifecycle(
+        entry: &RequestEntry,
+    ) -> Result<Arc<dyn SurfaceRequestLifecycleHandle>, RequestTransitionError> {
+        lock_or_recover(&entry.lifecycle)
             .clone()
-            .ok_or(RequestTransitionError::AuthorityUnavailable)?;
-        Ok((entry, lifecycle))
+            .ok_or(RequestTransitionError::AuthorityUnavailable)
+    }
+
+    fn remove_with_cleanup_decision(
+        entries: &mut HashMap<String, Arc<RequestEntry>>,
+        key: &str,
+        run_unpublished_cleanup: bool,
+    ) -> Option<RequestAsyncAction> {
+        let removed = entries.remove(key);
+        if run_unpublished_cleanup {
+            removed.and_then(|entry| lock_or_recover(&entry.unpublished_cleanup).take())
+        } else {
+            None
+        }
     }
 
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
-        let (entry, lifecycle) = self.require_bound_lifecycle(key)?;
+        let mut entries = lock_or_recover(&self.entries);
+        let entry = Self::matching_entry(&entries, key, None)?;
+        let lifecycle = Self::entry_lifecycle(&entry)?;
         match lifecycle.publish_and_complete(&entry.lifecycle_key) {
             Ok(()) => {
-                lock_or_recover(&self.entries).remove(key);
+                entries.remove(key);
                 Ok(())
             }
             Err(err) => Err(err),
         }
     }
 
+    fn publish_or_cancelled_decision(
+        &self,
+        key: &str,
+        expected_lifecycle_key: Option<&str>,
+    ) -> Result<(PublishOutcome, Option<RequestAsyncAction>), RequestTransitionError> {
+        let mut entries = lock_or_recover(&self.entries);
+        let entry = Self::matching_entry(&entries, key, expected_lifecycle_key)?;
+        let lifecycle = Self::entry_lifecycle(&entry)?;
+        match lifecycle.publish_and_complete(&entry.lifecycle_key) {
+            Ok(()) => {
+                entries.remove(key);
+                Ok((PublishOutcome::Published, None))
+            }
+            Err(RequestTransitionError::AlreadyTerminal {
+                current: SurfaceRequestPhase::Cancelled,
+            }) => {
+                let transition = lifecycle.finish_unpublished(&entry.lifecycle_key)?;
+                let cleanup = Self::remove_with_cleanup_decision(
+                    &mut entries,
+                    key,
+                    transition.run_unpublished_cleanup,
+                );
+                Ok((PublishOutcome::CancelledBeforePublish, cleanup))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn publish_or_cancelled(
+        &self,
+        key: &str,
+    ) -> Result<PublishOutcome, RequestTransitionError> {
+        let (outcome, cleanup) = self.publish_or_cancelled_decision(key, None)?;
+        if let Some(cleanup) = cleanup {
+            cleanup().await;
+        }
+        Ok(outcome)
+    }
+
+    async fn publish_or_cancelled_for_lifecycle_key(
+        &self,
+        key: &str,
+        lifecycle_key: &str,
+    ) -> Result<PublishOutcome, RequestTransitionError> {
+        let (outcome, cleanup) = self.publish_or_cancelled_decision(key, Some(lifecycle_key))?;
+        if let Some(cleanup) = cleanup {
+            cleanup().await;
+        }
+        Ok(outcome)
+    }
+
+    fn finish_unpublished_decision(
+        &self,
+        key: &str,
+        expected_lifecycle_key: Option<&str>,
+    ) -> Result<(CompleteOutcome, Option<RequestAsyncAction>), RequestTransitionError> {
+        let mut entries = lock_or_recover(&self.entries);
+        let entry = Self::matching_entry(&entries, key, expected_lifecycle_key)?;
+        let lifecycle = Self::entry_lifecycle(&entry)?;
+        let transition = lifecycle.finish_unpublished(&entry.lifecycle_key)?;
+        let cleanup = Self::remove_with_cleanup_decision(
+            &mut entries,
+            key,
+            transition.run_unpublished_cleanup,
+        );
+        Ok((transition.outcome, cleanup))
+    }
+
     async fn finish_unpublished(
         &self,
         key: &str,
     ) -> Result<CompleteOutcome, RequestTransitionError> {
-        let (entry, lifecycle) = self.require_bound_lifecycle(key)?;
-        let transition = lifecycle.finish_unpublished(&entry.lifecycle_key)?;
-        let cleanup = if transition.run_unpublished_cleanup {
-            lock_or_recover(&self.entries)
-                .remove(key)
-                .and_then(|entry| lock_or_recover(&entry.unpublished_cleanup).take())
-        } else {
-            lock_or_recover(&self.entries).remove(key);
-            None
-        };
+        let (outcome, cleanup) = self.finish_unpublished_decision(key, None)?;
 
         if let Some(cleanup) = cleanup {
             cleanup().await;
         }
-        Ok(transition.outcome)
+        Ok(outcome)
+    }
+
+    async fn finish_unpublished_for_lifecycle_key(
+        &self,
+        key: &str,
+        lifecycle_key: &str,
+    ) -> Result<CompleteOutcome, RequestTransitionError> {
+        let (outcome, cleanup) = self.finish_unpublished_decision(key, Some(lifecycle_key))?;
+
+        if let Some(cleanup) = cleanup {
+            cleanup().await;
+        }
+        Ok(outcome)
     }
 
     fn is_empty(&self) -> bool {
@@ -569,11 +673,21 @@ impl SurfaceRequestMechanics {
             .collect()
     }
 
-    fn remove(&self, key: &str) {
-        if let Some((entry, lifecycle)) = self.bound_lifecycle(key) {
+    fn remove_for_lifecycle_key(
+        &self,
+        key: &str,
+        lifecycle_key: &str,
+    ) -> Result<(), RequestTransitionError> {
+        let entry = {
+            let mut entries = lock_or_recover(&self.entries);
+            let entry = Self::matching_entry(&entries, key, Some(lifecycle_key))?;
+            entries.remove(key);
+            entry
+        };
+        if let Some(lifecycle) = lock_or_recover(&entry.lifecycle).clone() {
             lifecycle.remove(&entry.lifecycle_key);
         }
-        lock_or_recover(&self.entries).remove(key);
+        Ok(())
     }
 }
 
@@ -689,16 +803,7 @@ impl SurfaceRequestExecutor {
         &self,
         key: &str,
     ) -> Result<PublishOutcome, RequestTransitionError> {
-        match self.publish_and_complete(key) {
-            Ok(()) => Ok(PublishOutcome::Published),
-            Err(RequestTransitionError::AlreadyTerminal {
-                current: SurfaceRequestPhase::Cancelled,
-            }) => {
-                let _ = self.finish_unpublished(key).await?;
-                Ok(PublishOutcome::CancelledBeforePublish)
-            }
-            Err(err) => Err(err),
-        }
+        self.mechanics.publish_or_cancelled(key).await
     }
 
     /// Uncommitted-terminal transition.
@@ -729,63 +834,87 @@ impl SurfaceRequestExecutor {
     ) -> RequestTerminalResolution<T> {
         let Some(key) = key else {
             return match terminal.kind {
-                RequestTerminalKind::LifecycleError { error, .. } => {
-                    RequestTerminalResolution::LifecycleError(error)
+                RequestTerminalKind::Inline { .. }
+                | RequestTerminalKind::Publish { .. }
+                | RequestTerminalKind::RespondWithoutPublish { .. }
+                | RequestTerminalKind::PreAuthorityFailure { .. }
+                | RequestTerminalKind::LifecycleError { .. } => {
+                    RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
                 }
-                RequestTerminalKind::Inline(payload)
-                | RequestTerminalKind::UntrackedInline(payload)
-                | RequestTerminalKind::UntrackedRespondWithoutPublish(payload)
-                | RequestTerminalKind::PreAuthorityFailure(payload)
-                | RequestTerminalKind::Publish(payload)
-                | RequestTerminalKind::RespondWithoutPublish(payload) => {
+                RequestTerminalKind::UntrackedInline(payload)
+                | RequestTerminalKind::UntrackedRespondWithoutPublish(payload) => {
                     RequestTerminalResolution::Emit(payload)
                 }
             };
         };
 
         match terminal.kind {
-            RequestTerminalKind::Inline(payload) => {
-                self.mechanics.remove(key);
-                RequestTerminalResolution::Emit(payload)
-            }
-            RequestTerminalKind::UntrackedInline(_) => {
-                self.mechanics.remove(key);
-                RequestTerminalResolution::LifecycleError(
-                    RequestTransitionError::AuthorityUnavailable,
-                )
-            }
-            RequestTerminalKind::UntrackedRespondWithoutPublish(_) => {
-                self.mechanics.remove(key);
-                RequestTerminalResolution::LifecycleError(
-                    RequestTransitionError::AuthorityUnavailable,
-                )
-            }
-            RequestTerminalKind::PreAuthorityFailure(payload) => {
-                self.mechanics.remove(key);
-                RequestTerminalResolution::Emit(payload)
-            }
-            RequestTerminalKind::Publish(payload) => match self.publish_or_cancelled(key).await {
-                Ok(PublishOutcome::Published) => RequestTerminalResolution::Emit(payload),
-                Ok(PublishOutcome::CancelledBeforePublish) => RequestTerminalResolution::Cancelled,
-                Err(err) => {
-                    self.mechanics.remove(key);
-                    RequestTerminalResolution::LifecycleError(err)
-                }
+            RequestTerminalKind::Inline {
+                lifecycle_key,
+                payload,
+            } => match self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key) {
+                Ok(()) => RequestTerminalResolution::Emit(payload),
+                Err(err) => RequestTerminalResolution::LifecycleError(err),
             },
-            RequestTerminalKind::RespondWithoutPublish(payload) => {
-                match self.finish_unpublished(key).await {
-                    Ok(CompleteOutcome::Completed) => RequestTerminalResolution::Emit(payload),
-                    Ok(CompleteOutcome::SupersededByCancel) => RequestTerminalResolution::Cancelled,
+            RequestTerminalKind::UntrackedInline(_) => RequestTerminalResolution::LifecycleError(
+                RequestTransitionError::AuthorityUnavailable,
+            ),
+            RequestTerminalKind::UntrackedRespondWithoutPublish(_) => {
+                RequestTerminalResolution::LifecycleError(
+                    RequestTransitionError::AuthorityUnavailable,
+                )
+            }
+            RequestTerminalKind::PreAuthorityFailure {
+                lifecycle_key,
+                payload,
+            } => match self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key) {
+                Ok(()) => RequestTerminalResolution::Emit(payload),
+                Err(err) => RequestTerminalResolution::LifecycleError(err),
+            },
+            RequestTerminalKind::Publish {
+                lifecycle_key,
+                payload,
+            } => {
+                match self
+                    .mechanics
+                    .publish_or_cancelled_for_lifecycle_key(key, &lifecycle_key)
+                    .await
+                {
+                    Ok(PublishOutcome::Published) => RequestTerminalResolution::Emit(payload),
+                    Ok(PublishOutcome::CancelledBeforePublish) => {
+                        RequestTerminalResolution::Cancelled
+                    }
                     Err(err) => {
-                        self.mechanics.remove(key);
+                        let _ = self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key);
                         RequestTerminalResolution::LifecycleError(err)
                     }
                 }
             }
-            RequestTerminalKind::LifecycleError { error, .. } => {
-                self.mechanics.remove(key);
-                RequestTerminalResolution::LifecycleError(error)
+            RequestTerminalKind::RespondWithoutPublish {
+                lifecycle_key,
+                payload,
+            } => {
+                match self
+                    .mechanics
+                    .finish_unpublished_for_lifecycle_key(key, &lifecycle_key)
+                    .await
+                {
+                    Ok(CompleteOutcome::Completed) => RequestTerminalResolution::Emit(payload),
+                    Ok(CompleteOutcome::SupersededByCancel) => RequestTerminalResolution::Cancelled,
+                    Err(err) => {
+                        let _ = self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key);
+                        RequestTerminalResolution::LifecycleError(err)
+                    }
+                }
             }
+            RequestTerminalKind::LifecycleError {
+                lifecycle_key,
+                error,
+                ..
+            } => match self.mechanics.remove_for_lifecycle_key(key, &lifecycle_key) {
+                Ok(()) => RequestTerminalResolution::LifecycleError(error),
+                Err(err) => RequestTerminalResolution::LifecycleError(err),
+            },
         }
     }
 
@@ -846,6 +975,7 @@ mod tests {
         CancelActionInstallDecision, CancelTransition, CompleteTransition,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, mpsc};
 
     fn begin_test_request(
         executor: &SurfaceRequestExecutor,
@@ -1297,7 +1427,11 @@ mod tests {
             RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable),
             "public inline terminals are only valid for untracked observations"
         );
-        assert_eq!(executor.phase(context.key()), None);
+        assert_eq!(
+            executor.phase(context.key()),
+            Some(SurfaceRequestPhase::Pending),
+            "rejected public inline terminals must not remove tracked request state"
+        );
         assert_eq!(
             executor
                 .resolve_terminal(None, RequestTerminal::inline("untracked"))
@@ -1326,12 +1460,443 @@ mod tests {
             RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable),
             "public unpublished terminals are only valid for untracked work"
         );
-        assert_eq!(executor.phase(context.key()), None);
+        assert_eq!(
+            executor.phase(context.key()),
+            Some(SurfaceRequestPhase::Pending),
+            "rejected public unpublished terminals must not remove tracked request state"
+        );
         assert_eq!(
             executor
                 .resolve_terminal(None, RequestTerminal::respond_without_publish("untracked"))
                 .await,
             RequestTerminalResolution::Emit("untracked")
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_error_terminal_cannot_resolve_with_different_request_key() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+
+        let source = begin_test_request_with_kind(
+            &executor,
+            "lifecycle-error-source",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let target = begin_test_request_with_kind(
+            &executor,
+            "lifecycle-error-target",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        let terminal = source.classify_success_terminal("wrong-lifecycle-error");
+        assert!(
+            matches!(
+                &terminal.kind,
+                RequestTerminalKind::LifecycleError {
+                    error: RequestTransitionError::AuthorityUnavailable,
+                    ..
+                }
+            ),
+            "unbound success must fail closed through a lifecycle error terminal"
+        );
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(target.key()), terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(source.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+        assert_eq!(
+            executor.phase(target.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn classified_terminal_cannot_resolve_without_request_key() {
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+
+        let publish_context = begin_test_request_with_kind(
+            &executor,
+            "missing-key-publish",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let publish_terminal = publish_context.classify_success_terminal("publish-without-key");
+        assert!(publish_terminal.is_publish());
+        assert_eq!(
+            executor.resolve_terminal(None, publish_terminal).await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(publish_context.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+
+        let unpublished_context = begin_test_request_with_kind(
+            &executor,
+            "missing-key-unpublished",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let unpublished_terminal =
+            unpublished_context.classify_failure_terminal("unpublished-without-key");
+        assert!(unpublished_terminal.is_respond_without_publish());
+        assert_eq!(
+            executor.resolve_terminal(None, unpublished_terminal).await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(unpublished_context.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+
+        let inline_context = begin_test_request_with_kind(
+            &executor,
+            "missing-key-inline",
+            SurfaceRequestKind::InlineObservation,
+            noop_request_action(),
+        );
+        let inline_terminal = inline_context.classify_success_terminal("inline-without-key");
+        assert!(!inline_terminal.is_publish());
+        assert!(!inline_terminal.is_respond_without_publish());
+        assert_eq!(
+            executor.resolve_terminal(None, inline_terminal).await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(inline_context.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn classified_terminal_cannot_resolve_with_different_request_key() {
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+
+        let publish_source = begin_test_request_with_kind(
+            &executor,
+            "mismatched-key-publish-source",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let publish_target = begin_test_request_with_kind(
+            &executor,
+            "mismatched-key-publish-target",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let publish_terminal = publish_source.classify_success_terminal("wrong-publish");
+        assert!(publish_terminal.is_publish());
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(publish_target.key()), publish_terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(publish_source.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+        assert_eq!(
+            executor.phase(publish_target.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+
+        let unpublished_source = begin_test_request_with_kind(
+            &executor,
+            "mismatched-key-unpublished-source",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let unpublished_target = begin_test_request_with_kind(
+            &executor,
+            "mismatched-key-unpublished-target",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let unpublished_terminal =
+            unpublished_source.classify_failure_terminal("wrong-unpublished");
+        assert!(unpublished_terminal.is_respond_without_publish());
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(unpublished_target.key()), unpublished_terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(unpublished_source.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+        assert_eq!(
+            executor.phase(unpublished_target.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+
+        let inline_source = begin_test_request_with_kind(
+            &executor,
+            "mismatched-key-inline-source",
+            SurfaceRequestKind::InlineObservation,
+            noop_request_action(),
+        );
+        let inline_target = begin_test_request_with_kind(
+            &executor,
+            "mismatched-key-inline-target",
+            SurfaceRequestKind::InlineObservation,
+            noop_request_action(),
+        );
+        let inline_terminal = inline_source.classify_success_terminal("wrong-inline");
+        assert!(!inline_terminal.is_publish());
+        assert!(!inline_terminal.is_respond_without_publish());
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(inline_target.key()), inline_terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(inline_source.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+        assert_eq!(
+            executor.phase(inline_target.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn classified_terminal_cannot_cross_executor_with_same_request_key() {
+        let first = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+        let second = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+
+        let source = begin_test_request_with_kind(
+            &first,
+            "same-wire-id",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let target = begin_test_request_with_kind(
+            &second,
+            "same-wire-id",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        let terminal = source.classify_success_terminal("wrong-executor");
+        assert!(terminal.is_publish());
+        assert_eq!(
+            second.resolve_terminal(Some(target.key()), terminal).await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            first.phase(source.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+        assert_eq!(
+            second.phase(target.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_authority_failure_cannot_resolve_with_different_request_key() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+
+        let source = begin_test_request_with_kind(
+            &executor,
+            "pre-authority-source",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let target = begin_test_request_with_kind(
+            &executor,
+            "pre-authority-target",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        let terminal = source.classify_failure_terminal("wrong-preauthority");
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(target.key()), terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(source.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+        assert_eq!(
+            executor.phase(target.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn classified_terminal_cannot_replay_after_request_key_reuse() {
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+
+        let source = begin_test_request_with_kind(
+            &executor,
+            "reused-terminal-key",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let stale_terminal = source.classify_success_terminal("stale-publish");
+        assert!(stale_terminal.is_publish());
+        assert_eq!(
+            executor.cancel_request(source.key()).await,
+            CancelOutcome::Cancelled
+        );
+        assert_eq!(
+            executor.finish_unpublished(source.key()).await,
+            Ok(CompleteOutcome::SupersededByCancel)
+        );
+        assert_eq!(executor.phase(source.key()), None);
+
+        let target = begin_test_request_with_kind(
+            &executor,
+            "reused-terminal-key",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(target.key()), stale_terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            executor.phase(target.key()),
+            Some(SurfaceRequestPhase::Pending)
+        );
+    }
+
+    struct BlockingPublishLifecycle {
+        inner: Arc<dyn SurfaceRequestLifecycleHandle>,
+        publish_entered: mpsc::Sender<()>,
+        release_publish: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl SurfaceRequestLifecycleHandle for BlockingPublishLifecycle {
+        fn try_begin_request(
+            &self,
+            key: String,
+            kind: SurfaceRequestKind,
+        ) -> Result<(), RequestAlreadyExists> {
+            self.inner.try_begin_request(key, kind)
+        }
+
+        fn classify_terminal(
+            &self,
+            key: &str,
+            outcome: SurfaceRequestTerminalOutcome,
+        ) -> Result<SurfaceRequestTerminalDisposition, RequestTransitionError> {
+            self.inner.classify_terminal(key, outcome)
+        }
+
+        fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
+            self.inner.phase(key)
+        }
+
+        fn cancel_action_install_decision(&self, key: &str) -> CancelActionInstallDecision {
+            self.inner.cancel_action_install_decision(key)
+        }
+
+        fn cancel_request(&self, key: &str) -> CancelTransition {
+            self.inner.cancel_request(key)
+        }
+
+        fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
+            let _ = self.publish_entered.send(());
+            let (release_flag, release_cvar) = &*self.release_publish;
+            let mut released = lock_or_recover(release_flag);
+            while !*released {
+                released = release_cvar
+                    .wait(released)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            self.inner.publish_and_complete(key)
+        }
+
+        fn finish_unpublished(
+            &self,
+            key: &str,
+        ) -> Result<CompleteTransition, RequestTransitionError> {
+            self.inner.finish_unpublished(key)
+        }
+
+        fn remove(&self, key: &str) {
+            self.inner.remove(key);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn terminal_resolution_does_not_remove_reused_key_after_publish_race() {
+        let (publish_entered_tx, publish_entered_rx) = mpsc::channel();
+        let release_publish = Arc::new((Mutex::new(false), Condvar::new()));
+        let lifecycle = Arc::new(BlockingPublishLifecycle {
+            inner: meerkat_runtime::handles::standalone_surface_request_lifecycle_handle(),
+            publish_entered: publish_entered_tx,
+            release_publish: Arc::clone(&release_publish),
+        });
+        let executor = SurfaceRequestExecutor::from_lifecycle(Duration::from_millis(1), lifecycle);
+
+        let source = begin_test_request_with_kind(
+            &executor,
+            "race-reused-terminal-key",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+        let terminal = source.classify_success_terminal("racing-publish");
+        assert!(terminal.is_publish());
+
+        let resolving_executor = executor.clone();
+        let resolver = tokio::spawn(async move {
+            resolving_executor
+                .resolve_terminal(Some("race-reused-terminal-key"), terminal)
+                .await
+        });
+        publish_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("publish transition should be entered");
+
+        let reusing_executor = executor.clone();
+        let reuser = tokio::spawn(async move {
+            let _ = reusing_executor
+                .finish_unpublished("race-reused-terminal-key")
+                .await;
+            let _target = begin_test_request_with_kind(
+                &reusing_executor,
+                "race-reused-terminal-key",
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            );
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        {
+            let (release_flag, release_cvar) = &*release_publish;
+            *lock_or_recover(release_flag) = true;
+            release_cvar.notify_all();
+        }
+
+        let _ = resolver.await.expect("resolver task should complete");
+        reuser.await.expect("reuser task should complete");
+        assert_eq!(
+            executor.phase("race-reused-terminal-key"),
+            Some(SurfaceRequestPhase::Pending),
+            "a terminal already matched to the old request instance must not remove the reused key"
         );
     }
 
@@ -1349,7 +1914,10 @@ mod tests {
 
         let terminal = context.classify_failure_terminal("invalid params");
         assert!(
-            matches!(terminal.kind, RequestTerminalKind::PreAuthorityFailure(_)),
+            matches!(
+                terminal.kind,
+                RequestTerminalKind::PreAuthorityFailure { .. }
+            ),
             "pre-binding failures should abort the local entry without granting publish authority"
         );
         assert_eq!(

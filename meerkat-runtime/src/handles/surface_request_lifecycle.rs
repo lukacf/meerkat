@@ -147,9 +147,6 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
         key: &str,
         outcome: SurfaceRequestTerminalOutcome,
     ) -> Result<SurfaceRequestTerminalDisposition, RequestTransitionError> {
-        if self.dsl_phase(key).is_none() {
-            return Err(RequestTransitionError::NotFound);
-        }
         let effects = self
             .dsl
             .apply_input_with_effects(
@@ -193,12 +190,6 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
     }
 
     fn cancel_request(&self, key: &str) -> CancelTransition {
-        if self.dsl_phase(key).is_none() {
-            return CancelTransition {
-                outcome: CancelOutcome::NotFound,
-                fire_cancel_action: false,
-            };
-        }
         match self.dsl.apply_input_with_effects(
             mm_dsl::MeerkatMachineInput::CancelSurfaceRequest {
                 request_id: key.to_owned(),
@@ -214,9 +205,6 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
     }
 
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
-        if self.dsl_phase(key).is_none() {
-            return Err(RequestTransitionError::NotFound);
-        }
         self.dsl
             .apply_input(
                 mm_dsl::MeerkatMachineInput::PublishSurfaceRequest {
@@ -228,9 +216,6 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
     }
 
     fn finish_unpublished(&self, key: &str) -> Result<CompleteTransition, RequestTransitionError> {
-        if self.dsl_phase(key).is_none() {
-            return Err(RequestTransitionError::NotFound);
-        }
         let effects = self
             .dsl
             .apply_input_with_effects(
@@ -324,6 +309,23 @@ mod tests {
     }
 
     #[test]
+    fn dsl_terminal_classification_rejects_unknown_request() {
+        let authority = HandleDslAuthority::ephemeral();
+
+        let err = authority
+            .apply_input_with_effects(
+                mm_dsl::MeerkatMachineInput::ClassifySurfaceRequestTerminal {
+                    request_id: "missing".to_owned(),
+                    outcome: mm_dsl::SurfaceRequestTerminalOutcome::Succeeded,
+                },
+                "dsl_terminal_classification_rejects_unknown_request",
+            )
+            .expect_err("missing request classification must be rejected by the DSL authority");
+
+        assert!(err.is_guard_rejected());
+    }
+
+    #[test]
     fn publish_and_cancel_fail_closed_for_unknown_request() {
         let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
 
@@ -348,5 +350,21 @@ mod tests {
             handle.finish_unpublished("missing"),
             Err(RequestTransitionError::NotFound)
         );
+    }
+
+    #[test]
+    fn dsl_unpublished_finish_rejects_unknown_request() {
+        let authority = HandleDslAuthority::ephemeral();
+
+        let err = authority
+            .apply_input_with_effects(
+                mm_dsl::MeerkatMachineInput::FinishSurfaceRequestUnpublished {
+                    request_id: "missing".to_owned(),
+                },
+                "dsl_unpublished_finish_rejects_unknown_request",
+            )
+            .expect_err("missing unpublished finish must be rejected by the DSL authority");
+
+        assert!(err.is_guard_rejected());
     }
 }

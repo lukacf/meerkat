@@ -3549,36 +3549,48 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `ClassifySurfaceRequestTerminalInitializing`
 - From: `Initializing`
 - On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Guards:
+  - `request_tracked`
 - Emits: `SurfaceRequestTerminalClassified`
 - To: `Initializing`
 
 ### `ClassifySurfaceRequestTerminalIdle`
 - From: `Idle`
 - On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Guards:
+  - `request_tracked`
 - Emits: `SurfaceRequestTerminalClassified`
 - To: `Idle`
 
 ### `ClassifySurfaceRequestTerminalAttached`
 - From: `Attached`
 - On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Guards:
+  - `request_tracked`
 - Emits: `SurfaceRequestTerminalClassified`
 - To: `Attached`
 
 ### `ClassifySurfaceRequestTerminalRunning`
 - From: `Running`
 - On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Guards:
+  - `request_tracked`
 - Emits: `SurfaceRequestTerminalClassified`
 - To: `Running`
 
 ### `ClassifySurfaceRequestTerminalRetired`
 - From: `Retired`
 - On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Guards:
+  - `request_tracked`
 - Emits: `SurfaceRequestTerminalClassified`
 - To: `Retired`
 
 ### `ClassifySurfaceRequestTerminalStopped`
 - From: `Stopped`
 - On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Guards:
+  - `request_tracked`
 - Emits: `SurfaceRequestTerminalClassified`
 - To: `Stopped`
 
@@ -4029,42 +4041,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `FinishSurfaceRequestUnpublished`(request_id)
 - Guards:
   - `request_terminal`
-- Emits: `SurfaceRequestUnpublishedFinished`
-- To: `Stopped`
-
-### `FinishSurfaceRequestUnpublishedMissingInitializing`
-- From: `Initializing`
-- On: `FinishSurfaceRequestUnpublished`(request_id)
-- Emits: `SurfaceRequestUnpublishedFinished`
-- To: `Initializing`
-
-### `FinishSurfaceRequestUnpublishedMissingIdle`
-- From: `Idle`
-- On: `FinishSurfaceRequestUnpublished`(request_id)
-- Emits: `SurfaceRequestUnpublishedFinished`
-- To: `Idle`
-
-### `FinishSurfaceRequestUnpublishedMissingAttached`
-- From: `Attached`
-- On: `FinishSurfaceRequestUnpublished`(request_id)
-- Emits: `SurfaceRequestUnpublishedFinished`
-- To: `Attached`
-
-### `FinishSurfaceRequestUnpublishedMissingRunning`
-- From: `Running`
-- On: `FinishSurfaceRequestUnpublished`(request_id)
-- Emits: `SurfaceRequestUnpublishedFinished`
-- To: `Running`
-
-### `FinishSurfaceRequestUnpublishedMissingRetired`
-- From: `Retired`
-- On: `FinishSurfaceRequestUnpublished`(request_id)
-- Emits: `SurfaceRequestUnpublishedFinished`
-- To: `Retired`
-
-### `FinishSurfaceRequestUnpublishedMissingStopped`
-- From: `Stopped`
-- On: `FinishSurfaceRequestUnpublished`(request_id)
 - Emits: `SurfaceRequestUnpublishedFinished`
 - To: `Stopped`
 

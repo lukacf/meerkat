@@ -7209,23 +7209,23 @@ macro_rules! meerkat_catalog_machine_dsl {
         transition ClassifySurfaceRequestTerminal {
             per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
             on input ClassifySurfaceRequestTerminal { request_id, outcome }
+            guard "request_tracked" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_terminal_policy.contains_key(request_id)
+            }
             update {}
             to Idle
             emit SurfaceRequestTerminalClassified {
                 request_id: request_id,
-                disposition: if !self.surface_request_terminal_policy.contains_key(request_id) {
-                    SurfaceRequestTerminalDisposition::Inline
+                disposition: if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::PublishOnSuccess
+                    && outcome == SurfaceRequestTerminalOutcome::Succeeded
+                {
+                    SurfaceRequestTerminalDisposition::Publish
                 } else {
-                    if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::PublishOnSuccess
-                        && outcome == SurfaceRequestTerminalOutcome::Succeeded
-                    {
-                        SurfaceRequestTerminalDisposition::Publish
+                    if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::InlineObservation {
+                        SurfaceRequestTerminalDisposition::Inline
                     } else {
-                        if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::InlineObservation {
-                            SurfaceRequestTerminalDisposition::Inline
-                        } else {
-                            SurfaceRequestTerminalDisposition::RespondWithoutPublish
-                        }
+                        SurfaceRequestTerminalDisposition::RespondWithoutPublish
                     }
                 }
             }
@@ -7397,18 +7397,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.surface_request_phases.remove(request_id);
                 self.surface_request_terminal_policy.remove(request_id);
             }
-            to Idle
-            emit SurfaceRequestUnpublishedFinished {
-                request_id: request_id,
-                outcome: SurfaceRequestCompleteOutcome::Completed,
-                run_unpublished_cleanup: false
-            }
-        }
-
-        transition FinishSurfaceRequestUnpublishedMissing {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input FinishSurfaceRequestUnpublished { request_id }
-            update {}
             to Idle
             emit SurfaceRequestUnpublishedFinished {
                 request_id: request_id,

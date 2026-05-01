@@ -1,4 +1,8 @@
 use super::*;
+use crate::meerkat_machine_types::{
+    MeerkatMachineRuntimeInternalInput,
+    canonical_meerkat_machine_runtime_internal_input_variant_manifest,
+};
 
 /// Effects produced by an actual MeerkatMachine DSL transition.
 ///
@@ -42,6 +46,41 @@ impl std::ops::Deref for DslTransitionEffects {
 }
 
 impl MeerkatMachine {
+    pub(super) async fn stage_session_runtime_internal_dsl_input(
+        &self,
+        session_id: &SessionId,
+        input: MeerkatMachineRuntimeInternalInput,
+    ) -> Result<Box<dsl::MeerkatMachineState>, String> {
+        self.stage_session_runtime_internal_dsl_transition(session_id, input)
+            .await
+            .map(|staged| staged.previous_state)
+    }
+
+    pub(super) async fn stage_session_runtime_internal_dsl_transition(
+        &self,
+        session_id: &SessionId,
+        input: MeerkatMachineRuntimeInternalInput,
+    ) -> Result<StagedSessionDslInput, String> {
+        let authority = self.session_dsl_authority(session_id).await?;
+        Self::stage_runtime_internal_dsl_transition_on_authority(&authority, input)
+    }
+
+    pub(super) fn stage_runtime_internal_dsl_transition_on_authority(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        input: MeerkatMachineRuntimeInternalInput,
+    ) -> Result<StagedSessionDslInput, String> {
+        let variant = input.input_variant();
+        if !canonical_meerkat_machine_runtime_internal_input_variant_manifest().contains(&variant) {
+            return Err(format!(
+                "runtime-internal input {variant:?} is absent from the typed production manifest"
+            ));
+        }
+        let dsl_input = input.fieldless_dsl_input().ok_or_else(|| {
+            format!("runtime-internal input {variant:?} requires payloaded staging")
+        })?;
+        Self::stage_dsl_transition_on_authority(authority, dsl_input, variant.as_str())
+    }
+
     pub(super) async fn stage_session_dsl_input(
         &self,
         session_id: &SessionId,

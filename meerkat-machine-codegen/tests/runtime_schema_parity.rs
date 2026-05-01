@@ -4,6 +4,8 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine_production_schema, dsl_meerkat_machine, dsl_meerkat_machine_production_schema,
     dsl_mob_machine, dsl_mob_machine_production_schema, dsl_occurrence_lifecycle_machine,
     dsl_schedule_lifecycle_machine,
+    meerkat_machine::{MeerkatMachineInput, MeerkatMachineInputVariant},
+    meerkat_machine_runtime_internal_input_variants,
     mob_machine::{MobMachineInput, MobMachineInputVariant},
     mob_machine_runtime_internal_input_variants,
 };
@@ -392,6 +394,13 @@ fn generated_mob_input_variants() -> BTreeSet<MobMachineInputVariant> {
         .collect()
 }
 
+fn generated_meerkat_input_variants() -> BTreeSet<MeerkatMachineInputVariant> {
+    MeerkatMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .collect()
+}
+
 fn mob_catalog_input_variants(
     inputs: impl IntoIterator<Item = MobMachineCatalogInput>,
 ) -> BTreeSet<MobMachineInputVariant> {
@@ -604,6 +613,55 @@ fn mob_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
             record.input
         );
     }
+}
+
+#[test]
+fn meerkat_runtime_parity_runtime_internal_manifest_has_typed_reasons() {
+    let catalog_inputs = generated_meerkat_input_variants();
+    let records = meerkat_runtime::canonical_meerkat_machine_runtime_internal_classifications();
+    let classified = records
+        .iter()
+        .map(|record| record.input.input_variant())
+        .collect::<BTreeSet<_>>();
+    let declared = meerkat_machine_runtime_internal_input_variants()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let typed_manifest =
+        meerkat_runtime::canonical_meerkat_machine_runtime_internal_input_variant_manifest()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+    let interrupt_reason = records
+        .iter()
+        .find(|record| {
+            record.input.input_variant() == MeerkatMachineInputVariant::InterruptCurrentRun
+        })
+        .map(|record| record.reason)
+        .expect("InterruptCurrentRun production evidence");
+
+    assert!(
+        !records.is_empty(),
+        "runtime-internal MeerkatMachine paths must be declared by typed production records"
+    );
+    assert_eq!(
+        classified, declared,
+        "typed MeerkatMachine runtime-internal records must exactly match schema.runtime_internal_inputs"
+    );
+    assert_eq!(
+        typed_manifest, declared,
+        "MeerkatMachine runtime-internal manifest must expose typed generated input variants"
+    );
+    for record in records {
+        assert!(
+            catalog_inputs.contains(&record.input.input_variant()),
+            "runtime-internal MeerkatMachine record {:?} must name a catalog input",
+            record.input
+        );
+    }
+    assert_eq!(
+        interrupt_reason,
+        meerkat_runtime::MeerkatMachineRuntimeInternalReason::UserInterruptDispatch,
+        "public user interrupt path must have typed production evidence"
+    );
 }
 
 #[test]

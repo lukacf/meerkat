@@ -132,10 +132,15 @@ pub use meerkat_machine_types::{
     MeerkatCompletionWaitersSnapshot, MeerkatControlSnapshot, MeerkatCursorSnapshot,
     MeerkatDrainSnapshot, MeerkatDriverKind, MeerkatInputsSnapshot, MeerkatMachineCatalogInput,
     MeerkatMachineCommandClassification, MeerkatMachineCommandClassificationRecord,
-    MeerkatMachineCommandVariant, MeerkatMachineShellMechanicReason, MeerkatMachineSpineSnapshot,
-    MeerkatOpsSnapshot, canonical_meerkat_machine_command_classifications,
+    MeerkatMachineCommandVariant, MeerkatMachineRuntimeInternalClassificationRecord,
+    MeerkatMachineRuntimeInternalInput, MeerkatMachineRuntimeInternalReason,
+    MeerkatMachineShellMechanicReason, MeerkatMachineSpineSnapshot, MeerkatOpsSnapshot,
+    canonical_meerkat_machine_command_classifications,
     canonical_meerkat_machine_command_input_variant_manifest,
     canonical_meerkat_machine_command_manifest,
+    canonical_meerkat_machine_runtime_internal_classifications,
+    canonical_meerkat_machine_runtime_internal_input_variant_manifest,
+    canonical_meerkat_machine_runtime_internal_manifest,
 };
 pub use ops_lifecycle::{
     OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,

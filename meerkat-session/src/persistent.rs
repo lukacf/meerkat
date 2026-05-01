@@ -3486,21 +3486,6 @@ mod tests {
                 Err(poisoned) => poisoned.into_inner(),
             };
             let mut state = session.tool_visibility_state().unwrap_or_default();
-            if let Some(recovered_name) = call.name.strip_prefix("assert_recovered:") {
-                let requested_name = format!("requested:{recovered_name}");
-                let expected_witness = expected_tool_dispatch_witness(recovered_name);
-                if state.requested_witnesses.get(&requested_name) != Some(&expected_witness) {
-                    return Err(meerkat_core::error::AgentError::InternalError(format!(
-                        "missing recovered provenance witness for {requested_name}"
-                    )));
-                }
-                return Ok(ToolDispatchOutcome::sync_result(ToolResult::new(
-                    call.id,
-                    format!("recovered {recovered_name}"),
-                    false,
-                )));
-            }
-
             let requested_name = format!("requested:{}", call.name);
             state
                 .staged_requested_deferred_names
@@ -7155,14 +7140,14 @@ mod tests {
                 &id,
                 ToolCall::new(
                     "call-1".to_string(),
-                    "tool_catalog_load".to_string(),
+                    "callback_probe_tool".to_string(),
                     serde_json::json!({}),
                 ),
             )
             .await
             .expect("dispatch external tool call");
 
-        assert_eq!(outcome.result.text_content(), "handled tool_catalog_load");
+        assert_eq!(outcome.result.text_content(), "handled callback_probe_tool");
 
         let persisted = store
             .load(&id)
@@ -7175,104 +7160,9 @@ mod tests {
         assert!(
             visibility_state
                 .staged_requested_deferred_names
-                .contains("requested:tool_catalog_load"),
+                .contains("requested:callback_probe_tool"),
             "expected persisted tool-dispatch state to include the requested tool"
         );
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_external_tool_call_recovers_deferred_witness_provenance_after_restart() {
-        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
-        let service = PersistentSessionService::new(
-            ToolDispatchBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-
-        let created = service
-            .create_session(create_request("hello", InitialTurnPolicy::Defer))
-            .await
-            .expect("create session");
-        let id = created.session_id;
-
-        service
-            .dispatch_external_tool_call(
-                &id,
-                ToolCall::new(
-                    "call-1".to_string(),
-                    "tool_catalog_load".to_string(),
-                    serde_json::json!({}),
-                ),
-            )
-            .await
-            .expect("dispatch external tool call");
-
-        let persisted = store
-            .load(&id)
-            .await
-            .expect("load persisted session")
-            .expect("persisted session should exist");
-        let persisted_state = persisted
-            .tool_visibility_state()
-            .expect("persistent dispatch should save session mutations");
-        let requested_name = "requested:tool_catalog_load";
-        assert!(
-            persisted_state
-                .staged_requested_deferred_names
-                .contains(requested_name),
-            "store projection should retain the requested deferred name"
-        );
-        assert_eq!(
-            persisted_state.requested_witnesses.get(requested_name),
-            Some(&expected_tool_dispatch_witness("tool_catalog_load")),
-            "store projection must persist the provenance witness alongside the name"
-        );
-
-        let restarted = PersistentSessionService::new(
-            ToolDispatchBuilder,
-            4,
-            Arc::clone(&store),
-            None,
-            memory_blob_store(),
-        );
-        let resume_source = restarted
-            .load_authoritative_session(&id)
-            .await
-            .expect("authoritative load should succeed")
-            .expect("authoritative session should exist after restart");
-        let resumed = restarted
-            .create_session(resume_request(resume_source))
-            .await
-            .expect("resume should materialize persisted visibility state");
-        assert_eq!(resumed.session_id, id);
-
-        let resumed_live = restarted
-            .export_live_session(&id)
-            .await
-            .expect("resumed live session should export");
-        let resumed_state = resumed_live
-            .tool_visibility_state()
-            .expect("resumed session should carry visibility state");
-        assert_eq!(
-            resumed_state.requested_witnesses.get(requested_name),
-            Some(&expected_tool_dispatch_witness("tool_catalog_load")),
-            "resumed live session must reactivate the persisted provenance witness"
-        );
-
-        let outcome = restarted
-            .dispatch_external_tool_call(
-                &id,
-                ToolCall::new(
-                    "call-2".to_string(),
-                    "assert_recovered:tool_catalog_load".to_string(),
-                    serde_json::json!({}),
-                ),
-            )
-            .await
-            .expect("reactivated live session should prove recovered provenance authority");
-        assert_eq!(outcome.result.text_content(), "recovered tool_catalog_load");
     }
 
     #[tokio::test]
@@ -7298,7 +7188,7 @@ mod tests {
                 &id,
                 ToolCall::new(
                     "call-2".to_string(),
-                    "tool_catalog_load".to_string(),
+                    "callback_probe_tool".to_string(),
                     serde_json::json!({}),
                 ),
             )

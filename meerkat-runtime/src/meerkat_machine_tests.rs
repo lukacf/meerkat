@@ -646,6 +646,38 @@ fn custom_auth_handle_install_does_not_create_separate_oauth_lifecycle_authority
     ));
 }
 
+#[test]
+fn surface_request_lifecycle_handle_targets_machine_surface_authority() {
+    let adapter = MeerkatMachine::ephemeral();
+    let handle = adapter.surface_request_lifecycle_handle();
+    let request_id = "surface-scope-request";
+
+    handle
+        .try_begin_request(request_id.to_owned())
+        .expect("surface request should begin");
+    handle
+        .authorize_publish_on_success(request_id)
+        .expect("surface request should accept publish authorization");
+
+    let authority = adapter
+        .surface_request_lifecycle_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(
+        authority.state.surface_request_phases.get(request_id),
+        Some(&mm_dsl::SurfaceRequestLifecyclePhase::Pending),
+        "surface lifecycle transitions must land in the MeerkatMachine-owned surface authority"
+    );
+    assert_eq!(
+        authority
+            .state
+            .surface_request_terminal_policy
+            .get(request_id),
+        Some(&mm_dsl::SurfaceRequestTerminalPolicy::PublishOnSuccess),
+        "publish policy must be owned by the machine surface authority, not a private handle authority"
+    );
+}
+
 #[derive(Default)]
 struct RecordingMeerkatSignalSurface {
     log: tokio::sync::Mutex<

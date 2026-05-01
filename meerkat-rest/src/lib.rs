@@ -2878,10 +2878,26 @@ async fn with_request_lifecycle(
     }
 }
 
-fn committed_terminal<T>(ctx: Option<&RequestContext>, payload: T) -> RequestTerminal<T> {
+fn failed_terminal(
+    ctx: Option<&RequestContext>,
+    err: ApiError,
+) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
     match ctx {
-        Some(ctx) => ctx.classify_success_terminal(payload),
-        None => RequestTerminal::respond_without_publish(payload),
+        Some(ctx) => ctx.classify_failure_terminal(Err(err)),
+        None => RequestTerminal::respond_without_publish(Err(err)),
+    }
+}
+
+fn committed_terminal(
+    ctx: Option<&RequestContext>,
+    payload: Result<Json<SessionResponse>, ApiError>,
+) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+    match payload {
+        Ok(payload) => match ctx {
+            Some(ctx) => ctx.classify_success_terminal(Ok(payload)),
+            None => RequestTerminal::respond_without_publish(Ok(payload)),
+        },
+        Err(err) => failed_terminal(ctx, err),
     }
 }
 
@@ -2908,15 +2924,15 @@ async fn create_session_inner(
 ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
     // --- Validation (pre-stateful work) ---
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
-        return RequestTerminal::respond_without_publish(Err(e));
+        return failed_terminal(req_ctx.as_ref(), e);
     }
     if let Err(e) = validate_public_surface_metadata(req.labels.as_ref(), req.app_context.as_ref())
     {
-        return RequestTerminal::respond_without_publish(Err(e));
+        return failed_terminal(req_ctx.as_ref(), e);
     }
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
-        Err(e) => return RequestTerminal::respond_without_publish(Err(e)),
+        Err(e) => return failed_terminal(req_ctx.as_ref(), e),
     };
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
@@ -2925,23 +2941,27 @@ async fn create_session_inner(
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
         Ok(v) => v,
-        Err(e) => return RequestTerminal::respond_without_publish(Err(e)),
+        Err(e) => return failed_terminal(req_ctx.as_ref(), e),
     };
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
         && ctx.cancel_already_requested()
     {
-        return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-            details: None,
-        }));
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::RequestCancelled { details: None },
+        );
     }
     if let Some(ctx) = req_ctx.as_ref()
         && let Err(err) = ctx.authorize_publish_on_success()
     {
-        return RequestTerminal::respond_without_publish(Err(ApiError::Internal(format!(
-            "request lifecycle rejected publish authorization: {err}"
-        ))));
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::Internal(format!(
+                "request lifecycle rejected publish authorization: {err}"
+            )),
+        );
     }
 
     // --- Preclaim: session, runtime registration, MCP adapter ---
@@ -2958,7 +2978,7 @@ async fn create_session_inner(
         Ok(v) => v,
         Err(e) => {
             let message = format!("failed to prepare runtime bindings: {e}");
-            return RequestTerminal::respond_without_publish(Err(ApiError::Internal(message)));
+            return failed_terminal(req_ctx.as_ref(), ApiError::Internal(message));
         }
     };
 
@@ -3031,9 +3051,10 @@ async fn create_session_inner(
         if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-                details: None,
-            }));
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::RequestCancelled { details: None },
+            );
         }
     }
 
@@ -3044,7 +3065,7 @@ async fn create_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(err)));
+                return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
             }
         };
     let mut build = SessionBuildOptions {
@@ -3129,14 +3150,14 @@ async fn create_session_inner(
         {
             Ok(identity) => identity,
             Err(err) => {
-                return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(err)));
+                return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
             }
         };
     if let Err(err) =
         validate_prompt_video_input(&state.config_runtime, &svc_req.prompt, &validation_identity)
             .await
     {
-        return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(err)));
+        return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
     }
 
     let adapter = state.runtime_adapter.clone();
@@ -3158,7 +3179,7 @@ async fn create_session_inner(
                 }
                 _ => ApiError::Agent(err.to_string()),
             };
-            return RequestTerminal::respond_without_publish(Err(api_err));
+            return failed_terminal(req_ctx.as_ref(), api_err);
         }
     };
 
@@ -3196,9 +3217,10 @@ async fn create_session_inner(
     {
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-            details: None,
-        }));
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::RequestCancelled { details: None },
+        );
     }
 
     let (outcome, handle) = match adapter
@@ -3207,6 +3229,9 @@ async fn create_session_inner(
     {
         Ok(pair) => pair,
         Err(err) => {
+            if let Some(ctx) = req_ctx.as_ref() {
+                ctx.disarm_unpublished_cleanup();
+            }
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return committed_terminal(
@@ -3224,6 +3249,9 @@ async fn create_session_inner(
             );
         }
     };
+    if let Some(ctx) = req_ctx.as_ref() {
+        ctx.disarm_unpublished_cleanup();
+    }
 
     let result = match handle {
         Some(handle) => {
@@ -3692,48 +3720,55 @@ async fn continue_session_inner(
     req_ctx: Option<RequestContext>,
 ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
     if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
-        return RequestTerminal::respond_without_publish(Err(e));
+        return failed_terminal(req_ctx.as_ref(), e);
     }
     let path_session_id = match resolve_session_id_for_state(id, state) {
         Ok(v) => v,
-        Err(e) => return RequestTerminal::respond_without_publish(Err(e)),
+        Err(e) => return failed_terminal(req_ctx.as_ref(), e),
     };
     let body_session_id = match resolve_session_id_for_state(&req.session_id, state) {
         Ok(v) => v,
-        Err(e) => return RequestTerminal::respond_without_publish(Err(e)),
+        Err(e) => return failed_terminal(req_ctx.as_ref(), e),
     };
     if body_session_id != path_session_id {
-        return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(format!(
-            "Session ID mismatch: path={} body={}",
-            id, req.session_id
-        ))));
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::BadRequest(format!(
+                "Session ID mismatch: path={} body={}",
+                id, req.session_id
+            )),
+        );
     }
     let session_id = body_session_id;
 
     let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
         Ok(v) => v,
-        Err(e) => return RequestTerminal::respond_without_publish(Err(e)),
+        Err(e) => return failed_terminal(req_ctx.as_ref(), e),
     };
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
         Ok(v) => v,
-        Err(e) => return RequestTerminal::respond_without_publish(Err(e)),
+        Err(e) => return failed_terminal(req_ctx.as_ref(), e),
     };
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
         && ctx.cancel_already_requested()
     {
-        return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-            details: None,
-        }));
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::RequestCancelled { details: None },
+        );
     }
     if let Some(ctx) = req_ctx.as_ref()
         && let Err(err) = ctx.authorize_publish_on_success()
     {
-        return RequestTerminal::respond_without_publish(Err(ApiError::Internal(format!(
-            "request lifecycle rejected publish authorization: {err}"
-        ))));
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::Internal(format!(
+                "request lifecycle rejected publish authorization: {err}"
+            )),
+        );
     }
 
     // Set up event forwarding: caller channel -> broadcast
@@ -3754,9 +3789,10 @@ async fn continue_session_inner(
         Err(e) => {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::respond_without_publish(Err(ApiError::Internal(format!(
-                "Failed to load session: {e}"
-            ))));
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::Internal(format!("Failed to load session: {e}")),
+            );
         }
     };
     let stored_metadata = loaded_session
@@ -3779,9 +3815,10 @@ async fn continue_session_inner(
     {
         drop(caller_event_tx);
         drain_event_forwarder(&session_id, forward_task).await;
-        return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(
-            "keep_alive requires comms_name".to_string(),
-        )));
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::BadRequest("keep_alive requires comms_name".to_string()),
+        );
     }
 
     // Apply staged MCP operations at the turn boundary.
@@ -3797,7 +3834,7 @@ async fn continue_session_inner(
             Err(e) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(e));
+                return failed_terminal(req_ctx.as_ref(), e);
             }
         }
         // If the MCP boundary appended notices, prepend as a text block
@@ -3819,9 +3856,10 @@ async fn continue_session_inner(
             None => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::NotFound(format!(
-                    "Session not found: {session_id}"
-                ))));
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::NotFound(format!("Session not found: {session_id}")),
+                );
             }
         };
         let bindings = match state
@@ -3834,7 +3872,7 @@ async fn continue_session_inner(
                 let message = format!("failed to prepare runtime bindings: {e}");
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::Internal(message)));
+                return failed_terminal(req_ctx.as_ref(), ApiError::Internal(message));
             }
         };
         let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
@@ -3933,7 +3971,7 @@ async fn continue_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(err)));
+                return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
             }
         };
         if let Err(err) = validate_prompt_video_input(
@@ -3945,16 +3983,17 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(err)));
+            return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
         }
         let create_result = match state.session_service.create_session(create_req).await {
             Ok(v) => v,
             Err(e) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::Internal(format!(
-                    "Failed to rebuild session: {e}"
-                ))));
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::Internal(format!("Failed to rebuild session: {e}")),
+                );
             }
         };
 
@@ -3993,9 +4032,10 @@ async fn continue_session_inner(
             if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-                    details: None,
-                }));
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::RequestCancelled { details: None },
+                );
             }
         }
 
@@ -4028,9 +4068,10 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-                details: None,
-            }));
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::RequestCancelled { details: None },
+            );
         }
         let (_outcome, handle) = match adapter
             .accept_input_with_completion(&create_result.session_id, input)
@@ -4040,9 +4081,7 @@ async fn continue_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::Internal(
-                    err.to_string(),
-                )));
+                return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
             }
         };
         match handle {
@@ -4064,9 +4103,12 @@ async fn continue_session_inner(
             if keep_alive && comms_rt.is_none() {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(
-                    "keep_alive requires a session created with comms_name".to_string(),
-                )));
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::BadRequest(
+                        "keep_alive requires a session created with comms_name".to_string(),
+                    ),
+                );
             }
             if keep_alive_override.is_some()
                 && let Err(e) = state
@@ -4076,9 +4118,10 @@ async fn continue_session_inner(
             {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::Internal(format!(
-                    "failed to persist keep_alive: {e}"
-                ))));
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::Internal(format!("failed to persist keep_alive: {e}")),
+                );
             }
             adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
@@ -4093,9 +4136,7 @@ async fn continue_session_inner(
                 Err(err) => {
                     drop(caller_event_tx);
                     drain_event_forwarder(&session_id, forward_task).await;
-                    return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(
-                        err,
-                    )));
+                    return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
                 }
             };
         let current_identity = stored_metadata
@@ -4108,7 +4149,7 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::respond_without_publish(Err(ApiError::BadRequest(err)));
+            return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
         }
 
         // Install cancel action: interrupt the session.
@@ -4132,9 +4173,10 @@ async fn continue_session_inner(
             if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-                    details: None,
-                }));
+                return failed_terminal(
+                    req_ctx.as_ref(),
+                    ApiError::RequestCancelled { details: None },
+                );
             }
         }
 
@@ -4159,9 +4201,10 @@ async fn continue_session_inner(
         {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
-            return RequestTerminal::respond_without_publish(Err(ApiError::RequestCancelled {
-                details: None,
-            }));
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::RequestCancelled { details: None },
+            );
         }
         let (outcome, handle) = match adapter
             .accept_input_with_completion(&session_id, input)
@@ -4171,9 +4214,7 @@ async fn continue_session_inner(
             Err(err) => {
                 drop(caller_event_tx);
                 drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::respond_without_publish(Err(ApiError::Internal(
-                    err.to_string(),
-                )));
+                return failed_terminal(req_ctx.as_ref(), ApiError::Internal(err.to_string()));
             }
         };
 
@@ -4215,7 +4256,8 @@ async fn continue_session_inner(
                     .await;
                 state.runtime_adapter.unregister_session(&session_id).await;
             }
-            // Session exists for continue — this is a Published error.
+            // Session exists for continue; failed terminals still take the
+            // machine-owned unpublished path.
             committed_terminal(req_ctx.as_ref(), Err(err))
         }
     }
@@ -6772,6 +6814,62 @@ mod tests {
         assert!(payload["details"]["session_ref"].is_string());
     }
 
+    #[tokio::test]
+    async fn test_tracked_create_session_post_commit_failure_preserves_resumable_session() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(ErrorLlmClient));
+        let session_service = state.session_service.clone();
+        let app = router(state);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            app.oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .header("x-meerkat-request-id", "tracked-post-commit-turn-failure")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "prompt": "Trigger failure"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("tracked post-commit-failure create route timed out")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], "SESSION_CREATED_WITH_TURN_FAILURE");
+        assert_eq!(payload["details"]["session_created"], true);
+        assert_eq!(payload["details"]["resumable"], true);
+        let session_id = payload["details"]["session_id"]
+            .as_str()
+            .expect("post-commit error should include a session id");
+        let session_id = SessionId::parse(session_id).expect("session id should parse");
+        let session = session_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("session load should not fail")
+            .expect("tracked post-commit failure must preserve the created session");
+        assert!(
+            !session_metadata_marks_archived(&session),
+            "tracked post-commit failure must not run unpublished rollback cleanup"
+        );
+    }
+
     #[test]
     fn test_skill_entry_uses_canonical_source_identity_records() {
         use meerkat_core::skills::{
@@ -7556,6 +7654,86 @@ mod tests {
                 Err(ApiError::RequestCancelled { details: None })
             ));
             assert_eq!(executor.phase("rest-cancel-before-publish"), None);
+        }
+
+        #[tokio::test]
+        async fn test_error_terminal_after_publish_authorization_uses_unpublished_path() {
+            let executor =
+                SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
+            let ctx = executor
+                .try_begin_request("rest-error-after-publish-auth", noop_request_action())
+                .expect("test request key should be unique");
+            ctx.authorize_publish_on_success()
+                .expect("runtime lifecycle authority should accept publish authorization");
+            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            ctx.set_unpublished_cleanup(request_action({
+                let cleanup_count = Arc::clone(&cleanup_count);
+                move || {
+                    let cleanup_count = Arc::clone(&cleanup_count);
+                    async move {
+                        cleanup_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }));
+
+            let terminal = committed_terminal(
+                Some(&ctx),
+                Err(ApiError::Internal(
+                    "committed REST error must not publish".to_string(),
+                )),
+            );
+
+            assert!(
+                terminal.is_respond_without_publish(),
+                "REST Result::Err terminals must route through machine-owned failure classification"
+            );
+            let result = with_request_lifecycle(&executor, Some(ctx), terminal).await;
+
+            assert!(matches!(result, Err(ApiError::Internal(_))));
+            assert_eq!(
+                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "failed REST terminals must complete through the unpublished lifecycle path"
+            );
+            assert_eq!(executor.phase("rest-error-after-publish-auth"), None);
+        }
+
+        #[tokio::test]
+        async fn test_tracked_early_error_terminal_uses_machine_failure_classification() {
+            let executor =
+                SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
+            let ctx = executor
+                .try_begin_request("rest-early-error", noop_request_action())
+                .expect("test request key should be unique");
+            let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            ctx.set_unpublished_cleanup(request_action({
+                let cleanup_count = Arc::clone(&cleanup_count);
+                move || {
+                    let cleanup_count = Arc::clone(&cleanup_count);
+                    async move {
+                        cleanup_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }));
+
+            let terminal = failed_terminal(
+                Some(&ctx),
+                ApiError::BadRequest("tracked early errors must be classified".to_string()),
+            );
+
+            assert!(
+                terminal.is_respond_without_publish(),
+                "tracked early REST errors must route through machine-owned failure classification"
+            );
+            let result = with_request_lifecycle(&executor, Some(ctx), terminal).await;
+
+            assert!(matches!(result, Err(ApiError::BadRequest(_))));
+            assert_eq!(
+                cleanup_count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "tracked early REST errors must complete through the unpublished lifecycle path"
+            );
+            assert_eq!(executor.phase("rest-early-error"), None);
         }
 
         #[derive(Clone)]

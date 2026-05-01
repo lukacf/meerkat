@@ -32,12 +32,13 @@ impl std::fmt::Debug for RuntimeSurfaceRequestLifecycleHandle {
 }
 
 impl RuntimeSurfaceRequestLifecycleHandle {
-    pub(crate) fn new() -> Self {
-        Self::new_with_dsl(Arc::new(HandleDslAuthority::ephemeral()))
+    pub(crate) fn new(dsl: Arc<HandleDslAuthority>) -> Self {
+        Self { dsl }
     }
 
-    fn new_with_dsl(dsl: Arc<HandleDslAuthority>) -> Self {
-        Self { dsl }
+    #[cfg(test)]
+    fn standalone_for_tests() -> Self {
+        Self::new(Arc::new(HandleDslAuthority::ephemeral()))
     }
 
     fn dsl_phase(&self, key: &str) -> Option<mm_dsl::SurfaceRequestLifecyclePhase> {
@@ -284,7 +285,7 @@ mod tests {
 
     #[test]
     fn cancel_action_install_decision_fires_after_cancelled_cancellable_request() {
-        let handle = RuntimeSurfaceRequestLifecycleHandle::new();
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone_for_tests();
 
         handle
             .try_begin_request("request".to_owned())
@@ -304,7 +305,7 @@ mod tests {
 
     #[test]
     fn cancel_action_install_decision_does_not_promote_inline_request() {
-        let handle = RuntimeSurfaceRequestLifecycleHandle::new();
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone_for_tests();
 
         handle
             .try_begin_request("request".to_owned())

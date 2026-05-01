@@ -194,6 +194,9 @@ impl RequestContext {
     /// Classify a failed handler terminal through this request's runtime-owned
     /// publication authority.
     pub fn classify_failure_terminal<T>(&self, response: T) -> RequestTerminal<T> {
+        let _ = self
+            .lifecycle
+            .authorize_cancellable_observation(&self.lifecycle_key);
         self.classify_terminal(SurfaceRequestTerminalOutcome::Failed, response)
     }
 
@@ -280,6 +283,14 @@ impl RequestContext {
     pub fn set_unpublished_cleanup(&self, cleanup: RequestAsyncAction) {
         let mut slot = lock_or_recover(&self.entry.unpublished_cleanup);
         *slot = Some(cleanup);
+    }
+
+    /// Disarm rollback cleanup once a surface has crossed its durable side-effect
+    /// point. Terminal classification and cancellation authority remain
+    /// machine-owned; this only clears the surface-owned cleanup closure.
+    pub fn disarm_unpublished_cleanup(&self) {
+        let mut slot = lock_or_recover(&self.entry.unpublished_cleanup);
+        *slot = None;
     }
 }
 
@@ -664,6 +675,12 @@ mod tests {
         let terminal = context.classify_success_terminal("raw-success");
         assert!(!terminal.is_publish());
         assert!(!terminal.is_respond_without_publish());
+        assert!(
+            context
+                .classify_failure_terminal("raw-failure")
+                .is_respond_without_publish(),
+            "failed terminals must use the machine-owned unpublished path even before publish authorization"
+        );
 
         context
             .authorize_publish_on_success()
@@ -907,6 +924,45 @@ mod tests {
             RequestTerminalResolution::Emit("late-observation")
         );
         assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn disarmed_unpublished_cleanup_does_not_run_on_failed_terminal() {
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let context = begin_test_request(
+            &executor,
+            "preserved-post-commit-failure",
+            noop_request_action(),
+        );
+        context
+            .authorize_publish_on_success()
+            .expect("runtime lifecycle authority should accept publish authorization");
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        context.disarm_unpublished_cleanup();
+
+        assert_eq!(
+            executor
+                .resolve_terminal(
+                    Some(context.key()),
+                    context.classify_failure_terminal("preserved-error"),
+                )
+                .await,
+            RequestTerminalResolution::Emit("preserved-error")
+        );
+        assert_eq!(
+            cleanup_count.load(Ordering::SeqCst),
+            0,
+            "post-commit failed terminals must stay machine-classified without running rollback cleanup"
+        );
     }
 
     #[tokio::test]

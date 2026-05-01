@@ -175,6 +175,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
         .ok_or_else(|| interactive_login_error(binding))?;
     let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile.auth_method)?;
+    let is_oauth_login = crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode);
 
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
     let now = (env.now)();
@@ -190,8 +191,26 @@ pub async fn load_managed_store_tokens_with_lifecycle(
 
     if let Some(auth_lease) = env.auth_lease_handle.as_ref() {
         let snapshot = auth_lease.snapshot(&lease_key);
-        let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-        if !crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode)
+        let mut phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+        if is_oauth_login
+            && phase == AuthStatusPhase::Unknown
+            && snapshot.generation == 0
+            && snapshot.phase.is_none()
+            && !snapshot.credential_present
+        {
+            meerkat_core::publish_token_lifecycle_acquired(
+                auth_lease.as_ref(),
+                &binding.connection_ref,
+                &tokens,
+            )
+            .map_err(|e| {
+                ProviderAuthError::SourceResolutionFailed(format!(
+                    "AuthMachine lifecycle acquire failed: {e}"
+                ))
+            })?;
+            phase = AuthStatusPhase::from_lease_snapshot(now, &auth_lease.snapshot(&lease_key));
+        }
+        if !is_oauth_login
             && phase == AuthStatusPhase::Unknown
             && snapshot.generation == 0
             && snapshot.phase.is_none()
@@ -216,7 +235,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         };
     }
 
-    if crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode) {
+    if is_oauth_login {
         Err(interactive_login_error(binding))
     } else {
         Ok(managed_store_tokens(store, key, tokens, lifecycle))
@@ -289,6 +308,30 @@ pub fn publish_managed_store_tokens_lifecycle(
         ))
     })?;
     require_credential_lifecycle_authority(env, binding)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn publish_managed_store_tokens_lifecycle_or_restore(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    previous: &ManagedStoreTokens,
+    refreshed: &PersistedTokens,
+) -> Result<(), ProviderAuthError> {
+    match publish_managed_store_tokens_lifecycle(env, binding, refreshed) {
+        Ok(()) => Ok(()),
+        Err(publish_error) => {
+            previous
+                .store
+                .save(&previous.key, &previous.tokens)
+                .await
+                .map_err(|restore_error| {
+                    ProviderAuthError::SourceResolutionFailed(format!(
+                        "{publish_error}; TokenStore restore failed after AuthMachine lifecycle rejection: {restore_error}"
+                    ))
+                })?;
+            Err(publish_error)
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

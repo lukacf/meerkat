@@ -16,7 +16,7 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, load_managed_store_tokens_with_lifecycle,
-    publish_managed_store_tokens_lifecycle, refresh_allowed,
+    publish_managed_store_tokens_lifecycle_or_restore, refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
@@ -249,9 +249,7 @@ impl ProviderRuntime for GoogleProviderRuntime {
                     .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
                     let managed = load_managed_store_tokens_with_lifecycle(env, binding).await?;
                     let lifecycle = managed.lifecycle;
-                    let store = managed.store;
-                    let key = managed.key;
-                    let persisted = managed.tokens;
+                    let persisted = managed.tokens.clone();
                     use chrono::{Duration, Utc};
                     let fresh = persisted
                         .expires_at
@@ -270,10 +268,10 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         });
                         let endpoints = oauth::code_assist_endpoints("http://127.0.0.1:0/callback");
                         let runtime = oauth::GoogleCodeAssistOAuthRuntime::new(
-                            store.clone(),
+                            managed.store.clone(),
                             coord,
                             endpoints,
-                            key,
+                            managed.key.clone(),
                         );
                         let refreshed =
                             runtime.get_or_refresh_tokens().await.map_err(|e| match e {
@@ -284,7 +282,10 @@ impl ProviderRuntime for GoogleProviderRuntime {
                                     ProviderAuthError::SourceResolutionFailed(other.to_string())
                                 }
                             })?;
-                        publish_managed_store_tokens_lifecycle(env, binding, &refreshed)?;
+                        publish_managed_store_tokens_lifecycle_or_restore(
+                            env, binding, &managed, &refreshed,
+                        )
+                        .await?;
                         refreshed
                     };
                     let access = effective_tokens

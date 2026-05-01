@@ -247,6 +247,76 @@ impl AuthLeaseHandle for BootstrappingAuthLeaseHandle {
     }
 }
 
+struct RejectingAuthLeaseHandle {
+    snapshot: AuthLeaseSnapshot,
+}
+
+impl RejectingAuthLeaseHandle {
+    fn expired(expires_at: chrono::DateTime<Utc>) -> Arc<Self> {
+        Arc::new(Self {
+            snapshot: AuthLeaseSnapshot {
+                phase: Some(AuthLeasePhase::Valid),
+                expires_at: Some(expires_at.timestamp().max(0) as u64),
+                credential_present: true,
+                generation: 1,
+            },
+        })
+    }
+}
+
+impl AuthLeaseHandle for RejectingAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        _lease_key: &LeaseKey,
+        _expires_at: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        Err(DslTransitionError::guard_rejected(
+            "acquire_lease",
+            "test rejected lifecycle publication",
+        ))
+    }
+
+    fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn complete_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+        _new_expires_at: u64,
+        _now: u64,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
+        Err(DslTransitionError::guard_rejected(
+            "complete_refresh",
+            "test rejected lifecycle publication",
+        ))
+    }
+
+    fn refresh_failed(
+        &self,
+        _lease_key: &LeaseKey,
+        _permanent: bool,
+    ) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        Ok(())
+    }
+
+    fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        self.snapshot.clone()
+    }
+}
+
 struct StaticRefreshCoordinator {
     tokens: PersistedTokens,
 }
@@ -350,7 +420,7 @@ async fn openai_managed_chatgpt_oauth_rejects_token_without_auth_lifecycle() {
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_rejects_empty_auth_lifecycle_with_persisted_token() {
+async fn openai_managed_chatgpt_oauth_rehydrates_empty_auth_lifecycle_with_persisted_token() {
     let store = Arc::new(EphemeralTokenStore::new());
     let persisted = PersistedTokens {
         auth_mode: PersistedAuthMode::ChatgptOauth,
@@ -381,26 +451,21 @@ async fn openai_managed_chatgpt_oauth_rejects_empty_auth_lifecycle_with_persiste
         .with_auth_lease_handle(auth_lease.clone());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
-    let err = registry
+    let connection = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::InteractiveLoginRequired
-            )
-        ),
-        "got {err:?}"
+        .expect("fresh persisted OAuth tokens should rehydrate AuthMachine after restart");
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("fresh-chatgpt-access".to_string())
     );
     let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&default_connection_ref()));
-    assert_eq!(snapshot.phase, None);
-    assert!(!snapshot.credential_present);
+    assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+    assert!(snapshot.credential_present);
 }
 
 #[tokio::test]
-async fn openai_managed_chatgpt_oauth_rejects_expired_empty_auth_lifecycle_before_refresh() {
+async fn openai_managed_chatgpt_oauth_rehydrates_expired_empty_auth_lifecycle_before_refresh() {
     let store = Arc::new(EphemeralTokenStore::new());
     store
         .save(
@@ -447,22 +512,17 @@ async fn openai_managed_chatgpt_oauth_rejects_expired_empty_auth_lifecycle_befor
         .with_auth_lease_handle(auth_lease.clone());
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
-    let err = registry
+    let connection = registry
         .resolve(&realm, &default_connection_ref(), &env)
         .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::InteractiveLoginRequired
-            )
-        ),
-        "got {err:?}"
+        .expect("expired persisted OAuth tokens should rehydrate then refresh after restart");
+    assert_eq!(
+        connection.resolved_secret(),
+        Some("refreshed-chatgpt-access".to_string())
     );
     let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&default_connection_ref()));
-    assert_eq!(snapshot.phase, None);
-    assert!(!snapshot.credential_present);
+    assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+    assert!(snapshot.credential_present);
     assert_eq!(
         store
             .load(&TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"))
@@ -471,7 +531,7 @@ async fn openai_managed_chatgpt_oauth_rejects_expired_empty_auth_lifecycle_befor
             .unwrap()
             .primary_secret
             .as_deref(),
-        Some("expired-chatgpt-access")
+        Some("refreshed-chatgpt-access")
     );
 }
 
@@ -648,6 +708,64 @@ async fn openai_chatgpt_oauth_refresh_returns_refreshed_expiry_for_lease_publica
 }
 
 #[tokio::test]
+async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_publication_fails() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    let old_expiry = Utc::now() - ChronoDuration::minutes(5);
+    let old_tokens = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("expired-chatgpt-access".into()),
+        refresh_token: Some("rt".into()),
+        id_token: None,
+        expires_at: Some(old_expiry),
+        last_refresh: Some(Utc::now() - ChronoDuration::hours(1)),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+    };
+    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    store.save(&key, &old_tokens).await.unwrap();
+
+    let refreshed = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("refreshed-chatgpt-access".into()),
+        refresh_token: Some("rotated-rt".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+        last_refresh: Some(Utc::now()),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect(),
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+    };
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store.clone())
+        .with_refresh_coordinator(Arc::new(StaticRefreshCoordinator { tokens: refreshed }))
+        .with_auth_lease_handle(RejectingAuthLeaseHandle::expired(old_expiry));
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("AuthMachine lifecycle acquire failed"),
+        "got {err}"
+    );
+    let stored = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(stored.primary_secret, old_tokens.primary_secret);
+    assert_eq!(stored.refresh_token, old_tokens.refresh_token);
+    assert_eq!(stored.expires_at, old_tokens.expires_at);
+}
+
+#[tokio::test]
 async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     let store = Arc::new(EphemeralTokenStore::new());
     let persisted = PersistedTokens {
@@ -686,7 +804,7 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
 }
 
 #[tokio::test]
-async fn openai_external_chatgpt_tokens_rejects_expired_empty_lifecycle_bootstrap() {
+async fn openai_external_chatgpt_tokens_rehydrates_empty_lifecycle_as_expired() {
     let store = Arc::new(EphemeralTokenStore::new());
     let persisted = PersistedTokens {
         auth_mode: PersistedAuthMode::ExternalTokens,
@@ -723,14 +841,14 @@ async fn openai_external_chatgpt_tokens_rejects_expired_empty_lifecycle_bootstra
         matches!(
             err,
             meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::InteractiveLoginRequired
+                meerkat_core::AuthError::Expired
             )
         ),
         "got {err:?}"
     );
     let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&default_connection_ref()));
-    assert_eq!(snapshot.phase, None);
-    assert!(!snapshot.credential_present);
+    assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+    assert!(snapshot.credential_present);
 }
 
 #[tokio::test]

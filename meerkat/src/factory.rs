@@ -1858,7 +1858,7 @@ impl AgentFactory {
             .await
             .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
         if let Some(handle) = auth_lease_handle {
-            Self::publish_auth_lease(&handle, &connection_ref, &connection);
+            Self::publish_auth_lease(&handle, &connection_ref, &connection)?;
         }
         provider_registry
             .build_client(connection)
@@ -2067,7 +2067,7 @@ impl AgentFactory {
                 .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
 
             if let Some(handle) = auth_lease_handle {
-                Self::publish_auth_lease(&handle, &connection_ref, &connection);
+                Self::publish_auth_lease(&handle, &connection_ref, &connection)?;
             }
 
             if connection.resolved_authorizer().is_some() {
@@ -2295,14 +2295,17 @@ impl AgentFactory {
         handle: &Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
         connection_ref: &ConnectionRef,
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
-    ) {
+    ) -> Result<(), FactoryError> {
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
         let expires_at = connection
             .auth_lease
             .expires_at()
             .map(|ts| ts.timestamp().max(0) as u64)
             .unwrap_or(u64::MAX);
-        let _ = handle.acquire_lease(&lease_key, expires_at);
+        handle.acquire_lease(&lease_key, expires_at).map_err(|e| {
+            FactoryError::ClientCreationFailed(format!("AuthMachine lifecycle acquire failed: {e}"))
+        })?;
+        Ok(())
     }
 
     /// Wrap a session store in the shared adapter.
@@ -2691,7 +2694,8 @@ impl AgentFactory {
                                 &bindings.auth_lease,
                                 lease_connection_ref,
                                 &connection,
-                            );
+                            )
+                            .map_err(BuildAgentError::LlmClient)?;
                         }
 
                         #[cfg(not(target_arch = "wasm32"))]
@@ -2812,7 +2816,8 @@ impl AgentFactory {
                 if let RuntimeBuildMode::SessionOwned(bindings) = &build_config.runtime_build_mode
                     && !connection_ref.is_env_default()
                 {
-                    Self::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection);
+                    Self::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+                        .map_err(BuildAgentError::LlmClient)?;
                 }
                 let Ok(Some(executor)) = self
                     .provider_registry
@@ -4292,6 +4297,188 @@ mod tests {
         assert_eq!(
             snapshot.phase, None,
             "synthetic env-default identity must not be admitted to AuthMachine lease truth"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn build_llm_client_for_identity_fails_when_auth_lease_publication_rejects() {
+        use meerkat_core::handles::{
+            AuthLeaseHandle, AuthLeaseSnapshot, AuthLeaseTransition, DslTransitionError, LeaseKey,
+        };
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedAuthMethod, NormalizedBackendKind, ProviderAuthError, ProviderBindingError,
+            ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry, ResolvedConnection,
+            ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+
+        struct PublishingOpenAiRuntime {
+            client_builds: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for PublishingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            fn validate_binding(
+                &self,
+                connection_ref: &ConnectionRef,
+                backend: &meerkat_core::BackendProfile,
+                auth: &meerkat_core::AuthProfile,
+                policy: &meerkat_core::BindingPolicy,
+            ) -> Result<ValidatedBinding, ProviderBindingError> {
+                Ok(ValidatedBinding {
+                    connection_ref: connection_ref.clone(),
+                    provider: Provider::OpenAI,
+                    backend: NormalizedBackendKind::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+                    ),
+                    auth: NormalizedAuthMethod::OpenAi(
+                        meerkat_core::provider_matrix::OpenAiAuthMethod::ApiKey,
+                    ),
+                    backend_profile: Arc::new(backend.clone()),
+                    auth_profile: Arc::new(auth.clone()),
+                    policy: policy.clone(),
+                })
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                Ok(ResolvedConnection {
+                    provider: Provider::OpenAI,
+                    backend: binding.backend,
+                    backend_profile: Arc::clone(&binding.backend_profile),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        "sk-openai-test".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                self.client_builds
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+        }
+
+        struct RejectingAuthLeaseHandle;
+
+        impl AuthLeaseHandle for RejectingAuthLeaseHandle {
+            fn acquire_lease(
+                &self,
+                _lease_key: &LeaseKey,
+                _expires_at: u64,
+            ) -> Result<AuthLeaseTransition, DslTransitionError> {
+                Err(DslTransitionError::guard_rejected(
+                    "acquire_lease",
+                    "test rejected lifecycle publication",
+                ))
+            }
+
+            fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+                Ok(())
+            }
+
+            fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+                Ok(())
+            }
+
+            fn complete_refresh(
+                &self,
+                _lease_key: &LeaseKey,
+                _new_expires_at: u64,
+                _now: u64,
+            ) -> Result<AuthLeaseTransition, DslTransitionError> {
+                Ok(AuthLeaseTransition { generation: 0 })
+            }
+
+            fn refresh_failed(
+                &self,
+                _lease_key: &LeaseKey,
+                _permanent: bool,
+            ) -> Result<(), DslTransitionError> {
+                Ok(())
+            }
+
+            fn mark_reauth_required(
+                &self,
+                _lease_key: &LeaseKey,
+            ) -> Result<(), DslTransitionError> {
+                Ok(())
+            }
+
+            fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+                Ok(())
+            }
+
+            fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+                AuthLeaseSnapshot {
+                    phase: None,
+                    expires_at: None,
+                    credential_present: false,
+                    generation: 0,
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let client_builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider_registry =
+            ProviderRuntimeRegistry::empty().with_runtime(Arc::new(PublishingOpenAiRuntime {
+                client_builds: Arc::clone(&client_builds),
+            }));
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry = Arc::new(provider_registry);
+        let mut config = Config::default();
+        config.realm.insert(
+            "session_a".to_string(),
+            inline_realm_section(&[("openai", "text-openai-key")]),
+        );
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("session_a").unwrap(),
+            binding: BindingId::parse("default_openai").unwrap(),
+            profile: None,
+        };
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            connection_ref: Some(connection_ref),
+        };
+
+        let err = match factory
+            .build_llm_client_for_identity_with_auth_lease(
+                &config,
+                &identity,
+                Some(Arc::new(RejectingAuthLeaseHandle)),
+            )
+            .await
+        {
+            Ok(_) => panic!("client build must fail when AuthMachine rejects lease publication"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("AuthMachine lifecycle acquire failed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            client_builds.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "client construction must not run after rejected lifecycle publication"
         );
     }
 

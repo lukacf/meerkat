@@ -812,12 +812,10 @@ fn core_create_params_minimal_deserialize() {
     let params: CoreCreateParams = serde_json::from_str(json).unwrap();
 
     assert_eq!(params.prompt, "hi");
-    assert!(params.model.is_none());
-    assert!(params.provider.is_none());
+    assert!(params.turn_metadata.is_none());
     assert!(params.max_tokens.is_none());
     assert!(params.system_prompt.is_none());
     assert!(params.labels.is_none());
-    assert!(params.additional_instructions.is_none());
     assert!(params.app_context.is_none());
     assert!(params.shell_env.is_none());
 }

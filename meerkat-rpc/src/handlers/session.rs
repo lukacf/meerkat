@@ -733,6 +733,31 @@ mod tests {
     }
 
     #[test]
+    fn deferred_create_rejects_runtime_owned_turn_metadata_stamps() {
+        for (field, value) in [
+            ("execution_kind", serde_json::json!("content_turn")),
+            (
+                "peer_response_terminal_apply_intent",
+                serde_json::json!("append_context_and_run"),
+            ),
+        ] {
+            let err = serde_json::from_value::<CreateSessionParams>(serde_json::json!({
+                "prompt": "hello",
+                "initial_turn": "deferred",
+                "turn_metadata": {
+                    field: value,
+                },
+            }))
+            .expect_err("deferred session/create must reject runtime-owned turn metadata stamps");
+            let message = err.to_string();
+            assert!(
+                message.contains(field) || message.contains("unknown field"),
+                "unexpected error for {field}: {message}"
+            );
+        }
+    }
+
+    #[test]
     fn create_session_rejects_reserved_mob_peer_meta_labels() {
         let result = meerkat::surface::validate_public_peer_meta(Some(
             &meerkat_core::PeerMeta::default().with_label("mob_id", "team"),

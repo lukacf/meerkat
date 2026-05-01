@@ -1531,10 +1531,15 @@ mod tests {
             .pointer("/properties")
             .and_then(serde_json::Value::as_object)
             .expect("WireRuntimeTurnMetadata schema must expose properties");
-        for split_field in ["clear_provider_params", "clear_connection_ref"] {
+        for split_field in [
+            "clear_provider_params",
+            "clear_connection_ref",
+            "execution_kind",
+            "peer_response_terminal_apply_intent",
+        ] {
             assert!(
                 !turn_metadata_properties.contains_key(split_field),
-                "WireRuntimeTurnMetadata must not expose legacy nested split field {split_field}"
+                "WireRuntimeTurnMetadata must not expose legacy or runtime-owned nested field {split_field}"
             );
         }
 
@@ -1972,10 +1977,15 @@ mod tests {
             .pointer("/properties")
             .and_then(serde_json::Value::as_object)
             .expect("WireRuntimeTurnMetadata component must expose properties");
-        for split_field in ["clear_provider_params", "clear_connection_ref"] {
+        for split_field in [
+            "clear_provider_params",
+            "clear_connection_ref",
+            "execution_kind",
+            "peer_response_terminal_apply_intent",
+        ] {
             assert!(
                 !turn_metadata_properties.contains_key(split_field),
-                "WireRuntimeTurnMetadata component must not expose legacy nested split field {split_field}"
+                "WireRuntimeTurnMetadata component must not expose legacy or runtime-owned nested field {split_field}"
             );
         }
         for split_field in [

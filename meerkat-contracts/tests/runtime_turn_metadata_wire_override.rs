@@ -164,6 +164,27 @@ fn wire_metadata_malformed_tagged_override_payloads_fail_at_boundary() {
 }
 
 #[test]
+fn wire_metadata_rejects_runtime_owned_stamps() {
+    for (field, value) in [
+        ("execution_kind", serde_json::json!("content_turn")),
+        (
+            "peer_response_terminal_apply_intent",
+            serde_json::json!("append_context_and_run"),
+        ),
+    ] {
+        let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            field: value,
+        }))
+        .expect_err("public wire turn_metadata must reject runtime-owned stamps");
+        let message = err.to_string();
+        assert!(
+            message.contains(field) || message.contains("unknown field"),
+            "unexpected error for {field}: {message}"
+        );
+    }
+}
+
+#[test]
 fn wire_metadata_untagged_overrides_fail_closed() {
     for (field, value) in [
         (

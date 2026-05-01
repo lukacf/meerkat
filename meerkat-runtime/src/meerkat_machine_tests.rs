@@ -4708,6 +4708,152 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
 }
 
 #[tokio::test]
+async fn cancel_after_boundary_live_wake_is_not_blocked_by_full_effect_channel() {
+    struct BlockingExecutor {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+        queued_boundary_cancel_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    struct BoundaryHandle {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for BoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.live_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(BoundaryHandle {
+                live_boundary_cancel_calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
+                queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let input = Input::Prompt(crate::input::PromptInput::new(
+        "attached steered saturated boundary cancel",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("attached steered prompt should be accepted");
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("attached steered prompt should expose a completion waiter");
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("attached steered prompt should request immediate processing");
+
+    for _ in 0..16 {
+        adapter
+            .cancel_after_boundary(&session_id)
+            .await
+            .expect("boundary cancel should enqueue until the effect channel is full");
+    }
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        16,
+        "each queued boundary cancel should deliver the live wake first"
+    );
+    assert_eq!(
+        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "runtime loop is still blocked inside apply, so queued effects have not drained"
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        adapter.cancel_after_boundary(&session_id),
+    )
+    .await
+    .expect("live boundary cancel must not wait for capacity in the bounded effect channel")
+    .expect("live boundary cancel should succeed after best-effort enqueue");
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        17,
+        "saturated effect channel must not prevent the live cooperative wake"
+    );
+
+    allow_finish.notify_waiters();
+    match completion_handle.wait().await {
+        CompletionOutcome::CompletedWithoutResult => {}
+        other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
     struct BlockingThenImmediateExecutor {
         apply_calls: Arc<AtomicUsize>,

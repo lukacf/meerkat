@@ -1199,13 +1199,13 @@ impl MobProvisioner for SessionBackend {
                 "runtime-backed interrupt requested for unregistered runtime session '{session_id}'"
             )));
         }
-        MobSessionServiceInterruptHandle {
-            session_service: Arc::clone(&self.session_service),
-            bridge_session_id: session_id,
-        }
-        .hard_cancel_current_run("mob session interrupt".to_string())
-        .await
-        .map_err(|error| MobError::Internal(format!("mob session interrupt failed: {error}")))?;
+        self.session_service
+            .cancel_after_boundary(&session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                err => Err(err),
+            })?;
         Ok(())
     }
 

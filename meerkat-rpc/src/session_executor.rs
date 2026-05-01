@@ -414,6 +414,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 }
 
 #[cfg(all(test, feature = "mob"))]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use meerkat_core::RunResult;

@@ -13,7 +13,7 @@
 )]
 #![cfg_attr(test, allow(clippy::expect_used))]
 
-#[cfg(not(test))]
+#[cfg_attr(test, allow(dead_code))]
 mod artifacts;
 mod render;
 

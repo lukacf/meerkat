@@ -6,13 +6,13 @@ use meerkat_machine_schema::identity::{
 };
 use meerkat_machine_schema::{
     EffectEmit, Expr, HelperSchema, MachineSchema, Quantifier, RouteVariantId, TransitionSchema,
-    TriggerMatch, TypeRef, Update,
+    TriggerMatch, TypePathEnumPayloadAtom, TypePathEnumStructuralVariant, TypePathStructField,
+    TypePathStructFieldAtom, TypeRef, Update,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 const TOOL_PROVENANCE_TYPE: &str = "ToolProvenance";
-const TOOL_SOURCE_KIND_TYPE: &str = "ToolSourceKind";
 const TOOL_VISIBILITY_WITNESS_TYPE: &str = "ToolVisibilityWitness";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -167,76 +167,88 @@ fn named_value_type_is(type_name: &NamedTypeId, expected: &str) -> bool {
     type_name.as_str() == expected
 }
 
-fn tool_source_kind_matches(value: &KernelValue) -> bool {
-    let value = match value {
-        KernelValue::Named { type_name, value }
-            if named_value_type_is(type_name, TOOL_SOURCE_KIND_TYPE) =>
-        {
-            value.as_ref()
-        }
-        other => other,
-    };
-
-    matches!(
-        value,
-        KernelValue::String(kind)
-            if matches!(
-                kind.as_str(),
-                "Builtin"
-                    | "Shell"
-                    | "Comms"
-                    | "Memory"
-                    | "Schedule"
-                    | "Mob"
-                    | "MobTasks"
-                    | "Callback"
-                    | "Mcp"
-                    | "RustBundle"
-            )
-    )
-}
-
-fn tool_provenance_matches(value: &KernelValue) -> bool {
-    let value = match value {
-        KernelValue::Named { type_name, value }
-            if named_value_type_is(type_name, TOOL_PROVENANCE_TYPE) =>
-        {
-            value.as_ref()
-        }
-        other => other,
-    };
-
-    let KernelValue::Map(fields) = value else {
+fn tool_provenance_matches(schema: &MachineSchema, value: &KernelValue) -> bool {
+    let Ok(type_name) = NamedTypeId::parse(TOOL_PROVENANCE_TYPE) else {
         return false;
     };
-    if fields.len() != 2 {
+    if !matches!(
+        named_type_atom(schema, &type_name),
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. })
+    ) {
         return false;
     }
 
-    matches!(
-        fields.get(&string_key("kind")),
-        Some(kind) if tool_source_kind_matches(kind)
-    ) && matches!(
-        fields.get(&string_key("source_id")),
-        Some(KernelValue::String(_))
-    )
+    let ty = TypeRef::Named(type_name.clone());
+    match value {
+        KernelValue::Named {
+            type_name: value_type,
+            ..
+        } if value_type == &type_name => value_matches_type(schema, value, &ty),
+        KernelValue::Map(_) => value_matches_type(
+            schema,
+            &KernelValue::Named {
+                type_name,
+                value: Box::new(value.clone()),
+            },
+            &ty,
+        ),
+        _ => false,
+    }
 }
 
-fn tool_visibility_witness_matches(value: &KernelValue) -> bool {
+fn type_path_field_presence_set_matches(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    fields: &[FieldId],
+    value: &KernelValue,
+) -> bool {
+    if name.as_str() == TOOL_VISIBILITY_WITNESS_TYPE {
+        return tool_visibility_witness_matches(schema, fields, value);
+    }
+
+    let KernelValue::Map(values) = value else {
+        return false;
+    };
+    values.keys().all(|key| match key {
+        KernelValue::String(key) => fields.iter().any(|field| field.as_str() == key),
+        _ => false,
+    })
+}
+
+fn tool_visibility_witness_matches(
+    schema: &MachineSchema,
+    allowed_fields: &[FieldId],
+    value: &KernelValue,
+) -> bool {
     let KernelValue::Map(fields) = value else {
         return false;
     };
 
     fields.iter().all(|(key, value)| match key {
-        KernelValue::String(key) if key == "stable_owner_key" => {
+        KernelValue::String(key)
+            if key == "stable_owner_key"
+                && allowed_fields
+                    .iter()
+                    .any(|field| field.as_str() == "stable_owner_key") =>
+        {
             matches!(value, KernelValue::String(_))
         }
-        KernelValue::String(key) if key == "last_seen_provenance" => tool_provenance_matches(value),
+        KernelValue::String(key)
+            if key == "last_seen_provenance"
+                && allowed_fields
+                    .iter()
+                    .any(|field| field.as_str() == "last_seen_provenance") =>
+        {
+            tool_provenance_matches(schema, value)
+        }
         _ => false,
     })
 }
 
-fn tool_visibility_witness_identity_len(value: &KernelValue) -> Option<usize> {
+fn tool_visibility_witness_identity_len(
+    schema: &MachineSchema,
+    value: &KernelValue,
+) -> Option<usize> {
     let KernelValue::Map(fields) = value else {
         return None;
     };
@@ -250,7 +262,7 @@ fn tool_visibility_witness_identity_len(value: &KernelValue) -> Option<usize> {
     }
     if matches!(
         fields.get(&string_key("last_seen_provenance")),
-        Some(provenance) if tool_provenance_matches(provenance)
+        Some(provenance) if tool_provenance_matches(schema, provenance)
     ) {
         len += 1;
     }
@@ -1055,13 +1067,14 @@ impl GeneratedMachineKernel {
                     KernelValue::Named { type_name, value }
                         if named_value_type_is(&type_name, TOOL_VISIBILITY_WITNESS_TYPE) =>
                     {
-                        tool_visibility_witness_identity_len(value.as_ref()).ok_or_else(|| {
-                            self.eval_error(
-                                transition_name,
-                                "Len expects structural ToolVisibilityWitness authority"
-                                    .to_string(),
-                            )
-                        })?
+                        tool_visibility_witness_identity_len(&self.schema, value.as_ref())
+                            .ok_or_else(|| {
+                                self.eval_error(
+                                    transition_name,
+                                    "Len expects structural ToolVisibilityWitness authority"
+                                        .to_string(),
+                                )
+                            })?
                     }
                     KernelValue::Named { value, .. } => match *value {
                         KernelValue::Seq(items) => items.len(),
@@ -1338,17 +1351,14 @@ impl GeneratedMachineKernel {
         match ty {
             TypeRef::Named(name) => matches!(
                 named_type_atom(&self.schema, name),
-                Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
+                Some(
+                    meerkat_machine_schema::RustTypeAtom::StringEnum { .. }
+                        | meerkat_machine_schema::RustTypeAtom::TypePathEnum { .. }
+                        | meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. }
+                        | meerkat_machine_schema::RustTypeAtom::TypePathStruct { .. }
+                ) | None
             ),
-            TypeRef::Enum(name) => {
-                let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
-                    return false;
-                };
-                matches!(
-                    named_type_atom(&self.schema, &named_type_name),
-                    Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
-                )
-            }
+            TypeRef::Enum(_) => true,
             TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
                 self.type_contains_constrained_string_enum(inner)
             }
@@ -1502,6 +1512,10 @@ fn default_value_for_type(schema: &MachineSchema, ty: &TypeRef) -> KernelValue {
 }
 
 fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef) -> bool {
+    if !type_has_resolved_named_bindings(schema, ty) {
+        return false;
+    }
+
     match (value, ty) {
         (KernelValue::Bool(_), TypeRef::Bool) => true,
         (KernelValue::U64(_), TypeRef::U32 | TypeRef::U64) => true,
@@ -1540,11 +1554,63 @@ fn value_matches_type(schema: &MachineSchema, value: &KernelValue, ty: &TypeRef)
     }
 }
 
-fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> KernelValue {
-    if name.as_str() == TOOL_VISIBILITY_WITNESS_TYPE {
-        return KernelValue::Map(BTreeMap::new());
-    }
+fn type_has_resolved_named_bindings(schema: &MachineSchema, ty: &TypeRef) -> bool {
+    let mut visiting = BTreeSet::new();
+    type_has_resolved_named_bindings_inner(schema, ty, &mut visiting)
+}
 
+fn type_has_resolved_named_bindings_inner(
+    schema: &MachineSchema,
+    ty: &TypeRef,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    match ty {
+        TypeRef::Named(name) => named_type_has_resolved_named_bindings(schema, name, visiting),
+        TypeRef::Enum(name) => {
+            let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
+                return false;
+            };
+            matches!(
+                named_type_atom(schema, &named_type_name),
+                Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
+            )
+        }
+        TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            type_has_resolved_named_bindings_inner(schema, inner, visiting)
+        }
+        TypeRef::Map(key, value) => {
+            type_has_resolved_named_bindings_inner(schema, key, visiting)
+                && type_has_resolved_named_bindings_inner(schema, value, visiting)
+        }
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String => true,
+    }
+}
+
+fn named_type_has_resolved_named_bindings(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    if !visiting.insert(name.as_str().to_owned()) {
+        return false;
+    }
+    let resolved = match named_type_atom(schema, name) {
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. }) => {
+            fields.iter().all(|field| match &field.atom {
+                TypePathStructFieldAtom::String => true,
+                TypePathStructFieldAtom::Named(name) => {
+                    named_type_has_resolved_named_bindings(schema, name, visiting)
+                }
+            })
+        }
+        Some(_) => true,
+        None => false,
+    };
+    visiting.remove(name.as_str());
+    resolved
+}
+
+fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> KernelValue {
     match named_type_atom(schema, name) {
         Some(meerkat_machine_schema::RustTypeAtom::Bool) => KernelValue::Bool(false),
         Some(
@@ -1556,12 +1622,47 @@ fn default_value_for_named_type(schema: &MachineSchema, name: &NamedTypeId) -> K
         Some(
             meerkat_machine_schema::RustTypeAtom::String
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
-        )
-        | None => KernelValue::String(String::new()),
+        ) => KernelValue::String(String::new()),
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { .. }) => {
+            KernelValue::Map(BTreeMap::new())
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. }) => {
+            KernelValue::Map(
+                fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            string_key(field.name.as_str()),
+                            default_value_for_type_path_struct_field(schema, field),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
+            unit_variants
+                .first()
+                .map(|variant| KernelValue::String(variant.as_str().to_owned()))
+                .unwrap_or_else(|| KernelValue::String(String::new()))
+        }
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => variants
             .first()
             .map(|variant| KernelValue::String(variant.as_str().to_owned()))
             .unwrap_or_else(|| KernelValue::String(String::new())),
+        None => KernelValue::None,
+    }
+}
+
+fn default_value_for_type_path_struct_field(
+    schema: &MachineSchema,
+    field: &TypePathStructField,
+) -> KernelValue {
+    match &field.atom {
+        TypePathStructFieldAtom::String => KernelValue::String(String::new()),
+        TypePathStructFieldAtom::Named(name) => KernelValue::Named {
+            type_name: name.clone(),
+            value: Box::new(default_value_for_named_type(schema, name)),
+        },
     }
 }
 
@@ -1588,10 +1689,6 @@ fn named_type_inner_matches(
     name: &NamedTypeId,
     value: &KernelValue,
 ) -> bool {
-    if name.as_str() == TOOL_VISIBILITY_WITNESS_TYPE {
-        return tool_visibility_witness_matches(value);
-    }
-
     match named_type_atom(schema, name) {
         Some(meerkat_machine_schema::RustTypeAtom::Bool) => matches!(value, KernelValue::Bool(_)),
         Some(
@@ -1603,11 +1700,102 @@ fn named_type_inner_matches(
         Some(
             meerkat_machine_schema::RustTypeAtom::String
             | meerkat_machine_schema::RustTypeAtom::TypePath(_),
-        )
-        | None => matches!(value, KernelValue::String(_)),
+        ) => matches!(value, KernelValue::String(_)),
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathFieldPresenceSet { fields, .. }) => {
+            type_path_field_presence_set_matches(schema, name, fields, value)
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathStruct { fields, .. }) => {
+            type_path_struct_matches(schema, fields, value)
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        }) => {
+            type_path_enum_unit_matches(name, unit_variants, value)
+                || type_path_enum_structural_matches(structural_variants, value)
+        }
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             matches!(value, KernelValue::String(value) if variants.iter().any(|variant| variant.as_str() == value))
         }
+        None => false,
+    }
+}
+
+fn type_path_struct_matches(
+    schema: &MachineSchema,
+    expected_fields: &[TypePathStructField],
+    value: &KernelValue,
+) -> bool {
+    let KernelValue::Map(fields) = value else {
+        return false;
+    };
+    if fields.len() != expected_fields.len() {
+        return false;
+    }
+
+    expected_fields.iter().all(|field| {
+        let Some(value) = fields.get(&string_key(field.name.as_str())) else {
+            return false;
+        };
+        match &field.atom {
+            TypePathStructFieldAtom::String => matches!(value, KernelValue::String(_)),
+            TypePathStructFieldAtom::Named(name) => {
+                value_matches_type(schema, value, &TypeRef::Named(name.clone()))
+            }
+        }
+    })
+}
+
+fn type_path_enum_structural_matches(
+    structural_variants: &[TypePathEnumStructuralVariant],
+    value: &KernelValue,
+) -> bool {
+    let KernelValue::Map(fields) = value else {
+        return false;
+    };
+    let Some(KernelValue::String(tag)) = fields.get(&string_key("tag")) else {
+        return false;
+    };
+    let Some(variant) = structural_variants
+        .iter()
+        .find(|variant| variant.variant.as_str() == tag)
+    else {
+        return false;
+    };
+    if fields.len() != variant.fields.len() + 1 {
+        return false;
+    }
+
+    variant.fields.iter().all(|field| {
+        let Some(value) = fields.get(&string_key(field.name.as_str())) else {
+            return false;
+        };
+        match field.atom {
+            TypePathEnumPayloadAtom::StringSet => matches!(
+                value,
+                KernelValue::Set(values)
+                    if values
+                        .iter()
+                        .all(|value| matches!(value, KernelValue::String(_)))
+            ),
+        }
+    })
+}
+
+fn type_path_enum_unit_matches(
+    name: &NamedTypeId,
+    unit_variants: &[EnumVariantId],
+    value: &KernelValue,
+) -> bool {
+    match value {
+        KernelValue::String(value) => unit_variants
+            .iter()
+            .any(|variant| variant.as_str() == value.as_str()),
+        KernelValue::NamedVariant { enum_name, variant } if enum_name.as_str() == name.as_str() => {
+            unit_variants.iter().any(|allowed| allowed == variant)
+        }
+        _ => false,
     }
 }
 
@@ -1619,6 +1807,9 @@ fn named_type_variant_matches(
     match named_type_atom(schema, name) {
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             variants.iter().any(|allowed| allowed == variant)
+        }
+        Some(meerkat_machine_schema::RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
+            unit_variants.iter().any(|allowed| allowed == variant)
         }
         _ => false,
     }
@@ -1637,17 +1828,18 @@ fn enum_variant_matches(
     variant: &EnumVariantId,
 ) -> bool {
     let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
-        return true;
+        return false;
     };
     match named_type_atom(schema, &named_type_name) {
         Some(meerkat_machine_schema::RustTypeAtom::StringEnum { variants }) => {
             variants.iter().any(|allowed| allowed == variant)
         }
-        _ => true,
+        _ => false,
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::redundant_clone)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1783,12 +1975,51 @@ mod tests {
         );
     }
 
+    fn add_unbound_named_register_op_effect(schema: &mut meerkat_machine_schema::MachineSchema) {
+        let effect_variant = schema
+            .effects
+            .variants
+            .iter_mut()
+            .find(|variant| variant.name.as_str() == "SubmitOpEvent")
+            .expect("SubmitOpEvent effect variant");
+        effect_variant
+            .fields
+            .push(meerkat_machine_schema::FieldSchema {
+                name: field_id("unbound_runtime_id"),
+                ty: meerkat_machine_schema::TypeRef::Named(named_type_id("UnboundRuntimeId")),
+            });
+
+        let transition = schema
+            .transitions
+            .iter_mut()
+            .find(|transition| transition.name.as_str() == "RegisterOpIdle")
+            .expect("RegisterOpIdle transition");
+        let effect = transition
+            .emit
+            .iter_mut()
+            .find(|effect| effect.variant.as_str() == "SubmitOpEvent")
+            .expect("SubmitOpEvent emit");
+        effect.fields.insert(
+            field_id("unbound_runtime_id"),
+            meerkat_machine_schema::Expr::String("runtime-1".to_string()),
+        );
+    }
+
     fn add_invalid_operation_status_helper(schema: &mut meerkat_machine_schema::MachineSchema) {
         schema.helpers.push(meerkat_machine_schema::HelperSchema {
             name: "invalid_operation_status".to_string(),
             params: Vec::new(),
             returns: meerkat_machine_schema::TypeRef::Enum(enum_type_id("OperationStatus")),
             body: meerkat_machine_schema::Expr::String("Launched".to_string()),
+        });
+    }
+
+    fn add_unbound_named_helper(schema: &mut meerkat_machine_schema::MachineSchema) {
+        schema.helpers.push(meerkat_machine_schema::HelperSchema {
+            name: "unbound_runtime_id".to_string(),
+            params: Vec::new(),
+            returns: meerkat_machine_schema::TypeRef::Named(named_type_id("UnboundRuntimeId")),
+            body: meerkat_machine_schema::Expr::String("runtime-1".to_string()),
         });
     }
 
@@ -1855,6 +2086,46 @@ mod tests {
                 if type_name == named_type_id("FenceToken")
                     && matches!(value.as_ref(), KernelValue::U64(0))
         ));
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn unbound_semantic_enum_state_domains_reject_unknown_values() {
+        let kernel = GeneratedMachineKernel::new(mob_machine());
+        let mut state = kernel.initial_state().expect("initial state");
+        state.fields.insert(
+            field_id("run_step_dependency_modes"),
+            KernelValue::Map(BTreeMap::from([(
+                named_string("RunId", "run-1"),
+                KernelValue::Map(BTreeMap::from([(
+                    named_string("StepId", "step-1"),
+                    KernelValue::NamedVariant {
+                        enum_name: enum_type_id("DependencyMode"),
+                        variant: enum_variant_id("Neither"),
+                    },
+                )])),
+            )])),
+        );
+
+        let refusal = kernel
+            .transition(
+                &state,
+                &KernelInput {
+                    variant: input_id("Stop"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect_err("invalid DependencyMode state must be rejected before transitioning");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("run_step_dependency_modes"),
+                    "state validation refusal should identify the bad field, got: {reason}"
+                );
+            }
+            other => panic!("expected state validation error, got {other:?}"),
+        }
     }
 
     #[allow(clippy::expect_used)]
@@ -1973,6 +2244,258 @@ mod tests {
                 ),
                 "unknown {domain} named variants must not enter named-type state fields"
             );
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn typed_tool_filter_domain_rejects_arbitrary_string_values() {
+        let schema = meerkat_machine();
+        let tool_filter_ty = meerkat_machine_schema::TypeRef::Named(named_type_id("ToolFilter"));
+
+        assert!(value_matches_type(
+            &schema,
+            &named_string("ToolFilter", "All"),
+            &tool_filter_ty,
+        ));
+        assert!(value_matches_type(
+            &schema,
+            &KernelValue::NamedVariant {
+                enum_name: enum_type_id("ToolFilter"),
+                variant: enum_variant_id("All"),
+            },
+            &tool_filter_ty,
+        ));
+        assert!(
+            !value_matches_type(
+                &schema,
+                &named_string("ToolFilter", "toolfilter_2"),
+                &tool_filter_ty,
+            ),
+            "ToolFilter must not accept arbitrary generated placeholder strings"
+        );
+        assert!(
+            !value_matches_type(
+                &schema,
+                &KernelValue::NamedVariant {
+                    enum_name: enum_type_id("ToolFilter"),
+                    variant: enum_variant_id("Bogus"),
+                },
+                &tool_filter_ty,
+            ),
+            "ToolFilter named variants must be constrained by the typed owner"
+        );
+
+        let tool_filter_payload = |tag: &str| KernelValue::Named {
+            type_name: named_type_id("ToolFilter"),
+            value: Box::new(KernelValue::Map(BTreeMap::from([
+                (
+                    KernelValue::String("tag".into()),
+                    KernelValue::String(tag.to_owned()),
+                ),
+                (
+                    KernelValue::String("names".into()),
+                    KernelValue::Set(BTreeSet::from([KernelValue::String("tool-a".into())])),
+                ),
+            ]))),
+        };
+        let allow_payload = tool_filter_payload("Allow");
+        let deny_payload = tool_filter_payload("Deny");
+        assert!(value_matches_type(&schema, &allow_payload, &tool_filter_ty));
+        assert!(value_matches_type(&schema, &deny_payload, &tool_filter_ty));
+
+        let mut no_structural_schema = schema.clone();
+        no_structural_schema
+            .named_types
+            .iter_mut()
+            .find(|binding| binding.name.as_str() == "ToolFilter")
+            .expect("ToolFilter binding")
+            .rust = meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+            path: "crate::catalog::dsl::meerkat_machine::ToolFilter".to_string(),
+            unit_variants: vec![enum_variant_id("All")],
+            structural_variants: Vec::new(),
+        };
+        assert!(
+            !value_matches_type(&no_structural_schema, &allow_payload, &tool_filter_ty),
+            "structural ToolFilter payloads must be authorized by TypePathEnum metadata"
+        );
+
+        let mut alternate_schema = schema.clone();
+        alternate_schema
+            .named_types
+            .iter_mut()
+            .find(|binding| binding.name.as_str() == "ToolFilter")
+            .expect("ToolFilter binding")
+            .rust = meerkat_machine_schema::RustTypeAtom::TypePathEnum {
+            path: "crate::catalog::dsl::meerkat_machine::ToolFilter".to_string(),
+            unit_variants: vec![enum_variant_id("Only")],
+            structural_variants: vec![
+                meerkat_machine_schema::TypePathEnumStructuralVariant::string_set("Allow", "names"),
+                meerkat_machine_schema::TypePathEnumStructuralVariant::string_set("Deny", "names"),
+            ],
+        };
+        assert!(
+            !value_matches_type(
+                &alternate_schema,
+                &named_string("ToolFilter", "All"),
+                &tool_filter_ty,
+            ),
+            "ToolFilter unit strings must be authorized by TypePathEnum metadata"
+        );
+        assert!(
+            !value_matches_type(
+                &alternate_schema,
+                &KernelValue::NamedVariant {
+                    enum_name: enum_type_id("ToolFilter"),
+                    variant: enum_variant_id("All"),
+                },
+                &tool_filter_ty,
+            ),
+            "ToolFilter named variants must be authorized by TypePathEnum metadata"
+        );
+        assert!(
+            value_matches_type(&alternate_schema, &allow_payload, &tool_filter_ty),
+            "structural ToolFilter payloads remain validated by shape after the typed owner authorizes the domain"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn missing_named_type_bindings_fail_closed_in_kernel_matching() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .retain(|binding| binding.name.as_str() != "OperationStatus");
+
+        assert!(
+            !value_matches_type(
+                &schema,
+                &named_string("OperationStatus", "Running"),
+                &meerkat_machine_schema::TypeRef::Named(named_type_id("OperationStatus")),
+            ),
+            "missing named-type bindings must not fall back to arbitrary string matching"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn missing_named_type_bindings_do_not_default_to_arbitrary_strings() {
+        let schema = meerkat_machine();
+        let unbound_ty = meerkat_machine_schema::TypeRef::Named(named_type_id("UnboundRuntimeId"));
+        let default = default_value_for_type(&schema, &unbound_ty);
+
+        assert!(
+            matches!(
+                default,
+                KernelValue::Named {
+                    ref type_name,
+                    ref value,
+                }
+                    if type_name.as_str() == "UnboundRuntimeId"
+                        && matches!(value.as_ref(), KernelValue::None)
+            ),
+            "unbound named-type defaults must not manufacture arbitrary string values"
+        );
+        assert!(
+            !value_matches_type(&schema, &default, &unbound_ty),
+            "unbound named-type defaults must fail closed when checked"
+        );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn missing_named_type_bindings_fail_initial_state_validation() {
+        let mut schema = meerkat_machine();
+        schema
+            .state
+            .fields
+            .push(meerkat_machine_schema::FieldSchema {
+                name: field_id("unbound_runtime_id"),
+                ty: meerkat_machine_schema::TypeRef::Named(named_type_id("UnboundRuntimeId")),
+            });
+
+        let refusal = GeneratedMachineKernel::new(schema)
+            .initial_state()
+            .expect_err("missing named binding must invalidate generated default state");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("unbound_runtime_id"),
+                    "state validation refusal should identify the unbound field, got: {reason}"
+                );
+            }
+            other => panic!("expected initial-state evaluation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn missing_named_type_bindings_fail_helper_return_validation() {
+        let mut schema = meerkat_machine();
+        add_unbound_named_helper(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state");
+
+        let refusal = kernel
+            .evaluate_helper(&state, "unbound_runtime_id", &BTreeMap::new())
+            .expect_err("missing named binding must invalidate helper returns");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("unbound_runtime_id") && reason.contains("return value"),
+                    "helper refusal should identify the unbound helper return, got: {reason}"
+                );
+            }
+            other => panic!("expected helper return evaluation error, got {other:?}"),
+        }
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn missing_named_type_bindings_fail_effect_validation() {
+        let mut schema = meerkat_machine();
+        add_unbound_named_register_op_effect(&mut schema);
+        let kernel = GeneratedMachineKernel::new(schema);
+        let state = kernel.initial_state().expect("initial state");
+        let initialized = kernel
+            .transition_signal(
+                &state,
+                &KernelSignal {
+                    variant: signal_id("Initialize"),
+                    fields: BTreeMap::new(),
+                },
+            )
+            .expect("initialize");
+
+        let refusal = kernel
+            .transition(
+                &initialized.next_state,
+                &KernelInput {
+                    variant: input_id("RegisterOp"),
+                    fields: BTreeMap::from([
+                        (field_id("operation_id"), KernelValue::String("op-1".into())),
+                        (
+                            field_id("kind"),
+                            KernelValue::NamedVariant {
+                                enum_name: enum_type_id("OperationKind"),
+                                variant: enum_variant_id("BackgroundToolOp"),
+                            },
+                        ),
+                    ]),
+                },
+            )
+            .expect_err("missing named binding must invalidate emitted effect payloads");
+
+        match refusal {
+            TransitionRefusal::EvaluationError { reason, .. } => {
+                assert!(
+                    reason.contains("SubmitOpEvent") && reason.contains("unbound_runtime_id"),
+                    "effect refusal should identify the unbound payload field, got: {reason}"
+                );
+            }
+            other => panic!("expected effect payload evaluation error, got {other:?}"),
         }
     }
 

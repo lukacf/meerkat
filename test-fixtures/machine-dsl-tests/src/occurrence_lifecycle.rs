@@ -481,8 +481,7 @@ mod tests {
 
     #[test]
     fn schema_validates() {
-        // Mirror the occurrence-lifecycle catalog binding set from
-        // `meerkat-machine-schema/src/catalog/dsl/mod.rs::dsl_occurrence_lifecycle_machine`.
+        // Mirror this fixture machine's typed binding set.
         // B-4 (`c0cb12071`) made `named_types` validation-gated; DSL macro
         // emits `vec![]`.
         use meerkat_machine_schema::identity::NamedTypeBinding;
@@ -490,6 +489,10 @@ mod tests {
         schema.named_types = vec![
             NamedTypeBinding::string("ClaimToken"),
             NamedTypeBinding::string("DeliveryReceipt"),
+            NamedTypeBinding::string_enum(
+                "OccurrenceFailureClass",
+                &["Timeout", "TargetUnavailable", "InternalError"],
+            ),
             NamedTypeBinding::string("OccurrenceId"),
             NamedTypeBinding::string("OccurrenceLifecycleState"),
             NamedTypeBinding::string("ScheduleId"),
@@ -526,7 +529,18 @@ mod tests {
             }
         }
 
-        let schema = OccurrenceLifecycleMachineState::schema();
+        let mut schema = OccurrenceLifecycleMachineState::schema();
+        schema.named_types = vec![
+            meerkat_machine_schema::identity::NamedTypeBinding::string("ClaimToken"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("DeliveryReceipt"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string_enum(
+                "OccurrenceFailureClass",
+                &["Timeout", "TargetUnavailable", "InternalError"],
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("OccurrenceId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("OccurrenceLifecycleState"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("ScheduleId"),
+        ];
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         let mut auth = OccurrenceLifecycleMachineAuthority::new();

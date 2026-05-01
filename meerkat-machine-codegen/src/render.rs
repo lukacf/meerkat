@@ -356,87 +356,11 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
     pushln!(&mut out);
 
     let named_type_aliases = collect_machine_named_types(schema);
-    let enum_type_defs = collect_machine_enum_types(schema);
-    let generated_enum_names: std::collections::BTreeSet<String> = enum_type_defs
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect();
-    let enum_defaults: std::collections::BTreeMap<String, String> = enum_type_defs
-        .iter()
-        .map(|(name, variants)| {
-            (
-                name.clone(),
-                format!(
-                    "{}::{}",
-                    name,
-                    rust_ident(
-                        variants
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "Running".to_string())
-                            .as_str()
-                    )
-                ),
-            )
-        })
-        .collect();
     if !named_type_aliases.is_empty() {
         for alias in named_type_aliases {
-            if generated_enum_names.contains(&rust_ident(&alias)) {
-                continue;
-            }
             if let Some(atom) = lookup_named_type_atom(schema, &alias) {
                 render_named_type_definition(&mut out, &alias, atom);
             }
-        }
-        pushln!(&mut out);
-    }
-    if !enum_type_defs.is_empty() {
-        for (enum_name, variants) in enum_type_defs {
-            pushln!(&mut out, "#[allow(non_camel_case_types)]");
-            pushln!(
-                &mut out,
-                "#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]"
-            );
-            pushln!(&mut out, "pub enum {} {{", enum_name);
-            for (index, variant) in variants.iter().enumerate() {
-                if index == 0 {
-                    pushln!(&mut out, "    #[default]");
-                }
-                let wire_label = known_enum_variant_wire_label(&enum_name, variant);
-                if wire_label != variant.as_str() {
-                    pushln!(
-                        &mut out,
-                        "    #[serde(rename = {})]",
-                        tla_string(wire_label)
-                    );
-                }
-                pushln!(&mut out, "    {},", rust_ident(variant));
-            }
-            pushln!(&mut out, "}}");
-            pushln!(&mut out, "impl {} {{", enum_name);
-            pushln!(&mut out, "    pub fn as_str(&self) -> &'static str {{");
-            pushln!(&mut out, "        match self {{");
-            for variant in &variants {
-                let wire_expr = known_enum_variant_wire_expr(&enum_name, variant);
-                pushln!(
-                    &mut out,
-                    "            Self::{} => {},",
-                    rust_ident(variant),
-                    wire_expr
-                );
-            }
-            pushln!(&mut out, "        }}");
-            pushln!(&mut out, "    }}");
-            pushln!(&mut out, "}}");
-            pushln!(&mut out, "impl std::fmt::Display for {} {{", enum_name);
-            pushln!(
-                &mut out,
-                "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
-            );
-            pushln!(&mut out, "        f.write_str(self.as_str())");
-            pushln!(&mut out, "    }}");
-            pushln!(&mut out, "}}");
         }
         pushln!(&mut out);
     }
@@ -772,7 +696,7 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
             &mut out,
             "        {}: {},",
             rust_field_ident(&field.name),
-            direct_default_value_expr(schema, &field.ty, &enum_defaults)
+            direct_default_value_expr(&field.ty)
         );
     }
     pushln!(&mut out, "    }}");
@@ -781,20 +705,13 @@ fn render_canonical_stub_modeled_module(schema: &MachineSchema) -> String {
 }
 
 #[cfg(not(test))]
-fn direct_default_value_expr(
-    _schema: &MachineSchema,
-    ty: &TypeRef,
-    enum_defaults: &std::collections::BTreeMap<String, String>,
-) -> String {
+fn direct_default_value_expr(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Bool => "false".to_string(),
         TypeRef::U32 | TypeRef::U64 => "0".to_string(),
         TypeRef::String => "String::new()".to_string(),
         TypeRef::Named(name) => format!("{}::default()", rust_ident(name.as_str())),
-        TypeRef::Enum(name) => enum_defaults
-            .get(name.as_str())
-            .cloned()
-            .unwrap_or_else(|| format!("{}::default()", rust_ident(name.as_str()))),
+        TypeRef::Enum(name) => format!("{}::default()", rust_ident(name.as_str())),
         TypeRef::Option(_) => "None".to_string(),
         TypeRef::Set(_) => "Default::default()".to_string(),
         TypeRef::Seq(_) => "Vec::new()".to_string(),
@@ -1334,66 +1251,6 @@ fn collect_named_types_from_type_ref(ty: &TypeRef, names: &mut std::collections:
     }
 }
 
-#[cfg(not(test))]
-fn collect_machine_enum_types(schema: &MachineSchema) -> Vec<(String, Vec<String>)> {
-    let mut enums: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    enums.insert(schema.state.phase.name.clone());
-    for field in &schema.state.fields {
-        collect_enum_types_from_type_ref(&field.ty, &mut enums);
-    }
-    for variant in &schema.inputs.variants {
-        for field in &variant.fields {
-            collect_enum_types_from_type_ref(&field.ty, &mut enums);
-        }
-    }
-    for variant in &schema.signals.variants {
-        for field in &variant.fields {
-            collect_enum_types_from_type_ref(&field.ty, &mut enums);
-        }
-    }
-    for variant in &schema.effects.variants {
-        for field in &variant.fields {
-            collect_enum_types_from_type_ref(&field.ty, &mut enums);
-        }
-    }
-    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
-        for field in &helper.params {
-            collect_enum_types_from_type_ref(&field.ty, &mut enums);
-        }
-        collect_enum_types_from_type_ref(&helper.returns, &mut enums);
-    }
-
-    enums
-        .into_iter()
-        .filter_map(|name| {
-            if matches!(
-                lookup_named_type_atom(schema, &name),
-                Some(meerkat_machine_schema::RustTypeAtom::StringEnum { .. })
-            ) {
-                return None;
-            }
-            known_enum_variants(&name).map(|variants| (rust_ident(&name), variants))
-        })
-        .collect()
-}
-
-#[cfg(not(test))]
-fn collect_enum_types_from_type_ref(ty: &TypeRef, enums: &mut std::collections::BTreeSet<String>) {
-    match ty {
-        TypeRef::Enum(name) => {
-            enums.insert(name.as_str().to_owned());
-        }
-        TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
-            collect_enum_types_from_type_ref(inner, enums);
-        }
-        TypeRef::Map(key, value) => {
-            collect_enum_types_from_type_ref(key, enums);
-            collect_enum_types_from_type_ref(value, enums);
-        }
-        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String | TypeRef::Named(_) => {}
-    }
-}
-
 /// Render the Rust-code text for a [`RustTypeAtom`] — what appears on the
 /// right-hand side of a `pub type Alias = ...;` declaration or the
 /// return position of a default-value helper.
@@ -1408,7 +1265,10 @@ fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String 
         RustTypeAtom::Bool => "bool".to_string(),
         RustTypeAtom::String => "String".to_string(),
         RustTypeAtom::StringEnum { .. } => "String".to_string(),
-        RustTypeAtom::TypePath(path) => path
+        RustTypeAtom::TypePath(path)
+        | RustTypeAtom::TypePathFieldPresenceSet { path, .. }
+        | RustTypeAtom::TypePathStruct { path, .. }
+        | RustTypeAtom::TypePathEnum { path, .. } => path
             .strip_prefix("crate::catalog::")
             .map(|suffix| format!("meerkat_machine_schema::catalog::{suffix}"))
             .unwrap_or_else(|| path.clone()),
@@ -1425,7 +1285,10 @@ fn render_named_type_definition(
 
     let rust_name = rust_ident(name);
     match atom {
-        RustTypeAtom::TypePath(_) => {
+        RustTypeAtom::TypePath(_)
+        | RustTypeAtom::TypePathFieldPresenceSet { .. }
+        | RustTypeAtom::TypePathStruct { .. }
+        | RustTypeAtom::TypePathEnum { .. } => {
             pushln!(
                 out,
                 "pub type {} = {};",
@@ -1604,338 +1467,6 @@ fn rust_ident(value: impl AsRef<str>) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect()
-}
-
-#[cfg(not(test))]
-fn known_enum_variants(name: &str) -> Option<Vec<String>> {
-    Some(
-        match name {
-            "OperationKind" => vec!["MobMemberChild", "BackgroundToolOp"],
-            "Provider" => vec!["Anthropic", "OpenAI", "Gemini", "SelfHosted", "Other"],
-            "SessionLlmCapabilitySurfaceStatus" => vec!["Resolved", "Unresolved"],
-            "ToolSourceKind" => vec![
-                "Builtin",
-                "Shell",
-                "Comms",
-                "Memory",
-                "Schedule",
-                "Mob",
-                "MobTasks",
-                "Callback",
-                "Mcp",
-                "RustBundle",
-            ],
-            "RealtimeBindingState" => vec![
-                "Unbound",
-                "BindingNotReady",
-                "BindingReady",
-                "ReplacementPending",
-            ],
-            "RealtimeProductTurnPhase" => vec![
-                "Idle",
-                "AwaitingProgress",
-                "Committed",
-                "OutputStarted",
-                "Preemptible",
-            ],
-            "RealtimeProjectionFreshness" => vec!["Clean", "StaleDeferred", "StaleImmediate"],
-            "RealtimeReconnectPolicy" => vec!["CleanExit", "ReattachAndRecover"],
-            "OutboundPeerRequestState" => vec![
-                "Sent",
-                "AcceptedProgress",
-                "Completed",
-                "Failed",
-                "TimedOut",
-            ],
-            "InboundPeerRequestState" => vec!["Received", "Replied"],
-            "PeerTerminalDisposition" => vec!["Completed", "Failed"],
-            "InteractionStreamState" => vec![
-                "Reserved",
-                "Attached",
-                "Completed",
-                "Expired",
-                "ClosedEarly",
-            ],
-            "McpServerState" => vec!["PendingConnect", "Connected", "Failed", "Disconnected"],
-            "PeerIngressEnvelopeClass" => {
-                vec!["Message", "Request", "Lifecycle", "Response", "Ack"]
-            }
-            "PeerIngressAdmittedKind" => {
-                vec!["Message", "Request", "Response", "Ack", "PlainEvent"]
-            }
-            "PeerIngressInputClass" => vec![
-                "ActionableMessage",
-                "ActionableRequest",
-                "ResponseProgress",
-                "ResponseTerminal",
-                "PeerLifecycleAdded",
-                "PeerLifecycleRetired",
-                "PeerLifecycleUnwired",
-                "SilentRequest",
-                "Ack",
-                "PlainEvent",
-            ],
-            "PeerIngressLifecycleClass" => vec!["PeerAdded", "PeerRetired", "PeerUnwired"],
-            "PeerIngressAuthClass" => vec!["Required", "SupervisorBridgeExempt"],
-            "PeerIngressResponseStatus" => vec!["Accepted", "Completed", "Failed"],
-            "PeerIngressResponseTerminality" => {
-                vec!["Progress", "TerminalCompleted", "TerminalFailed"]
-            }
-            "PeerIngressOwnerKind" => vec!["Unattached", "SessionOwned", "MobOwned"],
-            "SupervisorBindingKind" => vec!["Unbound", "Bound"],
-            "TurnPhase" => vec![
-                "Ready",
-                "ApplyingPrimitive",
-                "CallingLlm",
-                "WaitingForOps",
-                "DrainingBoundary",
-                "Extracting",
-                "ErrorRecovery",
-                "Cancelling",
-                "Completed",
-                "Failed",
-                "Cancelled",
-            ],
-            "RegistrationPhase" => vec!["Queuing", "Active"],
-            "DrainPhase" => vec!["Inactive", "Running", "Stopped", "ExitedRespawnable"],
-            "DrainMode" => vec!["Timed", "AttachedSession", "PersistentHost"],
-            "SurfacePhase" => vec!["Operating", "Shutdown"],
-            "LiveTopologyPhase" => vec![
-                "Idle",
-                "Reconfiguring",
-                "Detached",
-                "HostIdentityApplied",
-                "HostVisibilityApplied",
-            ],
-            "InputPhase" => vec![
-                "Queued",
-                "Staged",
-                "Applied",
-                "AppliedPendingConsumption",
-                "Consumed",
-                "Superseded",
-                "Coalesced",
-                "Abandoned",
-            ],
-            "InputTerminalKind" => vec!["Consumed", "Superseded", "Coalesced", "Abandoned"],
-            "SurfacePendingOp" => vec!["None", "Add", "Reload"],
-            "SurfaceStagedOp" => vec!["None", "Add", "Remove", "Reload"],
-            "TurnPrimitiveKind" => vec![
-                "None",
-                "ConversationTurn",
-                "ImmediateAppend",
-                "ImmediateContextAppend",
-            ],
-            "TurnTerminalOutcome" => vec![
-                "None",
-                "Completed",
-                "Failed",
-                "Cancelled",
-                "BudgetExhausted",
-                "TimeBudgetExceeded",
-                "StructuredOutputValidationFailed",
-            ],
-            "RuntimeApplyFailureCause" => vec![
-                "Unknown",
-                "PrimitiveRejected",
-                "RuntimeContextApply",
-                "RuntimeTurn",
-                "ExecutorStopped",
-                "ExecutorControlFailed",
-                "ExecutorInternal",
-            ],
-            "PreRunPhase" => vec!["Idle", "Attached", "Retired"],
-            "RuntimeNoticeKind" => vec!["Drain", "Reset", "Stop", "Exit", "Recover"],
-            "TurnCancellationReason" => vec!["Observed"],
-            "LlmRetryFailureKind" => vec![
-                "RateLimited",
-                "NetworkTimeout",
-                "CallTimeout",
-                "RetryableProviderError",
-            ],
-            "PostAdmissionSignalKind" => vec![
-                "WakeLoop",
-                "InterruptYielding",
-                "RequestImmediateProcessing",
-            ],
-            "ExternalToolSurfaceBaseState" => vec!["Absent", "Active", "Removing", "Removed"],
-            "ExternalToolSurfaceDeltaOperation" => vec!["None", "Add", "Remove", "Reload"],
-            "ExternalToolSurfaceDeltaPhase" => {
-                vec!["None", "Pending", "Applied", "Draining", "Failed", "Forced"]
-            }
-            "ExternalToolSurfaceFailureCause" => {
-                vec!["PendingFailed", "SurfaceDraining", "SurfaceUnavailable"]
-            }
-            "DrainExitReason" => vec![
-                "IdleTimeout",
-                "Dismissed",
-                "Failed",
-                "Aborted",
-                "SessionShutdown",
-            ],
-            "InputAbandonReason" => vec![
-                "Retired",
-                "Reset",
-                "Stopped",
-                "Destroyed",
-                "Cancelled",
-                "MaxAttemptsExhausted",
-            ],
-            "InputLane" => vec!["Queue", "Steer"],
-            "RoutingSwitchTurnPhase" => vec![
-                "Requested",
-                "PendingForBoundary",
-                "ActiveFiniteOverride",
-                "ApplyingPersistentReconfigure",
-                "Terminal",
-            ],
-            "RoutingSwitchTurnTerminal" => vec![
-                "Denied",
-                "ConsumedAndRestored",
-                "PersistentReconfigureApplied",
-            ],
-            "RoutingDenialReason" => vec![
-                "CapabilityPolicy",
-                "ApprovalRequiredButUnavailable",
-                "DeniedDuringApproval",
-                "ScopedOverrideConflict",
-                "RealtimeTransportConflict",
-            ],
-            "RoutingApprovalPhase" => vec![
-                "Pending",
-                "PresentedToUser",
-                "Approved",
-                "Denied",
-                "SurfaceDetached",
-            ],
-            "RoutingApprovalParentKind" => vec!["SwitchTurn", "ImageOperation"],
-            "RoutingImageOperationPhase" => vec![
-                "Requested",
-                "PlanResolved",
-                "ScopedOverrideActive",
-                "ProviderCallInFlight",
-                "ResultCommitted",
-                "RestoringScopedOverride",
-                "Terminal",
-            ],
-            "RoutingImageTerminal" => vec![
-                "Generated",
-                "Denied",
-                "EmptyResult",
-                "RefusedByProvider",
-                "SafetyFiltered",
-                "Failed",
-                "Cancelled",
-                "Timeout",
-                "ScopedRestoreFailed",
-            ],
-            "FlowRunStatus" => vec![
-                "Absent",
-                "Pending",
-                "Running",
-                "Completed",
-                "Failed",
-                "Canceled",
-            ],
-            "DependencyMode" => vec!["All", "Any"],
-            "CollectionPolicyKind" => vec!["All", "Any", "Quorum"],
-            "StepRunStatus" => vec!["Dispatched", "Completed", "Failed", "Skipped", "Canceled"],
-            "FrameScope" => vec!["Root", "Body"],
-            "FlowNodeKind" => vec!["Step", "Loop"],
-            "NodeRunStatus" => vec![
-                "Pending",
-                "Ready",
-                "Running",
-                "Completed",
-                "Failed",
-                "Skipped",
-                "Canceled",
-            ],
-            "LoopIterationStage" => {
-                vec![
-                    "AwaitingBodyFrame",
-                    "BodyFrameActive",
-                    "AwaitingUntilEvaluation",
-                ]
-            }
-            "FrameStatus" => vec!["Running", "Completed", "Failed", "Canceled"],
-            "LoopStatus" => vec!["Running", "Completed", "Exhausted", "Failed", "Canceled"],
-            "FlowRunReducerCommandKind" => vec![
-                "CreateRun",
-                "StartRun",
-                "DispatchStep",
-                "CompleteStep",
-                "RecordStepOutput",
-                "ConditionPassed",
-                "ConditionRejected",
-                "FailStep",
-                "SkipStep",
-                "ProjectFrameStepStatus",
-                "CancelStep",
-                "RegisterTargets",
-                "RecordTargetSuccess",
-                "RecordTargetTerminalFailure",
-                "RecordTargetCanceled",
-                "RecordTargetFailure",
-                "RegisterReadyFrame",
-                "PumpNodeScheduler",
-                "RegisterPendingBodyFrame",
-                "PumpFrameScheduler",
-                "NodeExecutionReleased",
-                "FrameTerminated",
-                "TerminalizeCompleted",
-                "TerminalizeFailed",
-                "TerminalizeCanceled",
-            ],
-            "FlowFrameReducerCommandKind" => vec![
-                "StartRootFrame",
-                "StartBodyFrame",
-                "AdmitNextReadyNode",
-                "CompleteNode",
-                "RecordNodeOutput",
-                "FailNode",
-                "SkipNode",
-                "CancelNode",
-                "SealFrame",
-            ],
-            "LoopIterationReducerCommandKind" => vec![
-                "StartLoop",
-                "BodyFrameStarted",
-                "BodyFrameCompleted",
-                "BodyFrameFailed",
-                "BodyFrameCanceled",
-                "UntilConditionMet",
-                "UntilConditionFailed",
-                "CancelLoop",
-            ],
-            "WorkOrigin" => vec!["External", "Internal", "Ingest"],
-            "MemberLifecycleKind" => vec![
-                "Spawned",
-                "Retiring",
-                "Retired",
-                "Reset",
-                "Respawned",
-                "Completed",
-                "Destroyed",
-            ],
-            "KickoffIntent" => vec![
-                "Pending",
-                "Starting",
-                "Started",
-                "CallbackPending",
-                "Failed",
-                "Cancelled",
-            ],
-            "WiringLifecycleKind" => vec!["Wired", "Unwired"],
-            "MisfirePolicy" => vec!["Skip", "CatchUpWithin"],
-            "OverlapPolicy" => vec!["AllowConcurrent", "SkipIfRunning"],
-            "MissingTargetPolicy" => vec!["MarkMisfired", "Skip"],
-            _ => return None,
-        }
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-    )
 }
 
 fn known_enum_variant_wire_label(enum_name: &str, variant: &str) -> String {

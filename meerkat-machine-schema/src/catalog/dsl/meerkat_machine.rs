@@ -163,7 +163,18 @@ pub struct SessionToolVisibilityDelta {
 /// iteration, matching the R3 `InputAbandonReason::MaxAttemptsExhausted {
 /// attempts }` pattern of carrying the discriminant's companion data in a
 /// field with stable ordering.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ToolFilter {
     #[default]
     All,

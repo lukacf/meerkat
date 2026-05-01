@@ -13,6 +13,7 @@
 //! | `Bool`               | `pub struct Name(pub bool)`               |
 //! | `String`             | `pub struct Name(pub String)`             |
 //! | `TypePath(path)`     | `pub type Name = path`                    |
+//! | `TypePathEnum { path, .. }` | `pub type Name = path`             |
 //!
 //! A `TypeRef::Named` referenced without a matching binding is rejected by
 //! `MachineSchema::validate()` — there is no name-based fallback.
@@ -280,6 +281,25 @@ fn rust_type_atom_type_path_lowers_verbatim_not_to_string() {
     assert!(
         !rendered.contains("pub type AtomTypePath = String;"),
         "named-type aliases bound to TypePath must not fall back to String:\n{rendered}"
+    );
+}
+
+#[test]
+fn rust_type_atom_type_path_enum_lowers_verbatim_not_to_string() {
+    let schema = with_atom(
+        schema_with_single_named_type("custom", "AtomTypePathEnum"),
+        RustTypeAtom::TypePathEnum {
+            path: "my::special::MyEnum".into(),
+            unit_variants: vec![EnumVariantId::parse("All").expect("variant slug")],
+            structural_variants: Vec::new(),
+        },
+    );
+    schema.validate().expect("schema validates");
+    let rendered = render_machine_kernel_module(&schema);
+    assert_type_alias(&rendered, "AtomTypePathEnum", "my::special::MyEnum");
+    assert!(
+        !rendered.contains("pub type AtomTypePathEnum = String;"),
+        "named-type aliases bound to TypePathEnum must not fall back to String:\n{rendered}"
     );
 }
 

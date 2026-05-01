@@ -204,7 +204,7 @@ impl GoogleCodeAssistOAuthRuntime {
             .load()
             .await?
             .ok_or(GoogleCodeAssistOAuthError::InteractiveLoginRequired)?;
-        if Self::token_is_fresh(&persisted) {
+        if Self::token_is_fresh(&persisted) && commit_fn.is_none() {
             return Ok(persisted);
         }
         let commit_slot = Arc::new(Mutex::new(commit_fn));

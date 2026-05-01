@@ -238,7 +238,7 @@ impl AnthropicOAuthRuntime {
             .ok_or(AnthropicOAuthError::InteractiveLoginRequired)?;
 
         // Fresh enough? Use cached.
-        if Self::token_is_fresh(&persisted) {
+        if Self::token_is_fresh(&persisted) && commit_fn.is_none() {
             return Ok(persisted);
         }
 

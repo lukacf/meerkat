@@ -171,6 +171,23 @@ enum OAuthLifecycleMarkerRelation {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn oauth_lifecycle_publication_time_relation(
+    marker: Option<u64>,
+    snapshot: Option<u64>,
+) -> Option<OAuthLifecycleMarkerRelation> {
+    match (marker, snapshot) {
+        (Some(marker), Some(snapshot)) if marker == snapshot => {
+            Some(OAuthLifecycleMarkerRelation::Matches)
+        }
+        (Some(marker), Some(snapshot)) if marker > snapshot => {
+            Some(OAuthLifecycleMarkerRelation::TokenNewer)
+        }
+        (Some(_), Some(_)) => Some(OAuthLifecycleMarkerRelation::TokenStale),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn oauth_lifecycle_marker_relation(
     tokens: &PersistedTokens,
     snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
@@ -197,24 +214,22 @@ fn oauth_lifecycle_marker_relation(
         std::cmp::Ordering::Greater => return OAuthLifecycleMarkerRelation::TokenNewer,
         std::cmp::Ordering::Less => return OAuthLifecycleMarkerRelation::TokenStale,
         std::cmp::Ordering::Equal if token_expires_at != u64::MAX => {
+            if let Some(relation) = oauth_lifecycle_publication_time_relation(
+                publication.credential_published_at_millis,
+                snapshot.credential_published_at_millis,
+            ) {
+                return relation;
+            }
             return OAuthLifecycleMarkerRelation::Matches;
         }
         std::cmp::Ordering::Equal => {}
     }
 
-    match (
+    oauth_lifecycle_publication_time_relation(
         publication.credential_published_at_millis,
         snapshot.credential_published_at_millis,
-    ) {
-        (Some(marker), Some(snapshot)) if marker == snapshot => {
-            OAuthLifecycleMarkerRelation::Matches
-        }
-        (Some(marker), Some(snapshot)) if marker > snapshot => {
-            OAuthLifecycleMarkerRelation::TokenNewer
-        }
-        (Some(_), Some(_)) => OAuthLifecycleMarkerRelation::TokenStale,
-        _ => OAuthLifecycleMarkerRelation::Invalid,
-    }
+    )
+    .unwrap_or(OAuthLifecycleMarkerRelation::Invalid)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1424,6 +1439,57 @@ mod tests {
             .expect("a newer committed TokenStore credential should not be rejected by a stale local generation counter");
 
         assert_eq!(secret, "newer-shared-access");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_compares_publication_time_for_equal_expiry() {
+        let mut tokens = chatgpt_oauth_tokens("same-expiry-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(expires_at),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(2_000),
+        };
+
+        let older = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &tokens,
+            AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: Some(1_000),
+            },
+        );
+        assert_eq!(
+            oauth_lifecycle_marker_relation(&older, &snapshot),
+            OAuthLifecycleMarkerRelation::TokenStale
+        );
+
+        let newer = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &tokens,
+            AuthLeaseTransition {
+                generation: 3,
+                credential_published_at_millis: Some(3_000),
+            },
+        );
+        assert_eq!(
+            oauth_lifecycle_marker_relation(&newer, &snapshot),
+            OAuthLifecycleMarkerRelation::TokenNewer
+        );
+
+        let matching = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &tokens,
+            AuthLeaseTransition {
+                generation: 4,
+                credential_published_at_millis: Some(2_000),
+            },
+        );
+        assert_eq!(
+            oauth_lifecycle_marker_relation(&matching, &snapshot),
+            OAuthLifecycleMarkerRelation::Matches
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

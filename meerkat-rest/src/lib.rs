@@ -2880,7 +2880,7 @@ async fn with_request_lifecycle(
 
 fn committed_terminal<T>(ctx: Option<&RequestContext>, payload: T) -> RequestTerminal<T> {
     match ctx {
-        Some(ctx) => ctx.classify_terminal(true, payload),
+        Some(ctx) => ctx.classify_success_terminal(payload),
         None => RequestTerminal::respond_without_publish(payload),
     }
 }

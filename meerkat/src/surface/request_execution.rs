@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 pub use meerkat_core::handles::{
     CancelOutcome, CompleteOutcome, PublishOutcome, RequestAlreadyExists, RequestTransitionError,
-    SurfaceRequestPhase,
+    SurfaceRequestPhase, SurfaceRequestTerminalOutcome,
 };
 use meerkat_core::handles::{SurfaceRequestLifecycleHandle, SurfaceRequestTerminalDisposition};
 use meerkat_core::{Session, SessionId, SessionRuntimeBindings};
@@ -185,12 +185,28 @@ impl RequestContext {
             .authorize_cancellable_observation(&self.lifecycle_key)
     }
 
+    /// Classify a successful handler terminal through this request's
+    /// runtime-owned publication authority.
+    pub fn classify_success_terminal<T>(&self, response: T) -> RequestTerminal<T> {
+        self.classify_terminal(SurfaceRequestTerminalOutcome::Succeeded, response)
+    }
+
+    /// Classify a failed handler terminal through this request's runtime-owned
+    /// publication authority.
+    pub fn classify_failure_terminal<T>(&self, response: T) -> RequestTerminal<T> {
+        self.classify_terminal(SurfaceRequestTerminalOutcome::Failed, response)
+    }
+
     /// Classify a handler terminal through this request's runtime-owned
     /// publication authority.
-    pub fn classify_terminal<T>(&self, committed: bool, response: T) -> RequestTerminal<T> {
+    fn classify_terminal<T>(
+        &self,
+        outcome: SurfaceRequestTerminalOutcome,
+        response: T,
+    ) -> RequestTerminal<T> {
         match self
             .lifecycle
-            .classify_terminal(&self.lifecycle_key, committed)
+            .classify_terminal(&self.lifecycle_key, outcome)
         {
             SurfaceRequestTerminalDisposition::Publish => RequestTerminal {
                 kind: RequestTerminalKind::Publish(response),
@@ -573,17 +589,7 @@ impl SurfaceRequestExecutor {
             if let Some(handle) = lock_or_recover(&entry.task_handle).take() {
                 handle.abort();
             }
-            let phase = self.phase(&key).unwrap_or(SurfaceRequestPhase::Completed);
-            if matches!(
-                phase,
-                SurfaceRequestPhase::Pending | SurfaceRequestPhase::Cancelled
-            ) {
-                let cleanup = lock_or_recover(&entry.unpublished_cleanup).take();
-                if let Some(cleanup) = cleanup {
-                    cleanup().await;
-                }
-            }
-            self.mechanics.remove(&key);
+            let _ = self.finish_unpublished(&key).await;
         }
     }
 }
@@ -614,6 +620,9 @@ pub async fn prepare_surface_session(
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use meerkat_core::handles::{
+        CancelActionInstallDecision, CancelTransition, CompleteTransition,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn begin_test_request(
@@ -639,6 +648,9 @@ mod tests {
             concat!("mark", "_publish", "_on", "_success"),
             concat!("mark", "_cancellable", "_observation"),
             concat!("terminal", "_policy"),
+            concat!("classify", "_terminal", "(true"),
+            concat!("classify", "_terminal", "(false"),
+            concat!("committed", ": bool"),
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -649,7 +661,7 @@ mod tests {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let context = begin_test_request(&executor, "machine-policy", noop_request_action());
 
-        let terminal = context.classify_terminal(true, "raw-success");
+        let terminal = context.classify_success_terminal("raw-success");
         assert!(!terminal.is_publish());
         assert!(!terminal.is_respond_without_publish());
 
@@ -658,12 +670,12 @@ mod tests {
             .expect("runtime lifecycle authority should accept publish authorization");
         assert!(
             context
-                .classify_terminal(true, "committed-success")
+                .classify_success_terminal("committed-success")
                 .is_publish()
         );
         assert!(
             context
-                .classify_terminal(false, "failed")
+                .classify_failure_terminal("failed")
                 .is_respond_without_publish()
         );
     }
@@ -677,12 +689,12 @@ mod tests {
             .expect("runtime lifecycle authority should accept publish authorization");
         assert!(
             publish_context
-                .classify_terminal(true, "committed")
+                .classify_success_terminal("committed")
                 .is_publish()
         );
         assert!(
             publish_context
-                .classify_terminal(false, "failed")
+                .classify_failure_terminal("failed")
                 .is_respond_without_publish()
         );
 
@@ -693,8 +705,24 @@ mod tests {
             .expect("runtime lifecycle authority should accept cancellable observation");
         assert!(
             observation_context
-                .classify_terminal(true, "observation")
+                .classify_success_terminal("observation")
                 .is_respond_without_publish()
+        );
+    }
+
+    #[test]
+    fn machine_terminal_outcome_classifies_failed_payload_as_unpublished() {
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+        let context = begin_test_request(&executor, "forged-terminal", noop_request_action());
+        context
+            .authorize_publish_on_success()
+            .expect("runtime lifecycle authority should accept publish authorization");
+
+        assert!(
+            context
+                .classify_failure_terminal("handler-error")
+                .is_respond_without_publish(),
+            "machine-owned failed terminal classification must not mint committed publish authority"
         );
     }
 
@@ -711,7 +739,7 @@ mod tests {
 
         assert!(
             !context
-                .classify_terminal(true, "surface-success")
+                .classify_success_terminal("surface-success")
                 .is_publish(),
             "raw surface context must not grant committed publish authority"
         );
@@ -740,7 +768,7 @@ mod tests {
             executor
                 .resolve_terminal(
                     Some(context.key()),
-                    context.classify_terminal(true, "inline-response"),
+                    context.classify_success_terminal("inline-response"),
                 )
                 .await,
             RequestTerminalResolution::Emit("inline-response")
@@ -764,7 +792,7 @@ mod tests {
                 executor
                     .resolve_terminal(
                         Some(publish_context.key()),
-                        publish_context.classify_terminal(true, format!("{surface}-committed")),
+                        publish_context.classify_success_terminal(format!("{surface}-committed")),
                     )
                     .await,
                 RequestTerminalResolution::Emit(format!("{surface}-committed"))
@@ -790,7 +818,7 @@ mod tests {
                     .resolve_terminal(
                         Some(cancel_publish_context.key()),
                         cancel_publish_context
-                            .classify_terminal(true, format!("{surface}-stale-publish")),
+                            .classify_success_terminal(format!("{surface}-stale-publish")),
                     )
                     .await,
                 RequestTerminalResolution::Cancelled
@@ -864,7 +892,7 @@ mod tests {
             executor
                 .resolve_terminal(
                     Some(context.key()),
-                    context.classify_terminal(true, "cancelled-publish"),
+                    context.classify_success_terminal("cancelled-publish"),
                 )
                 .await,
             RequestTerminalResolution::Cancelled
@@ -931,6 +959,100 @@ mod tests {
         assert_eq!(
             second.cancel_request("same-wire-id").await,
             CancelOutcome::Cancelled
+        );
+    }
+
+    struct ShutdownLifecycleProbe {
+        finish_count: Arc<AtomicUsize>,
+    }
+
+    impl SurfaceRequestLifecycleHandle for ShutdownLifecycleProbe {
+        fn try_begin_request(&self, _key: String) -> Result<(), RequestAlreadyExists> {
+            Ok(())
+        }
+
+        fn authorize_publish_on_success(&self, _key: &str) -> Result<(), RequestTransitionError> {
+            Ok(())
+        }
+
+        fn authorize_cancellable_observation(
+            &self,
+            _key: &str,
+        ) -> Result<(), RequestTransitionError> {
+            Ok(())
+        }
+
+        fn classify_terminal(
+            &self,
+            _key: &str,
+            _outcome: SurfaceRequestTerminalOutcome,
+        ) -> SurfaceRequestTerminalDisposition {
+            SurfaceRequestTerminalDisposition::Inline
+        }
+
+        fn phase(&self, _key: &str) -> Option<SurfaceRequestPhase> {
+            Some(SurfaceRequestPhase::Pending)
+        }
+
+        fn cancel_action_install_decision(&self, _key: &str) -> CancelActionInstallDecision {
+            CancelActionInstallDecision {
+                phase: Some(SurfaceRequestPhase::Pending),
+                fire_cancel_action: false,
+            }
+        }
+
+        fn cancel_request(&self, _key: &str) -> CancelTransition {
+            CancelTransition {
+                outcome: CancelOutcome::Cancelled,
+                fire_cancel_action: false,
+            }
+        }
+
+        fn publish_and_complete(&self, _key: &str) -> Result<(), RequestTransitionError> {
+            Err(RequestTransitionError::NotFound)
+        }
+
+        fn finish_unpublished(&self, _key: &str) -> CompleteTransition {
+            self.finish_count.fetch_add(1, Ordering::SeqCst);
+            CompleteTransition {
+                outcome: CompleteOutcome::Completed,
+                run_unpublished_cleanup: false,
+            }
+        }
+
+        fn remove(&self, _key: &str) {}
+    }
+
+    #[tokio::test]
+    async fn shutdown_stragglers_use_lifecycle_cleanup_decision() {
+        let finish_count = Arc::new(AtomicUsize::new(0));
+        let lifecycle: Arc<dyn SurfaceRequestLifecycleHandle> = Arc::new(ShutdownLifecycleProbe {
+            finish_count: Arc::clone(&finish_count),
+        });
+        let executor = SurfaceRequestExecutor::from_lifecycle(Duration::from_millis(1), lifecycle);
+        let cleanup_count = Arc::new(AtomicUsize::new(0));
+        let context = begin_test_request(&executor, "shutdown-probe", noop_request_action());
+        context.set_unpublished_cleanup(request_action({
+            let cleanup_count = Arc::clone(&cleanup_count);
+            move || {
+                let cleanup_count = Arc::clone(&cleanup_count);
+                async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+
+        executor.shutdown_and_abort_stragglers().await;
+
+        assert_eq!(
+            finish_count.load(Ordering::SeqCst),
+            1,
+            "shutdown must route straggler cleanup through lifecycle authority"
+        );
+        assert_eq!(
+            cleanup_count.load(Ordering::SeqCst),
+            0,
+            "shutdown must obey the lifecycle cleanup decision instead of re-reading phase locally"
         );
     }
 

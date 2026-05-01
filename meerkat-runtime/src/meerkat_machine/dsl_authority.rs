@@ -204,6 +204,8 @@ pub(crate) fn project_state(
         next_admission_seq: 0,
         input_admission_seq: std::collections::BTreeMap::new(),
         input_lane: std::collections::BTreeMap::new(),
+        surface_request_phases: std::collections::BTreeMap::new(),
+        surface_request_terminal_policy: std::collections::BTreeMap::new(),
         op_statuses: std::collections::BTreeMap::new(),
         op_completion_seq: std::collections::BTreeMap::new(),
         op_terminal_outcomes: std::collections::BTreeMap::new(),

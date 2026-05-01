@@ -1240,6 +1240,114 @@ impl SurfacePhase {
     }
 }
 
+/// Typed request lifecycle phase for RPC/MCP/REST surface requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestLifecyclePhase {
+    #[default]
+    Pending,
+    Published,
+    Cancelled,
+    Completed,
+}
+
+impl From<SurfaceRequestLifecyclePhase> for meerkat_core::handles::SurfaceRequestPhase {
+    fn from(phase: SurfaceRequestLifecyclePhase) -> Self {
+        match phase {
+            SurfaceRequestLifecyclePhase::Pending => Self::Pending,
+            SurfaceRequestLifecyclePhase::Published => Self::Published,
+            SurfaceRequestLifecyclePhase::Cancelled => Self::Cancelled,
+            SurfaceRequestLifecyclePhase::Completed => Self::Completed,
+        }
+    }
+}
+
+/// Machine-owned terminal policy for a tracked surface request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestTerminalPolicy {
+    #[default]
+    InlineObservation,
+    CancellableObservation,
+    PublishOnSuccess,
+}
+
+/// Typed terminal outcome input reported by a surface handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestTerminalOutcome {
+    #[default]
+    Succeeded,
+    Failed,
+}
+
+impl From<meerkat_core::handles::SurfaceRequestTerminalOutcome> for SurfaceRequestTerminalOutcome {
+    fn from(outcome: meerkat_core::handles::SurfaceRequestTerminalOutcome) -> Self {
+        match outcome {
+            meerkat_core::handles::SurfaceRequestTerminalOutcome::Succeeded => Self::Succeeded,
+            meerkat_core::handles::SurfaceRequestTerminalOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+/// Machine-owned terminal disposition for a surface request response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestTerminalDisposition {
+    #[default]
+    Inline,
+    Publish,
+    RespondWithoutPublish,
+}
+
+impl From<SurfaceRequestTerminalDisposition>
+    for meerkat_core::handles::SurfaceRequestTerminalDisposition
+{
+    fn from(disposition: SurfaceRequestTerminalDisposition) -> Self {
+        match disposition {
+            SurfaceRequestTerminalDisposition::Inline => Self::Inline,
+            SurfaceRequestTerminalDisposition::Publish => Self::Publish,
+            SurfaceRequestTerminalDisposition::RespondWithoutPublish => Self::RespondWithoutPublish,
+        }
+    }
+}
+
+/// Machine-owned cancel transition outcome for surface requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestCancelOutcome {
+    #[default]
+    Cancelled,
+    AlreadyPublished,
+    AlreadyCancelled,
+    AlreadyCompleted,
+    NotFound,
+}
+
+impl From<SurfaceRequestCancelOutcome> for meerkat_core::handles::CancelOutcome {
+    fn from(outcome: SurfaceRequestCancelOutcome) -> Self {
+        match outcome {
+            SurfaceRequestCancelOutcome::Cancelled => Self::Cancelled,
+            SurfaceRequestCancelOutcome::AlreadyPublished => Self::AlreadyPublished,
+            SurfaceRequestCancelOutcome::AlreadyCancelled => Self::AlreadyCancelled,
+            SurfaceRequestCancelOutcome::AlreadyCompleted => Self::AlreadyCompleted,
+            SurfaceRequestCancelOutcome::NotFound => Self::NotFound,
+        }
+    }
+}
+
+/// Machine-owned unpublished terminal outcome for surface requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum SurfaceRequestCompleteOutcome {
+    #[default]
+    Completed,
+    SupersededByCancel,
+}
+
+impl From<SurfaceRequestCompleteOutcome> for meerkat_core::handles::CompleteOutcome {
+    fn from(outcome: SurfaceRequestCompleteOutcome) -> Self {
+        match outcome {
+            SurfaceRequestCompleteOutcome::Completed => Self::Completed,
+            SurfaceRequestCompleteOutcome::SupersededByCancel => Self::SupersededByCancel,
+        }
+    }
+}
+
 /// Typed live-topology reconfigure phase. Closed set of literals previously
 /// assigned to `live_topology_phase`. The catalog DSL holds a parallel copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

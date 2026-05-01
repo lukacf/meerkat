@@ -304,6 +304,16 @@ pub enum SurfaceRequestTerminalDisposition {
     RespondWithoutPublish,
 }
 
+/// Typed terminal outcome reported to the surface request lifecycle machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRequestTerminalOutcome {
+    /// Handler reached the terminal condition that may publish under the
+    /// request's machine-owned lifecycle policy.
+    Succeeded,
+    /// Handler reached a terminal condition that must remain unpublished.
+    Failed,
+}
+
 /// Surface request lifecycle authority.
 ///
 /// The surface executor stores transport mechanics (task handles, cancel
@@ -317,7 +327,11 @@ pub trait SurfaceRequestLifecycleHandle: Send + Sync {
 
     fn authorize_cancellable_observation(&self, key: &str) -> Result<(), RequestTransitionError>;
 
-    fn classify_terminal(&self, key: &str, committed: bool) -> SurfaceRequestTerminalDisposition;
+    fn classify_terminal(
+        &self,
+        key: &str,
+        outcome: SurfaceRequestTerminalOutcome,
+    ) -> SurfaceRequestTerminalDisposition;
 
     fn phase(&self, key: &str) -> Option<SurfaceRequestPhase>;
 

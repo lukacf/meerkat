@@ -356,7 +356,7 @@ where
                     "id": request_id,
                     "result": result
                 });
-                terminal_context.classify_terminal(true, response)
+                terminal_context.classify_success_terminal(response)
             }
             Err(err) => {
                 let mut error = json!({
@@ -366,14 +366,11 @@ where
                 if let Some(data) = err.data {
                     error["data"] = data;
                 }
-                terminal_context.classify_terminal(
-                    false,
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": error
-                    }),
-                )
+                terminal_context.classify_failure_terminal(json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": error
+                }))
             }
         };
         let _ = completion_tx
@@ -513,10 +510,10 @@ mod tests {
             .authorize_publish_on_success()
             .expect("runtime lifecycle authority should accept publish authorization");
 
-        assert!(context.classify_terminal(true, ()).is_publish());
+        assert!(context.classify_success_terminal(()).is_publish());
         assert!(
             context
-                .classify_terminal(false, ())
+                .classify_failure_terminal(())
                 .is_respond_without_publish()
         );
     }
@@ -572,14 +569,11 @@ mod tests {
             request_executor.cancel_request(&request_key).await,
             meerkat::surface::CancelOutcome::Cancelled
         );
-        let terminal = context.classify_terminal(
-            true,
-            json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"ok": true}
-            }),
-        );
+        let terminal = context.classify_success_terminal(json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"ok": true}
+        }));
 
         assert!(
             write_tool_completion(

@@ -721,6 +721,133 @@ pub enum SurfacePhase {
     Shutdown,
 }
 
+/// Typed request lifecycle phase for RPC/MCP/REST surface requests.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestLifecyclePhase {
+    #[default]
+    Pending,
+    Published,
+    Cancelled,
+    Completed,
+}
+
+/// Machine-owned terminal policy for a tracked surface request.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalPolicy {
+    #[default]
+    InlineObservation,
+    CancellableObservation,
+    PublishOnSuccess,
+}
+
+/// Typed terminal outcome input reported by a surface handler.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalOutcome {
+    #[default]
+    Succeeded,
+    Failed,
+}
+
+/// Machine-owned terminal disposition for a surface request response.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalDisposition {
+    #[default]
+    Inline,
+    Publish,
+    RespondWithoutPublish,
+}
+
+/// Machine-owned cancel transition outcome for surface requests.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestCancelOutcome {
+    #[default]
+    Cancelled,
+    AlreadyPublished,
+    AlreadyCancelled,
+    AlreadyCompleted,
+    NotFound,
+}
+
+/// Machine-owned unpublished terminal outcome for surface requests.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestCompleteOutcome {
+    #[default]
+    Completed,
+    SupersededByCancel,
+}
+
 /// Typed live-topology reconfigure phase. Closed set of literals previously
 /// assigned to `live_topology_phase`. The catalog DSL holds a parallel copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -1432,6 +1559,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             // Replaces the former `queue_lane`/`steer_lane` parallel sets.
             input_lane: Map<String, Enum<InputLane>>,
 
+            // --- Surface request lifecycle substate ---
+            surface_request_phases: Map<String, Enum<SurfaceRequestLifecyclePhase>>,
+            surface_request_terminal_policy: Map<String, Enum<SurfaceRequestTerminalPolicy>>,
+
             // --- Ops lifecycle substate ---
             op_statuses: Map<String, Enum<OperationStatus>>,
             op_completion_seq: Map<String, u64>,
@@ -1747,6 +1878,9 @@ macro_rules! meerkat_catalog_machine_dsl {
             next_admission_seq = 0,
             input_admission_seq = EmptyMap,
             input_lane = EmptyMap,
+            // Surface request lifecycle substate
+            surface_request_phases = EmptyMap,
+            surface_request_terminal_policy = EmptyMap,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -2008,6 +2142,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 attempt_count: u64,
             },
             RecordBoundarySeq { input_id: String, seq: u64 },
+            // Surface request lifecycle inputs
+            BeginSurfaceRequest { request_id: String },
+            AuthorizeSurfaceRequestPublishOnSuccess { request_id: String },
+            AuthorizeSurfaceRequestCancellableObservation { request_id: String },
+            ClassifySurfaceRequestTerminal {
+                request_id: String,
+                outcome: Enum<SurfaceRequestTerminalOutcome>,
+            },
+            DecideSurfaceRequestCancelActionInstall { request_id: String },
+            CancelSurfaceRequest { request_id: String },
+            PublishSurfaceRequest { request_id: String },
+            FinishSurfaceRequestUnpublished { request_id: String },
+            RemoveSurfaceRequest { request_id: String },
             // Ops lifecycle inputs.
             // Terminal transitions carry a typed outcome discriminant plus
             // an opaque `payload` string — the inner payload of the domain
@@ -2355,6 +2502,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             RecordTerminalOutcome,
             RecordRunAssociation,
             RecordBoundarySequence,
+            SurfaceRequestTerminalClassified {
+                request_id: String,
+                disposition: Enum<SurfaceRequestTerminalDisposition>,
+            },
+            SurfaceRequestCancelDecision {
+                request_id: String,
+                outcome: Enum<SurfaceRequestCancelOutcome>,
+                fire_cancel_action: bool,
+            },
+            SurfaceRequestCancelActionInstallDecision {
+                request_id: String,
+                phase: Option<Enum<SurfaceRequestLifecyclePhase>>,
+                fire_cancel_action: bool,
+            },
+            SurfaceRequestUnpublishedFinished {
+                request_id: String,
+                outcome: Enum<SurfaceRequestCompleteOutcome>,
+                run_unpublished_cleanup: bool,
+            },
             SubmitOpEvent { operation_id: String },
             NotifyOpWatcher { operation_id: String },
             ExposeOperationPeer { operation_id: String },
@@ -2510,6 +2676,10 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RecordTerminalOutcome => local,
         disposition RecordRunAssociation => local,
         disposition RecordBoundarySequence => local,
+        disposition SurfaceRequestTerminalClassified => local,
+        disposition SurfaceRequestCancelDecision => local,
+        disposition SurfaceRequestCancelActionInstallDecision => local,
+        disposition SurfaceRequestUnpublishedFinished => local,
         disposition SubmitOpEvent => local,
         disposition NotifyOpWatcher => local,
         disposition ExposeOperationPeer => local,
@@ -6984,6 +7154,272 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit RecordTerminalOutcome
+        }
+
+        // =====================================================================
+        // Absorbed substate transitions — Surface Request Lifecycle
+        // =====================================================================
+
+        transition BeginSurfaceRequest {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input BeginSurfaceRequest { request_id }
+            guard "not_already_tracked" { !self.surface_request_phases.contains_key(request_id) }
+            update {
+                self.surface_request_phases.insert(request_id, SurfaceRequestLifecyclePhase::Pending);
+                self.surface_request_terminal_policy.insert(request_id, SurfaceRequestTerminalPolicy::InlineObservation);
+            }
+            to Idle
+        }
+
+        transition AuthorizeSurfaceRequestPublishOnSuccess {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input AuthorizeSurfaceRequestPublishOnSuccess { request_id }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_id) }
+            guard "non_terminal" {
+                self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
+                || self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Cancelled
+            }
+            update {
+                self.surface_request_terminal_policy.insert(request_id, SurfaceRequestTerminalPolicy::PublishOnSuccess);
+            }
+            to Idle
+        }
+
+        transition AuthorizeSurfaceRequestCancellableObservation {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input AuthorizeSurfaceRequestCancellableObservation { request_id }
+            guard "request_tracked" { self.surface_request_phases.contains_key(request_id) }
+            guard "non_terminal" {
+                self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
+                || self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Cancelled
+            }
+            update {
+                if self.surface_request_terminal_policy.get(request_id).get("value") != SurfaceRequestTerminalPolicy::PublishOnSuccess {
+                    self.surface_request_terminal_policy.insert(request_id, SurfaceRequestTerminalPolicy::CancellableObservation);
+                }
+            }
+            to Idle
+        }
+
+        transition ClassifySurfaceRequestTerminal {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input ClassifySurfaceRequestTerminal { request_id, outcome }
+            update {}
+            to Idle
+            emit SurfaceRequestTerminalClassified {
+                request_id: request_id,
+                disposition: if !self.surface_request_terminal_policy.contains_key(request_id) {
+                    SurfaceRequestTerminalDisposition::Inline
+                } else {
+                    if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::PublishOnSuccess
+                        && outcome == SurfaceRequestTerminalOutcome::Succeeded
+                    {
+                        SurfaceRequestTerminalDisposition::Publish
+                    } else {
+                        if self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::InlineObservation {
+                            SurfaceRequestTerminalDisposition::Inline
+                        } else {
+                            SurfaceRequestTerminalDisposition::RespondWithoutPublish
+                        }
+                    }
+                }
+            }
+        }
+
+        transition CancelSurfaceRequestPending {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input CancelSurfaceRequest { request_id }
+            guard "request_pending" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
+            }
+            update {
+                self.surface_request_phases.insert(request_id, SurfaceRequestLifecyclePhase::Cancelled);
+            }
+            to Idle
+            emit SurfaceRequestCancelDecision {
+                request_id: request_id,
+                outcome: SurfaceRequestCancelOutcome::Cancelled,
+                fire_cancel_action: self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::CancellableObservation
+                    || self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::PublishOnSuccess
+            }
+        }
+
+        transition CancelSurfaceRequestPublished {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input CancelSurfaceRequest { request_id }
+            guard "request_published" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Published
+            }
+            update {}
+            to Idle
+            emit SurfaceRequestCancelDecision {
+                request_id: request_id,
+                outcome: SurfaceRequestCancelOutcome::AlreadyPublished,
+                fire_cancel_action: false
+            }
+        }
+
+        transition CancelSurfaceRequestCancelled {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input CancelSurfaceRequest { request_id }
+            guard "request_cancelled" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Cancelled
+            }
+            update {}
+            to Idle
+            emit SurfaceRequestCancelDecision {
+                request_id: request_id,
+                outcome: SurfaceRequestCancelOutcome::AlreadyCancelled,
+                fire_cancel_action: false
+            }
+        }
+
+        transition CancelSurfaceRequestCompleted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input CancelSurfaceRequest { request_id }
+            guard "request_completed" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Completed
+            }
+            update {}
+            to Idle
+            emit SurfaceRequestCancelDecision {
+                request_id: request_id,
+                outcome: SurfaceRequestCancelOutcome::AlreadyCompleted,
+                fire_cancel_action: false
+            }
+        }
+
+        transition CancelSurfaceRequestMissing {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input CancelSurfaceRequest { request_id }
+            update {}
+            to Idle
+            emit SurfaceRequestCancelDecision {
+                request_id: request_id,
+                outcome: SurfaceRequestCancelOutcome::NotFound,
+                fire_cancel_action: false
+            }
+        }
+
+        transition DecideSurfaceRequestCancelActionInstall {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input DecideSurfaceRequestCancelActionInstall { request_id }
+            update {}
+            to Idle
+            emit SurfaceRequestCancelActionInstallDecision {
+                request_id: request_id,
+                phase: if self.surface_request_phases.contains_key(request_id) {
+                    Some(self.surface_request_phases.get(request_id).get("value"))
+                } else {
+                    None
+                },
+                fire_cancel_action: self.surface_request_phases.contains_key(request_id)
+                    && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Cancelled
+                    && (
+                        self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::CancellableObservation
+                        || self.surface_request_terminal_policy.get(request_id).get("value") == SurfaceRequestTerminalPolicy::PublishOnSuccess
+                    )
+            }
+        }
+
+        transition PublishSurfaceRequest {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input PublishSurfaceRequest { request_id }
+            guard "request_pending" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
+            }
+            update {
+                self.surface_request_phases.remove(request_id);
+                self.surface_request_terminal_policy.remove(request_id);
+            }
+            to Idle
+        }
+
+        transition FinishSurfaceRequestUnpublishedPending {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input FinishSurfaceRequestUnpublished { request_id }
+            guard "request_pending" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Pending
+            }
+            update {
+                self.surface_request_phases.remove(request_id);
+                self.surface_request_terminal_policy.remove(request_id);
+            }
+            to Idle
+            emit SurfaceRequestUnpublishedFinished {
+                request_id: request_id,
+                outcome: SurfaceRequestCompleteOutcome::Completed,
+                run_unpublished_cleanup: true
+            }
+        }
+
+        transition FinishSurfaceRequestUnpublishedCancelled {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input FinishSurfaceRequestUnpublished { request_id }
+            guard "request_cancelled" {
+                self.surface_request_phases.contains_key(request_id)
+                && self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Cancelled
+            }
+            update {
+                self.surface_request_phases.remove(request_id);
+                self.surface_request_terminal_policy.remove(request_id);
+            }
+            to Idle
+            emit SurfaceRequestUnpublishedFinished {
+                request_id: request_id,
+                outcome: SurfaceRequestCompleteOutcome::SupersededByCancel,
+                run_unpublished_cleanup: true
+            }
+        }
+
+        transition FinishSurfaceRequestUnpublishedTerminal {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input FinishSurfaceRequestUnpublished { request_id }
+            guard "request_terminal" {
+                self.surface_request_phases.contains_key(request_id)
+                && (
+                    self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Published
+                    || self.surface_request_phases.get(request_id).get("value") == SurfaceRequestLifecyclePhase::Completed
+                )
+            }
+            update {
+                self.surface_request_phases.remove(request_id);
+                self.surface_request_terminal_policy.remove(request_id);
+            }
+            to Idle
+            emit SurfaceRequestUnpublishedFinished {
+                request_id: request_id,
+                outcome: SurfaceRequestCompleteOutcome::Completed,
+                run_unpublished_cleanup: false
+            }
+        }
+
+        transition FinishSurfaceRequestUnpublishedMissing {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input FinishSurfaceRequestUnpublished { request_id }
+            update {}
+            to Idle
+            emit SurfaceRequestUnpublishedFinished {
+                request_id: request_id,
+                outcome: SurfaceRequestCompleteOutcome::Completed,
+                run_unpublished_cleanup: false
+            }
+        }
+
+        transition RemoveSurfaceRequest {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input RemoveSurfaceRequest { request_id }
+            update {
+                self.surface_request_phases.remove(request_id);
+                self.surface_request_terminal_policy.remove(request_id);
+            }
+            to Idle
         }
 
         // =====================================================================

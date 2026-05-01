@@ -395,8 +395,11 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let request_key_for_task = request_key.clone();
         let handle = tokio::spawn(async move {
             if let Some(response) = dispatch(request, context).await {
-                let terminal =
-                    terminal_context.classify_terminal(response.error.is_none(), response);
+                let terminal = if response.error.is_none() {
+                    terminal_context.classify_success_terminal(response)
+                } else {
+                    terminal_context.classify_failure_terminal(response)
+                };
                 let _ = long_running_tx
                     .send(LongRunningResponse {
                         request_key: request_key_for_task,
@@ -694,16 +697,12 @@ mod tests {
             .expect("runtime lifecycle authority should accept publish authorization");
 
         let response = RpcResponse::success(Some(RpcId::Num(1)), serde_json::json!({"ok": true}));
-        assert!(
-            context
-                .classify_terminal(response.error.is_none(), response)
-                .is_publish()
-        );
+        assert!(context.classify_success_terminal(response).is_publish());
 
         let error = RpcResponse::error(Some(RpcId::Num(1)), crate::error::INTERNAL_ERROR, "boom");
         assert!(
             context
-                .classify_terminal(error.error.is_none(), error)
+                .classify_failure_terminal(error)
                 .is_respond_without_publish()
         );
     }
@@ -803,7 +802,7 @@ mod tests {
 
         let publish_response =
             RpcResponse::success(Some(request_id.clone()), serde_json::json!({"ok": true}));
-        let terminal = context.classify_terminal(true, publish_response);
+        let terminal = context.classify_success_terminal(publish_response);
         assert!(
             server
                 .write_long_running_response(LongRunningResponse {

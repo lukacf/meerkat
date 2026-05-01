@@ -3629,6 +3629,9 @@ async fn continue_session_inner(
     req: ContinueSessionRequest,
     req_ctx: Option<RequestContext>,
 ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
+    if let Err(e) = validate_public_peer_meta(req.peer_meta.as_ref()) {
+        return RequestTerminal::RespondWithoutPublish(Err(e));
+    }
     let turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> =
         req.turn_metadata.clone().map(Into::into);
     let recovery_overrides = SurfaceSessionRecoveryOverrides {
@@ -4960,6 +4963,7 @@ mod tests {
                         ..Default::default()
                     },
                 ),
+                build_only_overrides: None,
             });
 
         let output = super::apply_runtime_turn(
@@ -5443,7 +5447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_continue_session_route_rejects_unknown_peer_meta() {
+    async fn test_continue_session_route_rejects_reserved_mob_peer_meta_labels() {
         use axum::body::Body;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
@@ -5500,13 +5504,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body_text = String::from_utf8_lossy(&body);
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
-            body_text.contains("peer_meta"),
-            "continue request should reject peer_meta as an unknown split carrier: {}",
-            body_text
+            payload["error"]
+                .as_str()
+                .is_some_and(|msg| msg.contains("reserved") && msg.contains("mob_id")),
+            "reserved mob label rejection should explain the trust boundary: {}",
+            String::from_utf8_lossy(&body)
         );
     }
 

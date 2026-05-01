@@ -778,6 +778,7 @@ mod tests {
                 ),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         });
 
         let error = apply_runtime_turn(&context, &state, &session_id, RunId::new(), &primitive)
@@ -818,6 +819,7 @@ mod tests {
                 ),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         });
 
         assert!(
@@ -837,6 +839,7 @@ mod tests {
                 execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                 ..Default::default()
             }),
+            build_only_overrides: None,
         });
 
         assert!(should_apply_context_without_turn(&primitive));

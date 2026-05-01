@@ -11401,6 +11401,7 @@ default_model = "gemma"
                     ),
                     ..Default::default()
                 }),
+                build_only_overrides: None,
             });
 
         meerkat_core::lifecycle::CoreExecutor::apply(

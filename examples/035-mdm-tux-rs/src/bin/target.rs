@@ -2076,8 +2076,10 @@ mod tests {
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
-    use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
-    use meerkat_core::types::{ContentInput, HandlingMode};
+    use meerkat_core::lifecycle::run_primitive::{
+        CoreRenderable, ModelId, RunPrimitive, RuntimeTurnMetadata,
+    };
+    use meerkat_core::types::ContentInput;
     use meerkat_mob::MobSessionService;
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
     use meerkat_store::{JsonlStore, MemoryBlobStore, SessionStore};
@@ -2283,6 +2285,7 @@ mod tests {
                         ..Default::default()
                     },
                 ),
+                build_only_overrides: None,
             },
         );
 

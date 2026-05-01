@@ -379,6 +379,7 @@ mod unit_tests {
                     ),
                     ..Default::default()
                 }),
+                build_only_overrides: None,
             });
 
         assert!(primitive.is_peer_response_terminal_context_and_run());
@@ -487,6 +488,7 @@ mod tests {
                 context_appends: Vec::new(),
                 contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
                 turn_metadata: Some(metadata.clone()),
+                build_only_overrides: None,
             });
 
         let req = start_turn_request_from_primitive(&primitive)
@@ -1191,6 +1193,7 @@ mod tests {
                         execution_kind: Some(RuntimeExecutionKind::ContentTurn),
                         ..Default::default()
                     }),
+                    build_only_overrides: None,
                 }),
             )
             .await
@@ -1280,6 +1283,7 @@ mod tests {
                         ),
                         ..Default::default()
                     }),
+                    build_only_overrides: None,
                 }),
             )
             .await
@@ -1371,6 +1375,7 @@ mod tests {
                         ),
                         ..Default::default()
                     }),
+                    build_only_overrides: None,
                 }),
             )
             .await

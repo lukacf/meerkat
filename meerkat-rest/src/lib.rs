@@ -395,6 +395,10 @@ impl AppState {
         let (session_service, runtime_adapter) =
             meerkat::surface::build_runtime_backed_service(builder, 100, persistence);
         let auth_lease = runtime_adapter.auth_lease_handle();
+        let request_executor = Arc::new(SurfaceRequestExecutor::new_with_machine(
+            std::time::Duration::from_secs(5),
+            runtime_adapter.as_ref(),
+        ));
         let session_service = Arc::new(session_service);
         #[cfg(feature = "mob")]
         let mob_session_service = session_service.clone();
@@ -442,9 +446,7 @@ impl AppState {
             },
             #[cfg(feature = "mcp")]
             mcp_sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            request_executor: Arc::new(SurfaceRequestExecutor::new(
-                std::time::Duration::from_secs(5),
-            )),
+            request_executor,
             token_store,
             auth_lease,
             provider_registry,
@@ -2934,8 +2936,12 @@ async fn create_session_inner(
             details: None,
         }));
     }
-    if let Some(ctx) = req_ctx.as_ref() {
-        ctx.mark_publish_on_success();
+    if let Some(ctx) = req_ctx.as_ref()
+        && let Err(err) = ctx.authorize_publish_on_success()
+    {
+        return RequestTerminal::respond_without_publish(Err(ApiError::Internal(format!(
+            "request lifecycle rejected publish authorization: {err}"
+        ))));
     }
 
     // --- Preclaim: session, runtime registration, MCP adapter ---
@@ -3722,8 +3728,12 @@ async fn continue_session_inner(
             details: None,
         }));
     }
-    if let Some(ctx) = req_ctx.as_ref() {
-        ctx.mark_publish_on_success();
+    if let Some(ctx) = req_ctx.as_ref()
+        && let Err(err) = ctx.authorize_publish_on_success()
+    {
+        return RequestTerminal::respond_without_publish(Err(ApiError::Internal(format!(
+            "request lifecycle rejected publish authorization: {err}"
+        ))));
     }
 
     // Set up event forwarding: caller channel -> broadcast
@@ -7520,11 +7530,13 @@ mod tests {
 
         #[tokio::test]
         async fn test_publish_terminal_after_cancel_returns_request_cancelled() {
-            let executor = SurfaceRequestExecutor::new(std::time::Duration::from_millis(1));
+            let executor =
+                SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
             let ctx = executor
                 .try_begin_request("rest-cancel-before-publish", noop_request_action())
                 .expect("test request key should be unique");
-            ctx.mark_publish_on_success();
+            ctx.authorize_publish_on_success()
+                .expect("runtime lifecycle authority should accept publish authorization");
 
             assert_eq!(
                 executor.cancel_request(ctx.key()).await,
@@ -7557,7 +7569,11 @@ mod tests {
         ) -> Result<Json<SessionResponse>, ApiError> {
             let ctx = extract_request_context(&headers, &state.executor)?;
             if let Some(ctx) = ctx.as_ref() {
-                ctx.mark_publish_on_success();
+                ctx.authorize_publish_on_success().map_err(|err| {
+                    ApiError::Internal(format!(
+                        "request lifecycle rejected publish authorization: {err}"
+                    ))
+                })?;
                 let _ = state.executor.cancel_request(ctx.key()).await;
             }
             let terminal = committed_terminal(
@@ -7574,7 +7590,9 @@ mod tests {
             let app = Router::new()
                 .route("/probe", post(publish_after_cancel_probe))
                 .with_state(RequestLifecycleProbeState {
-                    executor: SurfaceRequestExecutor::new(std::time::Duration::from_millis(1)),
+                    executor: SurfaceRequestExecutor::new_standalone(
+                        std::time::Duration::from_millis(1),
+                    ),
                 });
 
             let response = app

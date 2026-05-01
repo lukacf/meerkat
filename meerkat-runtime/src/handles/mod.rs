@@ -59,6 +59,7 @@ mod realtime_product_turn;
 mod session_admission;
 mod session_claim;
 mod session_context;
+mod surface_request_lifecycle;
 mod turn_state;
 
 pub use auth_lease::RuntimeAuthLeaseHandle;
@@ -75,6 +76,7 @@ pub use realtime_product_turn::RuntimeRealtimeProductTurnHandle;
 pub use session_admission::RuntimeSessionAdmissionHandle;
 pub use session_claim::RuntimeSessionClaimRegistry;
 pub use session_context::RuntimeSessionContextHandle;
+pub(crate) use surface_request_lifecycle::RuntimeSurfaceRequestLifecycleHandle;
 pub use turn_state::RuntimeTurnStateHandle;
 
 /// Shared handle over a session's real `MeerkatMachineAuthority`.

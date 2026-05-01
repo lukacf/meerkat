@@ -3373,7 +3373,7 @@ mod tests {
 
     async fn cancelled_request_context(id: &RpcId) -> RequestContext {
         use meerkat::surface::CancelOutcome;
-        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let key = serde_json::to_string(id).expect("request id should serialize");
         let context = executor
             .try_begin_request(key.clone(), noop_request_action())

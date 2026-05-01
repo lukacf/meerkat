@@ -119,6 +119,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
         let router = MethodRouter::new(runtime, config_store, notification_sink)
             .with_skill_runtime(skill_runtime);
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_secs(5),
+            router.runtime_adapter().as_ref(),
+        );
         Self {
             transport,
             router,
@@ -132,7 +136,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             registered_tools,
             long_running_tx,
             long_running_rx,
-            request_executor: SurfaceRequestExecutor::new(tokio::time::Duration::from_secs(5)),
+            request_executor,
             skip_shutdown_on_eof: false,
         }
     }
@@ -185,6 +189,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         let router =
             MethodRouter::new_with_mob_state(runtime, config_store, notification_sink, mob_state)
                 .with_skill_runtime(skill_runtime);
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_secs(5),
+            router.runtime_adapter().as_ref(),
+        );
         Self {
             transport,
             router,
@@ -198,7 +206,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             registered_tools,
             long_running_tx,
             long_running_rx,
-            request_executor: SurfaceRequestExecutor::new(tokio::time::Duration::from_secs(5)),
+            request_executor,
             skip_shutdown_on_eof: false,
         }
     }
@@ -677,11 +685,13 @@ mod tests {
 
     #[test]
     fn rpc_request_context_grants_publish_authority_after_handler_marks_it() {
-        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let context = executor
             .try_begin_request("rpc-marked", noop_request_action())
             .expect("test request key should be unique");
-        context.mark_publish_on_success();
+        context
+            .authorize_publish_on_success()
+            .expect("runtime lifecycle authority should accept publish authorization");
 
         let response = RpcResponse::success(Some(RpcId::Num(1)), serde_json::json!({"ok": true}));
         assert!(
@@ -782,7 +792,9 @@ mod tests {
             .request_executor
             .try_begin_request(request_key.clone(), noop_request_action())
             .expect("test request key should be unique");
-        context.mark_publish_on_success();
+        context
+            .authorize_publish_on_success()
+            .expect("runtime lifecycle authority should accept publish authorization");
 
         assert_eq!(
             server.request_executor.cancel_request(&request_key).await,

@@ -170,7 +170,13 @@ pub async fn handle_start(
     };
 
     if let Some(context) = request_context.as_ref() {
-        context.mark_publish_on_success();
+        if let Err(err) = context.authorize_publish_on_success() {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("request lifecycle rejected publish authorization: {err}"),
+            );
+        }
         let runtime_adapter = Arc::clone(runtime_adapter);
         let session_id = session_id.clone();
         let install = context

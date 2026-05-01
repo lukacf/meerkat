@@ -115,9 +115,11 @@ async fn inner_test_rest_resume_metadata() {
         skill_runtime: None,
         runtime_adapter: runtime_adapter.clone(),
         schedule_host: Arc::default(),
-        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
-            std::time::Duration::from_secs(5),
-        )),
+        request_executor: std::sync::Arc::new(
+            meerkat::surface::SurfaceRequestExecutor::new_standalone(
+                std::time::Duration::from_secs(5),
+            ),
+        ),
         #[cfg(feature = "mob")]
         mob_state,
         #[cfg(feature = "mcp")]
@@ -247,9 +249,11 @@ async fn inner_test_rest_resume_metadata() {
         skill_runtime: None,
         runtime_adapter: runtime_adapter2,
         schedule_host: Arc::default(),
-        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
-            std::time::Duration::from_secs(5),
-        )),
+        request_executor: std::sync::Arc::new(
+            meerkat::surface::SurfaceRequestExecutor::new_standalone(
+                std::time::Duration::from_secs(5),
+            ),
+        ),
         #[cfg(feature = "mob")]
         mob_state: mob_state2,
         #[cfg(feature = "mcp")]

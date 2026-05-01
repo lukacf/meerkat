@@ -11,8 +11,8 @@ mod schedule_host;
 #[cfg(test)]
 use meerkat::SessionStore;
 use meerkat::surface::{
-    RequestContext, install_prepared_runtime_interrupt_handle, prepare_surface_session,
-    request_action,
+    RequestContext, SurfaceRequestExecutor, install_prepared_runtime_interrupt_handle,
+    prepare_surface_session, request_action,
 };
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
@@ -458,6 +458,13 @@ enum MobEventStreamInner {
 }
 
 impl MeerkatMcpState {
+    pub fn surface_request_executor(
+        &self,
+        shutdown_grace: std::time::Duration,
+    ) -> SurfaceRequestExecutor {
+        SurfaceRequestExecutor::new_with_machine(shutdown_grace, self.runtime_adapter.as_ref())
+    }
+
     pub(crate) fn runtime_ingress_context(&self) -> runtime_ingress::McpRuntimeIngressContext {
         runtime_ingress::McpRuntimeIngressContext::new(
             runtime_ingress::McpRuntimeIngressResources {
@@ -2711,7 +2718,11 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     if let Some(context) = request_context.as_ref() {
-        context.mark_publish_on_success();
+        context.authorize_publish_on_success().map_err(|err| {
+            ToolCallError::internal(format!(
+                "request lifecycle rejected publish authorization: {err}"
+            ))
+        })?;
         let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -2906,7 +2917,11 @@ async fn handle_meerkat_resume(
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
 
     if let Some(context) = request_context.as_ref() {
-        context.mark_publish_on_success();
+        context.authorize_publish_on_success().map_err(|err| {
+            ToolCallError::internal(format!(
+                "request lifecycle rejected publish authorization: {err}"
+            ))
+        })?;
         let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -3436,7 +3451,7 @@ mod tests {
 
     async fn cancelled_request_context(key: &str) -> RequestContext {
         use meerkat::surface::CancelOutcome;
-        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let context = executor
             .try_begin_request(key.to_string(), noop_request_action())
             .expect("test request key should be unique");
@@ -4333,7 +4348,7 @@ mod tests {
     async fn mcp_request_cancel_after_action_install_rejects_before_service_admission() {
         use meerkat::surface::CancelOutcome;
 
-        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
         let context = executor
             .try_begin_request("req-cancel-before-admission", noop_request_action())
             .expect("test request key should be unique");

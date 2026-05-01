@@ -109,9 +109,11 @@ fn build_state(
         skill_runtime: None,
         runtime_adapter: runtime_adapter.clone(),
         schedule_host: Arc::default(),
-        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
-            std::time::Duration::from_secs(5),
-        )),
+        request_executor: std::sync::Arc::new(
+            meerkat::surface::SurfaceRequestExecutor::new_standalone(
+                std::time::Duration::from_secs(5),
+            ),
+        ),
         #[cfg(feature = "mob")]
         mob_state,
         #[cfg(feature = "mcp")]

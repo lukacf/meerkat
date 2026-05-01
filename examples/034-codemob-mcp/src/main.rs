@@ -7,14 +7,14 @@ mod state;
 mod tools;
 
 use meerkat::surface::{
-    noop_request_action, spawn_stdio_json_writer, RequestTerminal, RequestTerminalResolution,
-    SurfaceRequestExecutor,
+    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, noop_request_action,
+    spawn_stdio_json_writer,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use state::ForceState;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
-use tokio::sync::{mpsc, OnceCell};
+use tokio::sync::{OnceCell, mpsc};
 
 static STATE: OnceCell<ForceState> = OnceCell::const_new();
 
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = io::stdout();
     let (writer, writer_task) = spawn_stdio_json_writer(stdout, 128);
     let mut writer_task = Box::pin(writer_task);
-    let executor = SurfaceRequestExecutor::new(tokio::time::Duration::from_secs(5));
+    let executor = SurfaceRequestExecutor::new_standalone(tokio::time::Duration::from_secs(5));
     let (completion_tx, mut completion_rx) = mpsc::channel::<ToolCompletion>(128);
     let mut reader = BufReader::new(stdin).lines();
 
@@ -143,7 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                         };
-                        context.mark_cancellable_observation();
+                        if let Err(err) = context.authorize_cancellable_observation() {
+                            tracing::warn!(
+                                error = %err,
+                                "request lifecycle rejected cancellable observation authorization"
+                            );
+                        }
                         let writer_for_progress = writer.clone();
                         let progress_notifier: tools::ProgressNotifier = Arc::new(move |token, progress, total, message| {
                             let writer = writer_for_progress.clone();

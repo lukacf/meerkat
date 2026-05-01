@@ -147,9 +147,11 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         skill_runtime: None,
         runtime_adapter: runtime_adapter.clone(),
         schedule_host: Arc::default(),
-        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
-            std::time::Duration::from_secs(5),
-        )),
+        request_executor: std::sync::Arc::new(
+            meerkat::surface::SurfaceRequestExecutor::new_standalone(
+                std::time::Duration::from_secs(5),
+            ),
+        ),
         token_store: Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
         auth_lease: Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new()),
         provider_registry,

@@ -389,8 +389,16 @@ pub async fn handle_create(
     }
 
     if let Some(context) = request_context.as_ref() {
-        if params.initial_turn != Some(InitialTurn::Deferred) {
-            context.mark_publish_on_success();
+        if params.initial_turn != Some(InitialTurn::Deferred)
+            && let Err(err) = context.authorize_publish_on_success()
+        {
+            let _ = runtime.archive_session(&session_id).await;
+            runtime_adapter.unregister_session(&session_id).await;
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("request lifecycle rejected publish authorization: {err}"),
+            );
         }
         let runtime_adapter_for_cancel = Arc::clone(runtime_adapter);
         let session_id_for_cancel = session_id.clone();

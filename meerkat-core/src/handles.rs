@@ -189,6 +189,150 @@ impl DslTransitionError {
 }
 
 // ---------------------------------------------------------------------------
+// SurfaceRequestLifecycleHandle
+// ---------------------------------------------------------------------------
+
+/// Returned when a surface request id is already tracked as in-flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("request already tracked")]
+pub struct RequestAlreadyExists;
+
+/// Canonical lifecycle phase of a tracked surface request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRequestPhase {
+    /// Registered and in-flight. Cancel can still win.
+    Pending,
+    /// Terminal: committed work was observed by the client.
+    Published,
+    /// Terminal: cancel won; any completion that arrives is superseded.
+    Cancelled,
+    /// Terminal: uncommitted work finished without publishing.
+    Completed,
+}
+
+impl std::fmt::Display for SurfaceRequestPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SurfaceRequestPhase::Pending => f.write_str("Pending"),
+            SurfaceRequestPhase::Published => f.write_str("Published"),
+            SurfaceRequestPhase::Cancelled => f.write_str("Cancelled"),
+            SurfaceRequestPhase::Completed => f.write_str("Completed"),
+        }
+    }
+}
+
+/// Typed rejection when a surface request transition is inapplicable to the
+/// current phase.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RequestTransitionError {
+    /// No tracked request with this key.
+    #[error("request not tracked")]
+    NotFound,
+    /// The request is already in a terminal phase; the requested transition is
+    /// rejected rather than silently overwriting prior state.
+    #[error("request already terminal (phase = {current})")]
+    AlreadyTerminal { current: SurfaceRequestPhase },
+}
+
+/// Outcome of a cancel attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// Pending -> Cancelled.
+    Cancelled,
+    /// The request was already committed (Published); cancel is suppressed.
+    AlreadyPublished,
+    /// The request had already transitioned to Cancelled.
+    AlreadyCancelled,
+    /// The request had already completed without publishing.
+    AlreadyCompleted,
+    /// No tracked request with this key.
+    NotFound,
+}
+
+/// Decision returned by the lifecycle authority when a cancel transition is
+/// requested. The surface executor owns the closure mechanics; this typed
+/// decision tells it whether the cancellation action is semantically allowed to
+/// run for the request's machine-owned policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelTransition {
+    pub outcome: CancelOutcome,
+    pub fire_cancel_action: bool,
+}
+
+/// Decision returned when a surface installs or upgrades a cancel action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CancelActionInstallDecision {
+    pub phase: Option<SurfaceRequestPhase>,
+    pub fire_cancel_action: bool,
+}
+
+/// Outcome of completing a request via the uncommitted path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompleteOutcome {
+    /// Pending -> Completed; the surface should write the task's own response.
+    Completed,
+    /// Cancel landed first; the surface should write a cancel response instead.
+    SupersededByCancel,
+}
+
+/// Decision returned by the lifecycle authority when an unpublished terminal
+/// transition is requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompleteTransition {
+    pub outcome: CompleteOutcome,
+    pub run_unpublished_cleanup: bool,
+}
+
+/// Outcome of claiming committed publication authority before a response is
+/// emitted to a surface client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// Pending -> Published; the surface may emit the task's publish response.
+    Published,
+    /// Cancel landed first; the surface must emit its cancellation response.
+    CancelledBeforePublish,
+}
+
+/// Machine-owned terminal disposition for a surface request response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceRequestTerminalDisposition {
+    /// Inline terminal. Cancellation must not suppress the response.
+    Inline,
+    /// Committed terminal. The request's side effects have been persisted.
+    Publish,
+    /// Uncommitted terminal. A prior cancel can supersede the response.
+    RespondWithoutPublish,
+}
+
+/// Surface request lifecycle authority.
+///
+/// The surface executor stores transport mechanics (task handles, cancel
+/// closures, cleanup closures). This handle owns semantic request lifecycle
+/// state: phase, cancellability, publish authority, and terminal
+/// classification.
+pub trait SurfaceRequestLifecycleHandle: Send + Sync {
+    fn try_begin_request(&self, key: String) -> Result<(), RequestAlreadyExists>;
+
+    fn authorize_publish_on_success(&self, key: &str) -> Result<(), RequestTransitionError>;
+
+    fn authorize_cancellable_observation(&self, key: &str) -> Result<(), RequestTransitionError>;
+
+    fn classify_terminal(&self, key: &str, committed: bool) -> SurfaceRequestTerminalDisposition;
+
+    fn phase(&self, key: &str) -> Option<SurfaceRequestPhase>;
+
+    fn cancel_action_install_decision(&self, key: &str) -> CancelActionInstallDecision;
+
+    fn cancel_request(&self, key: &str) -> CancelTransition;
+
+    fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError>;
+
+    fn finish_unpublished(&self, key: &str) -> CompleteTransition;
+
+    fn remove(&self, key: &str);
+}
+
+// ---------------------------------------------------------------------------
 // Cross-crate peer prompt/context projection seam
 // ---------------------------------------------------------------------------
 

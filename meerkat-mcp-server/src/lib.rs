@@ -670,6 +670,23 @@ impl MeerkatMcpState {
         store: Arc<dyn SessionStore>,
         runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
     ) -> Self {
+        Self::new_with_store_runtime_and_llm(store, runtime_store, None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_with_store_and_llm_client(
+        store: Arc<dyn SessionStore>,
+        default_llm_client: Arc<dyn meerkat::LlmClient>,
+    ) -> Self {
+        Self::new_with_store_runtime_and_llm(store, None, Some(default_llm_client)).await
+    }
+
+    #[cfg(test)]
+    async fn new_with_store_runtime_and_llm(
+        store: Arc<dyn SessionStore>,
+        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
+        default_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
+    ) -> Self {
         let bootstrap = RuntimeBootstrap::default();
         let locator = match bootstrap.realm.resolve_locator() {
             Ok(locator) => locator,
@@ -715,7 +732,8 @@ impl MeerkatMcpState {
             factory = factory.user_config_root(user_root);
         }
 
-        let builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        let mut builder = FactoryAgentBuilder::new_with_config_store(factory, config, config_store);
+        builder.default_llm_client = default_llm_client;
         meerkat::surface::set_default_schedule_tools(
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
@@ -2874,6 +2892,9 @@ async fn handle_meerkat_run(
 
     let session_exists = state.service.read(&session_id).await.is_ok();
     if session_exists {
+        if let Some(context) = request_context.as_ref() {
+            context.disarm_unpublished_cleanup();
+        }
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         ingress
             .configure_session(&session_id, callback_tools, false)
@@ -3413,6 +3434,8 @@ mod tests {
     use meerkat::surface::{
         CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
     };
+    use meerkat::surface::{RequestTerminalResolution, SurfaceRequestKind};
+    use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::{Duration, timeout};
@@ -3484,6 +3507,39 @@ mod tests {
         let payload = std::fs::read_to_string(path).expect("hook override fixture must exist");
         serde_json::from_str::<HookRunOverrides>(&payload)
             .expect("hook override fixture must deserialize")
+    }
+
+    fn test_run_input(prompt: &str) -> MeerkatRunInput {
+        MeerkatRunInput {
+            prompt: prompt.to_string(),
+            system_prompt: None,
+            model: Some("claude-opus-4-6".to_string()),
+            max_tokens: Some(4096),
+            provider: None,
+            output_schema: None,
+            structured_output_retries: Some(2),
+            stream: false,
+            verbose: false,
+            tools: vec![],
+            enable_builtins: Some(false),
+            builtin_config: None,
+            keep_alive: Some(false),
+            comms_name: None,
+            peer_meta: None,
+            hooks_override: None,
+            enable_memory: None,
+            enable_mob: None,
+            provider_params: None,
+            budget_limits: None,
+            preload_skills: None,
+            skill_refs: None,
+            skill_references: None,
+            labels: None,
+            additional_instructions: None,
+            app_context: None,
+            shell_env: None,
+            connection_ref: None,
+        }
     }
 
     #[test]
@@ -4472,6 +4528,128 @@ mod tests {
         assert_eq!(
             data.get("session_id").and_then(Value::as_str),
             Some(session_id_string.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn post_commit_meerkat_run_failure_preserves_live_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let failing_client: Arc<dyn meerkat::LlmClient> =
+            Arc::new(TestClient::new(vec![LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error {
+                    error: LlmError::InvalidRequest {
+                        message: "synthetic post-commit create failure".to_string(),
+                    },
+                },
+            }]));
+        let state = MeerkatMcpState::new_with_store_and_llm_client(store, failing_client).await;
+        let request_executor = state.surface_request_executor(Duration::from_millis(1));
+        let request_key = "mcp-create-post-commit-error";
+        let context = request_executor
+            .try_begin_request(
+                request_key,
+                SurfaceRequestKind::SessionCreateWithTurn,
+                noop_request_action(),
+            )
+            .expect("test request key should be unique");
+
+        let result = Box::pin(handle_meerkat_run(
+            &state,
+            test_run_input("fail after session create"),
+            None,
+            Some(context.clone()),
+        ))
+        .await;
+
+        let err = result.expect_err("failed first turn should be returned as a tool error");
+        let data = err.data.as_ref().expect("post-commit error data");
+        assert_eq!(
+            data.get("session_created").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(data.get("resumable").and_then(Value::as_bool), Some(true));
+        let session_id = meerkat::SessionId::parse(
+            data.get("session_id")
+                .and_then(Value::as_str)
+                .expect("post-commit error should include session id"),
+        )
+        .expect("post-commit session id should parse");
+        state
+            .service
+            .read(&session_id)
+            .await
+            .expect("post-commit error must leave the created session readable");
+        assert!(
+            state
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live-session check should succeed"),
+            "post-commit error must leave the created session live before terminal resolution"
+        );
+        assert!(
+            state
+                .runtime_sessions
+                .read()
+                .await
+                .contains_key(&session_id),
+            "post-commit error must leave runtime ingress state attached before terminal resolution"
+        );
+        assert!(
+            state
+                .mcp_adapters
+                .lock()
+                .await
+                .contains_key(&session_id.to_string()),
+            "post-commit error must leave the MCP adapter registered before terminal resolution"
+        );
+
+        let terminal_response = json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "error": {
+                "code": err.code,
+                "message": err.message,
+                "data": data,
+            }
+        });
+        let resolution = request_executor
+            .resolve_terminal(
+                Some(context.key()),
+                context.classify_failure_terminal(terminal_response),
+            )
+            .await;
+        assert!(matches!(resolution, RequestTerminalResolution::Emit(_)));
+        assert_eq!(request_executor.phase(context.key()), None);
+
+        state
+            .service
+            .read(&session_id)
+            .await
+            .expect("resolving a resumable post-commit error must not run rollback cleanup");
+        assert!(
+            state
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live-session check should succeed"),
+            "resolving a resumable post-commit error must not archive the live session"
+        );
+        assert!(
+            state
+                .runtime_sessions
+                .read()
+                .await
+                .contains_key(&session_id),
+            "resolving a resumable post-commit error must not clear runtime ingress state"
+        );
+        assert!(
+            state
+                .mcp_adapters
+                .lock()
+                .await
+                .contains_key(&session_id.to_string()),
+            "resolving a resumable post-commit error must not unregister the MCP adapter"
         );
     }
 

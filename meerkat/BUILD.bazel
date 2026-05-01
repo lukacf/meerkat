@@ -205,6 +205,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -312,6 +313,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -320,6 +322,97 @@ rust_test(
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_BIN_NAME": "agent_factory_connection_ref",
+        "CARGO_MANIFEST_DIR": "./meerkat",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-anthropic:meerkat_anthropic",
+        "//meerkat-client:meerkat_client",
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-gemini:meerkat_gemini",
+        "//meerkat-hooks:meerkat_hooks",
+        "//meerkat-llm-core:meerkat_llm_core",
+        "//meerkat-mcp:meerkat_mcp",
+        "//meerkat-memory:meerkat_memory",
+        "//meerkat-models:meerkat_models",
+        "//meerkat-openai:meerkat_openai",
+        "//meerkat-providers:meerkat_providers",
+        "//meerkat-runtime:meerkat_runtime",
+        "//meerkat-schedule:meerkat_schedule",
+        "//meerkat-session:meerkat_session",
+        "//meerkat-skills:meerkat_skills",
+        "//meerkat-store:meerkat_store",
+        "//meerkat-tools:meerkat_tools",
+        "//meerkat:meerkat",
+    ] + all_crate_deps(
+        package_name = "meerkat",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "catalog_control_agent_boundary_test",
+    aliases = aliases(
+        package_name = "meerkat",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "catalog_control_agent_boundary",
+    crate_root = "tests/catalog_control_agent_boundary.rs",
+    crate_features = [
+        "anthropic",
+        "comms",
+        "gemini",
+        "integration-real-tests",
+        "jsonl-store",
+        "mcp",
+        "memory-store",
+        "openai",
+        "openai-realtime",
+        "schedule",
+        "session-compaction",
+        "session-store",
+        "skills",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/mob-communication/SKILL.md",
+        "src/surface/request_execution.rs",
+        "tests/fixtures/agent_builder_policy/downstream_direct_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_feature_unified_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_inventory_steal_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_mirror_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
+        "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
+    ],
+    srcs = [
+        "tests/catalog_control_agent_boundary.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "catalog_control_agent_boundary",
         "CARGO_MANIFEST_DIR": "./meerkat",
     },
     tags = [
@@ -402,6 +495,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -496,6 +590,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -586,6 +681,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -678,6 +774,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -771,6 +868,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -862,6 +960,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -953,6 +1052,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1048,6 +1148,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1138,6 +1239,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1228,6 +1330,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1320,6 +1423,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1414,6 +1518,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1504,6 +1609,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1595,6 +1701,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
+        "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1655,6 +1762,7 @@ test_suite(
     tests = [
         ":agent_builder_policy_canary_test",
         ":agent_factory_connection_ref_test",
+        ":catalog_control_agent_boundary_test",
         ":embedded_skill_registration_test",
         ":factory_build_agent_test",
         ":meerkat_unit_test",

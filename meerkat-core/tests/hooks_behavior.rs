@@ -300,12 +300,8 @@ async fn build_agent(
         .with_hook_engine(Arc::new(hooks));
 
     #[allow(unsafe_code)]
-    let standalone_authority = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-    #[allow(unsafe_code)]
     unsafe {
-        builder
-            .build_standalone(standalone_authority, client, tools, store)
-            .await
+        builder.build_standalone(client, tools, store).await
     }
 }
 

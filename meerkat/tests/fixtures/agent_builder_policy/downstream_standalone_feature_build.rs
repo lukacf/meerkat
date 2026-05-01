@@ -19,9 +19,11 @@ async fn standalone_feature_entrypoint() {
     // not be callable in this shape.
     #[allow(unsafe_code)]
     let standalone_authority = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-    let _ = builder
-        .build_standalone(standalone_authority, client, tools, store)
-        .await;
+    let _ = unsafe {
+        builder
+            .build_standalone(standalone_authority, client, tools, store)
+            .await
+    };
 }
 
 fn main() {

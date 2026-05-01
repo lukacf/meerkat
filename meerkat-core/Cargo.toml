@@ -46,7 +46,7 @@ schema = []
 jsonschema = ["dep:jsonschema"]
 standalone-agent-builder = []
 # Retained for compatibility with older workspace selectors. The factory
-# finalizer is always compiled and still requires a typed authority.
+# finalizer is always compiled and validates canonical factory provenance.
 internal-agent-factory-build = []
 
 [dev-dependencies]

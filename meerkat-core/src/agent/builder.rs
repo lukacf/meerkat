@@ -77,6 +77,8 @@ pub enum AgentBuildPolicyError {
     MissingSessionBuildState,
     #[error("factory policy build requires a runtime turn-state handle")]
     MissingTurnStateHandle,
+    #[error("factory policy build must be called by the canonical factory caller")]
+    InvalidFactoryPolicyCaller,
 }
 
 /// Build an agent after the canonical factory has composed policy metadata.
@@ -92,27 +94,78 @@ pub enum AgentBuildPolicyError {
 /// only as a crate boundary bridge between `meerkat` and `meerkat-core`; it is
 /// not a standalone construction API.
 #[doc(hidden)]
+#[track_caller]
 #[allow(unsafe_code)]
-pub async unsafe fn build_agent_after_factory_policy<C, T, S>(
+pub unsafe fn build_agent_after_factory_policy<C, T, S>(
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
     store: Arc<S>,
-) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
+) -> impl std::future::Future<Output = Result<Agent<C, T, S>, AgentBuildPolicyError>>
 where
     C: AgentLlmClient + ?Sized,
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
-    builder.validate_factory_policy()?;
-    Ok(builder.build_inner(client, tools, store).await)
+    let caller = std::panic::Location::caller();
+    async move {
+        validate_factory_policy_caller(caller)?;
+        builder.validate_factory_policy()?;
+        Ok(builder.build_inner(client, tools, store).await)
+    }
 }
 
-#[cfg(all(not(test), feature = "standalone-agent-builder"))]
-mod standalone_build_authority {
-    #[derive(Debug, Clone, Copy)]
-    pub struct StandaloneAgentBuildAuthority {
-        _private: (),
+fn normalize_source_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let absolute =
+        path.starts_with('/') || path.as_bytes().get(1).is_some_and(|byte| *byte == b':');
+    let mut parts: Vec<&str> = Vec::new();
+
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+
+    let mut normalized = String::new();
+    if absolute {
+        normalized.push('/');
+    }
+    normalized.push_str(&parts.join("/"));
+    normalized
+}
+
+fn workspace_source_path(relative_or_absolute: &str) -> String {
+    let path = relative_or_absolute.replace('\\', "/");
+    if path.starts_with('/') || path.as_bytes().get(1).is_some_and(|byte| *byte == b':') {
+        normalize_source_path(&path)
+    } else {
+        normalize_source_path(&format!(
+            "{}/../{}",
+            env!("CARGO_MANIFEST_DIR"),
+            relative_or_absolute
+        ))
+    }
+}
+
+fn canonical_factory_source_path() -> String {
+    normalize_source_path(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../meerkat/src/factory.rs"
+    ))
+}
+
+fn validate_factory_policy_caller(
+    location: &'static std::panic::Location<'static>,
+) -> Result<(), AgentBuildPolicyError> {
+    if workspace_source_path(location.file()) == canonical_factory_source_path() {
+        Ok(())
+    } else {
+        Err(AgentBuildPolicyError::InvalidFactoryPolicyCaller)
     }
 }
 
@@ -297,7 +350,6 @@ impl AgentBuilder {
     #[allow(unsafe_code)]
     pub async unsafe fn build_standalone<C, T, S>(
         self,
-        _authority: standalone_build_authority::StandaloneAgentBuildAuthority,
         client: Arc<C>,
         tools: Arc<T>,
         store: Arc<S>,

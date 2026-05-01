@@ -129,14 +129,19 @@ fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
         .take(4)
         .collect::<Vec<_>>()
         .join("\n");
-    cfg_window.contains(r#"#[cfg(any(test, feature = "standalone-agent-builder"))]"#)
-        || source.contains("StandaloneAgentBuildAuthority")
+    cfg_window.contains("#[cfg(test)]") && source.contains("pub async unsafe fn build_standalone")
 }
 
 fn public_factory_policy_finalizer_is_unsafe_bridge(source: &str) -> bool {
     let Some(pos) = source.find("pub async fn build_agent_after_factory_policy") else {
         let Some(pos) = source.find("pub async unsafe fn build_agent_after_factory_policy") else {
-            return false;
+            let Some(pos) = source.find("pub unsafe fn build_agent_after_factory_policy") else {
+                return false;
+            };
+            let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
+            return signature_window.contains("builder: AgentBuilder")
+                && signature_window.contains("impl std::future::Future")
+                && !signature_window.contains("AgentFactoryBuildAuthority");
         };
         let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
         return signature_window.contains("builder: AgentBuilder")
@@ -390,6 +395,60 @@ meerkat-core = {{ path = "{}" }}
             || stderr.contains("requires unsafe")
             || stderr.contains("no method named"),
         "downstream direct-authority fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_unsafe_code_cannot_enter_factory_policy_finalizer() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_unsafe_code_cannot_enter_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-unsafe-finalizer"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        output.status.success(),
+        "downstream unsafe finalizer fixture did not observe a policy rejection; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
 }
@@ -833,8 +892,13 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     assert!(
         builder.contains("pub async unsafe fn build_standalone"),
         "the feature-gated standalone builder must be an explicit unsafe \
-         escape hatch; downstream safe code must not bypass AgentFactory by \
-         fabricating the private standalone authority argument"
+         escape hatch; downstream safe code must not bypass AgentFactory"
+    );
+    assert!(
+        !builder.contains("StandaloneAgentBuildAuthority"),
+        "the standalone feature must not pretend a private zero-sized argument \
+         is an authority; downstream unsafe code can fabricate inferred private \
+         argument types"
     );
     assert!(
         public_factory_policy_finalizer_is_unsafe_bridge(&builder),
@@ -850,7 +914,7 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("validate_factory_policy()?")
-            && builder.contains("pub async unsafe fn build_agent_after_factory_policy")
+            && builder.contains("pub unsafe fn build_agent_after_factory_policy")
             && !builder.contains("is_canonical_factory_authority()")
             && !builder.contains("AgentBuildPolicyError::InvalidBuildAuthority")
             && !builder.contains("pub fn from_registered_source<A: 'static>")
@@ -863,12 +927,13 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          registration or authority-minting API"
     );
     assert!(
-        !builder.contains("Location::caller")
-            && !builder.contains("is_allowed_factory_policy_callsite")
-            && !builder.contains("validate_factory_policy_caller"),
-        "core factory authority must not trust source file path suffixes; \
-         downstream crates can spoof callsites by placing code under matching \
-         paths"
+        builder.contains("#[track_caller]")
+            && builder.contains("let caller = std::panic::Location::caller();")
+            && builder.contains("validate_factory_policy_caller(caller)?")
+            && builder.contains("canonical_factory_source_path()")
+            && !builder.contains(".ends_with("),
+        "core factory authority must validate exact canonical factory caller \
+         provenance and must not trust source file path suffixes"
     );
     assert!(
         !builder.contains("pub struct AgentFactoryBuildToken")
@@ -1171,10 +1236,10 @@ fn production_crates_do_not_adopt_standalone_builder_seam() {
         );
         if path != root.join("meerkat/src/factory.rs") {
             assert!(
-                !source.contains("build_agent_after_factory_policy(")
-                    && !source.contains(".build_after_factory_policy("),
-                "production source must not bypass AgentFactory through the \
-                 core factory-authority seam: {}",
+                !source.contains("build_agent_after_factory_policy")
+                    && !source.contains("build_after_factory_policy"),
+                "production source must not bypass or alias AgentFactory through \
+                 the core factory-authority seam: {}",
                 path.display()
             );
             assert!(

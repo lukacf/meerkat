@@ -150,6 +150,8 @@ pub struct ManagedStoreTokens {
     pub tokens: PersistedTokens,
     pub lifecycle_snapshot: Option<meerkat_core::handles::AuthLeaseSnapshot>,
     pub lifecycle: ManagedStoreLifecycle,
+    #[doc(hidden)]
+    pub lifecycle_guard: Option<meerkat_core::AuthLoginLifecycleGuard>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -170,6 +172,16 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .ok_or_else(|| interactive_login_error(binding))?
         .clone();
     let key = TokenKey::from_connection_ref(&binding.connection_ref);
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    let lifecycle_guard = if crate::auth_store::persisted_auth_mode_for_auth_method(
+        &binding.auth_profile.auth_method,
+    )
+    .is_some_and(crate::auth_store::persisted_auth_mode_is_oauth_login)
+    {
+        Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await)
+    } else {
+        None
+    };
     let tokens = store
         .load(&key)
         .await
@@ -181,7 +193,6 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         return Err(interactive_login_error(binding));
     }
 
-    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
     let now = (env.now)();
     let token_phase = AuthStatusPhase::from_lease_expires_at(
         now,
@@ -228,6 +239,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 tokens,
                 Some(snapshot),
                 lifecycle,
+                lifecycle_guard,
             ));
         }
 
@@ -238,6 +250,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 tokens,
                 Some(snapshot),
                 lifecycle,
+                lifecycle_guard,
             )),
             AuthStatusPhase::Expired => Ok(managed_store_tokens(
                 store,
@@ -245,6 +258,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
                 tokens,
                 Some(snapshot),
                 ManagedStoreLifecycle::RefreshRequired,
+                lifecycle_guard,
             )),
             AuthStatusPhase::ReauthRequired
             | AuthStatusPhase::RefreshFailed
@@ -255,7 +269,14 @@ pub async fn load_managed_store_tokens_with_lifecycle(
     if is_oauth_login {
         Err(interactive_login_error(binding))
     } else {
-        Ok(managed_store_tokens(store, key, tokens, None, lifecycle))
+        Ok(managed_store_tokens(
+            store,
+            key,
+            tokens,
+            None,
+            lifecycle,
+            lifecycle_guard,
+        ))
     }
 }
 
@@ -289,6 +310,7 @@ fn managed_store_tokens(
     tokens: PersistedTokens,
     lifecycle_snapshot: Option<meerkat_core::handles::AuthLeaseSnapshot>,
     lifecycle: ManagedStoreLifecycle,
+    lifecycle_guard: Option<meerkat_core::AuthLoginLifecycleGuard>,
 ) -> ManagedStoreTokens {
     ManagedStoreTokens {
         store,
@@ -296,6 +318,7 @@ fn managed_store_tokens(
         tokens,
         lifecycle_snapshot,
         lifecycle,
+        lifecycle_guard,
     }
 }
 
@@ -341,7 +364,11 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
-    let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
+    let _guard = if previous.lifecycle_guard.is_none() {
+        Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await)
+    } else {
+        None
+    };
     let committed = meerkat_core::mark_tokens_lifecycle_published(refreshed);
     let previous_snapshot = previous.lifecycle_snapshot.as_ref().ok_or_else(|| {
         ProviderAuthError::SourceResolutionFailed(
@@ -1140,6 +1167,63 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn managed_store_oauth_resolution_holds_lifecycle_guard_until_commit_boundary() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        store
+            .save(
+                &key,
+                &meerkat_core::mark_tokens_lifecycle_published(&chatgpt_oauth_tokens(
+                    "expired-access",
+                )),
+            )
+            .await
+            .unwrap();
+        let auth_lease = StaticAuthLeaseHandle::valid();
+        let env = ResolverEnvironment::testing()
+            .with_token_store(Arc::clone(&store))
+            .with_auth_lease_handle(auth_lease.clone());
+
+        let first = load_managed_store_tokens_with_lifecycle(&env, &binding)
+            .await
+            .unwrap();
+        assert!(first.lifecycle_guard.is_some());
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let second_store = Arc::clone(&store);
+        let second_auth_lease = auth_lease.clone();
+        tokio::spawn(async move {
+            let binding =
+                simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+            let env = ResolverEnvironment::testing()
+                .with_token_store(second_store)
+                .with_auth_lease_handle(second_auth_lease);
+            let result = load_managed_store_tokens_with_lifecycle(&env, &binding)
+                .await
+                .map(|_| ());
+            let _ = done_tx.send(result);
+        });
+
+        tokio::pin!(done_rx);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut done_rx)
+                .await
+                .is_err(),
+            "a second resolver should wait while the first holds the lifecycle guard"
+        );
+
+        drop(first);
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut done_rx)
+            .await
+            .expect("second resolver should finish after the guard drops")
+            .expect("second resolver should report its result")
+            .expect("second resolver should succeed");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn managed_store_refresh_commit_rejects_stale_loaded_tokens() {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
@@ -1155,6 +1239,7 @@ mod tests {
             tokens: previous_tokens,
             lifecycle_snapshot: Some(auth_lease.snapshot(&lease_key)),
             lifecycle: ManagedStoreLifecycle::RefreshRequired,
+            lifecycle_guard: None,
         };
 
         let newer_tokens = chatgpt_oauth_tokens("newer-login-access");
@@ -1198,6 +1283,7 @@ mod tests {
             tokens: previous_tokens,
             lifecycle_snapshot: Some(auth_lease.snapshot(&lease_key)),
             lifecycle: ManagedStoreLifecycle::RefreshRequired,
+            lifecycle_guard: None,
         };
         let refreshed = chatgpt_oauth_tokens("shared-refresh-access");
         let env = ResolverEnvironment::testing()

@@ -31,6 +31,7 @@ use crate::{
     MeerkatMcpState, canonical_skill_keys, compose_external_tool_dispatchers, runtime_ingress,
 };
 
+#[cfg(test)]
 fn materialized_preload_skills(
     preload_skills: &[meerkat_core::skills::SkillKey],
 ) -> Option<Vec<meerkat_core::skills::SkillKey>> {
@@ -152,7 +153,7 @@ impl McpScheduleContext {
             .map(|snapshot| snapshot.generation)
             .or(create.config_generation);
         let build = SessionBuildOptions {
-            provider: create.provider,
+            provider: None,
             self_hosted_server_id: None,
             output_schema,
             structured_output_retries: create.structured_output_retries,
@@ -161,7 +162,7 @@ impl McpScheduleContext {
             peer_meta: create.peer_meta.clone(),
             resume_session: Some(session),
             budget_limits: None,
-            provider_params: create.provider_params.clone(),
+            provider_params: None,
             call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
             external_tools,
             recoverable_tool_defs: None,
@@ -173,7 +174,7 @@ impl McpScheduleContext {
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             schedule_tools: None,
             mob_tool_authority_context: None,
-            preload_skills: materialized_preload_skills(&create.preload_skills),
+            preload_skills: None,
             realm_id: create
                 .realm_id
                 .clone()
@@ -188,19 +189,18 @@ impl McpScheduleContext {
                 .or_else(|| Some(self.backend.clone())),
             config_generation: current_generation,
             connection_ref: None,
-            keep_alive: create.keep_alive,
+            keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
             app_context: create.app_context.clone(),
-            additional_instructions: (!create.additional_instructions.is_empty())
-                .then(|| create.additional_instructions.clone()),
+            additional_instructions: None,
             shell_env: None,
             resume_override_mask: Default::default(),
             blob_store_override: None,
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings),
-            initial_turn_metadata: None,
+            initial_turn_metadata: create.initial_turn_metadata(),
         };
 
         let request = CreateSessionRequest {

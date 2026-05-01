@@ -510,8 +510,159 @@ impl AgentBuildConfig {
         if let Some(options) = &req.build {
             build.apply_session_build_options(options);
         }
+        build.apply_initial_turn_metadata_authority();
         build.event_tx = Some(event_tx);
         build
+    }
+
+    fn provider_for_initial_turn_params(&self, metadata_provider: Option<Provider>) -> Provider {
+        metadata_provider
+            .or(self.provider)
+            .or_else(|| Provider::infer_from_model(&self.model))
+            .unwrap_or(Provider::Other)
+    }
+
+    fn provider_params_from_turn_metadata(
+        &self,
+        params: &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+        _metadata_provider: Option<Provider>,
+    ) -> serde_json::Value {
+        params.to_legacy_provider_value()
+    }
+
+    /// Project the canonical runtime metadata carrier into the internal build
+    /// config that the factory needs to materialize the session.
+    ///
+    /// `SessionBuildOptions` remains the service transport, but runtime-owned
+    /// first-turn identity must be supplied only by `initial_turn_metadata`.
+    /// The factory can then derive the concrete LLM binding from that carrier
+    /// without accepting split service-level authority.
+    pub fn apply_initial_turn_metadata_authority(&mut self) {
+        let Some(metadata) = self.initial_turn_metadata.clone() else {
+            return;
+        };
+
+        if let Some(model) = metadata.model.as_ref() {
+            self.model = model.to_string();
+        }
+        if let Some(provider) = metadata.provider {
+            self.provider = Some(provider);
+        }
+        match metadata.provider_params.as_ref() {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params)) => {
+                self.provider_params =
+                    Some(self.provider_params_from_turn_metadata(params, metadata.provider));
+            }
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+                self.provider_params = None;
+            }
+            None => {}
+        }
+        match metadata.connection_ref.as_ref() {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                connection_ref,
+            )) => {
+                self.connection_ref = Some(connection_ref.clone());
+            }
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+                self.connection_ref = None;
+            }
+            None => {}
+        }
+        match metadata.keep_alive.as_ref() {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)) => {
+                self.keep_alive = true;
+            }
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+                self.keep_alive = false;
+            }
+            None => {}
+        }
+        if metadata.skill_references.is_some() {
+            self.preload_skills = metadata.skill_references;
+        }
+    }
+
+    fn initial_turn_metadata_from_internal_build_fields(
+        &self,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        if !matches!(
+            self.runtime_build_mode,
+            meerkat_core::RuntimeBuildMode::SessionOwned(_)
+        ) {
+            return self.initial_turn_metadata.clone();
+        }
+
+        let mut metadata = self.initial_turn_metadata.clone().unwrap_or_default();
+        let provider = self.provider;
+        if metadata.model.is_none()
+            && (provider.is_some()
+                || self.provider_params.is_some()
+                || self.connection_ref.is_some()
+                || self.keep_alive)
+        {
+            metadata.model = Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                self.model.clone(),
+            ));
+        }
+        if metadata.provider.is_none() {
+            metadata.provider = provider;
+        }
+        if metadata.provider_params.is_none()
+            && let Some(params) = self.provider_params.as_ref()
+        {
+            metadata.provider_params = Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::from_legacy_provider_value(
+                        self.provider_for_initial_turn_params(provider).as_str(),
+                        params,
+                    ),
+                ),
+            );
+        }
+        if metadata.connection_ref.is_none()
+            && let Some(connection_ref) = self.connection_ref.as_ref()
+        {
+            metadata.connection_ref = Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    connection_ref.clone(),
+                ),
+            );
+        }
+        if metadata.keep_alive.is_none() && self.keep_alive {
+            metadata.keep_alive = Some(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                    meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                        ttl: std::time::Duration::from_secs(30),
+                        policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                    },
+                ),
+            );
+        }
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = self.preload_skills.clone();
+        }
+        if metadata.additional_instructions.is_none()
+            && let Some(instructions) = self.additional_instructions.as_ref()
+        {
+            let instructions = instructions
+                .iter()
+                .filter_map(|body| {
+                    let body = body.trim();
+                    (!body.is_empty()).then(|| {
+                        meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                            kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                            body: body.to_string(),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !instructions.is_empty() {
+                metadata.additional_instructions = Some(instructions);
+            }
+        }
+
+        (!metadata.is_empty()).then_some(metadata)
     }
 
     /// Apply the shared host/runtime default for explicit mob operator
@@ -591,8 +742,14 @@ impl AgentBuildConfig {
 
     /// Convert build options to the service transport representation.
     pub fn to_session_build_options(&self) -> SessionBuildOptions {
+        let runtime_owned = matches!(
+            self.runtime_build_mode,
+            meerkat_core::RuntimeBuildMode::SessionOwned(_)
+        );
+        let initial_turn_metadata = self.initial_turn_metadata_from_internal_build_fields();
+
         SessionBuildOptions {
-            provider: self.provider,
+            provider: if runtime_owned { None } else { self.provider },
             self_hosted_server_id: self.self_hosted_server_id.clone(),
             output_schema: self.output_schema.clone(),
             structured_output_retries: self.structured_output_retries,
@@ -601,7 +758,11 @@ impl AgentBuildConfig {
             peer_meta: self.peer_meta.clone(),
             resume_session: self.resume_session.clone(),
             budget_limits: self.budget_limits.clone(),
-            provider_params: self.provider_params.clone(),
+            provider_params: if runtime_owned {
+                None
+            } else {
+                self.provider_params.clone()
+            },
             external_tools: self.external_tools.clone(),
             recoverable_tool_defs: self.recoverable_tool_defs.clone(),
             blob_store_override: self.blob_store_override.clone(),
@@ -617,23 +778,35 @@ impl AgentBuildConfig {
             schedule_tools: self.schedule_tools.clone(),
             mob_tool_authority_context: self.mob_tool_authority_context.clone(),
             mob_tools: self.mob_tools.clone(),
-            preload_skills: self.preload_skills.clone(),
+            preload_skills: if runtime_owned {
+                None
+            } else {
+                self.preload_skills.clone()
+            },
             realm_id: self.realm_id.clone(),
             instance_id: self.instance_id.clone(),
             backend: self.backend.clone(),
             config_generation: self.config_generation,
-            connection_ref: self.connection_ref.clone(),
-            keep_alive: self.keep_alive,
+            connection_ref: if runtime_owned {
+                None
+            } else {
+                self.connection_ref.clone()
+            },
+            keep_alive: !runtime_owned && self.keep_alive,
             silent_comms_intents: self.silent_comms_intents.clone(),
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
-            additional_instructions: self.additional_instructions.clone(),
+            additional_instructions: if runtime_owned {
+                None
+            } else {
+                self.additional_instructions.clone()
+            },
             shell_env: self.shell_env.clone(),
             checkpointer: self.checkpointer.clone(),
             call_timeout_override: self.call_timeout_override.clone(),
             resume_override_mask: self.resume_override_mask,
             runtime_build_mode: self.runtime_build_mode.clone(),
-            initial_turn_metadata: self.initial_turn_metadata.clone(),
+            initial_turn_metadata,
         }
     }
 }

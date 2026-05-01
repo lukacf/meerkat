@@ -185,8 +185,17 @@ Create and run a new session.
 {
   "prompt": "Your prompt here",
   "system_prompt": "Optional system prompt",
-  "model": "claude-opus-4-6",
-  "provider": "anthropic",
+  "turn_metadata": {
+    "model": "claude-opus-4-6",
+    "provider": "anthropic",
+    "keep_alive": {
+      "action": "set",
+      "value": {
+        "ttl_secs": 30,
+        "policy": "pinned"
+      }
+    }
+  },
   "max_tokens": 4096,
   "output_schema": {
     "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
@@ -197,7 +206,6 @@ Create and run a new session.
   },
   "structured_output_retries": 2,
   "verbose": false,
-  "keep_alive": null,
   "comms_name": null,
   "peer_meta": null,
   "hooks_override": null,
@@ -234,12 +242,8 @@ Create and run a new session.
   Override the system prompt for this session.
 </ParamField>
 
-<ParamField body="model" type="string | null" default="config default">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
-</ParamField>
-
-<ParamField body="provider" type="string | null" default="inferred from model">
-  Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+<ParamField body="turn_metadata" type="RuntimeTurnMetadata | null" default="null">
+  Canonical first-turn runtime metadata. Use nested fields such as `model`, `provider`, `provider_params`, `skill_references`, `additional_instructions`, and `keep_alive` here.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="config default">
@@ -258,12 +262,8 @@ Create and run a new session.
   Enable verbose event logging (server-side).
 </ParamField>
 
-<ParamField body="keep_alive" type="bool | null" default="null">
-  Keep session alive after turn for comms. On create, `null`/omitted uses the create default (`false`), `true` enables, and `false` explicitly disables. Requires `comms_name` when enabled.
-</ParamField>
-
 <ParamField body="comms_name" type="string | null" default="null">
-  Agent name for inter-agent communication.
+  Agent name for inter-agent communication. Required when `turn_metadata.keep_alive` enables keep-alive.
 </ParamField>
 
 <ParamField body="peer_meta" type="object | null" default="null">

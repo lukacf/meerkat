@@ -318,8 +318,23 @@ Create a new session and run the first turn. Set `initial_turn` to `"deferred"` 
   "method": "session/create",
   "params": {
     "prompt": "What is Rust?",
-    "model": "claude-sonnet-4-6",
-    "provider": "anthropic",
+    "turn_metadata": {
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "provider_params": {
+        "action": "set",
+        "value": { "temperature": 0.2 }
+      },
+      "skill_references": [
+        {
+          "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+          "skill_name": "formatting-markdown"
+        }
+      ],
+      "keep_alive": {
+        "action": "clear"
+      }
+    },
     "max_tokens": 4096,
     "system_prompt": "You are a helpful assistant.",
     "output_schema": {
@@ -331,19 +346,7 @@ Create a new session and run the first turn. Set `initial_turn` to `"deferred"` 
     "enable_builtins": false,
     "enable_shell": false,
     "enable_memory": false,
-    "keep_alive": null,
-    "comms_name": null,
-    "provider_params": null,
-    "preload_skills": [
-      {"source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f", "skill_name": "extraction-email"}
-    ],
-    "skill_refs": [
-      {
-        "kind": "structured",
-        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-        "skill_name": "formatting-markdown"
-      }
-    ]
+    "comms_name": null
   }
 }
 ```
@@ -396,12 +399,8 @@ Only `prompt` is required. All other fields are optional and fall back to config
   The user prompt to send to the agent.
 </ParamField>
 
-<ParamField body="model" type="string | null" default="claude-sonnet-4-6">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
-</ParamField>
-
-<ParamField body="provider" type="string | null" default="inferred from model">
-  Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+<ParamField body="turn_metadata" type="RuntimeTurnMetadata | null" default="null">
+  Canonical first-turn runtime metadata. Use nested fields such as `model`, `provider`, `provider_params`, `skill_references`, `additional_instructions`, and `keep_alive` here.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="config default">
@@ -436,16 +435,8 @@ Only `prompt` is required. All other fields are optional and fall back to config
   Enable semantic memory (`memory_search` tool + compaction indexing).
 </ParamField>
 
-<ParamField body="keep_alive" type="bool | null" default="null">
-  Keep session alive after turn for comms. `null` = inherit persisted session intent, `true` = enable, `false` = disable. Requires `comms_name` when enabled.
-</ParamField>
-
 <ParamField body="comms_name" type="string | null" default="null">
-  Agent name for inter-agent communication.
-</ParamField>
-
-<ParamField body="provider_params" type="object | null" default="null">
-  Provider-specific parameters (e.g., thinking config, reasoning effort).
+  Agent name for inter-agent communication. Required when `turn_metadata.keep_alive` enables keep-alive.
 </ParamField>
 
 #### Response fields

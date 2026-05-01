@@ -237,19 +237,9 @@ pub fn build_recovered_session(
         .recoverable_tool_defs
         .clone()
         .unwrap_or_else(|| build_state.recoverable_tool_defs.clone());
-    let provider_params = match provider_params_override {
-        Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
-        Some(TurnMetadataOverride::Clear) => None,
-        None => metadata.provider_params.clone(),
-    };
-    let connection_ref = match connection_ref_override {
-        Some(TurnMetadataOverride::Set(connection_ref)) => Some(connection_ref.clone()),
-        Some(TurnMetadataOverride::Clear) => None,
-        None => metadata.connection_ref.clone(),
-    };
 
     let mut build = SessionBuildOptions {
-        provider: llm_binding.provider,
+        provider: None,
         self_hosted_server_id: llm_binding.self_hosted_server_id,
         output_schema: overrides
             .output_schema
@@ -275,7 +265,7 @@ pub fn build_recovered_session(
             .budget_limits
             .clone()
             .or_else(|| build_state.budget_limits.clone()),
-        provider_params,
+        provider_params: None,
         external_tools: context.external_tools,
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
         blob_store_override: None,
@@ -306,10 +296,8 @@ pub fn build_recovered_session(
         instance_id: metadata.instance_id.clone().or(context.instance_id),
         backend: metadata.backend.clone().or(context.backend),
         config_generation: metadata.config_generation.or(context.config_generation),
-        // Phase 3: persisted connection_ref re-enters at resume time unless
-        // this turn's canonical metadata explicitly sets or clears it.
-        connection_ref,
-        keep_alive,
+        connection_ref: None,
+        keep_alive: false,
         checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
         max_inline_peer_notifications: build_state.max_inline_peer_notifications,
@@ -509,15 +497,44 @@ mod tests {
         assert_eq!(recovered.recoverable_tool_defs[0].name, "inline_tool");
 
         let build = recovered.build;
-        assert_eq!(build.provider, Some(Provider::OpenAI));
-        assert_eq!(build.provider_params, Some(json!({ "temperature": 0.25 })));
+        assert_eq!(build.provider, None);
+        assert_eq!(build.provider_params, None);
+        assert_eq!(
+            build
+                .initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.provider),
+            Some(Provider::OpenAI)
+        );
+        assert_eq!(
+            build
+                .initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.provider_params.as_ref())
+                .map(|params| match params {
+                    TurnMetadataOverride::Set(params) => params.to_legacy_provider_value(),
+                    TurnMetadataOverride::Clear => serde_json::Value::Null,
+                }),
+            Some(json!({ "temperature": 0.25 }))
+        );
         assert_eq!(build.structured_output_retries, 9);
         assert_eq!(build.comms_name.as_deref(), Some("peer-a"));
         assert_eq!(build.realm_id.as_deref(), Some("realm-a"));
         assert_eq!(build.instance_id.as_deref(), Some("instance-a"));
         assert_eq!(build.backend.as_deref(), Some("sqlite"));
         assert_eq!(build.config_generation, Some(7));
-        assert!(build.keep_alive);
+        assert!(!build.keep_alive);
+        assert!(
+            build
+                .initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| {
+                    matches!(
+                        metadata.keep_alive.as_ref(),
+                        Some(TurnMetadataOverride::Set(_))
+                    )
+                })
+        );
         assert_eq!(build.override_builtins, ToolCategoryOverride::Disable);
         assert_eq!(build.override_shell, ToolCategoryOverride::Enable);
         assert_eq!(build.override_mob, ToolCategoryOverride::Enable);
@@ -617,7 +634,15 @@ mod tests {
         )
         .expect("recovered session with connection_ref override");
 
-        assert_eq!(recovered.build.connection_ref, Some(override_ref));
+        assert_eq!(recovered.build.connection_ref, None);
+        assert_eq!(
+            recovered
+                .build
+                .initial_turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.connection_ref.as_ref()),
+            Some(&TurnMetadataOverride::Set(override_ref))
+        );
         assert!(
             recovered.build.resume_override_mask.connection_ref,
             "set connection_ref must prevent persisted metadata overwrite"
@@ -760,6 +785,51 @@ mod tests {
         );
         assert_eq!(recovered.build.backend.as_deref(), Some("sqlite"));
         assert_eq!(recovered.build.config_generation, Some(99));
+    }
+
+    #[test]
+    fn build_recovered_session_preserves_turn_metadata_without_split_build_authority() {
+        let metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.2")),
+            provider: Some(Provider::OpenAI),
+            provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                temperature: Some(0.25),
+                ..Default::default()
+            })),
+            connection_ref: Some(TurnMetadataOverride::Set(connection_ref(
+                "default", "openai",
+            ))),
+            keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: Duration::from_secs(60),
+                policy: KeepAliveMode::Pinned,
+            })),
+            ..Default::default()
+        };
+
+        let recovered = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides {
+                turn_metadata: Some(metadata.clone()),
+                ..Default::default()
+            },
+            SurfaceSessionRecoveryContext::default(),
+        )
+        .expect("recovered session");
+
+        assert_eq!(recovered.model, "gpt-5.2");
+        assert!(recovered.keep_alive);
+        assert_eq!(recovered.build.initial_turn_metadata, Some(metadata));
+        assert_eq!(recovered.build.provider, None);
+        assert_eq!(recovered.build.provider_params, None);
+        assert_eq!(recovered.build.connection_ref, None);
+        assert!(
+            !recovered.build.keep_alive,
+            "keep_alive must not be mirrored into the split build carrier"
+        );
+        assert!(recovered.build.resume_override_mask.provider);
+        assert!(recovered.build.resume_override_mask.provider_params);
+        assert!(recovered.build.resume_override_mask.connection_ref);
+        assert!(recovered.build.resume_override_mask.keep_alive);
     }
 
     #[test]

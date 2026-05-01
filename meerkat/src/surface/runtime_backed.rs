@@ -343,7 +343,9 @@ mod tests {
     ))]
     use async_trait::async_trait;
     use meerkat_client::TestClient;
-    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+    use meerkat_core::lifecycle::run_primitive::{
+        KeepAliveMode, KeepAlivePolicy, RuntimeTurnMetadata, TurnMetadataOverride,
+    };
     use meerkat_core::{HandlingMode, SessionBuildOptions};
     #[cfg(all(
         feature = "openai",
@@ -444,6 +446,16 @@ mod tests {
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(build),
             labels: None,
+        }
+    }
+
+    fn keep_alive_turn_metadata() -> RuntimeTurnMetadata {
+        RuntimeTurnMetadata {
+            keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: Duration::from_secs(30),
+                policy: KeepAliveMode::Pinned,
+            })),
+            ..Default::default()
         }
     }
 
@@ -586,6 +598,37 @@ mod tests {
             Err(error) => panic!("unexpected runtime error after failed materialization: {error}"),
             Ok(_) => panic!("failed materialization must unregister prepared runtime session"),
         }
+    }
+
+    #[tokio::test]
+    async fn materialize_session_rejects_split_initial_turn_build_fields() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+
+        let error = Box::pin(materialize_session(
+            &service,
+            &adapter,
+            Session::new(),
+            make_request(SessionBuildOptions {
+                provider: Some(meerkat_core::Provider::OpenAI),
+                provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            {
+                let service = Arc::clone(&service);
+                let adapter = Arc::clone(&adapter);
+                move |session_id| default_persistent_executor(service, adapter, session_id)
+            },
+        ))
+        .await
+        .expect_err("runtime-owned service create must reject split first-turn build metadata");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("RuntimeTurnMetadata") && message.contains("provider"),
+            "unexpected error: {message}"
+        );
     }
 
     #[tokio::test]
@@ -866,7 +909,7 @@ mod tests {
             Session::new(),
             make_request(SessionBuildOptions {
                 comms_name: Some("surface-peer-ingress-session".to_string()),
-                keep_alive: true,
+                initial_turn_metadata: Some(keep_alive_turn_metadata()),
                 ..Default::default()
             }),
             {
@@ -901,7 +944,7 @@ mod tests {
             Session::new(),
             make_request(SessionBuildOptions {
                 comms_name: Some("surface-keep-alive-session".to_string()),
-                keep_alive: true,
+                initial_turn_metadata: Some(keep_alive_turn_metadata()),
                 ..Default::default()
             }),
             {

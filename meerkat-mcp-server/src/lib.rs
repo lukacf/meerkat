@@ -1056,37 +1056,6 @@ fn turn_metadata_keep_alive_override(
     }
 }
 
-fn turn_metadata_provider_params_for_build(
-    metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-) -> Option<serde_json::Value> {
-    match metadata.and_then(|metadata| metadata.provider_params.as_ref()) {
-        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params)) => {
-            Some(params.to_legacy_provider_value())
-        }
-        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) | None => None,
-    }
-}
-
-fn turn_metadata_connection_ref_for_build(
-    metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-) -> Option<meerkat_core::ConnectionRef> {
-    match metadata.and_then(|metadata| metadata.connection_ref.as_ref()) {
-        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref)) => {
-            Some(connection_ref.clone())
-        }
-        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) | None => None,
-    }
-}
-
-fn turn_metadata_keep_alive_for_create(
-    metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-) -> bool {
-    matches!(
-        metadata.and_then(|metadata| metadata.keep_alive.as_ref()),
-        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_))
-    )
-}
-
 async fn mcp_persisted_session_has_comms_name(
     state: &MeerkatMcpState,
     session_id: &meerkat::SessionId,
@@ -2657,8 +2626,17 @@ async fn handle_meerkat_run(
         .as_ref()
         .and_then(|metadata| metadata.model.clone());
     let model = metadata_model.unwrap_or_else(|| config.agent.model.clone());
-    let initial_turn_metadata =
+    let mut initial_turn_metadata =
         normalize_mcp_turn_metadata(input.turn_metadata.clone(), Some(&model));
+    if let Some(preload_skills) = input.preload_skills.clone() {
+        let metadata = initial_turn_metadata.get_or_insert_with(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata::default,
+        );
+        match metadata.skill_references.as_mut() {
+            Some(skill_references) => skill_references.extend(preload_skills),
+            None => metadata.skill_references = Some(preload_skills),
+        }
+    }
     let keep_alive_override = turn_metadata_keep_alive_override(initial_turn_metadata.as_ref())
         .map_err(ToolCallError::invalid_params)?;
     // Create: no persisted session to inherit from, so None -> false.
@@ -2680,8 +2658,6 @@ async fn handle_meerkat_run(
     let callback_tools = build_callback_dispatcher(&input.tools);
 
     let enable_shell_override = input.builtin_config.as_ref().and_then(|c| c.enable_shell);
-    let preload_skills = input.preload_skills.clone();
-
     // Parse output schema if provided
     let output_schema =
         match input.output_schema.clone() {
@@ -2762,10 +2738,7 @@ async fn handle_meerkat_run(
             .and_then(|metadata| metadata.provider),
     );
     let mut build = SessionBuildOptions {
-        provider: initial_turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.provider)
-            .or(llm_binding.provider),
+        provider: None,
         self_hosted_server_id: llm_binding.self_hosted_server_id,
         output_schema,
         structured_output_retries: input
@@ -2776,7 +2749,7 @@ async fn handle_meerkat_run(
         peer_meta: input.peer_meta.clone(),
         resume_session: Some(session),
         budget_limits: input.budget_limits.clone().map(Into::into),
-        provider_params: turn_metadata_provider_params_for_build(initial_turn_metadata.as_ref()),
+        provider_params: None,
         call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
         external_tools,
         recoverable_tool_defs: (!input.tools.is_empty())
@@ -2793,13 +2766,13 @@ async fn handle_meerkat_run(
         override_mob: ToolCategoryOverride::Inherit,
         schedule_tools: None,
         mob_tool_authority_context: None,
-        preload_skills,
+        preload_skills: None,
         realm_id: Some(state.realm_id.to_string()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
-        connection_ref: turn_metadata_connection_ref_for_build(initial_turn_metadata.as_ref()),
-        keep_alive: turn_metadata_keep_alive_for_create(initial_turn_metadata.as_ref()),
+        connection_ref: None,
+        keep_alive: false,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
@@ -2819,7 +2792,9 @@ async fn handle_meerkat_run(
             connection_ref: initial_turn_metadata
                 .as_ref()
                 .is_some_and(|metadata| metadata.connection_ref.is_some()),
-            preload_skills: input.preload_skills.is_some(),
+            preload_skills: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.skill_references.is_some()),
             keep_alive: keep_alive_override.is_some(),
             comms_name: input.comms_name.is_some(),
             peer_meta: input.peer_meta.is_some(),

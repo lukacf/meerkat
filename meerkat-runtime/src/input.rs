@@ -95,6 +95,7 @@ pub enum InputDurability {
 
 /// Visibility controls for an input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputVisibility {
     /// Whether this input appears in the conversation transcript.
     pub transcript_eligible: bool,
@@ -979,6 +980,26 @@ mod tests {
         let message = err.to_string();
         assert!(
             message.contains("turn_metadata") || message.contains("unknown field"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn input_visibility_rejects_smuggled_split_metadata_fields() {
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: "hello".into(),
+            blocks: None,
+            turn_metadata: None,
+        });
+        let mut json = serde_json::to_value(&input).unwrap();
+        json["header"]["visibility"]["provider_params"] = serde_json::json!({ "temperature": 0.9 });
+
+        let err = serde_json::from_value::<Input>(json)
+            .expect_err("runtime input visibility must reject stale split metadata fields");
+        let message = err.to_string();
+        assert!(
+            message.contains("provider_params") || message.contains("unknown field"),
             "unexpected error: {message}"
         );
     }

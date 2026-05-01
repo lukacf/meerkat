@@ -593,6 +593,56 @@ pub struct ResumeOverrideMask {
 }
 
 impl SessionBuildOptions {
+    /// Runtime-owned create requests must carry first-turn metadata through
+    /// `initial_turn_metadata`, not parallel build fields.
+    #[must_use]
+    pub fn split_runtime_turn_metadata_fields(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.provider.is_some() {
+            fields.push("provider");
+        }
+        if self.provider_params.is_some() {
+            fields.push("provider_params");
+        }
+        if self.preload_skills.is_some() {
+            fields.push("preload_skills");
+        }
+        if self.connection_ref.is_some() {
+            fields.push("connection_ref");
+        }
+        if self.keep_alive {
+            fields.push("keep_alive");
+        }
+        if self.additional_instructions.is_some() {
+            fields.push("additional_instructions");
+        }
+        fields
+    }
+
+    /// Reject split first-turn metadata at the runtime-backed service seam.
+    ///
+    /// Standalone/embedded builders still use `SessionBuildOptions` as their
+    /// local build config. Runtime-owned sessions have a separate typed carrier,
+    /// so accepting these fields here would reintroduce two authorities.
+    pub fn validate_runtime_owned_turn_metadata_carrier(&self) -> Result<(), String> {
+        if !matches!(
+            self.runtime_build_mode,
+            crate::runtime_epoch::RuntimeBuildMode::SessionOwned(_)
+        ) {
+            return Ok(());
+        }
+
+        let fields = self.split_runtime_turn_metadata_fields();
+        if fields.is_empty() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "runtime-owned create_session must carry first-turn metadata through RuntimeTurnMetadata; split SessionBuildOptions fields are not accepted: {}",
+            fields.join(", ")
+        ))
+    }
+
     /// Apply the shared rehydration rule for mob operator access.
     ///
     /// This preserves exact persisted authority when available and otherwise

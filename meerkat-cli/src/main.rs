@@ -5840,6 +5840,7 @@ async fn run_agent(
                         },
                     )
                 }),
+                skill_references: preload_skills.clone(),
                 flow_tool_overlay: flow_tool_overlay.clone(),
                 additional_instructions: (!instructions.is_empty()).then(|| {
                     instructions
@@ -5860,7 +5861,7 @@ async fn run_agent(
             CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
         let mut build = SessionBuildOptions {
-            provider: Some(provider.as_core()),
+            provider: None,
             self_hosted_server_id: None,
             output_schema,
             structured_output_retries,
@@ -5869,7 +5870,7 @@ async fn run_agent(
             peer_meta: comms_overrides.peer_meta.clone(),
             resume_session: Some(session),
             budget_limits: Some(limits),
-            provider_params,
+            provider_params: None,
             external_tools,
             recoverable_tool_defs: None,
             llm_client_override: None,
@@ -5880,12 +5881,12 @@ async fn run_agent(
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             schedule_tools: None,
             mob_tool_authority_context: None,
-            preload_skills,
+            preload_skills: None,
             realm_id: Some(scope.locator.realm.as_str().to_owned()),
             instance_id: scope.instance_id.clone(),
             backend: Some(manifest.backend.as_str().to_string()),
             config_generation: None,
-            keep_alive,
+            keep_alive: false,
             checkpointer: None,
             silent_comms_intents: Vec::new(),
             max_inline_peer_notifications: None,
@@ -5900,7 +5901,7 @@ async fn run_agent(
             call_timeout_override: Default::default(),
             blob_store_override: None,
             mob_tools: mob_tools_factory,
-            connection_ref,
+            connection_ref: None,
         };
         build.apply_generated_create_only_mob_operator_access(
             meerkat_core::ToolCategoryOverride::from_effective(effective_mob),
@@ -7167,7 +7168,7 @@ fn scheduled_skill_keys(
     ))
 }
 
-#[cfg(any(feature = "session-store", test))]
+#[cfg(test)]
 fn materialized_preload_skills(
     preload_skills: &[meerkat_core::skills::SkillKey],
 ) -> Option<Vec<meerkat_core::skills::SkillKey>> {
@@ -7224,22 +7225,22 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
         let build = SessionBuildOptions {
-            provider: create.provider,
+            provider: None,
             output_schema: create.output_schema.clone(),
             structured_output_retries: create.structured_output_retries,
             comms_name: create.comms_name.clone(),
             peer_meta: create.peer_meta.clone(),
             resume_session: Some(session),
-            provider_params: create.provider_params.clone(),
-            preload_skills: materialized_preload_skills(&create.preload_skills),
-            additional_instructions: (!create.additional_instructions.is_empty())
-                .then(|| create.additional_instructions.clone()),
+            provider_params: None,
+            preload_skills: None,
+            additional_instructions: None,
             realm_id: create.realm_id.clone(),
             instance_id: create.instance_id.clone(),
             backend: create.backend.clone(),
-            keep_alive: create.keep_alive,
+            keep_alive: false,
             app_context: create.app_context.clone(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            initial_turn_metadata: create.initial_turn_metadata(),
             ..SessionBuildOptions::default()
         };
 
@@ -10056,7 +10057,7 @@ mod tests {
     fn runtime_owned_first_run_does_not_duplicate_additional_instructions_carrier() {
         let source = include_str!("main.rs");
         let build_start = source
-            .find("let mut build = SessionBuildOptions {\n            provider: Some(provider.as_core()),")
+            .find("let mut build = SessionBuildOptions {\n            provider: None,")
             .expect("runtime-owned first-run build block should exist");
         let build_tail = &source[build_start..];
         let build_end = build_tail
@@ -10069,6 +10070,13 @@ mod tests {
             "runtime-owned CLI first run must stage first-turn metadata through RuntimeTurnMetadata"
         );
         assert!(
+            build_block.contains("provider_params: None")
+                && build_block.contains("preload_skills: None")
+                && build_block.contains("keep_alive: false")
+                && build_block.contains("connection_ref: None"),
+            "runtime-owned CLI first run must not keep split build-level turn metadata carriers"
+        );
+        assert!(
             build_block.contains("additional_instructions: None"),
             "runtime-owned CLI first run must not keep a split build-level instruction carrier"
         );
@@ -10076,6 +10084,40 @@ mod tests {
             !build_block.contains("additional_instructions: if instructions.is_empty()"),
             "runtime-owned CLI first run must not duplicate instructions into SessionBuildOptions"
         );
+    }
+
+    #[test]
+    fn scheduled_materialization_uses_initial_turn_metadata_not_split_build_carriers() {
+        let source = include_str!("main.rs");
+        let materialize_start = source
+            .find("async fn materialize_session(\n        &self,\n        create: &meerkat::SessionMaterializationSpec,")
+            .expect("CLI scheduled materialize_session should exist");
+        let tail = &source[materialize_start..];
+        let build_start = tail
+            .find("let build = SessionBuildOptions {")
+            .expect("scheduled materialization build block should exist");
+        let build_tail = &tail[build_start..];
+        let build_end = build_tail
+            .find("        };\n\n        let result = self")
+            .expect("scheduled materialization build block should have a stable end");
+        let build_block = &build_tail[..build_end];
+
+        assert!(
+            build_block.contains("initial_turn_metadata:"),
+            "scheduled materialization must stage first-turn metadata through RuntimeTurnMetadata"
+        );
+        for split in [
+            "provider: create.provider",
+            "provider_params: create.provider_params.clone()",
+            "preload_skills: materialized_preload_skills",
+            "additional_instructions: (!create.additional_instructions.is_empty())",
+            "keep_alive: create.keep_alive",
+        ] {
+            assert!(
+                !build_block.contains(split),
+                "scheduled materialization must not write split carrier `{split}` into SessionBuildOptions"
+            );
+        }
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {

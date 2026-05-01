@@ -41,10 +41,11 @@ use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+    ConversationContextAppend, CoreRenderable, ModelId, RunApplyBoundary, RunPrimitive,
+    RuntimeTurnMetadata,
 };
+use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::mcp_config::McpConfig;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
@@ -260,29 +261,22 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
 
         let build = SessionBuildOptions {
-            provider: create.provider,
+            provider: None,
             output_schema: create.output_schema.clone(),
             structured_output_retries: create.structured_output_retries,
             comms_name: create.comms_name.clone(),
             peer_meta: create.peer_meta.clone(),
             resume_session: Some(session),
-            provider_params: create.provider_params.clone(),
-            preload_skills: (!create.preload_skills.is_empty()).then(|| {
-                create
-                    .preload_skills
-                    .iter()
-                    .cloned()
-                    .map(Into::into)
-                    .collect()
-            }),
-            additional_instructions: (!create.additional_instructions.is_empty())
-                .then(|| create.additional_instructions.clone()),
+            provider_params: None,
+            preload_skills: None,
+            additional_instructions: None,
             realm_id: create.realm_id.clone(),
             instance_id: create.instance_id.clone(),
             backend: create.backend.clone(),
-            keep_alive: create.keep_alive,
+            keep_alive: false,
             app_context: create.app_context.clone(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            initial_turn_metadata: create.initial_turn_metadata(),
             ..SessionBuildOptions::default()
         };
 
@@ -987,12 +981,17 @@ async fn setup_session(
         .map_err(|e| anyhow::anyhow!("runtime bindings: {e}"))?;
 
     let build_opts = SessionBuildOptions {
-        provider: Some(meerkat_core::Provider::from_name(provider)),
+        provider: None,
         override_builtins: meerkat_core::ToolCategoryOverride::Enable,
         override_shell: meerkat_core::ToolCategoryOverride::Enable,
         override_mob: meerkat_core::ToolCategoryOverride::Enable,
         resume_session: Some(prepared_session),
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        initial_turn_metadata: Some(RuntimeTurnMetadata {
+            model: Some(ModelId::new(model.to_string())),
+            provider: Some(meerkat_core::Provider::from_name(provider)),
+            ..Default::default()
+        }),
         external_tools,
         ..Default::default()
     };

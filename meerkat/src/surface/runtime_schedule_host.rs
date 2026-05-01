@@ -81,24 +81,23 @@ fn materialized_build_options(
     create: &SessionMaterializationSpec,
 ) -> SessionBuildOptions {
     let mut build = template.clone();
-    build.provider = create.provider;
+    build.provider = None;
     build.output_schema = create.output_schema.clone();
     build.structured_output_retries = create.structured_output_retries;
     build.comms_name = create.comms_name.clone();
     build.peer_meta = create.peer_meta.clone();
-    build.provider_params = create.provider_params.clone();
-    if !create.preload_skills.is_empty() {
-        build.preload_skills = Some(create.preload_skills.clone());
-    }
+    build.provider_params = None;
+    build.preload_skills = None;
     build.realm_id = create.realm_id.clone();
     build.instance_id = create.instance_id.clone();
     build.backend = create.backend.clone();
     build.config_generation = create.config_generation;
-    build.keep_alive = create.keep_alive;
+    build.keep_alive = false;
     build.app_context = create.app_context.clone();
-    build.additional_instructions = (!create.additional_instructions.is_empty())
-        .then(|| create.additional_instructions.clone())
-        .or(build.additional_instructions);
+    build.additional_instructions = None;
+    build.initial_turn_metadata = create
+        .initial_turn_metadata()
+        .or(build.initial_turn_metadata);
     build
 }
 
@@ -291,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_build_options_forwards_preload_skill_keys() {
+    fn materialized_build_options_forwards_preload_skill_keys_through_metadata() {
         let key = fixture_skill_key("email");
         let create = SessionMaterializationSpec {
             model: "claude-sonnet-4-6".to_string(),
@@ -316,6 +315,12 @@ mod tests {
 
         let build = materialized_build_options(&SessionBuildOptions::default(), &create);
 
-        assert_eq!(build.preload_skills, Some(vec![key]));
+        assert_eq!(build.preload_skills, None);
+        assert_eq!(
+            build
+                .initial_turn_metadata
+                .and_then(|metadata| metadata.skill_references),
+            Some(vec![key])
+        );
     }
 }

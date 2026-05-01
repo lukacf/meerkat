@@ -855,22 +855,6 @@ fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, ApiError>
     }
 }
 
-fn runtime_metadata_provider_params_for_build(
-    metadata: Option<&RuntimeTurnMetadata>,
-) -> Option<Value> {
-    match metadata.and_then(|metadata| metadata.provider_params.as_ref()) {
-        Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
-        Some(TurnMetadataOverride::Clear) | None => None,
-    }
-}
-
-fn runtime_metadata_keep_alive_for_create(metadata: Option<&RuntimeTurnMetadata>) -> bool {
-    matches!(
-        metadata.and_then(|metadata| metadata.keep_alive.as_ref()),
-        Some(TurnMetadataOverride::Set(_))
-    )
-}
-
 fn normalize_create_turn_metadata(
     metadata: Option<WireRuntimeTurnMetadata>,
     resolved_model: &str,
@@ -2669,7 +2653,15 @@ async fn create_session_inner(
         .and_then(|metadata| metadata.model.clone());
     let model = metadata_model.unwrap_or_else(|| state.default_model.to_string());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
-    let initial_turn_metadata = normalize_create_turn_metadata(req.turn_metadata.clone(), &model);
+    let mut initial_turn_metadata =
+        normalize_create_turn_metadata(req.turn_metadata.clone(), &model);
+    if let Some(preload_skills) = req.preload_skills.clone() {
+        let metadata = initial_turn_metadata.get_or_insert_with(RuntimeTurnMetadata::default);
+        match metadata.skill_references.as_mut() {
+            Some(skill_references) => skill_references.extend(preload_skills),
+            None => metadata.skill_references = Some(preload_skills),
+        }
+    }
     let keep_alive_override = match rest_turn_keep_alive_override(initial_turn_metadata.as_ref()) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -2794,10 +2786,11 @@ async fn create_session_inner(
             return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
         }
     };
+    let create_provider = initial_turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.provider);
     let mut build = SessionBuildOptions {
-        provider: initial_turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.provider),
+        provider: None,
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req
@@ -2808,7 +2801,7 @@ async fn create_session_inner(
         peer_meta: req.peer_meta.clone(),
         resume_session: Some(pre_session),
         budget_limits: req.budget_limits,
-        provider_params: runtime_metadata_provider_params_for_build(initial_turn_metadata.as_ref()),
+        provider_params: None,
         external_tools: mcp_external_tools,
         recoverable_tool_defs: None,
         llm_client_override: state
@@ -2822,13 +2815,13 @@ async fn create_session_inner(
         override_mob: ToolCategoryOverride::Inherit,
         schedule_tools: None,
         mob_tool_authority_context: None,
-        preload_skills: req.preload_skills.clone(),
+        preload_skills: None,
         realm_id: Some(state.realm.to_string()),
         instance_id: state.instance_id.clone(),
         backend: Some(state.backend.clone()),
         config_generation: current_generation,
         connection_ref: None,
-        keep_alive: runtime_metadata_keep_alive_for_create(initial_turn_metadata.as_ref()),
+        keep_alive: false,
         checkpointer: None,
         silent_comms_intents: Vec::new(),
         max_inline_peer_notifications: None,
@@ -2847,7 +2840,9 @@ async fn create_session_inner(
             provider_params: initial_turn_metadata
                 .as_ref()
                 .is_some_and(|metadata| metadata.provider_params.is_some()),
-            preload_skills: req.preload_skills.is_some(),
+            preload_skills: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.skill_references.is_some()),
             keep_alive: keep_alive_override.is_some(),
             comms_name: req.comms_name.is_some(),
             peer_meta: req.peer_meta.is_some(),
@@ -2864,7 +2859,6 @@ async fn create_session_inner(
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
     ));
-    let create_provider = build.provider;
 
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),

@@ -476,6 +476,60 @@ impl SessionMaterializationSpec {
         self.output_schema = Some(output_schema);
         self
     }
+
+    pub fn initial_turn_metadata(
+        &self,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        use meerkat_core::lifecycle::run_primitive::{
+            KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
+            TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
+        };
+
+        let provider = self
+            .provider
+            .or_else(|| Provider::infer_from_model(&self.model));
+        let provider_for_params = provider.unwrap_or(Provider::Other);
+        let mut metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new(self.model.clone())),
+            provider,
+            provider_params: self.provider_params.as_ref().map(|params| {
+                TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
+                    provider_for_params.as_str(),
+                    params,
+                ))
+            }),
+            skill_references: (!self.preload_skills.is_empty())
+                .then(|| self.preload_skills.clone()),
+            keep_alive: self.keep_alive.then(|| {
+                TurnMetadataOverride::Set(KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(30),
+                    policy: KeepAliveMode::Pinned,
+                })
+            }),
+            additional_instructions: (!self.additional_instructions.is_empty()).then(|| {
+                self.additional_instructions
+                    .iter()
+                    .filter_map(|body| {
+                        let body = body.trim();
+                        (!body.is_empty()).then(|| TurnInstruction {
+                            kind: TurnInstructionKind::System,
+                            body: body.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+            ..Default::default()
+        };
+        if metadata
+            .additional_instructions
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            metadata.additional_instructions = None;
+        }
+
+        (!metadata.is_empty()).then_some(metadata)
+    }
 }
 
 impl PartialEq for SessionMaterializationSpec {

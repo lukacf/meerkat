@@ -1496,6 +1496,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
+        if let Some(build) = req.build.as_ref() {
+            build
+                .validate_runtime_owned_turn_metadata_carrier()
+                .map_err(|message| SessionError::Agent(AgentError::ConfigError(message)))?;
+        }
+
         // Reserve capacity up front so two concurrent create_session calls cannot race
         // past max_sessions between check and insert.
         let capacity_permit = match self.session_capacity.clone().try_acquire_owned() {

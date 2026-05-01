@@ -231,39 +231,53 @@ impl Router {
 
     pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
         let peer_ids = self.trusted_peer_ids.read().clone();
-        let removed = {
+        let removed_pubkeys = {
             let mut trusted = self.trusted_peers.write();
-            let Some(index) = trusted.peers.iter().position(|peer| {
-                peer_ids
+            let mut removed_pubkeys = Vec::new();
+            trusted.peers.retain(|peer| {
+                let matches = peer_ids
                     .get(&peer.pubkey)
                     .copied()
                     .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                    == *peer_id
-            }) else {
-                return false;
-            };
-            trusted.peers.remove(index)
+                    == *peer_id;
+                if matches {
+                    removed_pubkeys.push(peer.pubkey);
+                    false
+                } else {
+                    true
+                }
+            });
+            removed_pubkeys
         };
-        self.trusted_peer_ids.write().remove(&removed.pubkey);
+        if removed_pubkeys.is_empty() {
+            return false;
+        }
+        let mut trusted_peer_ids = self.trusted_peer_ids.write();
+        for pubkey in removed_pubkeys {
+            trusted_peer_ids.remove(&pubkey);
+        }
+        drop(trusted_peer_ids);
         self.private_peer_ids.write().remove(peer_id);
         true
     }
 
     fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> Option<TrustedPeer> {
         let peer_ids = self.trusted_peer_ids.read().clone();
-        self.trusted_peers
-            .read()
-            .peers
-            .iter()
-            .find(|peer| {
-                !peer.pubkey.is_zero()
-                    && peer_ids
-                        .get(&peer.pubkey)
-                        .copied()
-                        .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                        == *peer_id
-            })
-            .cloned()
+        let trusted = self.trusted_peers.read();
+        let mut matches = trusted.peers.iter().filter(|peer| {
+            !peer.pubkey.is_zero()
+                && peer_ids
+                    .get(&peer.pubkey)
+                    .copied()
+                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
+                    == *peer_id
+        });
+        let peer = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(peer.clone())
+        }
     }
 
     /// Get the trusted peers Arc.

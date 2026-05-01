@@ -2133,6 +2133,16 @@ impl CommsRuntime {
 
         {
             let trusted = self.trusted_peers.read();
+            let trusted_peer_id_counts: HashMap<PeerId, usize> = trusted
+                .peers
+                .iter()
+                .filter(|peer| peer.has_raw_sendable_identity())
+                .fold(HashMap::new(), |mut counts, peer| {
+                    *counts
+                        .entry(self.router.peer_id_for_pubkey(&peer.pubkey))
+                        .or_default() += 1;
+                    counts
+                });
             for peer in &trusted.peers {
                 if !peer.has_raw_sendable_identity() {
                     tracing::warn!(
@@ -2144,9 +2154,17 @@ impl CommsRuntime {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
                     continue;
                 }
+                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
+                if trusted_peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
+                    tracing::warn!(
+                        peer_name = %peer.name,
+                        peer_id = %peer_id,
+                        "skipping duplicate trusted peer id in peer directory"
+                    );
+                    continue;
+                }
                 trusted_names.insert(peer.name.clone());
                 trusted_pubkeys.insert(peer.pubkey);
-                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
                 if private_peer_ids.contains(&peer_id) {
                     continue;
                 }

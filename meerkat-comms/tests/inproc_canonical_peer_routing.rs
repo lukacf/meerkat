@@ -316,6 +316,175 @@ async fn ingress_rejects_late_shared_zero_pubkey_trust_mutation() {
 }
 
 #[tokio::test]
+async fn router_rejects_duplicate_trusted_canonical_peer_identity() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let target_name = format!("duplicate-canonical-target-{suffix}");
+    let stale_name = format!("duplicate-canonical-stale-{suffix}");
+    let (mut target_inbox, target_sender) = Inbox::new();
+
+    registry.register_with_meta_in_namespace(
+        "",
+        &target_name,
+        target_pubkey,
+        target_sender,
+        PeerMeta::default(),
+    );
+
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::new(
+        Keypair::generate(),
+        TrustedPeers {
+            peers: vec![
+                TrustedPeer {
+                    name: stale_name.clone(),
+                    pubkey: target_pubkey,
+                    addr: format!("inproc://{stale_name}"),
+                    meta: PeerMeta::default(),
+                },
+                TrustedPeer {
+                    name: target_name.clone(),
+                    pubkey: target_pubkey,
+                    addr: format!("inproc://{target_name}"),
+                    meta: PeerMeta::default(),
+                },
+            ],
+        },
+        CommsConfig::default(),
+        router_inbox_sender,
+        true,
+    );
+
+    let dest = target_pubkey.to_peer_id();
+    let result = router
+        .send(dest, message("duplicate canonical trust must not route"))
+        .await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "duplicate trusted canonical identity must fail closed: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "duplicate trusted canonical identity must not deliver by whichever entry wins"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn router_remove_trusted_peer_removes_all_duplicate_canonical_matches() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let target_name = format!("remove-duplicate-target-{suffix}");
+    let shadow_name = format!("remove-duplicate-shadow-{suffix}");
+    let (mut target_inbox, target_sender) = Inbox::new();
+
+    registry.register_with_meta_in_namespace(
+        "",
+        &target_name,
+        target_pubkey,
+        target_sender,
+        PeerMeta::default(),
+    );
+
+    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::with_shared_peers(
+        Keypair::generate(),
+        trusted_peers.clone(),
+        CommsConfig::default(),
+        router_inbox_sender,
+        true,
+    );
+    trusted_peers.write().peers.extend([
+        TrustedPeer {
+            name: shadow_name.clone(),
+            pubkey: target_pubkey,
+            addr: format!("inproc://{shadow_name}"),
+            meta: PeerMeta::default(),
+        },
+        TrustedPeer {
+            name: target_name.clone(),
+            pubkey: target_pubkey,
+            addr: format!("inproc://{target_name}"),
+            meta: PeerMeta::default(),
+        },
+    ]);
+
+    let dest = target_pubkey.to_peer_id();
+    assert!(
+        router.remove_trusted_peer(&dest),
+        "remove should report that duplicate canonical trust entries were removed"
+    );
+    assert!(
+        trusted_peers
+            .read()
+            .peers
+            .iter()
+            .all(|peer| peer.pubkey != target_pubkey),
+        "remove must clear every raw entry for the canonical peer id"
+    );
+
+    let result = router
+        .send(dest, message("removed duplicate trust must not route"))
+        .await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "removing duplicate trust must not leave one duplicate sendable: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "removed duplicate canonical identity must not deliver through the remaining entry"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn runtime_peer_directory_skips_duplicate_trusted_canonical_peer_identity() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let runtime = CommsRuntime::inproc_only(&format!("duplicate-directory-runtime-{suffix}"))
+        .expect("runtime");
+    let target_keypair = Keypair::generate();
+    let target_pubkey = target_keypair.public_key();
+    let peer_id = target_pubkey.to_peer_id();
+
+    runtime.trusted_peers_shared().write().peers.extend([
+        TrustedPeer {
+            name: format!("duplicate-directory-primary-{suffix}"),
+            pubkey: target_pubkey,
+            addr: format!("inproc://duplicate-directory-primary-{suffix}"),
+            meta: PeerMeta::default(),
+        },
+        TrustedPeer {
+            name: format!("duplicate-directory-shadow-{suffix}"),
+            pubkey: target_pubkey,
+            addr: format!("inproc://duplicate-directory-shadow-{suffix}"),
+            meta: PeerMeta::default(),
+        },
+    ]);
+
+    let peers = CoreCommsRuntime::peers(&runtime).await;
+
+    assert!(
+        peers.iter().all(|peer| peer.peer_id != peer_id),
+        "duplicate trusted canonical identities must not be advertised: {peers:?}"
+    );
+}
+
+#[tokio::test]
 async fn router_inproc_same_namespace_delivers_to_resolved_peer_identity_not_display_name() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     let registry = InprocRegistry::global();

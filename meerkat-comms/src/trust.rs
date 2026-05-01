@@ -309,7 +309,18 @@ impl TrustedPeers {
     }
 
     pub(crate) fn retain_raw_sendable_identities(&mut self) {
-        self.peers.retain(|peer| peer.validate().is_ok());
+        let mut peer_id_counts: BTreeMap<PeerId, usize> = BTreeMap::new();
+        for peer in self.peers.iter().filter(|peer| peer.validate().is_ok()) {
+            *peer_id_counts.entry(peer.pubkey.to_peer_id()).or_default() += 1;
+        }
+        self.peers.retain(|peer| {
+            peer.validate().is_ok()
+                && peer_id_counts
+                    .get(&peer.pubkey.to_peer_id())
+                    .copied()
+                    .unwrap_or(0)
+                    == 1
+        });
     }
 
     /// Load trusted peers from a JSON file, or return empty if not found.
@@ -393,8 +404,13 @@ impl TrustedPeers {
     }
 
     pub fn validate(&self) -> Result<(), TrustError> {
+        let mut peer_ids = BTreeMap::new();
         for peer in &self.peers {
             peer.validate()?;
+            let peer_id = peer.pubkey.to_peer_id();
+            if peer_ids.insert(peer_id, ()).is_some() {
+                return Err(TrustError::DuplicatePeerId { peer_id });
+            }
         }
         Ok(())
     }
@@ -419,9 +435,15 @@ impl TrustedPeers {
     /// unambiguous even when multiple entries share a [`crate::peer_meta::PeerMeta`]
     /// display name.
     pub fn find_by_peer_id(&self, peer_id: &PeerId) -> Option<&TrustedPeer> {
-        self.peers.iter().find(|p| {
+        let mut matches = self.peers.iter().filter(|p| {
             !p.pubkey.is_zero() && crate::router::peer_id_from_pubkey(&p.pubkey) == *peer_id
-        })
+        });
+        let peer = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(peer)
+        }
     }
 }
 
@@ -600,6 +622,36 @@ mod tests {
         assert!(
             peers.get_peer(&zero).is_none(),
             "zero pubkey must not resolve through raw trust lookup"
+        );
+    }
+
+    #[test]
+    fn test_trusted_peers_validate_rejects_duplicate_peer_id() {
+        let pubkey = PubKey::new([42u8; 32]);
+        let peer_id = pubkey.to_peer_id();
+        let peers = TrustedPeers {
+            peers: vec![
+                TrustedPeer {
+                    name: "primary".to_string(),
+                    pubkey,
+                    addr: "inproc://primary".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+                TrustedPeer {
+                    name: "stale-shadow".to_string(),
+                    pubkey,
+                    addr: "inproc://stale-shadow".to_string(),
+                    meta: crate::PeerMeta::default(),
+                },
+            ],
+        };
+
+        let err = peers
+            .validate()
+            .expect_err("legacy TrustedPeers must reject duplicate canonical identities");
+        assert!(
+            matches!(err, TrustError::DuplicatePeerId { peer_id: id } if id == peer_id),
+            "expected duplicate PeerId error for raw TrustedPeers, got {err:?}"
         );
     }
 

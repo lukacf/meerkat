@@ -156,6 +156,14 @@ impl InprocRegistry {
         meta: PeerMeta,
     ) {
         let name = name.into();
+        if pubkey.is_zero() {
+            tracing::warn!(
+                inproc_namespace = %namespace,
+                peer_name = %name,
+                "rejecting zero-pubkey inproc registration"
+            );
+            return;
+        }
         let peer = InprocPeer {
             name: name.clone(),
             pubkey,
@@ -672,6 +680,44 @@ mod tests {
 
         // Lookup by pubkey
         assert!(registry.get_by_pubkey(&pubkey).is_some());
+    }
+
+    #[test]
+    fn test_registry_rejects_zero_pubkey_registration() {
+        let registry = InprocRegistry::new();
+        let (_, sender) = Inbox::new();
+        let zero_pubkey = PubKey::new([0u8; 32]);
+
+        registry.register("zero-agent", zero_pubkey, sender);
+
+        assert!(registry.is_empty());
+        assert!(!registry.contains_name("zero-agent"));
+        assert!(registry.get_by_name("zero-agent").is_none());
+        assert!(registry.get_by_pubkey(&zero_pubkey).is_none());
+    }
+
+    #[test]
+    fn test_registry_zero_pubkey_registration_does_not_shadow_valid_name() {
+        let registry = InprocRegistry::new();
+        let valid_keypair = make_keypair();
+        let valid_pubkey = valid_keypair.public_key();
+        let (_, valid_sender) = Inbox::new();
+        let (_, zero_sender) = Inbox::new();
+        let zero_pubkey = PubKey::new([0u8; 32]);
+
+        registry.register("stable-agent", valid_pubkey, valid_sender);
+        registry.register("stable-agent", zero_pubkey, zero_sender);
+
+        assert_eq!(registry.len(), 1);
+        assert!(registry.contains(&valid_pubkey));
+        assert!(registry.contains_name("stable-agent"));
+        assert!(registry.get_by_pubkey(&valid_pubkey).is_some());
+        assert!(registry.get_by_pubkey(&zero_pubkey).is_none());
+
+        let (found_pubkey, _) = registry
+            .get_by_name("stable-agent")
+            .expect("valid name mapping should remain");
+        assert_eq!(found_pubkey, valid_pubkey);
     }
 
     #[test]

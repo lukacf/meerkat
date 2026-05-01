@@ -134,25 +134,10 @@ fn public_standalone_build_is_test_only(source: &str) -> bool {
         && !source.contains("#[cfg(all(not(test), feature = \"standalone-agent-builder\"))]")
 }
 
-fn public_factory_policy_finalizer_is_unsafe_bridge(source: &str) -> bool {
-    let Some(pos) = source.find("pub async fn build_agent_after_factory_policy") else {
-        let Some(pos) = source.find("pub async unsafe fn build_agent_after_factory_policy") else {
-            let Some(pos) = source.find("pub unsafe fn build_agent_after_factory_policy") else {
-                return false;
-            };
-            let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
-            return signature_window.contains("builder: AgentBuilder")
-                && signature_window.contains("impl std::future::Future")
-                && !signature_window.contains("AgentFactoryBuildAuthority");
-        };
-        let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
-        return signature_window.contains("builder: AgentBuilder")
-            && !signature_window.contains("AgentFactoryBuildAuthority");
-    };
-    let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
-    signature_window.contains("pub async unsafe fn build_agent_after_factory_policy")
-        && signature_window.contains("builder: AgentBuilder")
-        && !signature_window.contains("AgentFactoryBuildAuthority")
+fn public_factory_policy_finalizer_is_absent(source: &str) -> bool {
+    !source.contains("pub async fn build_agent_after_factory_policy")
+        && !source.contains("pub async unsafe fn build_agent_after_factory_policy")
+        && !source.contains("pub unsafe fn build_agent_after_factory_policy")
 }
 
 fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
@@ -178,19 +163,6 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("AgentFactoryBuildAuthorityRegistration")
         && !source.contains("inventory::collect!")
         && !source.contains("inventory::iter")
-}
-
-fn agent_mod_reexport_is_doc_hidden(source: &str) -> bool {
-    let Some(pos) = source.find("pub use builder::build_agent_after_factory_policy") else {
-        return true;
-    };
-    let cfg_window = source[..pos]
-        .lines()
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>()
-        .join("\n");
-    cfg_window.contains("#[doc(hidden)]")
 }
 
 fn bazel_target_block<'a>(source: &'a str, name: &str) -> Option<&'a str> {
@@ -910,10 +882,10 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          argument types"
     );
     assert!(
-        public_factory_policy_finalizer_is_unsafe_bridge(&builder),
-        "the factory-policy finalizer must be an explicit unsafe crate-boundary \
-         bridge and must not accept a public concrete authority token that \
-         downstream callers can transmute or mint"
+        public_factory_policy_finalizer_is_absent(&builder),
+        "meerkat_core must not expose a public Rust \
+         build_agent_after_factory_policy function; downstream callers can \
+         otherwise reach the factory-policy finalizer through doc-hidden paths"
     );
     assert!(
         !builder.contains("pub async fn build_after_factory_policy"),
@@ -923,8 +895,8 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("validate_factory_policy()?")
-            && (builder.contains("pub unsafe fn build_agent_after_factory_policy")
-                || builder.contains("pub async unsafe fn build_agent_after_factory_policy"))
+            && builder.contains("__meerkat_core_agent_factory_policy_build")
+            && builder.contains("pub(crate) unsafe extern \"Rust\" fn")
             && !builder.contains("is_canonical_factory_authority()")
             && !builder.contains("AgentBuildPolicyError::InvalidBuildAuthority")
             && !builder.contains("pub fn from_registered_source<A: 'static>")
@@ -933,8 +905,8 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
             && !builder.contains("pub struct AgentFactoryPolicyAuthorityRegistration")
             && !builder.contains("pub enum AgentFactoryPolicyAuthorityRegistrationKind"),
         "canonical factory construction must cross into core through a \
-         validating factory-policy seam that does not expose a downstream \
-         registration or authority-minting API"
+         private validating factory-policy seam that does not expose a \
+         downstream Rust registration or authority-minting API"
     );
     assert!(
         !builder.contains("std::panic::Location::caller")
@@ -962,16 +934,11 @@ fn core_factory_authority_token_is_not_reexported() {
     let authority = repo_file("meerkat-agent-build-authority/src/lib.rs");
 
     assert!(
-        agent_mod_reexport_is_doc_hidden(&agent_mod),
-        "meerkat_core::agent must not re-export the factory-policy finalizer \
-         as a normal public construction surface"
-    );
-    assert!(
         !agent_mod.contains("pub use builder::build_agent_after_factory_policy")
-            && agent_mod.contains("pub mod __agent_factory_build_bridge"),
-        "meerkat_core::agent must keep the factory-policy finalizer off the \
-         normal agent module surface; only the explicit facade/core bridge may \
-         expose it"
+            && !agent_mod.contains("__agent_factory_build_bridge"),
+        "meerkat_core::agent must not expose a public doc-hidden bridge for \
+         the factory-policy finalizer; downstream callers can name doc-hidden \
+         public modules"
     );
     assert!(
         !agent_mod.contains("AgentFactoryBuildToken"),
@@ -1329,7 +1296,7 @@ fn production_like_callers_do_not_call_core_builder_build_directly() {
          test/embedding seam"
     );
     assert!(
-        factory.contains("build_agent_after_factory_policy(")
+        factory.contains("core_agent_factory_policy_build(")
             && !factory.contains("agent_factory_policy_authority()")
             && !factory.contains(".build_after_factory_policy("),
         "AgentFactory must enter meerkat_core through the explicit \

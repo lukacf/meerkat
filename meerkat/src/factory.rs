@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
@@ -159,6 +161,25 @@ impl SessionStore for EphemeralSessionStore {
 
 /// Type-erased agent using trait objects.
 pub type DynAgent = Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type CoreAgentFactoryBuildFuture =
+    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>> + Send>>;
+
+#[cfg(target_arch = "wasm32")]
+type CoreAgentFactoryBuildFuture =
+    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>>>>;
+
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = "__meerkat_core_agent_factory_policy_build"]
+    fn core_agent_factory_policy_build(
+        builder: AgentBuilder,
+        client: Arc<dyn AgentLlmClient>,
+        tools: Arc<dyn AgentToolDispatcher>,
+        store: Arc<dyn AgentSessionStore>,
+    ) -> CoreAgentFactoryBuildFuture;
+}
 
 #[derive(Clone)]
 struct ErasedLlmClientOverride(Arc<dyn LlmClient>);
@@ -3878,13 +3899,7 @@ impl AgentFactory {
         // runtime, auth, session, tool, and metadata policy composition above.
         #[allow(unsafe_code)]
         let mut agent = unsafe {
-            meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
-                builder,
-                llm_adapter,
-                tools,
-                store_adapter,
-            )
-            .await
+            core_agent_factory_policy_build(builder, llm_adapter, tools, store_adapter).await
         }
         .map_err(|err| {
             BuildAgentError::Config(format!("AgentFactory policy validation failed: {err}"))
@@ -4026,13 +4041,7 @@ mod tests {
         // intentionally omitting required factory metadata.
         #[allow(unsafe_code)]
         let result = unsafe {
-            meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
-                builder,
-                llm_adapter,
-                tools,
-                store_adapter,
-            )
-            .await
+            core_agent_factory_policy_build(builder, llm_adapter, tools, store_adapter).await
         };
 
         assert!(

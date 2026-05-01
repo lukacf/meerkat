@@ -108,7 +108,7 @@ fn main() {
         // unsafe code and synthesizing every public prerequisite. The core bridge
         // must still reject the caller before constructing an agent.
         unsafe {
-            meerkat_core::agent::build_agent_after_factory_policy(
+            meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
                 builder,
                 Arc::new(NoopClient),
                 Arc::new(NoopTools),

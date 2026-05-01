@@ -4,6 +4,8 @@
     clippy::unwrap_used
 )]
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -17,6 +19,28 @@ use meerkat_core::{
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::{Mutex, mpsc};
+
+type DynAgent =
+    meerkat_core::Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type CoreAgentFactoryBuildFuture =
+    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>> + Send>>;
+
+#[cfg(target_arch = "wasm32")]
+type CoreAgentFactoryBuildFuture =
+    Pin<Box<dyn Future<Output = Result<DynAgent, meerkat_core::AgentBuildPolicyError>>>>;
+
+#[allow(improper_ctypes_definitions, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = "__meerkat_core_agent_factory_policy_build"]
+    fn core_agent_factory_policy_build(
+        builder: AgentBuilder,
+        client: Arc<dyn AgentLlmClient>,
+        tools: Arc<dyn AgentToolDispatcher>,
+        store: Arc<dyn AgentSessionStore>,
+    ) -> CoreAgentFactoryBuildFuture;
+}
 
 #[derive(Clone, Copy)]
 enum ClientMode {
@@ -287,7 +311,7 @@ async fn build_agent(
     hooks: TestHookEngine,
     seen_args: Arc<Mutex<Vec<Value>>>,
     seen_tokens: Arc<Mutex<Vec<u32>>>,
-) -> meerkat_core::Agent<ScenarioClient, RecordingToolDispatcher, NoopStore> {
+) -> DynAgent {
     let client = Arc::new(ScenarioClient::new(mode, seen_tokens));
     let tools = Arc::new(RecordingToolDispatcher::new(seen_args));
     let store = Arc::new(NoopStore);
@@ -301,11 +325,9 @@ async fn build_agent(
 
     #[allow(unsafe_code)]
     unsafe {
-        meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
-            builder, client, tools, store,
-        )
-        .await
-        .expect("test builder has factory policy metadata")
+        core_agent_factory_policy_build(builder, client, tools, store)
+            .await
+            .expect("test builder has factory policy metadata")
     }
 }
 

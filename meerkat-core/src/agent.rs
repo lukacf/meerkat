@@ -53,11 +53,6 @@ use std::sync::Arc;
 pub use builder::{AgentBuildPolicyError, AgentBuilder};
 pub use runner::AgentRunner;
 
-#[doc(hidden)]
-pub mod __agent_factory_build_bridge {
-    pub use super::builder::build_agent_after_factory_policy;
-}
-
 /// Trait for LLM clients that can be used with the agent
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

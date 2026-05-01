@@ -18,6 +18,8 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -79,33 +81,42 @@ pub enum AgentBuildPolicyError {
     MissingTurnStateHandle,
 }
 
-/// Build an agent after the canonical factory has composed policy metadata.
-///
-/// This is the production construction seam. It refuses to build unless the
-/// surrounding factory has attached durable session metadata, durable
-/// build-state metadata, and a runtime turn-state handle to the builder.
-///
-/// # Safety
-///
-/// Callers must be the canonical facade factory after it has run provider,
-/// runtime, auth, session, and tool policy composition. This function is public
-/// only as a crate boundary bridge between `meerkat` and `meerkat-core`; it is
-/// not a standalone construction API.
-#[doc(hidden)]
-#[allow(unsafe_code)]
-pub async unsafe fn build_agent_after_factory_policy<C, T, S>(
+#[cfg(not(target_arch = "wasm32"))]
+type AgentFactoryBuildFuture = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>,
+                    AgentBuildPolicyError,
+                >,
+            > + Send,
+    >,
+>;
+
+#[cfg(target_arch = "wasm32")]
+type AgentFactoryBuildFuture = Pin<
+    Box<
+        dyn Future<
+            Output = Result<
+                Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>,
+                AgentBuildPolicyError,
+            >,
+        >,
+    >,
+>;
+
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = "__meerkat_core_agent_factory_policy_build")]
+pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
     builder: AgentBuilder,
-    client: Arc<C>,
-    tools: Arc<T>,
-    store: Arc<S>,
-) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
-where
-    C: AgentLlmClient + ?Sized,
-    T: AgentToolDispatcher + ?Sized,
-    S: AgentSessionStore + ?Sized,
-{
-    builder.validate_factory_policy()?;
-    Ok(builder.build_inner(client, tools, store).await)
+    client: Arc<dyn AgentLlmClient>,
+    tools: Arc<dyn AgentToolDispatcher>,
+    store: Arc<dyn AgentSessionStore>,
+) -> AgentFactoryBuildFuture {
+    Box::pin(async move {
+        builder.validate_factory_policy()?;
+        Ok(builder.build_inner(client, tools, store).await)
+    })
 }
 
 impl AgentBuilder {

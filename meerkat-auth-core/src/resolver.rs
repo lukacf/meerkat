@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::AuthStatusPhase;
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::auth::{PersistedAuthMode, TokenKey};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::handles::AuthLeasePhase;

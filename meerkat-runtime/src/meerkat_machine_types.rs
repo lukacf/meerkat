@@ -578,11 +578,10 @@ pub(crate) enum MeerkatMachineCommandResult {
 
 #[doc(hidden)]
 #[must_use]
-pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
+pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<MeerkatMachineInputVariant> {
     canonical_meerkat_machine_command_classifications()
         .into_iter()
-        .flat_map(|record| record.classification.catalog_inputs())
-        .map(MeerkatMachineCatalogInput::as_str)
+        .flat_map(|record| record.classification.catalog_input_variants())
         .collect()
 }
 
@@ -664,6 +663,56 @@ pub enum MeerkatMachineCatalogInput {
 }
 
 impl MeerkatMachineCatalogInput {
+    pub const ALL: &'static [Self] = &[
+        Self::RegisterSession,
+        Self::UnregisterSession,
+        Self::EnsureSessionWithExecutor,
+        Self::SetSilentIntents,
+        Self::InterruptCurrentRun,
+        Self::CancelAfterBoundary,
+        Self::StopRuntimeExecutor,
+        Self::ContainsSession,
+        Self::SessionHasExecutor,
+        Self::SessionHasComms,
+        Self::OpsLifecycleRegistry,
+        Self::PrepareBindings,
+        Self::InputState,
+        Self::ListActiveInputs,
+        Self::ReconfigureSessionLlmIdentity,
+        Self::StagePersistentFilter,
+        Self::RequestDeferredTools,
+        Self::PublishCommittedVisibleSet,
+        Self::SetPeerIngressContext,
+        Self::NotifyDrainExited,
+        Self::AbortAll,
+        Self::Abort,
+        Self::Wait,
+        Self::Ingest,
+        Self::PublishEvent,
+        Self::Retire,
+        Self::Recycle,
+        Self::Reset,
+        Self::Recover,
+        Self::Destroy,
+        Self::RuntimeState,
+        Self::RuntimeRealtimeAttachmentStatus,
+        Self::ModelRoutingStatus,
+        Self::SetModelRoutingBaseline,
+        Self::RequestFiniteSwitchTurn,
+        Self::RequestUntilChangedSwitchTurn,
+        Self::AdmitModelRoutingAssistantTurn,
+        Self::BeginImageOperation,
+        Self::ActivateImageOperationOverride,
+        Self::CompleteImageOperation,
+        Self::RestoreImageOperationOverride,
+        Self::LoadBoundaryReceipt,
+        Self::AcceptWithCompletion,
+        Self::AcceptWithoutWake,
+        Self::Prepare,
+        Self::Commit,
+        Self::Fail,
+    ];
+
     #[must_use]
     pub const fn input_variant(self) -> MeerkatMachineInputVariant {
         match self {
@@ -783,6 +832,78 @@ impl MeerkatMachineCatalogInput {
             Self::Prepare => "Prepare",
             Self::Commit => "Commit",
             Self::Fail => "Fail",
+        }
+    }
+}
+
+impl MeerkatMachineCommandVariant {
+    #[must_use]
+    pub const fn catalog_input(self) -> Option<MeerkatMachineCatalogInput> {
+        match self {
+            Self::ConfigureModelRoutingBaseline
+            | Self::RequestSwitchTurn
+            | Self::RuntimeRealtimeChannelStatus
+            | Self::SessionModelRoutingStatus
+            | Self::PrepareLocalSessionBindings => None,
+            Self::RegisterSession => Some(MeerkatMachineCatalogInput::RegisterSession),
+            Self::UnregisterSession => Some(MeerkatMachineCatalogInput::UnregisterSession),
+            Self::EnsureSessionWithExecutor => {
+                Some(MeerkatMachineCatalogInput::EnsureSessionWithExecutor)
+            }
+            Self::SetSilentIntents => Some(MeerkatMachineCatalogInput::SetSilentIntents),
+            Self::InterruptCurrentRun => Some(MeerkatMachineCatalogInput::InterruptCurrentRun),
+            Self::CancelAfterBoundary => Some(MeerkatMachineCatalogInput::CancelAfterBoundary),
+            Self::StopRuntimeExecutor => Some(MeerkatMachineCatalogInput::StopRuntimeExecutor),
+            Self::ContainsSession => Some(MeerkatMachineCatalogInput::ContainsSession),
+            Self::SessionHasExecutor => Some(MeerkatMachineCatalogInput::SessionHasExecutor),
+            Self::SessionHasComms => Some(MeerkatMachineCatalogInput::SessionHasComms),
+            Self::OpsLifecycleRegistry => Some(MeerkatMachineCatalogInput::OpsLifecycleRegistry),
+            Self::PrepareBindings => Some(MeerkatMachineCatalogInput::PrepareBindings),
+            Self::InputState => Some(MeerkatMachineCatalogInput::InputState),
+            Self::ListActiveInputs => Some(MeerkatMachineCatalogInput::ListActiveInputs),
+            Self::ReconfigureSessionLlmIdentity => {
+                Some(MeerkatMachineCatalogInput::ReconfigureSessionLlmIdentity)
+            }
+            Self::StagePersistentFilter => Some(MeerkatMachineCatalogInput::StagePersistentFilter),
+            Self::RequestDeferredTools => Some(MeerkatMachineCatalogInput::RequestDeferredTools),
+            Self::PublishCommittedVisibleSet => {
+                Some(MeerkatMachineCatalogInput::PublishCommittedVisibleSet)
+            }
+            Self::SetPeerIngressContext => Some(MeerkatMachineCatalogInput::SetPeerIngressContext),
+            Self::NotifyDrainExited => Some(MeerkatMachineCatalogInput::NotifyDrainExited),
+            Self::AbortAll => Some(MeerkatMachineCatalogInput::AbortAll),
+            Self::Abort => Some(MeerkatMachineCatalogInput::Abort),
+            Self::Wait => Some(MeerkatMachineCatalogInput::Wait),
+            Self::Ingest => Some(MeerkatMachineCatalogInput::Ingest),
+            Self::PublishEvent => Some(MeerkatMachineCatalogInput::PublishEvent),
+            Self::Retire => Some(MeerkatMachineCatalogInput::Retire),
+            Self::Recycle => Some(MeerkatMachineCatalogInput::Recycle),
+            Self::Reset => Some(MeerkatMachineCatalogInput::Reset),
+            Self::Recover => Some(MeerkatMachineCatalogInput::Recover),
+            Self::Destroy => Some(MeerkatMachineCatalogInput::Destroy),
+            Self::RuntimeState => Some(MeerkatMachineCatalogInput::RuntimeState),
+            Self::RuntimeRealtimeAttachmentStatus => {
+                Some(MeerkatMachineCatalogInput::RuntimeRealtimeAttachmentStatus)
+            }
+            Self::AdmitModelRoutingAssistantTurn => {
+                Some(MeerkatMachineCatalogInput::AdmitModelRoutingAssistantTurn)
+            }
+            Self::BeginImageOperation => Some(MeerkatMachineCatalogInput::BeginImageOperation),
+            Self::ActivateImageOperationOverride => {
+                Some(MeerkatMachineCatalogInput::ActivateImageOperationOverride)
+            }
+            Self::CompleteImageOperation => {
+                Some(MeerkatMachineCatalogInput::CompleteImageOperation)
+            }
+            Self::RestoreImageOperationOverride => {
+                Some(MeerkatMachineCatalogInput::RestoreImageOperationOverride)
+            }
+            Self::LoadBoundaryReceipt => Some(MeerkatMachineCatalogInput::LoadBoundaryReceipt),
+            Self::AcceptWithCompletion => Some(MeerkatMachineCatalogInput::AcceptWithCompletion),
+            Self::AcceptWithoutWake => Some(MeerkatMachineCatalogInput::AcceptWithoutWake),
+            Self::Prepare => Some(MeerkatMachineCatalogInput::Prepare),
+            Self::Commit => Some(MeerkatMachineCatalogInput::Commit),
+            Self::Fail => Some(MeerkatMachineCatalogInput::Fail),
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::ids::{
 use crate::machines::mob_machine as mob_dsl;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
+use meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -78,7 +79,7 @@ pub fn flow_projection_kernel_audit() -> &'static [FlowProjectionKernelAudit] {
 }
 
 #[must_use]
-pub fn canonical_flow_authority_input_manifest() -> indexmap::IndexSet<&'static str> {
+pub fn canonical_flow_authority_input_manifest() -> indexmap::IndexSet<MobMachineInputVariant> {
     [
         MobMachineCatalogInput::RunFlow,
         MobMachineCatalogInput::CreateRunSeed,
@@ -92,7 +93,7 @@ pub fn canonical_flow_authority_input_manifest() -> indexmap::IndexSet<&'static 
         MobMachineCatalogInput::AuthorizeLoopIterationReducerCommand,
     ]
     .into_iter()
-    .map(MobMachineCatalogInput::as_str)
+    .map(MobMachineCatalogInput::input_variant)
     .collect()
 }
 

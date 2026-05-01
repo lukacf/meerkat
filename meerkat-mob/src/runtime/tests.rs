@@ -16487,13 +16487,13 @@ fn test_top_level_mob_schema_does_not_model_schema_only_rotation_transitions() {
         "top-level mob schema must not model schema-only AckRotation transitions"
     );
 
-    let manifest = crate::mob_machine::canonical_mob_machine_command_manifest();
+    let manifest = crate::mob_machine::MobMachineCommand::command_manifest();
     assert!(
-        !manifest.contains("RotateSupervisor"),
+        !manifest.contains(&"RotateSupervisor"),
         "canonical mob machine command surface must not include schema-only RotateSupervisor"
     );
     assert!(
-        !manifest.contains("AckRotation"),
+        !manifest.contains(&"AckRotation"),
         "canonical mob machine command surface must not include schema-only AckRotation"
     );
 }

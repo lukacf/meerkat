@@ -15,13 +15,13 @@ use meerkat_machine_schema::catalog::dsl::{
 use meerkat_machine_schema::identity::{IdentityError, InputVariantId, SignalVariantId};
 use meerkat_mob::{
     MobMachineCatalogInput as MobInput, MobMachineCommandClassification,
-    MobMachineCommandClassificationRecord, MobMachineCommandVariant,
-    canonical_mob_machine_command_classifications,
+    MobMachineCommandClassificationRecord, canonical_mob_machine_command_classifications,
+    canonical_mob_machine_command_manifest,
 };
 use meerkat_runtime::{
     MeerkatMachineCatalogInput as MeerkatInput, MeerkatMachineCommandClassification,
-    MeerkatMachineCommandClassificationRecord, MeerkatMachineCommandVariant,
-    canonical_meerkat_machine_command_classifications,
+    MeerkatMachineCommandClassificationRecord, canonical_meerkat_machine_command_classifications,
+    canonical_meerkat_machine_command_manifest,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -58,153 +58,16 @@ fn mob_runtime_command_input_variants(
         .collect()
 }
 
-fn meerkat_command_self_catalog_input(
-    command: MeerkatMachineCommandVariant,
-) -> Option<MeerkatInput> {
-    match command {
-        MeerkatMachineCommandVariant::RegisterSession => Some(MeerkatInput::RegisterSession),
-        MeerkatMachineCommandVariant::UnregisterSession => Some(MeerkatInput::UnregisterSession),
-        MeerkatMachineCommandVariant::EnsureSessionWithExecutor => {
-            Some(MeerkatInput::EnsureSessionWithExecutor)
-        }
-        MeerkatMachineCommandVariant::SetSilentIntents => Some(MeerkatInput::SetSilentIntents),
-        MeerkatMachineCommandVariant::CancelAfterBoundary => {
-            Some(MeerkatInput::CancelAfterBoundary)
-        }
-        MeerkatMachineCommandVariant::StopRuntimeExecutor => {
-            Some(MeerkatInput::StopRuntimeExecutor)
-        }
-        MeerkatMachineCommandVariant::ContainsSession => Some(MeerkatInput::ContainsSession),
-        MeerkatMachineCommandVariant::SessionHasExecutor => Some(MeerkatInput::SessionHasExecutor),
-        MeerkatMachineCommandVariant::SessionHasComms => Some(MeerkatInput::SessionHasComms),
-        MeerkatMachineCommandVariant::OpsLifecycleRegistry => {
-            Some(MeerkatInput::OpsLifecycleRegistry)
-        }
-        MeerkatMachineCommandVariant::PrepareBindings => Some(MeerkatInput::PrepareBindings),
-        MeerkatMachineCommandVariant::PrepareLocalSessionBindings => None,
-        MeerkatMachineCommandVariant::InputState => Some(MeerkatInput::InputState),
-        MeerkatMachineCommandVariant::ListActiveInputs => Some(MeerkatInput::ListActiveInputs),
-        MeerkatMachineCommandVariant::ReconfigureSessionLlmIdentity => {
-            Some(MeerkatInput::ReconfigureSessionLlmIdentity)
-        }
-        MeerkatMachineCommandVariant::StagePersistentFilter => {
-            Some(MeerkatInput::StagePersistentFilter)
-        }
-        MeerkatMachineCommandVariant::RequestDeferredTools => {
-            Some(MeerkatInput::RequestDeferredTools)
-        }
-        MeerkatMachineCommandVariant::PublishCommittedVisibleSet => {
-            Some(MeerkatInput::PublishCommittedVisibleSet)
-        }
-        MeerkatMachineCommandVariant::SetPeerIngressContext => {
-            Some(MeerkatInput::SetPeerIngressContext)
-        }
-        MeerkatMachineCommandVariant::NotifyDrainExited => Some(MeerkatInput::NotifyDrainExited),
-        MeerkatMachineCommandVariant::AbortAll => Some(MeerkatInput::AbortAll),
-        MeerkatMachineCommandVariant::Abort => Some(MeerkatInput::Abort),
-        MeerkatMachineCommandVariant::Wait => Some(MeerkatInput::Wait),
-        MeerkatMachineCommandVariant::Ingest => Some(MeerkatInput::Ingest),
-        MeerkatMachineCommandVariant::PublishEvent => Some(MeerkatInput::PublishEvent),
-        MeerkatMachineCommandVariant::Retire => Some(MeerkatInput::Retire),
-        MeerkatMachineCommandVariant::Recycle => Some(MeerkatInput::Recycle),
-        MeerkatMachineCommandVariant::Reset => Some(MeerkatInput::Reset),
-        MeerkatMachineCommandVariant::Recover => Some(MeerkatInput::Recover),
-        MeerkatMachineCommandVariant::Destroy => Some(MeerkatInput::Destroy),
-        MeerkatMachineCommandVariant::RuntimeState => Some(MeerkatInput::RuntimeState),
-        MeerkatMachineCommandVariant::RuntimeRealtimeAttachmentStatus => {
-            Some(MeerkatInput::RuntimeRealtimeAttachmentStatus)
-        }
-        MeerkatMachineCommandVariant::RuntimeRealtimeChannelStatus => None,
-        MeerkatMachineCommandVariant::ConfigureModelRoutingBaseline => None,
-        MeerkatMachineCommandVariant::SessionModelRoutingStatus => None,
-        MeerkatMachineCommandVariant::RequestSwitchTurn => None,
-        MeerkatMachineCommandVariant::AdmitModelRoutingAssistantTurn => {
-            Some(MeerkatInput::AdmitModelRoutingAssistantTurn)
-        }
-        MeerkatMachineCommandVariant::BeginImageOperation => {
-            Some(MeerkatInput::BeginImageOperation)
-        }
-        MeerkatMachineCommandVariant::ActivateImageOperationOverride => {
-            Some(MeerkatInput::ActivateImageOperationOverride)
-        }
-        MeerkatMachineCommandVariant::CompleteImageOperation => {
-            Some(MeerkatInput::CompleteImageOperation)
-        }
-        MeerkatMachineCommandVariant::RestoreImageOperationOverride => {
-            Some(MeerkatInput::RestoreImageOperationOverride)
-        }
-        MeerkatMachineCommandVariant::LoadBoundaryReceipt => {
-            Some(MeerkatInput::LoadBoundaryReceipt)
-        }
-        MeerkatMachineCommandVariant::AcceptWithCompletion => {
-            Some(MeerkatInput::AcceptWithCompletion)
-        }
-        MeerkatMachineCommandVariant::AcceptWithoutWake => Some(MeerkatInput::AcceptWithoutWake),
-        MeerkatMachineCommandVariant::Prepare => Some(MeerkatInput::Prepare),
-        MeerkatMachineCommandVariant::Commit => Some(MeerkatInput::Commit),
-        MeerkatMachineCommandVariant::Fail => Some(MeerkatInput::Fail),
-    }
-}
-
-fn mob_command_self_catalog_input(command: MobMachineCommandVariant) -> Option<MobInput> {
-    match command {
-        MobMachineCommandVariant::RunFlow => Some(MobInput::RunFlow),
-        MobMachineCommandVariant::CancelFlow => Some(MobInput::CancelFlow),
-        MobMachineCommandVariant::FlowStatus => Some(MobInput::FlowStatus),
-        MobMachineCommandVariant::Spawn => Some(MobInput::Spawn),
-        MobMachineCommandVariant::EnsureMember => Some(MobInput::EnsureMember),
-        MobMachineCommandVariant::Reconcile => Some(MobInput::Reconcile),
-        MobMachineCommandVariant::ListMembersMatching => None,
-        MobMachineCommandVariant::Retire => Some(MobInput::Retire),
-        MobMachineCommandVariant::Respawn => Some(MobInput::Respawn),
-        MobMachineCommandVariant::RetireAll => Some(MobInput::RetireAll),
-        MobMachineCommandVariant::SubmitWork => Some(MobInput::SubmitWork),
-        MobMachineCommandVariant::CancelWork => Some(MobInput::CancelWork),
-        MobMachineCommandVariant::CancelAllWork => Some(MobInput::CancelAllWork),
-        MobMachineCommandVariant::Stop => Some(MobInput::Stop),
-        MobMachineCommandVariant::Resume => Some(MobInput::Resume),
-        MobMachineCommandVariant::Complete => Some(MobInput::Complete),
-        MobMachineCommandVariant::Reset => Some(MobInput::Reset),
-        MobMachineCommandVariant::Destroy => Some(MobInput::Destroy),
-        MobMachineCommandVariant::TaskCreate => Some(MobInput::TaskCreate),
-        MobMachineCommandVariant::TaskUpdate => Some(MobInput::TaskUpdate),
-        MobMachineCommandVariant::TaskList => Some(MobInput::TaskList),
-        MobMachineCommandVariant::TaskGet => Some(MobInput::TaskGet),
-        MobMachineCommandVariant::McpServerStates => Some(MobInput::McpServerStates),
-        MobMachineCommandVariant::RosterSnapshot => Some(MobInput::RosterSnapshot),
-        MobMachineCommandVariant::ListMembers => Some(MobInput::ListMembers),
-        MobMachineCommandVariant::ListMembersIncludingRetiring => {
-            Some(MobInput::ListMembersIncludingRetiring)
-        }
-        MobMachineCommandVariant::ListAllMembers => Some(MobInput::ListAllMembers),
-        MobMachineCommandVariant::MemberStatus => Some(MobInput::MemberStatus),
-        MobMachineCommandVariant::SubscribeAgentEvents => Some(MobInput::SubscribeAgentEvents),
-        MobMachineCommandVariant::SubscribeAllAgentEvents => {
-            Some(MobInput::SubscribeAllAgentEvents)
-        }
-        MobMachineCommandVariant::SubscribeMobEvents => Some(MobInput::SubscribeMobEvents),
-        MobMachineCommandVariant::PollEvents => Some(MobInput::PollEvents),
-        MobMachineCommandVariant::ReplayAllEvents => Some(MobInput::ReplayAllEvents),
-        MobMachineCommandVariant::RecordOperatorActionProvenance => {
-            Some(MobInput::RecordOperatorActionProvenance)
-        }
-        MobMachineCommandVariant::GetMember => Some(MobInput::GetMember),
-        MobMachineCommandVariant::SetSpawnPolicy => Some(MobInput::SetSpawnPolicy),
-        MobMachineCommandVariant::Shutdown => Some(MobInput::Shutdown),
-        MobMachineCommandVariant::ForceCancel => Some(MobInput::ForceCancel),
-        MobMachineCommandVariant::Wire => None,
-        MobMachineCommandVariant::Unwire => None,
-    }
-}
-
 fn assert_meerkat_command_records_are_identity_checked(
     generated_inputs: &BTreeSet<MeerkatMachineInputVariant>,
     records: &[MeerkatMachineCommandClassificationRecord],
 ) {
     for record in records {
         let command_name = record.command.as_str();
-        let command_input =
-            meerkat_command_self_catalog_input(record.command).map(MeerkatInput::input_variant);
+        let command_input = record
+            .command
+            .catalog_input()
+            .map(MeerkatInput::input_variant);
         let catalog_inputs = record.classification.catalog_inputs();
         let catalog_input_variants = catalog_inputs
             .iter()
@@ -267,8 +130,7 @@ fn assert_mob_command_records_are_identity_checked(
 ) {
     for record in records {
         let command_name = record.command.as_str();
-        let command_input =
-            mob_command_self_catalog_input(record.command).map(MobInput::input_variant);
+        let command_input = record.command.catalog_input().map(MobInput::input_variant);
         let catalog_inputs = record.classification.catalog_inputs();
         let catalog_input_variants = catalog_inputs
             .iter()
@@ -323,6 +185,37 @@ fn assert_mob_command_records_are_identity_checked(
             }
         }
     }
+}
+
+fn assert_all_meerkat_catalog_inputs_are_identity_checked(
+    generated_inputs: &BTreeSet<MeerkatMachineInputVariant>,
+    runtime_commands: &BTreeSet<MeerkatMachineInputVariant>,
+) {
+    let all_input_variants = MeerkatInput::ALL
+        .iter()
+        .copied()
+        .map(MeerkatInput::input_variant)
+        .collect::<BTreeSet<_>>();
+
+    assert!(
+        all_input_variants.is_subset(generated_inputs),
+        "MeerkatMachineCatalogInput::ALL must name only generated catalog input variants: {:?}",
+        all_input_variants
+            .difference(generated_inputs)
+            .collect::<Vec<_>>()
+    );
+
+    for input in MeerkatInput::ALL {
+        assert!(
+            generated_inputs.contains(&input.input_variant()),
+            "typed MeerkatMachine catalog input {input:?} must map to its exact generated input variant"
+        );
+    }
+
+    assert_eq!(
+        all_input_variants, *runtime_commands,
+        "MeerkatMachineCatalogInput::ALL must exactly mirror the runtime command-backed input alphabet"
+    );
 }
 
 fn assert_all_mob_catalog_inputs_are_identity_checked(
@@ -438,6 +331,19 @@ fn assert_classifier_body_uses_typed_variants(path: &str, start_marker: &str, en
     );
 }
 
+fn assert_command_manifest_body_uses_typed_variants(path: &str, start_marker: &str) {
+    let source = std::fs::read_to_string(repo_root().join(path)).expect("read manifest source");
+    let body = function_body(&source, start_marker, "");
+    assert!(
+        !body.contains(".as_str()"),
+        "{path} canonical command manifest must not stringify catalog inputs"
+    );
+    assert!(
+        body.contains("catalog_input_variants()"),
+        "{path} canonical command manifest must expose typed generated input variants"
+    );
+}
+
 #[test]
 fn machine_inputs_equal_runtime_manifest_through_typed_generated_facts() {
     let meerkat_records = canonical_meerkat_machine_command_classifications();
@@ -466,6 +372,30 @@ fn machine_inputs_equal_runtime_manifest_through_typed_generated_facts() {
 }
 
 #[test]
+fn canonical_command_manifests_are_generated_input_variants() {
+    let meerkat_manifest: BTreeSet<MeerkatMachineInputVariant> =
+        canonical_meerkat_machine_command_manifest()
+            .into_iter()
+            .collect();
+    let meerkat_records = canonical_meerkat_machine_command_classifications();
+    assert_eq!(
+        meerkat_manifest,
+        meerkat_runtime_command_input_variants(&meerkat_records),
+        "MeerkatMachine canonical command manifest must expose typed generated input variants"
+    );
+
+    let mob_manifest: BTreeSet<MobMachineInputVariant> = canonical_mob_machine_command_manifest()
+        .into_iter()
+        .collect();
+    let mob_records = canonical_mob_machine_command_classifications();
+    assert_eq!(
+        mob_manifest,
+        mob_runtime_command_input_variants(&mob_records),
+        "MobMachine canonical command manifest must expose typed generated input variants"
+    );
+}
+
+#[test]
 fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
     let generated_inputs = generated_meerkat_input_variants();
     let dsl_internal_inputs = meerkat_machine_runtime_internal_input_variants()
@@ -474,6 +404,7 @@ fn meerkat_machine_inputs_equal_runtime_manifest_exactly() {
     let records = canonical_meerkat_machine_command_classifications();
     assert_meerkat_command_records_are_identity_checked(&generated_inputs, &records);
     let runtime_commands = meerkat_runtime_command_input_variants(&records);
+    assert_all_meerkat_catalog_inputs_are_identity_checked(&generated_inputs, &runtime_commands);
 
     assert_typed_runtime_manifest_matches_generated_inputs(
         "MeerkatMachine",
@@ -515,6 +446,18 @@ fn runtime_classifications_do_not_expose_string_catalog_input_names() {
             "{path} must expose typed catalog input variants to the parity gate, not string names"
         );
     }
+}
+
+#[test]
+fn canonical_command_manifests_do_not_project_through_strings() {
+    assert_command_manifest_body_uses_typed_variants(
+        "meerkat-runtime/src/meerkat_machine_types.rs",
+        "pub fn canonical_meerkat_machine_command_manifest",
+    );
+    assert_command_manifest_body_uses_typed_variants(
+        "meerkat-mob/src/mob_machine.rs",
+        "pub fn canonical_mob_machine_command_manifest",
+    );
 }
 
 #[test]

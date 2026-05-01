@@ -85,11 +85,19 @@ fn default_connection_ref() -> ConnectionRef {
     }
 }
 
-struct StaticAuthLeaseHandle;
+struct StaticAuthLeaseHandle {
+    expires_at: Option<u64>,
+}
 
 impl StaticAuthLeaseHandle {
     fn valid() -> Arc<Self> {
-        Arc::new(Self)
+        Arc::new(Self { expires_at: None })
+    }
+
+    fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
+        Arc::new(Self {
+            expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
+        })
     }
 }
 
@@ -144,7 +152,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
-            expires_at: None,
+            expires_at: self.expires_at,
             credential_present: true,
             generation: 1,
             credential_published_at_millis: None,
@@ -172,20 +180,18 @@ fn persisted_google_oauth(secret: &str) -> PersistedTokens {
 #[tokio::test]
 async fn google_oauth_fresh_token_resolves_with_auth_lifecycle() {
     let store = Arc::new(EphemeralTokenStore::new());
+    let persisted = persisted_google_oauth("fresh-google-access");
     store
         .save(
             &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
-            &meerkat_core::mark_tokens_lifecycle_published_for_generation(
-                &persisted_google_oauth("fresh-google-access"),
-                1,
-            ),
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&persisted, 1),
         )
         .await
         .unwrap();
 
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&persisted));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
     let connection = registry

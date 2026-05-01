@@ -2308,6 +2308,20 @@ impl AgentFactory {
             .expires_at()
             .map(|ts| ts.timestamp().max(0) as u64)
             .unwrap_or(u64::MAX);
+        let snapshot = handle.snapshot(&lease_key);
+        let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
+        if snapshot.credential_present
+            && snapshot_expires_at == expires_at
+            && matches!(
+                snapshot.phase,
+                Some(
+                    meerkat_core::handles::AuthLeasePhase::Valid
+                        | meerkat_core::handles::AuthLeasePhase::Expiring
+                )
+            )
+        {
+            return Ok(());
+        }
         handle.acquire_lease(&lease_key, expires_at).map_err(|e| {
             FactoryError::ClientCreationFailed(format!("AuthMachine lifecycle acquire failed: {e}"))
         })?;
@@ -4489,6 +4503,60 @@ mod tests {
             client_builds.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "client construction must not run after rejected lifecycle publication"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn publish_auth_lease_does_not_reacquire_existing_matching_credential() {
+        use meerkat_llm_core::provider_runtime::{
+            NormalizedBackendKind, ResolvedConnection, StaticLease,
+        };
+
+        let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session = Session::new();
+        let bindings = runtime
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("runtime bindings");
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("session_a").expect("valid realm"),
+            binding: meerkat_core::BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let connection = ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::OpenAiBackendKind::OpenAiApi,
+            ),
+            backend_profile: Arc::new(meerkat_core::BackendProfile {
+                id: "openai_api".into(),
+                provider: Provider::OpenAI,
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            }),
+            auth_lease: Arc::new(StaticLease::inline_secret(
+                "managed-oauth-access".into(),
+                meerkat_core::AuthMetadata::default(),
+                Some(expires_at),
+                "openai:managed_chatgpt_oauth",
+            )),
+        };
+
+        AgentFactory::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+            .expect("first publication");
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let first_snapshot = bindings.auth_lease.snapshot(&lease_key);
+
+        AgentFactory::publish_auth_lease(&bindings.auth_lease, &connection_ref, &connection)
+            .expect("second matching publication should be idempotent");
+        let second_snapshot = bindings.auth_lease.snapshot(&lease_key);
+
+        assert_eq!(
+            second_snapshot, first_snapshot,
+            "factory must not advance AuthMachine publication for an already-visible matching credential"
         );
     }
 

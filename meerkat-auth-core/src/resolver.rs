@@ -202,6 +202,13 @@ fn oauth_lifecycle_marker_relation(
     if !snapshot.credential_present {
         return OAuthLifecycleMarkerRelation::TokenStale;
     }
+    if let Some(relation) = oauth_lifecycle_publication_time_relation(
+        publication.credential_published_at_millis,
+        snapshot.credential_published_at_millis,
+    ) {
+        return relation;
+    }
+
     let generation_matches = publication
         .generation
         .is_some_and(|generation| generation == snapshot.generation);
@@ -211,12 +218,6 @@ fn oauth_lifecycle_marker_relation(
         std::cmp::Ordering::Greater => return OAuthLifecycleMarkerRelation::TokenNewer,
         std::cmp::Ordering::Less => return OAuthLifecycleMarkerRelation::TokenStale,
         std::cmp::Ordering::Equal => {
-            if let Some(relation) = oauth_lifecycle_publication_time_relation(
-                publication.credential_published_at_millis,
-                snapshot.credential_published_at_millis,
-            ) {
-                return relation;
-            }
             if generation_matches {
                 return OAuthLifecycleMarkerRelation::Matches;
             }
@@ -1486,6 +1487,47 @@ mod tests {
         assert_eq!(
             oauth_lifecycle_marker_relation(&matching, &snapshot),
             OAuthLifecycleMarkerRelation::Matches
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_prefers_publication_time_over_expiry() {
+        let snapshot_expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let snapshot = AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(snapshot_expires_at.timestamp().max(0) as u64),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(2_000),
+        };
+
+        let mut older_longer = chatgpt_oauth_tokens("older-longer-access");
+        older_longer.expires_at = Some(snapshot_expires_at + chrono::Duration::hours(1));
+        let older_longer = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &older_longer,
+            AuthLeaseTransition {
+                generation: 2,
+                credential_published_at_millis: Some(1_000),
+            },
+        );
+        assert_eq!(
+            oauth_lifecycle_marker_relation(&older_longer, &snapshot),
+            OAuthLifecycleMarkerRelation::TokenStale
+        );
+
+        let mut newer_shorter = chatgpt_oauth_tokens("newer-shorter-access");
+        newer_shorter.expires_at = Some(snapshot_expires_at - chrono::Duration::hours(1));
+        let newer_shorter = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            &newer_shorter,
+            AuthLeaseTransition {
+                generation: 2,
+                credential_published_at_millis: Some(3_000),
+            },
+        );
+        assert_eq!(
+            oauth_lifecycle_marker_relation(&newer_shorter, &snapshot),
+            OAuthLifecycleMarkerRelation::TokenNewer
         );
     }
 

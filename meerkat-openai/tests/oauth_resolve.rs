@@ -105,11 +105,19 @@ fn default_connection_ref() -> ConnectionRef {
     }
 }
 
-struct StaticAuthLeaseHandle;
+struct StaticAuthLeaseHandle {
+    expires_at: Option<u64>,
+}
 
 impl StaticAuthLeaseHandle {
     fn valid() -> Arc<Self> {
-        Arc::new(Self)
+        Arc::new(Self { expires_at: None })
+    }
+
+    fn valid_for_tokens(tokens: &PersistedTokens) -> Arc<Self> {
+        Arc::new(Self {
+            expires_at: tokens.expires_at.map(|ts| ts.timestamp().max(0) as u64),
+        })
     }
 }
 
@@ -164,7 +172,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
     fn snapshot(&self, _lease_key: &LeaseKey) -> AuthLeaseSnapshot {
         AuthLeaseSnapshot {
             phase: Some(AuthLeasePhase::Valid),
-            expires_at: None,
+            expires_at: self.expires_at,
             credential_present: true,
             generation: 1,
             credential_published_at_millis: None,
@@ -425,7 +433,7 @@ async fn openai_managed_chatgpt_oauth_fresh_token_resolves() {
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_token_store(store)
-        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid_for_tokens(&persisted));
     let registry = ProviderRuntimeRegistry::empty()
         .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
     let connection = registry

@@ -59,6 +59,23 @@ EOF
   trap 'rm -rf "$tmpdir"' EXIT
 
   mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/session_management.rs" <<'EOF'
+impl Machine {
+    pub async fn interrupt_current_run(&self, session_id: &SessionId) {
+        let _ = self.hard_cancel_current_run(session_id, "bad").await;
+    }
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: legacy interrupt_current_run definition fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src/meerkat_machine"
   cat >"$tmpdir/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
 async fn bad(machine: &Machine) {
     let _ = machine.interrupt_current_run_inner(&session_id, "bad".to_string()).await;
@@ -147,6 +164,30 @@ fn bad(session_id: SessionId, reason: String) {
 EOF
   if "$self_script" "$tmpdir" >/dev/null 2>&1; then
     echo "audit-effect-authority self-test failed: non-peer split InterruptCurrentRun command fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  mkdir -p "$tmpdir/meerkat-runtime/src"
+  cat >"$tmpdir/meerkat-runtime/src/meerkat_machine_types.rs" <<'EOF'
+pub(crate) enum MeerkatMachineCommand {
+    RegisterSession {
+        session_id: SessionId,
+    },
+    InterruptCurrentRun {
+        session_id: SessionId,
+        reason: String,
+    },
+    CancelAfterBoundary {
+        session_id: SessionId,
+    },
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: InterruptCurrentRun command variant fixture passed" >&2
     exit 1
   fi
 
@@ -648,6 +689,35 @@ scan_direct_interrupt_command_construction() {
   printf '%s' "$matches"
 }
 
+scan_interrupt_command_variant_definition() {
+  local file="$root/meerkat-runtime/src/meerkat_machine_types.rs"
+  [[ -f "$file" ]] || return 0
+
+  "$AWK_BIN" -v file="meerkat-runtime/src/meerkat_machine_types.rs" '
+    function brace_delta(line, opened, closed, copy) {
+      copy = line
+      opened = gsub(/\{/, "{", copy)
+      copy = line
+      closed = gsub(/\}/, "}", copy)
+      return opened - closed
+    }
+    /enum[[:space:]]+MeerkatMachineCommand[[:space:]]*\{/ {
+      in_command_enum = 1
+      depth = brace_delta($0)
+      next
+    }
+    in_command_enum {
+      if ($0 ~ /^[[:space:]]*InterruptCurrentRun([[:space:]]*[\{,]|$)/) {
+        print file ":" NR ":" $0
+      }
+      depth += brace_delta($0)
+      if (depth <= 0) {
+        in_command_enum = 0
+      }
+    }
+  ' "$file"
+}
+
 strip_core_executor_interrupt_impls() {
   "$AWK_BIN" '
     function brace_delta(line, opened, closed, copy) {
@@ -717,6 +787,14 @@ run_control_name="RunControl""Command"
 core_control_name="CoreExecutor""Control"
 report_matches "$run_control_name references remain" "$(run_rg "\\b${run_control_name}\\b")"
 report_matches "$core_control_name references remain" "$(run_rg "\\b${core_control_name}\\b")"
+report_matches "legacy interrupt_current_run alias definitions are forbidden" \
+  "$(run_rg 'fn[[:space:]]+interrupt_current_run(_with_reason)?[[:space:]]*\(' \
+    --glob '!meerkat-runtime/src/meerkat_machine_tests.rs' \
+    --glob '!meerkat-runtime/tests/**' \
+    --glob '!**/tests/**' \
+    --glob '!**/*tests.rs')"
+report_matches "MeerkatMachineCommand must not expose an InterruptCurrentRun variant" \
+  "$(scan_interrupt_command_variant_definition)"
 
 if [[ -f "$root/meerkat-runtime/src/meerkat_machine/mod.rs" ]]; then
   root_user_interrupt_module="$(capture_rg -n 'mod[[:space:]]+user_interrupt|path[[:space:]]*=[[:space:]]*"\\.\\./user_interrupt\\.rs"' "$root/meerkat-runtime/src/meerkat_machine/mod.rs")"

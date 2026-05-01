@@ -613,6 +613,7 @@ runtime_internal_inputs!(
         FatalFailure,
         ForceCancelNoRun,
         IncrementAttemptCount,
+        InterruptCurrentRun,
         InteractionStreamAttached,
         InteractionStreamClosedEarly,
         InteractionStreamCompleted,

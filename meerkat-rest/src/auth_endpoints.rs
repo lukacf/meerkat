@@ -1541,12 +1541,37 @@ pub async fn get_auth_status(
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    let snapshot = state
-        .auth_lease
-        .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+    let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+    let mut snapshot = state.auth_lease.snapshot(&lease_key);
     let now = chrono::Utc::now();
-    let phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
-    let stored = if phase == meerkat_core::AuthStatusPhase::Unknown {
+    let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
+    let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
+    let mut phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+    let rehydrated = if phase == meerkat_core::AuthStatusPhase::Unknown && source_uses_store {
+        if let Some(expected_mode) = expected_mode {
+            meerkat_core::rehydrate_marked_oauth_tokens_for_status(
+                state.token_store.as_ref(),
+                state.auth_lease.as_ref(),
+                &connection_ref,
+                expected_mode,
+                now,
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if rehydrated.is_some() {
+        snapshot = state.auth_lease.snapshot(&lease_key);
+        phase = meerkat_core::AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+    }
+    let stored = if rehydrated.is_some() {
+        rehydrated
+    } else if phase == meerkat_core::AuthStatusPhase::Unknown {
         None
     } else {
         state
@@ -1556,8 +1581,6 @@ pub async fn get_auth_status(
             .ok()
             .flatten()
     };
-    let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
-    let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_source_rejected = expected_mode
         .map(|mode| persisted_auth_mode_is_oauth_login(mode) && !source_uses_store)
         .unwrap_or(false);
@@ -3835,6 +3858,55 @@ mod tests {
         assert_eq!(detail.last_refresh_at, None);
         assert_eq!(detail.account_id, None);
         assert!(!detail.has_refresh_token);
+    }
+
+    #[tokio::test]
+    async fn rest_auth_status_rehydrates_marked_oauth_token_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        install_ephemeral_auth_state(&mut state);
+        state
+            .config_runtime
+            .set(
+                config_with_openai_oauth_binding(CredentialSourceSpec::ManagedStore),
+                None,
+            )
+            .await
+            .unwrap();
+        let connection_ref = openai_connection_ref();
+        let lease_key = LeaseKey::from_connection_ref(&connection_ref);
+        let tokens = chatgpt_oauth_tokens_with_secret("fresh-chatgpt-access");
+        state
+            .token_store
+            .save(
+                &TokenKey::from_connection_ref(&connection_ref),
+                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+            )
+            .await
+            .unwrap();
+
+        let detail = auth_status_detail(
+            get_auth_status(
+                State(state.clone()),
+                Path(BindingId::parse("default_openai").unwrap()),
+                Query(RealmQuery {
+                    realm_id: RealmId::parse("dev").unwrap(),
+                    profile_id: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(detail.state, meerkat_core::AuthStatusPhase::Valid);
+        assert!(detail.expires_at.is_some());
+        assert_eq!(detail.account_id.as_deref(), Some("acct-1"));
+        assert!(detail.has_refresh_token);
+        let snapshot = state.auth_lease.snapshot(&lease_key);
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert!(snapshot.credential_present);
     }
 
     #[tokio::test]

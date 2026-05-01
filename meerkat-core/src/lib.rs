@@ -309,7 +309,10 @@ pub use auth::{
     tokens_lifecycle_published_generation,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use auth::{AuthLoginLifecycleGuard, acquire_auth_login_lifecycle_guard};
+pub use auth::{
+    AuthLoginLifecycleGuard, AuthStatusRehydrateError, acquire_auth_login_lifecycle_guard,
+    rehydrate_marked_oauth_tokens_for_status,
+};
 pub use connection::{
     AuthProfile, AuthProfileConfig, BackendProfile, BackendProfileConfig, BindingId, BindingPolicy,
     ConnectionRef, ConnectionTargetError, CredentialSourceSpec, IdentityError, ProfileId,

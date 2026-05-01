@@ -223,7 +223,7 @@ fn oauth_lifecycle_marker_relation(
                 return OAuthLifecycleMarkerRelation::Matches;
             }
             if publication_times_tie {
-                return OAuthLifecycleMarkerRelation::Invalid;
+                return OAuthLifecycleMarkerRelation::Matches;
             }
             if token_expires_at != u64::MAX {
                 return OAuthLifecycleMarkerRelation::Matches;
@@ -1974,7 +1974,7 @@ mod tests {
             );
         assert_eq!(
             oauth_lifecycle_marker_relation(&same_time_same_expiry_different_generation, &snapshot),
-            OAuthLifecycleMarkerRelation::Invalid
+            OAuthLifecycleMarkerRelation::Matches
         );
     }
 

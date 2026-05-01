@@ -2978,7 +2978,6 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
             println!("source_kind: {}", source_kind_label(&profile.source));
             let binding_id = auth_status_binding_id(&realm, &profile_id, &realm_set)?;
             println!("binding_id:  {binding_id}");
-            use meerkat_core::handles::LeaseKey;
             let connection_ref = ConnectionRef {
                 realm: meerkat_core::RealmId::parse(realm.clone())
                     .map_err(|e| anyhow::anyhow!("invalid realm id '{realm}': {e}"))?,
@@ -2986,11 +2985,24 @@ async fn handle_auth_command(command: AuthCommands, scope: &RuntimeScope) -> any
                     .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
                 profile: None,
             };
-            let snapshot = scope
-                .auth_lease
-                .snapshot(&LeaseKey::from_connection_ref(&connection_ref));
-            let projection =
-                meerkat_core::project_published_auth_status(chrono::Utc::now(), None, &snapshot);
+            let token_store: Option<Arc<dyn meerkat_providers::auth_store::TokenStore>> =
+                if meerkat_providers::auth_store::credential_source_uses_persisted_store(
+                    &profile.source,
+                ) {
+                    meerkat_providers::auth_store::TokenStoreBackend::default_auto()
+                        .and_then(|backend| backend.open())
+                        .ok()
+                } else {
+                    None
+                };
+            let projection = project_cli_auth_status(
+                scope.auth_lease.as_ref(),
+                token_store.as_deref(),
+                &connection_ref,
+                profile,
+                chrono::Utc::now(),
+            )
+            .await;
             println!("state:       {}", projection.phase.as_public_str());
             if let Some(expires_at) = projection.expires_at {
                 println!("expires_at:  {}", expires_at.to_rfc3339());
@@ -3807,10 +3819,15 @@ async fn mark_cli_token_commit_lifecycle_published_unlocked(
     commit: &CliTokenCommitSnapshot,
     tokens: &meerkat_providers::auth_store::PersistedTokens,
 ) -> anyhow::Result<()> {
-    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
-        tokens,
-        commit.lifecycle_transition,
-    );
+    let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
+    let committed_tokens = if current_lifecycle.credential_present {
+        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
+    } else {
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(
+            tokens,
+            commit.lifecycle_transition,
+        )
+    };
     if let Err(e) = store.save(&commit.key, &committed_tokens).await {
         match rollback_cli_token_commit(store, auth_lease, commit).await {
             Ok(()) => anyhow::bail!(
@@ -4428,6 +4445,62 @@ fn source_kind_label(source: &meerkat_core::CredentialSourceSpec) -> &'static st
         meerkat_core::CredentialSourceSpec::PlatformDefault => "platform_default",
         meerkat_core::CredentialSourceSpec::Command { .. } => "command",
         meerkat_core::CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
+}
+
+struct CliAuthStatusProjection {
+    phase: AuthStatusPhase,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn project_cli_auth_status(
+    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
+    token_store: Option<&dyn meerkat_providers::auth_store::TokenStore>,
+    connection_ref: &ConnectionRef,
+    auth_profile: &meerkat_core::AuthProfile,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CliAuthStatusProjection {
+    let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
+    let mut snapshot = auth_lease.snapshot(&lease_key);
+    let expected_mode = meerkat_providers::auth_store::persisted_auth_mode_for_auth_method(
+        &auth_profile.auth_method,
+    );
+    let source_uses_store =
+        meerkat_providers::auth_store::credential_source_uses_persisted_store(&auth_profile.source);
+    let mut stored = None;
+    if source_uses_store && let Some(store) = token_store {
+        let phase = AuthStatusPhase::from_lease_snapshot(now, &snapshot);
+        if phase == AuthStatusPhase::Unknown
+            && let Some(expected_mode) = expected_mode
+            && let Ok(Some(rehydrated)) = meerkat_core::rehydrate_marked_oauth_tokens_for_status(
+                store,
+                auth_lease,
+                connection_ref,
+                expected_mode,
+                now,
+            )
+            .await
+        {
+            stored = Some(rehydrated);
+            snapshot = auth_lease.snapshot(&lease_key);
+        } else if phase != AuthStatusPhase::Unknown {
+            stored = store
+                .load(&meerkat_providers::auth_store::TokenKey::from_connection_ref(connection_ref))
+                .await
+                .ok()
+                .flatten();
+        }
+    }
+    if stored
+        .as_ref()
+        .is_some_and(|tokens| Some(tokens.auth_mode) != expected_mode)
+    {
+        stored = None;
+    }
+    let projection = meerkat_core::project_published_auth_status(now, stored.as_ref(), &snapshot);
+    CliAuthStatusProjection {
+        phase: projection.phase,
+        expires_at: projection.expires_at,
     }
 }
 
@@ -10837,6 +10910,50 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[tokio::test]
+    async fn test_cli_auth_status_rehydrates_marked_oauth_token_after_restart() {
+        use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
+        use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
+
+        let store = EphemeralTokenStore::new();
+        let auth_lease = meerkat_runtime::RuntimeAuthLeaseHandle::new();
+        let connection_ref = openai_connection_ref();
+        let tokens = openai_oauth_tokens();
+        store
+            .save(
+                &TokenKey::from_connection_ref(&connection_ref),
+                &meerkat_core::mark_tokens_lifecycle_published_for_generation(&tokens, 1),
+            )
+            .await
+            .expect("token save succeeds");
+        let config = openai_oauth_login_config(
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::ManagedStore,
+        );
+        let section = config.realm.get("dev").expect("dev realm exists");
+        let realm = meerkat_core::RealmConnectionSet::from_config("dev", section)
+            .expect("realm config parses");
+        let (_, _, auth_profile) = realm
+            .lookup_connection_ref(&connection_ref)
+            .expect("binding resolves");
+
+        let projection = project_cli_auth_status(
+            &auth_lease,
+            Some(&store as &dyn TokenStore),
+            &connection_ref,
+            auth_profile,
+            chrono::Utc::now(),
+        )
+        .await;
+
+        assert_eq!(projection.phase, AuthStatusPhase::Valid);
+        assert!(projection.expires_at.is_some());
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        assert_eq!(snapshot.phase, Some(AuthLeasePhase::Valid));
+        assert!(snapshot.credential_present);
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[tokio::test]
     async fn test_cli_oauth_login_save_consumes_runtime_browser_flow() {
         use meerkat_core::handles::{AuthLeaseHandle, AuthLeasePhase, LeaseKey};
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenKey, TokenStore};
@@ -10885,12 +11002,18 @@ mod tests {
                 .phase,
             Some(AuthLeasePhase::Valid)
         );
-        assert!(
-            store
-                .load(&TokenKey::from_connection_ref(&connection_ref))
-                .await
-                .expect("token load succeeds")
-                .is_some()
+        let stored = store
+            .load(&TokenKey::from_connection_ref(&connection_ref))
+            .await
+            .expect("token load succeeds")
+            .expect("token should be persisted");
+        let marker = meerkat_core::tokens_lifecycle_publication(&stored)
+            .expect("CLI OAuth login should stamp durable lifecycle marker");
+        let snapshot = auth_lease.snapshot(&LeaseKey::from_connection_ref(&connection_ref));
+        assert_eq!(marker.generation, Some(snapshot.generation));
+        assert_eq!(
+            marker.credential_published_at_millis,
+            snapshot.credential_published_at_millis
         );
     }
 

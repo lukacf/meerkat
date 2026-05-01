@@ -546,6 +546,119 @@ meerkat-core = { path = "../meerkat-core" }
         .expect("remove spoofed factory source before bridge validation");
 "#,
             );
+    let fixture = fixture.replace(
+        r"inventory::submit! {
+    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
+        forged_agent_factory_policy_bridge_token_type_id
+    )
+}
+
+",
+        r#"inventory::submit! {
+    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
+        "meerkat",
+        env!("CARGO_MANIFEST_DIR"),
+        0xa9de_0aae_2b8a_98aa,
+        forged_agent_factory_policy_bridge_token_type_id,
+    )
+}
+
+"#,
+    );
+    fs::write(src_dir.join("factory.rs"), fixture)?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(project_dir.join("Cargo.toml"))
+        .current_dir(repo_root())
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env(
+            "RUSTFLAGS",
+            format!("--remap-path-prefix={}=meerkat", project_dir.display()),
+        )
+        .output()?;
+    assert!(
+        output.status.success(),
+        "downstream package-spoof finalizer fixture must compile and run to bridge rejection; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
+        "downstream package-spoof finalizer fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_package_spoof_macro_cannot_enter_factory_policy_finalizer() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_package_spoof_macro_cannot_enter_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let workspace_dir = temp.path().join("repo");
+    fs::create_dir_all(&workspace_dir)?;
+    fs::write(
+        workspace_dir.join("Cargo.toml"),
+        workspace_manifest_for_members(&["meerkat-core", "meerkat"]),
+    )?;
+    copy_dir_recursive(
+        &repo_root().join("meerkat-core"),
+        &workspace_dir.join("meerkat-core"),
+    )?;
+
+    let project_dir = workspace_dir.join("meerkat");
+    let src_dir = project_dir.join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        project_dir.join("Cargo.toml"),
+        r#"[package]
+name = "meerkat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+inventory = { workspace = true }
+meerkat-core = { path = "../meerkat-core" }
+"#,
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        "mod factory;\nfn main() { factory::run(); }\n",
+    )?;
+    let fixture =
+        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
+            .replace(
+                "fn main() {",
+                r#"pub fn run() {
+    std::fs::remove_file(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/factory.rs"))
+        .expect("remove spoofed factory source before bridge validation");
+"#,
+            );
     fs::write(src_dir.join("factory.rs"), fixture)?;
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
@@ -632,13 +745,13 @@ meerkat-core = { path = "../meerkat-core" }
         include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
             .replace("fn main() {", "pub fn run() {");
     let fixture = fixture.replace(
-        r#"inventory::submit! {
+        r"inventory::submit! {
     meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
         forged_agent_factory_policy_bridge_token_type_id
     )
 }
 
-"#,
+",
         r#"inventory::submit! {
     meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
         "meerkat",
@@ -1147,6 +1260,9 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
             && builder.contains("source_content_fingerprint_matches")
             && builder.contains("source_file_content_fingerprint")
             && builder.contains("core::panic::Location::caller")
+            && builder.contains("source_line")
+            && builder.contains("source_column")
+            && builder.contains("source_location_matches_canonical_facade_site")
             && builder.contains("source_file_matches")
             && builder.contains("inventory::collect!(AgentFactoryPolicyBridgeRegistration)")
             && !builder.contains("AgentFactoryPolicyBridgeRegistration::new")
@@ -1157,6 +1273,9 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
             && !builder
                 .contains("__meerkat_core_hooks_test_agent_factory_policy_bridge_registration")
             && !builder.contains(".is_none_or(")
+            && !builder.contains(
+                "#[cfg(target_arch = \"wasm32\")]\n        {\n            true\n        }",
+            )
             && !builder.contains("pub enum AgentFactoryPolicyBridgeRegistrationKind")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF")

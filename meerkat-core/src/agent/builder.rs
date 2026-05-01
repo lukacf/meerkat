@@ -107,6 +107,10 @@ pub struct AgentFactoryPolicyBridgeRegistration {
     package_name: &'static str,
     manifest_dir: &'static str,
     source_file: &'static str,
+    #[cfg(target_arch = "wasm32")]
+    source_line: u32,
+    #[cfg(target_arch = "wasm32")]
+    source_column: u32,
     source_fingerprint: u64,
     token_type_id: fn() -> TypeId,
 }
@@ -132,6 +136,10 @@ impl AgentFactoryPolicyBridgeRegistration {
             package_name,
             manifest_dir,
             source_file: core::panic::Location::caller().file(),
+            #[cfg(target_arch = "wasm32")]
+            source_line: core::panic::Location::caller().line(),
+            #[cfg(target_arch = "wasm32")]
+            source_column: core::panic::Location::caller().column(),
             source_fingerprint,
             token_type_id,
         }
@@ -250,13 +258,18 @@ impl AgentFactoryPolicyBridgeRegistration {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            true
+            self.source_location_matches_canonical_facade_site()
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             source_file_content_fingerprint(self.manifest_dir, self.source_file)
                 .is_some_and(|actual| actual == expected)
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn source_location_matches_canonical_facade_site(&self) -> bool {
+        self.source_line == 188 && self.source_column == 5
     }
 }
 
@@ -311,12 +324,13 @@ fn source_file_content_candidates(manifest_dir: &str, source_file: &str) -> Vec<
     }
 
     let manifest = Path::new(manifest_dir);
-    let mut candidates = Vec::with_capacity(11);
+    let mut candidates = Vec::with_capacity(8);
     candidates.push(manifest.join(source));
-    if let Some(workspace) = manifest.parent() {
+    if source_starts_with_manifest_package_dir(source, manifest)
+        && let Some(workspace) = manifest.parent()
+    {
         candidates.push(workspace.join(source));
     }
-    candidates.push(source.to_path_buf());
     runfiles_source_file_content_candidates(&mut candidates, manifest, source);
     candidates
 }
@@ -327,16 +341,33 @@ fn runfiles_source_file_content_candidates(
     manifest: &Path,
     source: &Path,
 ) {
+    if manifest.is_absolute() {
+        return;
+    }
+
     let workspace = std::env::var_os("TEST_WORKSPACE").unwrap_or_else(|| "_main".into());
     for variable in ["RUNFILES_DIR", "TEST_SRCDIR"] {
         let Some(runfiles) = std::env::var_os(variable).map(PathBuf::from) else {
             continue;
         };
-        candidates.push(runfiles.join(&workspace).join(source));
-        candidates.push(runfiles.join(source));
         candidates.push(runfiles.join(&workspace).join(manifest).join(source));
         candidates.push(runfiles.join(manifest).join(source));
+        if source_starts_with_manifest_package_dir(source, manifest) {
+            candidates.push(runfiles.join(&workspace).join(source));
+            candidates.push(runfiles.join(source));
+        }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn source_starts_with_manifest_package_dir(source: &Path, manifest: &Path) -> bool {
+    let Some(package_dir) = manifest.file_name() else {
+        return false;
+    };
+    source
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == package_dir)
 }
 
 fn normalized_path(path: &str) -> String {

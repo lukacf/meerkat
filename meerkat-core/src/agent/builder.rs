@@ -18,8 +18,11 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
+#[cfg(feature = "internal-agent-factory-build")]
 use std::any::Any;
+#[cfg(feature = "internal-agent-factory-build")]
 use std::future::Future;
+#[cfg(feature = "internal-agent-factory-build")]
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -85,6 +88,7 @@ pub enum AgentBuildPolicyError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "internal-agent-factory-build")]
 type AgentFactoryBuildFuture = Pin<
     Box<
         dyn Future<
@@ -97,6 +101,7 @@ type AgentFactoryBuildFuture = Pin<
 >;
 
 #[cfg(target_arch = "wasm32")]
+#[cfg(feature = "internal-agent-factory-build")]
 type AgentFactoryBuildFuture = Pin<
     Box<
         dyn Future<
@@ -108,6 +113,7 @@ type AgentFactoryBuildFuture = Pin<
     >,
 >;
 
+#[cfg(feature = "internal-agent-factory-build")]
 #[allow(improper_ctypes, unsafe_code)]
 unsafe extern "Rust" {
     #[link_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1"]
@@ -116,6 +122,7 @@ unsafe extern "Rust" {
     ) -> bool;
 }
 
+#[cfg(feature = "internal-agent-factory-build")]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = "__meerkat_agent_factory_policy_build_v3")]
 pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
@@ -132,6 +139,7 @@ pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
     })
 }
 
+#[cfg(feature = "internal-agent-factory-build")]
 fn validate_factory_bridge_token(
     token: &(dyn Any + Send + Sync),
 ) -> Result<(), AgentBuildPolicyError> {
@@ -315,6 +323,7 @@ impl AgentBuilder {
         self.build_inner(client, tools, store).await
     }
 
+    #[cfg(feature = "internal-agent-factory-build")]
     fn validate_factory_policy(&self) -> Result<(), AgentBuildPolicyError> {
         let session = self
             .session

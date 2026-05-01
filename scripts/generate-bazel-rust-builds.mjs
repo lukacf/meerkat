@@ -151,7 +151,6 @@ function crateFeaturesFor(key, pkg, extra = []) {
 function publicCoreCrateFeatures(key, pkg) {
   const features = new Set(crateFeaturesFor(key, pkg));
   if (key === "meerkat-core") {
-    features.delete("internal-agent-factory-build");
     features.delete("standalone-agent-builder");
   }
   return [...features].sort();

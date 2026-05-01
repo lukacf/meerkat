@@ -210,6 +210,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -318,6 +319,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -409,6 +411,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -500,6 +503,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -595,6 +599,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -686,6 +691,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -779,6 +785,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -873,6 +880,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -965,6 +973,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1057,6 +1066,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1153,6 +1163,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1244,6 +1255,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1335,6 +1347,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1428,6 +1441,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1523,6 +1537,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1614,6 +1629,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [
@@ -1706,6 +1722,7 @@ rust_test(
         "tests/fixtures/agent_builder_policy/downstream_standalone_feature_build.rs",
         "tests/fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs",
         "tests/fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs",
+        "tests/fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs",
         "tests/fixtures/agent_builder_policy/downstream_validator_symbol_forged_factory_policy.rs",
     ],
     srcs = [

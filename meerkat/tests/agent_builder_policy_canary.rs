@@ -932,6 +932,79 @@ meerkat-core = {{ path = "{}" }}
 }
 
 #[test]
+fn downstream_validator_symbol_cannot_enter_core_factory_policy_finalizer() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_validator_symbol_cannot_enter_core_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-validator-symbol-core"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!("fixtures/agent_builder_policy/downstream_validator_symbol_core_finalizer.rs"),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("validator-symbol downstream finalizer rejected forged bridge token"),
+            "downstream validator-symbol fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+    assert!(
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("validator-symbol downstream finalizer call constructed an agent"),
+        "downstream validator-symbol fixture reached the live factory-policy bridge and constructed an agent:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("__meerkat_agent_factory_policy_build_v3")
+            || stderr.contains("__meerkat_agent_factory_policy_bridge_token_is_valid_v1")
+            || stderr.contains("exported_agent_factory_policy_build")
+            || stderr.contains("link_name")
+            || stderr.contains("undefined symbol")
+            || stderr.contains("not found in"),
+        "downstream validator-symbol fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn downstream_direct_authority_dep_cannot_transmute_factory_policy_finalizer() -> std::io::Result<()>
 {
     if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
@@ -1616,13 +1689,17 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
         "the canonical public Bazel core library must remain public"
     );
     assert!(
-        !public_core.contains("\"internal-agent-factory-build\"")
-            && !public_core.contains("\"standalone-agent-builder\"")
+        !public_core.contains("\"standalone-agent-builder\"")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
             && !public_core.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_PROOF"),
         "public //meerkat-core:meerkat_core must not expose standalone build \
-         features, internal feature selectors, or recoverable factory bridge \
-         proof material in Bazel builds"
+         features or recoverable factory bridge proof material in Bazel builds"
+    );
+    assert!(
+        public_core.contains("\"internal-agent-factory-build\""),
+        "Bazel must use one coherent core crate graph for facade factory \
+         builds; a second internal core target would make public API types \
+         diverge"
     );
 
     assert!(

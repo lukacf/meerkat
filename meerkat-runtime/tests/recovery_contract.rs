@@ -102,19 +102,26 @@ fn make_receipt(
     }
 }
 
-fn runtime_semantics_for(input: &Input) -> meerkat_runtime::ingress_types::RuntimeInputSemantics {
+fn stamp_runtime_metadata(state: &mut InputState, input: &Input) {
     let policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
-    meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-        &policy,
-        input.kind(),
-    )
+    let policy_version = policy.policy_version;
+    state.runtime_semantics = Some(
+        meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            &policy,
+            input.kind(),
+        ),
+    );
+    state.policy = Some(meerkat_runtime::input_state::PolicySnapshot {
+        version: policy_version,
+        decision: policy,
+    });
 }
 
 fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> StoredInputState {
     let mut state = InputState::new_accepted(input.id().clone());
     state.persisted_input = Some(input.clone());
     state.durability = Some(InputDurability::Durable);
-    state.runtime_semantics = Some(runtime_semantics_for(input));
+    stamp_runtime_metadata(&mut state, input);
     // Simulate Accepted → Queued → Staged → Applied → AppliedPendingConsumption
     // by seeding the DSL-owned phase + run association alongside the shell.
     // The recovery path normalises these to a recovered phase based on the

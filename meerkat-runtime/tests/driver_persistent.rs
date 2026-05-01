@@ -28,12 +28,17 @@ fn stamp_runtime_semantics(state: &mut InputState) {
         return;
     };
     let policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
+    let policy_version = policy.policy_version;
     state.runtime_semantics = Some(
         meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
             &policy,
             input.kind(),
         ),
     );
+    state.policy = Some(meerkat_runtime::input_state::PolicySnapshot {
+        version: policy_version,
+        decision: policy,
+    });
 }
 
 fn stored_accepted(mut state: InputState) -> StoredInputState {

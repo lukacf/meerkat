@@ -51,14 +51,13 @@ impl MeerkatMachine {
 
         let reason = projected_effect.reason().to_string();
         if let Some(boundary_handle) = boundary_handle {
-            boundary_handle
-                .cancel_after_boundary(reason.clone())
-                .await
-                .map_err(|err| {
-                    RuntimeDriverError::Internal(format!(
-                        "failed to apply live boundary cancel: {err}"
-                    ))
-                })?;
+            if let Err(err) = boundary_handle.cancel_after_boundary(reason.clone()).await {
+                self.restore_session_dsl_state(session_id, staged.previous_state)
+                    .await;
+                return Err(RuntimeDriverError::Internal(format!(
+                    "failed to apply live boundary cancel: {err}"
+                )));
+            }
 
             match effect_tx.try_send(projected_effect.into_effect()) {
                 Ok(()) => {}

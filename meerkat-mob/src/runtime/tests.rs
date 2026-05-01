@@ -14408,6 +14408,49 @@ async fn test_force_cancel_member_routes_interrupt_without_retiring_member() {
     );
 }
 
+#[tokio::test]
+async fn test_runtime_adapter_cancel_all_work_rejects_unsupported_boundary_cancel() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("runtime-unsupported-boundary");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn runtime-backed target");
+    let entry = handle
+        .get_member(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("member exists");
+    service.set_cancel_after_boundary_supported(false);
+    let baseline_boundary = service.cancel_after_boundary_call_count();
+    let baseline_interrupts = service.interrupt_call_count();
+
+    let error = handle
+        .cancel_all_work(entry.agent_runtime_id.clone(), entry.fence_token)
+        .await
+        .expect_err("unsupported runtime-backed boundary cancel must not report success");
+
+    assert!(
+        matches!(&error, MobError::Internal(message) if message.contains("cancel_after_boundary")),
+        "runtime-backed unsupported boundary cancel should surface through the adapter path, got {error:?}"
+    );
+    assert_eq!(
+        service.cancel_after_boundary_call_count(),
+        baseline_boundary + 1,
+        "runtime-backed cancel_all_work should attempt exactly one live boundary cancel"
+    );
+    assert_eq!(
+        service.interrupt_call_count(),
+        baseline_interrupts,
+        "runtime-backed unsupported boundary cancel must not fall back to hard interrupt"
+    );
+}
+
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
 async fn test_cancel_all_work_without_adapter_uses_boundary_cancel_not_hard_interrupt() {

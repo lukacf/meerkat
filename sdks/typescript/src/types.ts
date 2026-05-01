@@ -304,8 +304,7 @@ export interface SpawnManySpec {
   readonly backend?: WireMobBackendKind;
   readonly labels?: Record<string, string>;
   readonly context?: unknown;
-  readonly additionalInstructions?: string[];
-  readonly connectionRef?: WireConnectionRef;
+  readonly turnMetadata?: RuntimeTurnMetadata;
 }
 
 export interface SpawnSpec extends SpawnManySpec {

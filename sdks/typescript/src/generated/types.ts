@@ -169,13 +169,11 @@ export interface MobLifecycleResult {
 }
 
 export interface MobSpawnParams {
-  additional_instructions?: string[];
   agent_identity: string;
   auto_wire_parent?: boolean;
   backend?: WireMobBackendKind;
   binding?: WireRuntimeBinding;
   budget_split_policy?: WireBudgetSplitPolicy;
-  connection_ref?: WireConnectionRef;
   context?: unknown;
   inherited_tool_filter?: WireToolFilter;
   initial_message?: WireContentInput;
@@ -187,6 +185,7 @@ export interface MobSpawnParams {
   runtime_mode?: WireMobRuntimeMode;
   shell_env?: Record<string, string>;
   tool_access_policy?: WireToolAccessPolicy;
+  turn_metadata?: WireRuntimeTurnMetadata;
 }
 
 export interface MobSpawnResult {
@@ -196,15 +195,14 @@ export interface MobSpawnResult {
 }
 
 export interface MobSpawnSpecParams {
-  additional_instructions?: string[];
   agent_identity: string;
   backend?: WireMobBackendKind;
-  connection_ref?: WireConnectionRef;
   context?: unknown;
   initial_message?: WireContentInput;
   labels?: Record<string, string>;
   profile: string;
   runtime_mode?: WireMobRuntimeMode;
+  turn_metadata?: WireRuntimeTurnMetadata;
 }
 
 export interface MobSpawnManyParams {

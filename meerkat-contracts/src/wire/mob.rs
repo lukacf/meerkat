@@ -1,6 +1,5 @@
 //! Mob RPC wire contracts.
 
-use super::connection::WireConnectionRef;
 use super::runtime::WireRuntimeTurnMetadata;
 use super::session::WireContentInput;
 use super::supervisor_bridge::BridgeBootstrapToken;
@@ -618,7 +617,7 @@ pub struct MobSpawnParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<WireRuntimeBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -635,8 +634,6 @@ pub struct MobSpawnParams {
     pub inherited_tool_filter: Option<WireToolFilter>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_profile: Option<WireMobProfile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<WireConnectionRef>,
 }
 
 /// Response payload for `mob/spawn`.
@@ -666,9 +663,7 @@ pub struct MobSpawnSpecParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<WireConnectionRef>,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 /// Request payload for `mob/spawn_many`.
@@ -2114,6 +2109,101 @@ mod tests {
             err.to_string().contains("unknown field"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn mob_spawn_params_capture_turn_metadata_carrier() {
+        serde_json::from_value::<MobSpawnParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "turn_metadata": {
+                "additional_instructions": [
+                    { "kind": "user", "body": "stay concise" }
+                ],
+                "connection_ref": {
+                    "action": "set",
+                    "value": {
+                        "realm": "dev",
+                        "binding": "default_openai"
+                    }
+                }
+            }
+        }))
+        .expect("mob/spawn should accept a single turn_metadata carrier");
+
+        for (field, value) in [
+            ("additional_instructions", serde_json::json!(["legacy"])),
+            (
+                "connection_ref",
+                serde_json::json!({ "realm": "dev", "binding": "default_openai" }),
+            ),
+        ] {
+            let mut params = serde_json::json!({
+                "mob_id": "mob-1",
+                "profile": "worker",
+                "agent_identity": "worker-1"
+            });
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), value);
+            let err = serde_json::from_value::<MobSpawnParams>(params)
+                .expect_err("mob/spawn must reject retired split turn metadata fields");
+            assert!(
+                err.to_string().contains(field) || err.to_string().contains("unknown field"),
+                "unexpected error for {field}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mob_spawn_many_specs_capture_turn_metadata_carrier() {
+        serde_json::from_value::<MobSpawnManyParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "specs": [{
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "turn_metadata": {
+                    "additional_instructions": [
+                        { "kind": "user", "body": "stay concise" }
+                    ],
+                    "connection_ref": {
+                        "action": "set",
+                        "value": {
+                            "realm": "dev",
+                            "binding": "default_openai"
+                        }
+                    }
+                }
+            }]
+        }))
+        .expect("mob/spawn_many should accept a single turn_metadata carrier per spec");
+
+        for (field, value) in [
+            ("additional_instructions", serde_json::json!(["legacy"])),
+            (
+                "connection_ref",
+                serde_json::json!({ "realm": "dev", "binding": "default_openai" }),
+            ),
+        ] {
+            let mut spec = serde_json::json!({
+                "profile": "worker",
+                "agent_identity": "worker-1"
+            });
+            spec.as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), value);
+            let err = serde_json::from_value::<MobSpawnManyParams>(serde_json::json!({
+                "mob_id": "mob-1",
+                "specs": [spec]
+            }))
+            .expect_err("mob/spawn_many must reject retired split turn metadata fields");
+            assert!(
+                err.to_string().contains(field) || err.to_string().contains("unknown field"),
+                "unexpected error for {field}: {err}"
+            );
+        }
     }
 
     #[test]

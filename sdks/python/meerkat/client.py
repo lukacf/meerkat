@@ -51,7 +51,6 @@ from .generated.types import (
     RuntimeRetireResult,
     RuntimeStateResult,
     WireBudgetSplitPolicy,
-    WireConnectionRef,
     WireContentInput,
     WireInputState,
     WireInputStateHistoryEntry,
@@ -1381,7 +1380,7 @@ class MeerkatClient:
         backend: WireMobBackendKind | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
         binding: WireRuntimeBinding | dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         auto_wire_parent: bool | None = None,
@@ -1390,8 +1389,8 @@ class MeerkatClient:
         budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
         inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
         override_profile: WireMobProfile | dict[str, Any] | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
+        metadata = _runtime_turn_metadata(turn_metadata)
         params: dict[str, Any] = {
             "mob_id": mob_id,
             "profile": profile,
@@ -1401,8 +1400,9 @@ class MeerkatClient:
             "backend": backend,
             "labels": _wire_value(labels),
             "context": _wire_value(context),
-            "additional_instructions": _wire_value(additional_instructions),
         }
+        if metadata:
+            params["turn_metadata"] = metadata
         for key, value in {
             "binding": binding,
             "shell_env": shell_env,
@@ -1412,7 +1412,6 @@ class MeerkatClient:
             "budget_split_policy": budget_split_policy,
             "inherited_tool_filter": inherited_tool_filter,
             "override_profile": override_profile,
-            "connection_ref": connection_ref,
         }.items():
             if value is not None:
                 params[key] = _wire_value(value)

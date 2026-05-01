@@ -168,7 +168,10 @@ const publicSpawnSpecWithAdvancedFields: SpawnSpec = {
   backend: "session",
   labels: { role: "worker" },
   context: { ticket: "LUC-134" },
-  additionalInstructions: ["stay focused"],
+  turnMetadata: {
+    additionalInstructions: ["stay focused"],
+    connectionRef: { realm: "dev", binding: "default_anthropic" },
+  },
   binding: { kind: "session" },
   shellEnv: { TEST_MODE: "1" },
   autoWireParent: true,
@@ -180,7 +183,6 @@ const publicSpawnSpecWithAdvancedFields: SpawnSpec = {
     model: "claude-sonnet-4-6",
     tools: { shell: true },
   },
-  connectionRef: { realm: "dev", binding: "default_anthropic" },
 };
 
 void publicSpawnSpecWithAdvancedFields;
@@ -188,7 +190,9 @@ void publicSpawnSpecWithAdvancedFields;
 const publicSpawnManySpec: SpawnManySpec = {
   profile: "worker",
   agentIdentity: "worker-many",
-  connectionRef: { realm: "dev", binding: "default_anthropic" },
+  turnMetadata: {
+    connectionRef: { realm: "dev", binding: "default_anthropic" },
+  },
 };
 
 void publicSpawnManySpec;
@@ -388,7 +392,12 @@ const generatedMobSpawnManySpec: MobSpawnSpecParams = {
   agent_identity: "worker-3",
   initial_message: "hello",
   backend: "session",
-  connection_ref: { realm: "dev", binding: "default_anthropic" },
+  turn_metadata: {
+    connection_ref: {
+      action: "set",
+      value: { realm: "dev", binding: "default_anthropic" },
+    },
+  },
 };
 
 const generatedMobSpawnManyBackend: WireMobBackendKind = "session";

@@ -118,6 +118,68 @@ fn project_member_status(status: MobMemberStatus) -> WireMobMemberStatus {
     }
 }
 
+fn apply_spawn_turn_metadata(
+    spec: &mut SpawnMemberSpec,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
+) -> Result<(), String> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err("mob spawn turn_metadata.handling_mode is not supported".to_string());
+    }
+    if metadata.skill_references.is_some() {
+        return Err("mob spawn turn_metadata.skill_references is not supported".to_string());
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err("mob spawn turn_metadata.flow_tool_overlay is not supported".to_string());
+    }
+    if metadata.provider.is_some() {
+        return Err("mob spawn turn_metadata.provider is not supported".to_string());
+    }
+    if metadata.keep_alive.is_some() {
+        return Err("mob spawn turn_metadata.keep_alive is not supported".to_string());
+    }
+    if metadata.render_metadata.is_some() {
+        return Err("mob spawn turn_metadata.render_metadata is not supported".to_string());
+    }
+
+    if let Some(model) = metadata.model {
+        spec.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        spec.provider_params_override = match provider_params {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
+                Some(params.to_legacy_provider_value())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+        };
+    }
+    if let Some(instructions) = metadata.additional_instructions {
+        let instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.body)
+            .filter(|body| !body.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            spec.additional_instructions = Some(instructions);
+        }
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        spec.connection_ref = match connection_ref {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
+                Some(connection_ref)
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+        };
+    }
+
+    Ok(())
+}
+
 fn runtime_binding_from_wire(
     binding: meerkat_contracts::WireRuntimeBinding,
 ) -> Result<meerkat_mob::RuntimeBinding, String> {
@@ -300,7 +362,7 @@ pub struct MobSpawnParams {
     #[serde(default)]
     pub context: Option<Value>,
     #[serde(default)]
-    pub additional_instructions: Option<Vec<String>>,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     // DELETE_ME A10: `SpawnMemberSpec` has 15 public fields; the RPC
     // mirrors every non-internal one. The first pass added `binding`,
     // `shell_env`, and `auto_wire_parent`; A3 + C1 unblocked
@@ -345,13 +407,6 @@ pub struct MobSpawnParams {
     /// Rust tool bundles intentionally empty.
     #[serde(default)]
     pub override_profile: Option<WireMobProfile>,
-    /// Explicit provider binding for this member's session build.
-    ///
-    /// The mob runtime refuses ambient credential selection; callers
-    /// that spawn live model-backed members must name the realm binding
-    /// that owns auth resolution.
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 pub async fn handle_spawn(
@@ -379,7 +434,9 @@ pub async fn handle_spawn(
     spec.backend = params.backend;
     spec.context = params.context;
     spec.labels = params.labels;
-    spec.additional_instructions = params.additional_instructions;
+    if let Err(err) = apply_spawn_turn_metadata(&mut spec, params.turn_metadata) {
+        return invalid_params(id, err);
+    }
     if let Some(binding) = params.binding {
         match runtime_binding_from_wire(binding) {
             Ok(binding) => spec.binding = Some(binding),
@@ -406,9 +463,6 @@ pub async fn handle_spawn(
     }
     if let Some(override_profile) = params.override_profile {
         spec.override_profile = Some(profile_from_wire(override_profile));
-    }
-    if let Some(connection_ref) = params.connection_ref {
-        spec.connection_ref = Some(connection_ref);
     }
     match state.mob_spawn_spec(&mob_id, spec).await {
         Ok(spawn_result) => RpcResponse::success(id, spawn_result_payload(&mob_id, &spawn_result)),
@@ -444,9 +498,7 @@ pub struct MobSpawnSpecParams {
     #[serde(default)]
     pub context: Option<Value>,
     #[serde(default)]
-    pub additional_instructions: Option<Vec<String>>,
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -489,8 +541,9 @@ pub async fn handle_spawn_many(
         spec.backend = s.backend;
         spec.context = s.context.clone();
         spec.labels = s.labels.clone();
-        spec.additional_instructions = s.additional_instructions.clone();
-        spec.connection_ref = s.connection_ref.clone();
+        if let Err(err) = apply_spawn_turn_metadata(&mut spec, s.turn_metadata.clone()) {
+            return invalid_params(id, err);
+        }
         specs.push(spec);
     }
 
@@ -2179,10 +2232,6 @@ mod tests {
                 "peer_description": "",
                 "external_addressable": false
             },
-            "connection_ref": {
-                "realm": "dev",
-                "binding": "default_anthropic"
-            },
         });
         let params: MobSpawnParams =
             serde_json::from_value(value).expect("spawn params with full surface deserialize");
@@ -2225,12 +2274,6 @@ mod tests {
             .as_ref()
             .expect("override_profile round-trips through serde");
         assert_eq!(override_profile.model, "claude-sonnet-4-6");
-        let connection_ref = params
-            .connection_ref
-            .as_ref()
-            .expect("connection_ref round-trips through serde");
-        assert_eq!(connection_ref.realm.as_str(), "dev");
-        assert_eq!(connection_ref.binding.as_str(), "default_anthropic");
 
         // And all older fields that aren't set stay None so the additive
         // wire extension doesn't break prior callers.
@@ -2246,7 +2289,7 @@ mod tests {
         assert!(minimal_params.budget_split_policy.is_none());
         assert!(minimal_params.inherited_tool_filter.is_none());
         assert!(minimal_params.override_profile.is_none());
-        assert!(minimal_params.connection_ref.is_none());
+        assert!(minimal_params.turn_metadata.is_none());
     }
 
     #[test]
@@ -2298,6 +2341,103 @@ mod tests {
             err.to_string().contains("unknown field `launch_mode`"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn mob_spawn_params_use_turn_metadata_for_runtime_carrier_fields() {
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "profile": "worker",
+            "agent_identity": "w1",
+            "turn_metadata": {
+                "additional_instructions": [
+                    { "kind": "user", "body": "stay concise" }
+                ],
+                "connection_ref": {
+                    "action": "set",
+                    "value": {
+                        "realm": "dev",
+                        "binding": "default_openai"
+                    }
+                }
+            }
+        });
+        serde_json::from_value::<MobSpawnParams>(value)
+            .expect("mob/spawn must accept canonical turn_metadata carrier");
+
+        for (field, value) in [
+            ("additional_instructions", serde_json::json!(["legacy"])),
+            (
+                "connection_ref",
+                serde_json::json!({ "realm": "dev", "binding": "default_openai" }),
+            ),
+        ] {
+            let mut params = serde_json::json!({
+                "mob_id": "m1",
+                "profile": "worker",
+                "agent_identity": "w1"
+            });
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), value);
+            let err = serde_json::from_value::<MobSpawnParams>(params)
+                .expect_err("retired mob/spawn split metadata carrier must fail closed");
+            assert!(
+                err.to_string().contains(field) || err.to_string().contains("unknown field"),
+                "unexpected error for {field}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mob_spawn_many_specs_use_turn_metadata_for_runtime_carrier_fields() {
+        let value = serde_json::json!({
+            "mob_id": "m1",
+            "specs": [{
+                "profile": "worker",
+                "agent_identity": "w1",
+                "turn_metadata": {
+                    "additional_instructions": [
+                        { "kind": "user", "body": "stay concise" }
+                    ],
+                    "connection_ref": {
+                        "action": "set",
+                        "value": {
+                            "realm": "dev",
+                            "binding": "default_openai"
+                        }
+                    }
+                }
+            }]
+        });
+        serde_json::from_value::<MobSpawnManyParams>(value)
+            .expect("mob/spawn_many specs must accept canonical turn_metadata carrier");
+
+        for (field, value) in [
+            ("additional_instructions", serde_json::json!(["legacy"])),
+            (
+                "connection_ref",
+                serde_json::json!({ "realm": "dev", "binding": "default_openai" }),
+            ),
+        ] {
+            let mut spec = serde_json::json!({
+                "profile": "worker",
+                "agent_identity": "w1"
+            });
+            spec.as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), value);
+            let err = serde_json::from_value::<MobSpawnManyParams>(serde_json::json!({
+                "mob_id": "m1",
+                "specs": [spec]
+            }))
+            .expect_err("retired mob/spawn_many split metadata carrier must fail closed");
+            assert!(
+                err.to_string().contains(field) || err.to_string().contains("unknown field"),
+                "unexpected error for {field}: {err}"
+            );
+        }
     }
 
     #[test]

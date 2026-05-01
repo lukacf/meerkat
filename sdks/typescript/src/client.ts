@@ -346,7 +346,8 @@ function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown
   setIfDefined(payload, "backend", spec.backend);
   setIfDefined(payload, "labels", spec.labels);
   setIfDefined(payload, "context", spec.context);
-  setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
+  const turnMetadata = runtimeTurnMetadataPayload(spec.turnMetadata);
+  if (turnMetadata) payload.turn_metadata = turnMetadata;
   setIfDefined(payload, "binding", spec.binding);
   setIfDefined(payload, "shell_env", spec.shellEnv);
   setIfDefined(payload, "auto_wire_parent", spec.autoWireParent);
@@ -355,7 +356,6 @@ function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown
   setIfDefined(payload, "budget_split_policy", spec.budgetSplitPolicy);
   setIfDefined(payload, "inherited_tool_filter", spec.inheritedToolFilter);
   setIfDefined(payload, "override_profile", spec.overrideProfile);
-  setIfDefined(payload, "connection_ref", spec.connectionRef);
   return payload;
 }
 
@@ -369,8 +369,8 @@ function mobSpawnManySpecPayload(spec: SpawnManySpec): Record<string, unknown> {
   setIfDefined(payload, "backend", spec.backend);
   setIfDefined(payload, "labels", spec.labels);
   setIfDefined(payload, "context", spec.context);
-  setIfDefined(payload, "additional_instructions", spec.additionalInstructions);
-  setIfDefined(payload, "connection_ref", spec.connectionRef);
+  const turnMetadata = runtimeTurnMetadataPayload(spec.turnMetadata);
+  if (turnMetadata) payload.turn_metadata = turnMetadata;
   return payload;
 }
 

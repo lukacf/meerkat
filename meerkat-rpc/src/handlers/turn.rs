@@ -7,9 +7,10 @@ use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
 use meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata;
-use meerkat_core::ContentInput;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::has_build_only_turn_overrides;
+use meerkat_core::{ContentInput, OutputSchema, SurfaceSessionRecoveryOverrides};
 
 use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
@@ -31,6 +32,18 @@ use meerkat_runtime::{RuntimeDriverError, RuntimeState, SessionServiceRuntimeExt
 pub struct StartTurnParams {
     pub session_id: String,
     pub prompt: ContentInput,
+    /// Override max_tokens for a deferred session's first materializing turn.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Override system prompt for a deferred session's first materializing turn.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Override structured output schema for a deferred session's first materializing turn.
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    /// Override structured output retries for a deferred session's first materializing turn.
+    #[serde(default)]
+    pub structured_output_retries: Option<u32>,
     /// Retired legacy string refs. Kept only to return a typed ingress error
     /// when old clients send the field.
     #[serde(default, deserialize_with = "reject_retired_skill_references")]
@@ -112,6 +125,28 @@ pub async fn handle_start(
     });
 
     let turn_metadata = params.turn_metadata.map(Into::into);
+    let output_schema = match params.output_schema {
+        Some(schema) => match OutputSchema::from_json_value(schema) {
+            Ok(schema) => Some(schema),
+            Err(err) => {
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("Invalid output_schema: {err}"),
+                );
+            }
+        },
+        None => None,
+    };
+    let build_only_overrides = SurfaceSessionRecoveryOverrides {
+        max_tokens: params.max_tokens,
+        system_prompt: params.system_prompt,
+        output_schema,
+        structured_output_retries: params.structured_output_retries,
+        ..Default::default()
+    };
+    let build_only_overrides =
+        has_build_only_turn_overrides(&build_only_overrides).then_some(build_only_overrides);
 
     // Lazy-register executor if not already registered.
     // This handles cases where session/create used deferred mode or
@@ -148,7 +183,13 @@ pub async fn handle_start(
     }
 
     let result = match runtime
-        .start_turn_via_runtime(&session_id, params.prompt, mcp_event_tx, turn_metadata)
+        .start_turn_via_runtime(
+            &session_id,
+            params.prompt,
+            mcp_event_tx,
+            turn_metadata,
+            build_only_overrides,
+        )
         .await
     {
         Ok(r) => r,
@@ -217,5 +258,64 @@ pub async fn handle_interrupt(
             format!("Session is not interruptible while runtime is {state}"),
         ),
         Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StartTurnParams;
+
+    #[test]
+    fn start_turn_params_accept_build_only_deferred_overrides() {
+        let params = serde_json::json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "start",
+            "system_prompt": "deferred system",
+            "max_tokens": 256,
+            "output_schema": { "type": "object" },
+            "structured_output_retries": 2,
+            "turn_metadata": {
+                "model": "gpt-test"
+            }
+        });
+
+        let params = serde_json::from_value::<StartTurnParams>(params)
+            .expect("build-only deferred overrides must remain valid outside turn_metadata");
+        assert_eq!(params.system_prompt.as_deref(), Some("deferred system"));
+        assert_eq!(params.max_tokens, Some(256));
+        assert!(params.output_schema.is_some());
+        assert_eq!(params.structured_output_retries, Some(2));
+        assert!(params.turn_metadata.is_some());
+    }
+
+    #[test]
+    fn start_turn_params_reject_split_metadata_carriers() {
+        for (field, value) in [
+            ("keep_alive", serde_json::json!(true)),
+            (
+                "flow_tool_overlay",
+                serde_json::json!({ "allowed_tools": ["read"] }),
+            ),
+            ("additional_instructions", serde_json::json!(["legacy"])),
+            (
+                "connection_ref",
+                serde_json::json!({ "realm": "dev", "binding": "default" }),
+            ),
+        ] {
+            let mut params = serde_json::json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "start"
+            });
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), value);
+            let err = serde_json::from_value::<StartTurnParams>(params)
+                .expect_err("split metadata field must be rejected");
+            assert!(
+                err.to_string().contains(field) || err.to_string().contains("unknown field"),
+                "unexpected error for {field}: {err}"
+            );
+        }
     }
 }

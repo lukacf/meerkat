@@ -1558,7 +1558,10 @@ describe("Parity wrappers", () => {
       backend: "session",
       labels: { role: "worker" },
       context: { ticket: "LUC-134" },
-      additionalInstructions: ["stay focused"],
+      turnMetadata: {
+        additionalInstructions: ["stay focused"],
+        connectionRef: { realm: "dev", binding: "default_anthropic" },
+      },
       binding: { kind: "session" },
       shellEnv: { TEST_MODE: "1" },
       autoWireParent: true,
@@ -1570,12 +1573,13 @@ describe("Parity wrappers", () => {
         model: "claude-sonnet-4-6",
         tools: { shell: true },
       },
-      connectionRef: { realm: "dev", binding: "default_anthropic" },
     });
     const spawned = await client.spawnMobMembers("mob-1", [{
       profile: "worker",
       agentIdentity: "worker-1",
-      connectionRef: { realm: "dev", binding: "default_anthropic" },
+      turnMetadata: {
+        connectionRef: { realm: "dev", binding: "default_anthropic" },
+      },
     }]);
     await client.mobTurnStart(
       "mob-1",
@@ -1640,7 +1644,13 @@ describe("Parity wrappers", () => {
       backend: "session",
       labels: { role: "worker" },
       context: { ticket: "LUC-134" },
-      additional_instructions: ["stay focused"],
+      turn_metadata: {
+        additional_instructions: [{ kind: "user", body: "stay focused" }],
+        connection_ref: {
+          action: "set",
+          value: { realm: "dev", binding: "default_anthropic" },
+        },
+      },
       binding: { kind: "session" },
       shell_env: { TEST_MODE: "1" },
       auto_wire_parent: true,
@@ -1652,11 +1662,13 @@ describe("Parity wrappers", () => {
         model: "claude-sonnet-4-6",
         tools: { shell: true },
       },
-      connection_ref: { realm: "dev", binding: "default_anthropic" },
     });
-    assert.deepEqual(calls[1].params.specs[0].connection_ref, {
-      realm: "dev",
-      binding: "default_anthropic",
+    assert.deepEqual(calls[1].params.specs[0].turn_metadata.connection_ref, {
+      action: "set",
+      value: {
+        realm: "dev",
+        binding: "default_anthropic",
+      },
     });
     assert.deepEqual(calls[2].params, {
       mob_id: "mob-1",

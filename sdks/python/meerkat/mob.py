@@ -5,7 +5,6 @@ from typing import Any, Literal, NotRequired, TypedDict
 from .generated.types import (
     MobSpawnManyResult,
     WireBudgetSplitPolicy,
-    WireConnectionRef,
     WireContentInput,
     WireMemberLaunchMode,
     WireMobBackendKind,
@@ -16,6 +15,7 @@ from .generated.types import (
     WireToolFilter,
 )
 from .streaming import EventSubscription
+from .types import RuntimeTurnMetadata
 
 MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
 
@@ -180,8 +180,7 @@ MobSpawnSpec = TypedDict(
         "backend": NotRequired[WireMobBackendKind | None],
         "labels": NotRequired[dict[str, str] | None],
         "context": NotRequired[dict[str, Any] | None],
-        "additional_instructions": NotRequired[list[str] | None],
-        "connection_ref": NotRequired[WireConnectionRef | dict[str, str] | None],
+        "turn_metadata": NotRequired[RuntimeTurnMetadata | dict[str, Any] | None],
     },
 )
 
@@ -235,7 +234,7 @@ class Mob:
         backend: WireMobBackendKind | None = None,
         labels: dict[str, str] | None = None,
         context: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
         binding: WireRuntimeBinding | dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         auto_wire_parent: bool | None = None,
@@ -244,7 +243,6 @@ class Mob:
         budget_split_policy: WireBudgetSplitPolicy | dict[str, Any] | None = None,
         inherited_tool_filter: WireToolFilter | dict[str, list[str]] | None = None,
         override_profile: WireMobProfile | dict[str, Any] | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
     ) -> MobSpawnResult:
         return await self._client.spawn_mob_member(
             self.id,
@@ -255,7 +253,7 @@ class Mob:
             backend=backend,
             labels=labels,
             context=context,
-            additional_instructions=additional_instructions,
+            turn_metadata=turn_metadata,
             binding=binding,
             shell_env=shell_env,
             auto_wire_parent=auto_wire_parent,
@@ -264,7 +262,6 @@ class Mob:
             budget_split_policy=budget_split_policy,
             inherited_tool_filter=inherited_tool_filter,
             override_profile=override_profile,
-            connection_ref=connection_ref,
         )
 
     async def spawn_many(

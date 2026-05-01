@@ -239,12 +239,10 @@ class MobSpawnParams:
     agent_identity: str
     mob_id: str
     profile: str
-    additional_instructions: Optional[list[str]] = None
     auto_wire_parent: Optional[bool] = None
     backend: Optional[WireMobBackendKind] = None
     binding: Optional[WireRuntimeBinding] = None
     budget_split_policy: Optional[WireBudgetSplitPolicy] = None
-    connection_ref: Optional[WireConnectionRef] = None
     context: Optional[Any] = None
     inherited_tool_filter: Optional[WireToolFilter] = None
     initial_message: Optional[WireContentInput] = None
@@ -254,6 +252,7 @@ class MobSpawnParams:
     runtime_mode: Optional[WireMobRuntimeMode] = None
     shell_env: Optional[dict[str, str]] = None
     tool_access_policy: Optional[WireToolAccessPolicy] = None
+    turn_metadata: Optional[WireRuntimeTurnMetadata] = None
 
 
 @dataclass
@@ -269,13 +268,12 @@ class MobSpawnSpecParams:
     """Per-member request payload inside `mob/spawn_many`."""
     agent_identity: str
     profile: str
-    additional_instructions: Optional[list[str]] = None
     backend: Optional[WireMobBackendKind] = None
-    connection_ref: Optional[WireConnectionRef] = None
     context: Optional[Any] = None
     initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, str]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    turn_metadata: Optional[WireRuntimeTurnMetadata] = None
 
 
 @dataclass

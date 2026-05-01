@@ -28,10 +28,10 @@ use meerkat::{
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
 use meerkat_core::EventEnvelope;
-use meerkat_core::RunId;
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
+use meerkat_core::lifecycle::InputId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, KeepAliveMode, KeepAlivePolicy, RunApplyBoundary,
@@ -46,6 +46,7 @@ use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
 #[cfg(feature = "mcp")]
 use meerkat_core::{AgentToolDispatcher, ToolGateway};
+use meerkat_core::{BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RunId, has_build_only_turn_overrides};
 use meerkat_core::{
     Config, ConfigStore, ContentInput, PendingSystemContextAppend, Session, SessionLlmIdentity,
     SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
@@ -697,6 +698,11 @@ pub struct SessionRuntime {
     /// first materializing turn fans out events here, then bridges the stream
     /// to the live session service after promotion.
     pending_session_event_streams: Arc<Mutex<HashMap<SessionId, PendingSessionEventStreams>>>,
+    /// Build-only deferred first-turn overrides keyed by the runtime input
+    /// that admitted them. These are not runtime turn metadata and are removed
+    /// when the corresponding primitive is applied or abandoned.
+    pending_build_only_turn_overrides:
+        Arc<Mutex<HashMap<InputId, SurfaceSessionRecoveryOverrides>>>,
     max_sessions: usize,
     /// Override LLM client for all sessions (primarily for testing).
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
@@ -1064,6 +1070,7 @@ impl SessionRuntime {
             schedule_host: Mutex::new(None),
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
             pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            pending_build_only_turn_overrides: Arc::new(Mutex::new(HashMap::new())),
             max_sessions,
             default_llm_client,
             realm_id: None,
@@ -1141,6 +1148,7 @@ impl SessionRuntime {
             schedule_host: Mutex::new(None),
             staged_sessions: Arc::new(StagedSessionRegistry::new()),
             pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
+            pending_build_only_turn_overrides: Arc::new(Mutex::new(HashMap::new())),
             max_sessions,
             default_llm_client,
             realm_id: None,
@@ -1300,6 +1308,86 @@ impl SessionRuntime {
             turn_metadata: turn_metadata.cloned(),
             ..Default::default()
         }
+    }
+
+    fn recovery_overrides_from_turn_and_build_only(
+        turn_metadata: Option<&RuntimeTurnMetadata>,
+        build_only_overrides: Option<SurfaceSessionRecoveryOverrides>,
+    ) -> SurfaceSessionRecoveryOverrides {
+        let mut overrides = build_only_overrides.unwrap_or_default();
+        overrides.turn_metadata = turn_metadata.cloned();
+        overrides
+    }
+
+    fn apply_build_only_overrides_to_pending_build(
+        build_config: &mut AgentBuildConfig,
+        overrides: Option<&SurfaceSessionRecoveryOverrides>,
+    ) {
+        let Some(overrides) = overrides else {
+            return;
+        };
+        if let Some(system_prompt) = overrides.system_prompt.clone() {
+            build_config.system_prompt = Some(system_prompt);
+        }
+        if let Some(max_tokens) = overrides.max_tokens {
+            build_config.max_tokens = Some(max_tokens);
+        }
+        if let Some(output_schema) = overrides.output_schema.clone() {
+            build_config.output_schema = Some(output_schema);
+        }
+        if let Some(structured_output_retries) = overrides.structured_output_retries {
+            build_config.structured_output_retries = structured_output_retries;
+        }
+    }
+
+    async fn store_build_only_turn_overrides(
+        &self,
+        input_id: InputId,
+        overrides: Option<SurfaceSessionRecoveryOverrides>,
+    ) -> bool {
+        let Some(overrides) = overrides else {
+            return false;
+        };
+        self.pending_build_only_turn_overrides
+            .lock()
+            .await
+            .insert(input_id, overrides);
+        true
+    }
+
+    async fn remove_build_only_turn_overrides(&self, input_id: &InputId) {
+        self.pending_build_only_turn_overrides
+            .lock()
+            .await
+            .remove(input_id);
+    }
+
+    async fn take_build_only_turn_overrides_for_primitive(
+        &self,
+        primitive: &RunPrimitive,
+    ) -> Result<Option<SurfaceSessionRecoveryOverrides>, RpcError> {
+        let input_ids = primitive.contributing_input_ids();
+        if input_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let mut pending = self.pending_build_only_turn_overrides.lock().await;
+        let mut found = None;
+        for input_id in input_ids {
+            if let Some(overrides) = pending.remove(input_id) {
+                if found.is_some() {
+                    return Err(RpcError {
+                        code: error::INVALID_PARAMS,
+                        message:
+                            "multiple runtime inputs in one batch carried build-only turn overrides"
+                                .to_string(),
+                        data: None,
+                    });
+                }
+                found = Some(overrides);
+            }
+        }
+        Ok(found)
     }
 
     fn recovery_external_tools(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
@@ -2204,6 +2292,7 @@ impl SessionRuntime {
         prompt: ContentInput,
         mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
         turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+        build_only_overrides: Option<SurfaceSessionRecoveryOverrides>,
     ) -> Result<RunResult, RpcError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
@@ -2330,22 +2419,38 @@ impl SessionRuntime {
             }
         }
 
-        let input = Input::Prompt(PromptInput::from_content_input(prompt, turn_metadata));
+        let prompt_input = PromptInput::from_content_input(prompt, turn_metadata);
+        let input_id = prompt_input.header.id.clone();
+        let stored_build_overrides = self
+            .store_build_only_turn_overrides(input_id.clone(), build_only_overrides)
+            .await;
+        let input = Input::Prompt(prompt_input);
 
-        let (outcome, handle) = self
+        let (outcome, handle) = match self
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
-            .map_err(|e| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!("runtime accept failed: {e}"),
-                data: None,
-            })?;
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                if stored_build_overrides {
+                    self.remove_build_only_turn_overrides(&input_id).await;
+                }
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("runtime accept failed: {e}"),
+                    data: None,
+                });
+            }
+        };
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())
 
         let Some(handle) = handle else {
+            if stored_build_overrides {
+                self.remove_build_only_turn_overrides(&input_id).await;
+            }
             // Input already terminal (dedup of completed input)
             let existing_id = match outcome {
                 AcceptOutcome::Deduplicated { existing_id, .. } => existing_id.to_string(),
@@ -2358,7 +2463,11 @@ impl SessionRuntime {
             });
         };
 
-        completion_outcome_to_rpc_result(handle.wait().await, session_id)
+        let result = completion_outcome_to_rpc_result(handle.wait().await, session_id);
+        if stored_build_overrides {
+            self.remove_build_only_turn_overrides(&input_id).await;
+        }
+        result
     }
 
     /// Admit a canonical external event through the runtime-backed path.
@@ -2504,6 +2613,9 @@ impl SessionRuntime {
         let turn_metadata = primitive.turn_metadata();
         let service_turn_metadata = turn_metadata.cloned();
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata);
+        let build_only_overrides = self
+            .take_build_only_turn_overrides_for_primitive(primitive)
+            .await?;
 
         #[cfg(feature = "comms")]
         if let Some(keep_alive) = keep_alive_override
@@ -2562,7 +2674,22 @@ impl SessionRuntime {
             .or(persisted_keep_alive)
             .unwrap_or(false);
 
-        if pending_session.is_none() && !self.live_session_is_stale(session_id).await? {
+        let live_session_stale = if pending_session.is_none() {
+            self.live_session_is_stale(session_id).await?
+        } else {
+            false
+        };
+        if pending_session.is_none() && !live_session_stale {
+            if build_only_overrides
+                .as_ref()
+                .is_some_and(has_build_only_turn_overrides)
+            {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
+                    data: None,
+                });
+            }
             // Hot-swap LLM client if model/provider overrides are present.
             if let Some(metadata) = turn_metadata
                 && Self::turn_metadata_reconfigures_llm(metadata)
@@ -2613,6 +2740,10 @@ impl SessionRuntime {
             if let Some(deferred) = deferred_prompt {
                 runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
             }
+            Self::apply_build_only_overrides_to_pending_build(
+                &mut build_config,
+                build_only_overrides.as_ref(),
+            );
 
             let pending_turn_metadata = match Self::merge_initial_turn_metadata(
                 build_config.initial_turn_metadata_for_service(),
@@ -2849,7 +2980,8 @@ impl SessionRuntime {
                 message: format!("session not found: {session_id}"),
                 data: None,
             })?;
-        let recovery_overrides = self.recovery_overrides_from_turn(turn_metadata);
+        let recovery_overrides =
+            Self::recovery_overrides_from_turn_and_build_only(turn_metadata, build_only_overrides);
         let create_request = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
@@ -8527,6 +8659,31 @@ mod tests {
         assert_eq!(recovered.turn_metadata, Some(clear_connection));
     }
 
+    #[test]
+    fn recovery_overrides_preserve_build_only_deferred_fields_outside_metadata() {
+        let turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-test")),
+            ..Default::default()
+        };
+        let build_only = SurfaceSessionRecoveryOverrides {
+            max_tokens: Some(256),
+            system_prompt: Some("deferred system".to_string()),
+            structured_output_retries: Some(3),
+            ..Default::default()
+        };
+
+        let recovered = SessionRuntime::recovery_overrides_from_turn_and_build_only(
+            Some(&turn_metadata),
+            Some(build_only),
+        );
+
+        assert_eq!(recovered.turn_metadata, Some(turn_metadata));
+        assert_eq!(recovered.max_tokens, Some(256));
+        assert_eq!(recovered.system_prompt.as_deref(), Some("deferred system"));
+        assert_eq!(recovered.structured_output_retries, Some(3));
+        assert!(recovered.output_schema.is_none());
+    }
+
     // -----------------------------------------------------------------------
     // Phase 4: Persisted session recovery
     // -----------------------------------------------------------------------
@@ -9196,6 +9353,7 @@ mod tests {
                     ),
                     ..Default::default()
                 }),
+                None,
             )
             .await
             .expect_err("keep_alive=true must require comms_name on pending sessions");
@@ -9238,7 +9396,7 @@ mod tests {
         ));
         let (tx, _rx) = mpsc::channel(100);
         let err = runtime
-            .start_turn_via_runtime(&session_id, "test".into(), tx, Some(turn_metadata))
+            .start_turn_via_runtime(&session_id, "test".into(), tx, Some(turn_metadata), None)
             .await
             .expect_err("invalid provider_params should fail pending materialization");
         assert!(
@@ -9302,7 +9460,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel(100);
         runtime
-            .start_turn_via_runtime(&session_id, "recover".into(), tx, None)
+            .start_turn_via_runtime(&session_id, "recover".into(), tx, None, None)
             .await
             .expect("turn/start should inherit persisted keep_alive during recovery");
 

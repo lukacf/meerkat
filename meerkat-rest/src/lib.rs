@@ -80,7 +80,7 @@ use meerkat_core::{
     Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy, ConfigStore, ContentInput,
     FileConfigStore, HookRunOverrides, PendingSystemContextAppend, Provider, RealmSelection,
     RuntimeBootstrap, SessionLlmIdentity, ToolCategoryOverride, agent_event_type,
-    format_verbose_event,
+    format_verbose_event, has_materialization_overrides,
 };
 #[cfg(feature = "mob")]
 use meerkat_mob::MobSessionService as _;
@@ -997,15 +997,8 @@ fn default_structured_output_retries() -> u32 {
     2
 }
 
-fn rest_continue_requires_rebuild(
-    turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-) -> bool {
-    turn_metadata.is_some_and(|metadata| {
-        metadata.model.is_some()
-            || metadata.provider.is_some()
-            || metadata.provider_params.is_some()
-            || metadata.connection_ref.is_some()
-    })
+fn rest_continue_requires_rebuild(overrides: &SurfaceSessionRecoveryOverrides) -> bool {
+    has_materialization_overrides(overrides)
 }
 
 fn surface_recovery_error_to_api(error: SurfaceSessionRecoveryError) -> ApiError {
@@ -1069,6 +1062,25 @@ async fn canonical_skill_keys_for_state(
 pub struct ContinueSessionRequest {
     pub session_id: String,
     pub prompt: ContentInput,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// JSON schema for structured output extraction (wrapper or raw schema).
+    #[serde(default)]
+    pub output_schema: Option<OutputSchema>,
+    /// Max retries for structured output validation.
+    #[serde(default)]
+    pub structured_output_retries: Option<u32>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Agent name for inter-agent communication during deferred recovery.
+    #[serde(default)]
+    pub comms_name: Option<String>,
+    /// Friendly metadata for peer discovery during deferred recovery.
+    #[serde(default)]
+    pub peer_meta: Option<meerkat_core::PeerMeta>,
+    /// Optional run-scoped hook overrides for deferred recovery.
+    #[serde(default)]
+    pub hooks_override: Option<HookRunOverrides>,
     /// Enable verbose event logging (server-side).
     #[serde(default)]
     pub verbose: bool,
@@ -3619,6 +3631,17 @@ async fn continue_session_inner(
 ) -> RequestTerminal<Result<Json<SessionResponse>, ApiError>> {
     let turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> =
         req.turn_metadata.clone().map(Into::into);
+    let recovery_overrides = SurfaceSessionRecoveryOverrides {
+        turn_metadata: turn_metadata.clone(),
+        max_tokens: req.max_tokens,
+        system_prompt: req.system_prompt.clone(),
+        output_schema: req.output_schema.clone(),
+        structured_output_retries: req.structured_output_retries,
+        hooks_override: req.hooks_override.clone(),
+        comms_name: req.comms_name.clone(),
+        peer_meta: req.peer_meta.clone(),
+        ..Default::default()
+    };
     let path_session_id = match resolve_session_id_for_state(id, state) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
@@ -3724,7 +3747,7 @@ async fn continue_session_inner(
     }
 
     let adapter = state.runtime_adapter.clone();
-    let final_result = if rest_continue_requires_rebuild(turn_metadata.as_ref()) {
+    let final_result = if rest_continue_requires_rebuild(&recovery_overrides) {
         let session = match loaded_session {
             Some(s) => s,
             None => {
@@ -3751,10 +3774,7 @@ async fn continue_session_inner(
         let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
         let recovered = match build_recovered_session(
             session,
-            &SurfaceSessionRecoveryOverrides {
-                turn_metadata: turn_metadata.clone(),
-                ..Default::default()
-            },
+            &recovery_overrides,
             SurfaceSessionRecoveryContext {
                 llm_client_override: state
                     .llm_client_override
@@ -6509,6 +6529,29 @@ mod tests {
     }
 
     #[test]
+    fn test_continue_session_request_accepts_build_only_deferred_overrides() {
+        let req_json = serde_json::json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "Continue",
+            "system_prompt": "deferred system",
+            "max_tokens": 512,
+            "output_schema": { "type": "object" },
+            "structured_output_retries": 3,
+            "turn_metadata": {
+                "model": "gpt-test"
+            }
+        });
+
+        let req = serde_json::from_value::<ContinueSessionRequest>(req_json)
+            .expect("REST continue must preserve build-only deferred overrides");
+        assert_eq!(req.system_prompt.as_deref(), Some("deferred system"));
+        assert_eq!(req.max_tokens, Some(512));
+        assert!(req.output_schema.is_some());
+        assert_eq!(req.structured_output_retries, Some(3));
+        assert!(req.turn_metadata.is_some());
+    }
+
+    #[test]
     fn test_continue_session_request_rejects_split_turn_metadata_fields() {
         let err = serde_json::from_value::<ContinueSessionRequest>(serde_json::json!({
             "session_id": "01234567-89ab-cdef-0123-456789abcdef",
@@ -6578,12 +6621,17 @@ mod tests {
             ModelId, RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind,
         };
 
-        assert!(!rest_continue_requires_rebuild(None));
+        assert!(!rest_continue_requires_rebuild(
+            &SurfaceSessionRecoveryOverrides::default()
+        ));
 
         let mut metadata = RuntimeTurnMetadata::default();
         metadata.flow_tool_overlay = Some(meerkat_core::service::TurnToolOverlay::default());
         assert!(
-            !rest_continue_requires_rebuild(Some(&metadata)),
+            !rest_continue_requires_rebuild(&SurfaceSessionRecoveryOverrides {
+                turn_metadata: Some(metadata.clone()),
+                ..Default::default()
+            }),
             "flow tool overlay stays on the live path"
         );
         metadata.flow_tool_overlay = None;
@@ -6593,13 +6641,27 @@ mod tests {
             body: "extra".to_string(),
         }]);
         assert!(
-            !rest_continue_requires_rebuild(Some(&metadata)),
+            !rest_continue_requires_rebuild(&SurfaceSessionRecoveryOverrides {
+                turn_metadata: Some(metadata.clone()),
+                ..Default::default()
+            }),
             "additional instructions stay on the live path"
         );
         metadata.additional_instructions = None;
 
         metadata.model = Some(ModelId::new("gpt-5.4"));
-        assert!(rest_continue_requires_rebuild(Some(&metadata)));
+        assert!(rest_continue_requires_rebuild(
+            &SurfaceSessionRecoveryOverrides {
+                turn_metadata: Some(metadata),
+                ..Default::default()
+            }
+        ));
+        assert!(rest_continue_requires_rebuild(
+            &SurfaceSessionRecoveryOverrides {
+                system_prompt: Some("deferred system".to_string()),
+                ..Default::default()
+            }
+        ));
     }
 
     #[tokio::test]

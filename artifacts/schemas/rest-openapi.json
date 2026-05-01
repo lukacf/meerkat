@@ -5204,15 +5204,6 @@
         "additionalProperties": false,
         "description": "Request payload for `mob/spawn`.",
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "agent_identity": {
             "type": "string"
           },
@@ -5246,16 +5237,6 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WireBudgetSplitPolicy"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "connection_ref": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WireConnectionRef"
               },
               {
                 "type": "null"
@@ -5341,6 +5322,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WireToolAccessPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
               },
               {
                 "type": "null"
@@ -5433,15 +5424,6 @@
         "additionalProperties": false,
         "description": "Per-member request payload inside `mob/spawn_many`.",
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "agent_identity": {
             "type": "string"
           },
@@ -5449,16 +5431,6 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WireMobBackendKind"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "connection_ref": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WireConnectionRef"
               },
               {
                 "type": "null"
@@ -5492,6 +5464,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
               },
               {
                 "type": "null"

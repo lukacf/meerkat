@@ -457,6 +457,7 @@ pub async fn handle_create(
                     prompt_for_turn,
                     event_tx_for_turn,
                     turn_metadata_for_turn,
+                    None,
                 )
                 .await
             {
@@ -493,6 +494,7 @@ pub async fn handle_create(
                 params.prompt,
                 mcp_event_tx,
                 initial_turn_metadata,
+                None,
             )
             .await
         {

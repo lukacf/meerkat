@@ -334,8 +334,8 @@ pub async fn handle_interrupt(
         }
         Err(RuntimeDriverError::NotReady { state }) => RpcResponse::error(
             id,
-            error::INTERNAL_ERROR,
-            format!("Runtime not ready: {state}"),
+            error::INVALID_REQUEST,
+            format!("Session is not interruptible while runtime is {state}"),
         ),
         Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     }

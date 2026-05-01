@@ -3,6 +3,11 @@ set -euo pipefail
 
 self_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
 
+if ! command -v rg >/dev/null 2>&1; then
+  echo "effect-authority audit failed: required command 'rg' (ripgrep) not found" >&2
+  exit 127
+fi
+
 if [[ "${1:-}" == "--self-test" ]]; then
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT

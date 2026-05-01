@@ -3,10 +3,26 @@ set -euo pipefail
 
 self_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "effect-authority audit failed: required command 'rg' (ripgrep) not found" >&2
-  exit 127
-fi
+audit_fail() {
+  echo "effect-authority audit failed: $*" >&2
+  exit 2
+}
+
+required_tool() {
+  local tool="$1"
+  local path
+  path="$(type -P "$tool" || true)"
+  if [[ -z "$path" ]]; then
+    echo "effect-authority audit failed: required command '$tool' not found" >&2
+    exit 127
+  fi
+  printf '%s' "$path"
+}
+
+AWK_BIN="$(required_tool awk)"
+FIND_BIN="$(required_tool find)"
+GREP_BIN="$(required_tool grep)"
+RG_BIN="$(type -P rg || true)"
 
 if [[ "${1:-}" == "--self-test" ]]; then
   tmpdir="$(mktemp -d)"
@@ -188,6 +204,11 @@ EOF
     exit 1
   }
 
+  if "$self_script" "$tmpdir/missing-root" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: missing scan root passed" >&2
+    exit 1
+  fi
+
   echo "audit-effect-authority self-test passed"
   exit 0
 fi
@@ -195,8 +216,16 @@ fi
 root="${1:-}"
 if [[ -z "$root" ]]; then
   script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-  root="$(cd "$script_dir/.." && pwd)"
+  if [[ "$(basename -- "$self_script")" == "audit_effect_authority_test" && -d "$script_dir/meerkat-runtime" ]]; then
+    root="$script_dir"
+  else
+    root="$(cd "$script_dir/.." && pwd)"
+  fi
 fi
+if [[ ! -d "$root" ]]; then
+  audit_fail "scan root does not exist or is not a directory: $root"
+fi
+root="$(cd "$root" && pwd)"
 
 failures=0
 
@@ -210,14 +239,188 @@ report_matches() {
   fi
 }
 
+fallback_rg_excluded() {
+  local path="${1#./}"
+  local glob
+  case "$path" in
+    .* | */.* | target/* | */target/*)
+      return 0
+      ;;
+  esac
+  for glob in "${fallback_rg_exclude_globs[@]:-}"; do
+    [[ "$path" == $glob ]] && return 0
+    if [[ "$glob" == **/* ]]; then
+      [[ "$path" == "${glob#**/}" ]] && return 0
+    fi
+  done
+  return 1
+}
+
+fallback_rg_list_files() {
+  local paths=("$@")
+  local path
+  local file
+  [[ "${#paths[@]}" -eq 0 ]] && paths=(".")
+  for path in "${paths[@]}"; do
+    if [[ -f "$path" ]]; then
+      file="${path#./}"
+      fallback_rg_excluded "$file" || printf '%s\n' "$file"
+    elif [[ -d "$path" ]]; then
+      while IFS= read -r file; do
+        file="${file#./}"
+        fallback_rg_excluded "$file" || printf '%s\n' "$file"
+      done < <("$FIND_BIN" "$path" -type f -print)
+    else
+      echo "fallback rg: path not found: $path" >&2
+      return 2
+    fi
+  done
+}
+
+fallback_rg_search() {
+  local pattern="$1"
+  local line_numbers="$2"
+  local invert="$3"
+  shift 3
+  local paths=("$@")
+  local grep_args=(-E -I)
+  local file
+  local matched=1
+  local status
+  [[ "$line_numbers" == true ]] && grep_args+=(-n)
+  [[ "$invert" == true ]] && grep_args+=(-v)
+
+  if [[ "${#paths[@]}" -eq 0 ]]; then
+    "$GREP_BIN" "${grep_args[@]}" -- "$pattern"
+    return $?
+  fi
+
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    set +e
+    "$GREP_BIN" "${grep_args[@]}" -H -- "$pattern" "$file"
+    status=$?
+    set -e
+    case "$status" in
+      0) matched=0 ;;
+      1) ;;
+      *) return "$status" ;;
+    esac
+  done < <(fallback_rg_list_files "${paths[@]}")
+  return "$matched"
+}
+
+rg_cmd() {
+  if [[ -n "$RG_BIN" ]]; then
+    "$RG_BIN" "$@"
+    return $?
+  fi
+
+  local files_mode=false
+  local line_numbers=false
+  local invert=false
+  local pattern=""
+  local have_pattern=false
+  local paths=()
+  local glob
+  fallback_rg_exclude_globs=()
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --files)
+        files_mode=true
+        shift
+        ;;
+      -n)
+        line_numbers=true
+        shift
+        ;;
+      -v)
+        invert=true
+        shift
+        ;;
+      --glob)
+        shift
+        [[ "$#" -gt 0 ]] || {
+          echo "fallback rg: --glob requires a value" >&2
+          return 2
+        }
+        glob="$1"
+        [[ "$glob" == '!'* ]] || {
+          echo "fallback rg: only exclusion --glob values are supported: $glob" >&2
+          return 2
+        }
+        fallback_rg_exclude_globs+=("${glob#!}")
+        shift
+        ;;
+      --glob=*)
+        glob="${1#--glob=}"
+        [[ "$glob" == '!'* ]] || {
+          echo "fallback rg: only exclusion --glob values are supported: $glob" >&2
+          return 2
+        }
+        fallback_rg_exclude_globs+=("${glob#!}")
+        shift
+        ;;
+      -*)
+        echo "fallback rg: unsupported option: $1" >&2
+        return 2
+        ;;
+      *)
+        if [[ "$files_mode" == true ]]; then
+          paths+=("$1")
+        elif [[ "$have_pattern" == false ]]; then
+          pattern="$1"
+          have_pattern=true
+        else
+          paths+=("$1")
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$files_mode" == true ]]; then
+    fallback_rg_list_files "${paths[@]}"
+    return $?
+  fi
+
+  [[ "$have_pattern" == true ]] || {
+    echo "fallback rg: missing pattern" >&2
+    return 2
+  }
+  fallback_rg_search "$pattern" "$line_numbers" "$invert" "${paths[@]}"
+}
+
+capture_rg() {
+  local output
+  local status
+  set +e
+  output="$(rg_cmd "$@" 2>&1)"
+  status=$?
+  set -e
+  case "$status" in
+    0) printf '%s\n' "$output" ;;
+    1) ;;
+    *) audit_fail "search command failed: rg $*"$'\n'"$output" ;;
+  esac
+}
+
+filter_rg() {
+  local input="$1"
+  shift
+  [[ -z "$input" ]] && return 0
+  printf '%s\n' "$(printf '%s\n' "$input" | capture_rg "$@")"
+}
+
 run_rg() {
   local pattern="$1"
   shift
-  (cd "$root" && rg -n "$pattern" . --glob '!target/**' --glob '!scripts/audit-effect-authority.sh' "$@") 2>/dev/null || true
+  (cd "$root" && capture_rg -n "$pattern" . --glob '!target/**' --glob '!scripts/audit-effect-authority.sh' --glob '!audit_effect_authority_test' "$@")
 }
 
 strip_core_executor_interrupt_impls() {
-  awk '
+  "$AWK_BIN" '
     function brace_delta(line, opened, closed, copy) {
       copy = line
       opened = gsub(/\{/, "{", copy)
@@ -247,7 +450,7 @@ strip_core_executor_interrupt_impls() {
 }
 
 strip_cfg_test_modules() {
-  awk '
+  "$AWK_BIN" '
     function brace_delta(line, opened, closed, copy) {
       copy = line
       opened = gsub(/\{/, "{", copy)
@@ -292,34 +495,36 @@ for peer_file in \
   "$root/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs"
 do
   if [[ -f "$peer_file" ]]; then
-    found="$(rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|runtime\.interrupt\(|session_service\.interrupt\(' "$peer_file" 2>/dev/null || true)"
+    found="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|runtime\.interrupt\(|session_service\.interrupt\(' "$peer_file")"
     if [[ -n "$found" ]]; then
       peer_matches+="$found"$'\n'
     fi
   fi
 done
+peer_admission_files="$(cd "$root" && capture_rg --files)"
+peer_admission_files="$(filter_rg "$peer_admission_files" '(^|/)peer_admission[^/]*\.rs$|(^|/)peer_admission/')"
 while IFS= read -r peer_file; do
   [[ -z "$peer_file" ]] && continue
-  found="$(rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|runtime\.interrupt\(|session_service\.interrupt\(' "$root/$peer_file" 2>/dev/null || true)"
+  found="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|runtime\.interrupt\(|session_service\.interrupt\(' "$root/$peer_file")"
   if [[ -n "$found" ]]; then
     peer_matches+="$found"$'\n'
   fi
-done < <(cd "$root" && rg --files 2>/dev/null | rg '(^|/)peer_admission[^/]*\.rs$|(^|/)peer_admission/' || true)
+done <<<"$peer_admission_files"
 report_matches "peer-admission code can reach hard interrupt authority" "$peer_matches"
 
 if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
-  comms_drain_matches="$(rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|\.interrupt_current_run\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs" 2>/dev/null || true)"
+  comms_drain_matches="$(capture_rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|\.interrupt_current_run\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs")"
   report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
 fi
 
 if [[ -f "$root/meerkat-rpc/src/session_executor.rs" ]]; then
-  rpc_executor_recursion="$(rg -n '\.runtime\.interrupt\(' "$root/meerkat-rpc/src/session_executor.rs" 2>/dev/null || true)"
+  rpc_executor_recursion="$(capture_rg -n '\.runtime\.interrupt\(' "$root/meerkat-rpc/src/session_executor.rs")"
   report_matches "RPC executor interrupt handle must not re-enter public SessionRuntime::interrupt" "$rpc_executor_recursion"
 fi
 
 if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
   strip_authorized_interrupt_body() {
-    awk '
+    "$AWK_BIN" '
       function brace_delta(line, opened, closed, copy) {
         copy = line
         opened = gsub(/\{/, "{", copy)
@@ -347,9 +552,9 @@ if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then
       { print }
     ' "$1"
   }
-  public_interrupt_bypass="$(strip_authorized_interrupt_body "$root/meerkat-runtime/src/user_interrupt.rs" \
-    | rg -n 'self\.hard_cancel_current_run_authorized\(|UserInterruptAuthority::new\(\)|\.hard_cancel_current_run\(|\binterrupt_handle_for\(' \
-    | rg -v 'fn[[:space:]]+interrupt_handle_for[[:space:]]*\(' 2>/dev/null || true)"
+  public_interrupt_bypass="$(strip_authorized_interrupt_body "$root/meerkat-runtime/src/user_interrupt.rs")"
+  public_interrupt_bypass="$(filter_rg "$public_interrupt_bypass" -n 'self\.hard_cancel_current_run_authorized\(|UserInterruptAuthority::new\(\)|\.hard_cancel_current_run\(|\binterrupt_handle_for\(')"
+  public_interrupt_bypass="$(filter_rg "$public_interrupt_bypass" -v 'fn[[:space:]]+interrupt_handle_for[[:space:]]*\(')"
   report_matches "public user-interrupt API must route through the command/DSL path" "$public_interrupt_bypass"
 fi
 
@@ -370,9 +575,9 @@ for surface_file in \
   "$root/meerkat-mob/src/runtime/provisioner.rs"
 do
   if [[ -f "$surface_file" ]]; then
-    found="$(strip_core_executor_interrupt_impls "$surface_file" \
-      | strip_cfg_test_modules \
-      | rg -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run\(' 2>/dev/null || true)"
+    stripped_surface="$(strip_core_executor_interrupt_impls "$surface_file")"
+    stripped_surface="$(printf '%s\n' "$stripped_surface" | strip_cfg_test_modules)"
+    found="$(filter_rg "$stripped_surface" -n '\b(runtime|service|svc|session_service|cancel_svc|self\.service|self\.session_service)\.interrupt\(|session_service\(\)\.interrupt\(|\.interrupt_current_run\(')"
     if [[ -n "$found" ]]; then
       public_interrupt_bypasses+="$surface_file"$'\n'"$found"$'\n'
     fi
@@ -392,51 +597,22 @@ report_matches "direct RuntimeEffect constructor helpers are forbidden" \
   "$(run_rg 'RuntimeEffect::(cancel_after_boundary|stop_runtime_executor)\b')"
 
 runtime_effect_assoc="$(run_rg 'RuntimeEffect::[A-Za-z_][A-Za-z0-9_]*' --glob '!**/effect.rs')"
-runtime_effect_assoc="$(printf '%s\n' "$runtime_effect_assoc" | rg -v 'RuntimeEffect::from_fact' || true)"
+runtime_effect_assoc="$(filter_rg "$runtime_effect_assoc" -v 'RuntimeEffect::from_fact')"
 report_matches "RuntimeEffect associated constructors must go through from_fact" "$runtime_effect_assoc"
 
 fact_literals=""
 if [[ -d "$root/meerkat-runtime/src" ]]; then
+  runtime_files="$(cd "$root" && capture_rg --files meerkat-runtime/src)"
+  runtime_files="$(filter_rg "$runtime_files" -v '(^|/)generated/|(^|/)effect\.rs$|(^|/)tests/|tests\.rs$')"
   while IFS= read -r runtime_file; do
     [[ -z "$runtime_file" ]] && continue
     runtime_path="$root/$runtime_file"
-    found="$(awk '
-      function brace_delta(line, opened, closed, copy) {
-        copy = line
-        opened = gsub(/\{/, "{", copy)
-        copy = line
-        closed = gsub(/\}/, "}", copy)
-        return opened - closed
-      }
-      /^[[:space:]]*#\[cfg\(test\)\]/ {
-        pending_test_attr = 1
-        next
-      }
-      pending_test_attr && /^[[:space:]]*mod[[:space:]]+tests[[:space:]]*\{/ {
-        in_test = 1
-        pending_test_attr = 0
-        depth = brace_delta($0)
-        next
-      }
-      pending_test_attr {
-        pending_test_attr = 0
-      }
-      in_test {
-        depth += brace_delta($0)
-        if (depth <= 0) {
-          in_test = 0
-          depth = 0
-        }
-        next
-      }
-      { print }
-    ' "$runtime_path" \
-      | rg -n 'RuntimeEffectFact::(CancelAfterBoundary|StopRuntimeExecutor)|MeerkatMachineEffect::RuntimeEffectFact|RuntimeEffectKind::(CancelAfterBoundary|StopRuntimeExecutor)' 2>/dev/null || true)"
+    stripped_runtime="$(strip_cfg_test_modules <"$runtime_path")"
+    found="$(filter_rg "$stripped_runtime" -n 'RuntimeEffectFact::(CancelAfterBoundary|StopRuntimeExecutor)|MeerkatMachineEffect::RuntimeEffectFact|RuntimeEffectKind::(CancelAfterBoundary|StopRuntimeExecutor)')"
     if [[ -n "$found" ]]; then
       fact_literals+="$runtime_path"$'\n'"$found"$'\n'
     fi
-  done < <(cd "$root" && rg --files meerkat-runtime/src 2>/dev/null \
-    | rg -v '(^|/)generated/|(^|/)effect\.rs$|(^|/)tests/|tests\.rs$' || true)
+  done <<<"$runtime_files"
 fi
 report_matches "runtime shell files must not construct RuntimeEffectFact literals" "$fact_literals"
 

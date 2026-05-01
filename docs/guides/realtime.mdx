@@ -63,7 +63,8 @@ Realtime is enabled by pointing the session at a realtime-capable model. Two pat
 
 ### At session creation
 
-Set the model on `session/create` (RPC) or the equivalent REST / SDK call:
+Set the model in `turn_metadata` on `session/create` (RPC) or the equivalent
+REST / SDK call:
 
 <CodeGroup>
 ```json JSON-RPC
@@ -73,8 +74,10 @@ Set the model on `session/create` (RPC) or the equivalent REST / SDK call:
   "method": "session/create",
   "params": {
     "prompt": "Let's talk.",
-    "model": "gpt-realtime-1.5",
-    "provider": "openai"
+    "turn_metadata": {
+      "model": "gpt-realtime-1.5",
+      "provider": "openai"
+    }
   }
 }
 ```
@@ -82,7 +85,7 @@ Set the model on `session/create` (RPC) or the equivalent REST / SDK call:
 ```bash REST
 curl -X POST http://127.0.0.1:8080/sessions \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Let'"'"'s talk.","model":"gpt-realtime-1.5","provider":"openai"}'
+  -d '{"prompt":"Let'"'"'s talk.","turn_metadata":{"model":"gpt-realtime-1.5","provider":"openai"}}'
 ```
 
 ```python Python SDK

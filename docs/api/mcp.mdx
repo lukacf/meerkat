@@ -242,9 +242,11 @@ Start a new Meerkat agent session with the given prompt.
 {
   "prompt": "Analyze this code for bugs",
   "system_prompt": "You are a senior code reviewer.",
-  "model": "claude-opus-4-6",
+  "turn_metadata": {
+    "model": "claude-opus-4-6",
+    "provider": "anthropic"
+  },
   "max_tokens": 4096,
-  "provider": "anthropic",
   "output_schema": {
     "type": "object",
     "properties": {
@@ -273,7 +275,6 @@ Start a new Meerkat agent session with the given prompt.
     "enable_shell": false,
     "shell_timeout_secs": 30
   },
-  "keep_alive": null,
   "comms_name": null,
   "hooks_override": null
 }
@@ -299,16 +300,12 @@ Start a new Meerkat agent session with the given prompt.
   Override system prompt.
 </ParamField>
 
-<ParamField body="model" type="string | null" default="config default">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
-</ParamField>
-
 <ParamField body="max_tokens" type="u32 | null" default="config default">
   Max tokens per turn.
 </ParamField>
 
-<ParamField body="provider" type="string | null" default="inferred">
-  Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+<ParamField body="turn_metadata" type="RuntimeTurnMetadata | null" default="null">
+  Canonical first-turn runtime metadata. Put model/provider/provider_params, skill_references, additional_instructions, keep_alive, and render metadata inside this object; split top-level metadata fields are rejected.
 </ParamField>
 
 <ParamField body="output_schema" type="object | null" default="null">
@@ -347,12 +344,8 @@ Start a new Meerkat agent session with the given prompt.
   Default shell command timeout.
 </ParamField>
 
-<ParamField body="keep_alive" type="bool | null" default="null">
-  Keep session alive after turn for comms. On `meerkat_run`, `null`/omitted uses the run default (`false`), `true` enables, and `false` explicitly disables. Requires `comms_name` when enabled.
-</ParamField>
-
 <ParamField body="comms_name" type="string | null" default="null">
-  Agent name for comms.
+  Agent name for comms. Required when `turn_metadata.keep_alive` enables keep-alive.
 </ParamField>
 
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">
@@ -409,11 +402,13 @@ tool calls. The call waits for the resumed turn to complete and returns the same
   ],
   "enable_builtins": false,
   "builtin_config": null,
-  "keep_alive": null,
+  "turn_metadata": {
+    "keep_alive": {
+      "action": "clear"
+    }
+  },
   "comms_name": null,
-  "model": null,
   "max_tokens": null,
-  "provider": null,
   "hooks_override": null
 }
 ```
@@ -478,28 +473,20 @@ tool calls. The call waits for the resumed turn to complete and returns the same
   Shell-tools override. Omit / `null` to inherit the persisted session value.
 </ParamField>
 
-<ParamField body="keep_alive" type="bool | null" default="null">
-  Keep-alive override for this resume. `null` = inherit persisted session intent, `true` = enable, `false` = disable.
-</ParamField>
-
 <Note>
 `meerkat_run` and `meerkat_resume` follow the same commit/cancel rule as the other interactive surfaces: committed success is not rewritten to cancellation, and post-commit create failure returns session identity so the session can be resumed.
 </Note>
 
 <ParamField body="comms_name" type="string | null" default="from session">
-  Agent name for comms.
-</ParamField>
-
-<ParamField body="model" type="string | null" default="from session">
-  Model override. On materialized sessions this hot-swaps the LLM client for the remainder of the session.
+  Agent name for comms. Required when `turn_metadata.keep_alive` enables keep-alive.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="from session">
   Max tokens override.
 </ParamField>
 
-<ParamField body="provider" type="string | null" default="from session">
-  Provider override. Typically inferred from `model`. Used with `model` for mid-session provider switching.
+<ParamField body="turn_metadata" type="RuntimeTurnMetadata | null" default="null">
+  Canonical per-turn runtime metadata. Put turn-scoped model/provider/provider_params, skill_references, flow_tool_overlay, additional_instructions, keep_alive, and render metadata inside this object; split top-level metadata fields are rejected.
 </ParamField>
 
 <ParamField body="hooks_override" type="HookRunOverrides | null" default="null">

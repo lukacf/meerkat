@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
+use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason, dsl};
 use chrono::{DateTime, Utc};
 use indexmap::IndexSet;
 use meerkat_contracts::{RealtimeChannelState, RealtimeChannelStatus};
@@ -579,11 +579,441 @@ pub(crate) enum MeerkatMachineCommandResult {
 #[doc(hidden)]
 #[must_use]
 pub fn canonical_meerkat_machine_command_manifest() -> IndexSet<&'static str> {
+    canonical_meerkat_machine_command_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_command_input_variant_manifest()
+-> IndexSet<MeerkatMachineInputVariant> {
     canonical_meerkat_machine_command_classifications()
         .into_iter()
-        .flat_map(|record| record.classification.catalog_inputs())
-        .map(MeerkatMachineCatalogInput::as_str)
+        .flat_map(|record| record.classification.catalog_input_variants())
         .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_runtime_internal_manifest() -> IndexSet<&'static str> {
+    canonical_meerkat_machine_runtime_internal_input_variant_manifest()
+        .into_iter()
+        .map(|variant| variant.as_str())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_runtime_internal_input_variant_manifest()
+-> IndexSet<MeerkatMachineInputVariant> {
+    canonical_meerkat_machine_runtime_internal_classifications()
+        .into_iter()
+        .map(|record| record.input.input_variant())
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+-> IndexSet<MeerkatMachineInputVariant> {
+    MeerkatMachineFieldlessRuntimeInternalInput::ALL
+        .iter()
+        .copied()
+        .map(MeerkatMachineFieldlessRuntimeInternalInput::input_variant)
+        .collect()
+}
+
+macro_rules! meerkat_machine_runtime_internal_inputs {
+    ($($reason:ident => [$($variant:ident),+ $(,)?]),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum MeerkatMachineRuntimeInternalInput {
+            $($($variant),+),+
+        }
+
+        impl MeerkatMachineRuntimeInternalInput {
+            pub const ALL: &'static [Self] = &[
+                $($(Self::$variant),+),+
+            ];
+
+            pub const CLASSIFICATIONS: &'static [MeerkatMachineRuntimeInternalClassificationRecord] = &[
+                $($(
+                    MeerkatMachineRuntimeInternalClassificationRecord {
+                        input: Self::$variant,
+                        reason: MeerkatMachineRuntimeInternalReason::$reason,
+                    },
+                )+)+
+            ];
+
+            #[must_use]
+            pub const fn input_variant(self) -> MeerkatMachineInputVariant {
+                match self {
+                    $($(Self::$variant => MeerkatMachineInputVariant::$variant,)+)+
+                }
+            }
+
+            #[must_use]
+            pub const fn reason(self) -> MeerkatMachineRuntimeInternalReason {
+                match self {
+                    $(
+                        $(Self::$variant)|+ => MeerkatMachineRuntimeInternalReason::$reason,
+                    )+
+                }
+            }
+        }
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeerkatMachineRuntimeInternalReason {
+    InputQueueLifecycle,
+    OperationLifecycle,
+    RunExecutionLifecycle,
+    CancellationLifecycle,
+    LiveTopologyReconfiguration,
+    RealtimeBindingLifecycle,
+    CommsIngressLifecycle,
+    SupervisorTrustLifecycle,
+    PeerRequestLifecycle,
+    VisibilityAuthorityLifecycle,
+    ExtractionLifecycle,
+    McpServerLifecycle,
+    ModelRoutingLifecycle,
+    ExternalSurfaceLifecycle,
+    FailureRecoveryLifecycle,
+    UserInterruptDispatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeerkatMachineRuntimeInternalClassificationRecord {
+    pub input: MeerkatMachineRuntimeInternalInput,
+    pub reason: MeerkatMachineRuntimeInternalReason,
+}
+
+meerkat_machine_runtime_internal_inputs!(
+    InputQueueLifecycle => [
+        AbandonInput,
+        AdvanceSessionContext,
+        BudgetExhausted,
+        ChangeLane,
+        CoalesceInput,
+        ConsumeInput,
+        ConsumeOnAccept,
+        MarkApplied,
+        MarkAppliedPendingConsumption,
+        QueueAccepted,
+        RecoverInputLifecycle,
+        RetryRequested,
+        RollbackStaged,
+        StageForRun,
+        StartConversationRun,
+        StartImmediateAppend,
+        StartImmediateContext,
+        SteerAccepted,
+        SupersedeInput,
+    ],
+    OperationLifecycle => [
+        AbortOp,
+        CancelOp,
+        CancelWaitAll,
+        CompleteOp,
+        FailOp,
+        IncrementAttemptCount,
+        OpsBarrierSatisfied,
+        PeerReadyOp,
+        ProgressReportedOp,
+        RegisterOp,
+        RegisterPendingOps,
+        RequestWaitAll,
+        RetireCompletedOp,
+        RetireRequestedOp,
+        SatisfyWaitAll,
+        StartOp,
+        TerminateOp,
+    ],
+    RunExecutionLifecycle => [
+        AcknowledgeTerminal,
+        BoundaryComplete,
+        BoundaryContinue,
+        LlmReturnedTerminal,
+        LlmReturnedToolCalls,
+        PrimitiveApplied,
+        ProductOutputStarted,
+        ProductTurnCommitted,
+        ProductTurnInFlight,
+        ProductTurnTerminal,
+        RecordBoundarySeq,
+        RunCompleted,
+        RunFailed,
+        RuntimeExecutorExited,
+        TimeBudgetExceeded,
+        ToolCallsResolved,
+        TurnLimitReached,
+    ],
+    CancellationLifecycle => [
+        CancelNow,
+        CancellationObserved,
+        ForceCancelNoRun,
+        ProductTurnInterrupted,
+        RequestCancelAfterBoundary,
+        RunCancelled,
+    ],
+    LiveTopologyReconfiguration => [
+        AbortLiveTopologyBeforeDetach,
+        ApplyLiveTopologyIdentity,
+        ApplyLiveTopologyVisibility,
+        BeginLiveTopologyReconfigure,
+        CompleteLiveTopology,
+        CompleteUntilChangedSwitchTurnReconfigure,
+        FailLiveTopologyAfterDetach,
+        MarkLiveTopologyDetached,
+    ],
+    RealtimeBindingLifecycle => [
+        BeginRealtimeBinding,
+        BeginRealtimeReconnectCycle,
+        ClassifyRealtimeClientInputSubmitted,
+        ClassifyRealtimeMidTurnActivity,
+        ClassifyRealtimeTurnTerminated,
+        ClearRealtimeReconnectProgress,
+        DetachRealtimeBinding,
+        ExhaustRealtimeReconnectCycle,
+        InteractionStreamAttached,
+        InteractionStreamClosedEarly,
+        InteractionStreamCompleted,
+        InteractionStreamExpired,
+        InteractionStreamReserved,
+        ProjectRealtimeIntent,
+        PublishRealtimeSignal,
+        RealtimeProjectionAdvanceObserved,
+        RealtimeProjectionRefreshed,
+        RealtimeProjectionReset,
+        ReplaceRealtimeBinding,
+        RequireRealtimeReattach,
+        RequireRealtimeReattachForAuthority,
+        ScheduleRealtimeReconnectRetry,
+    ],
+    CommsIngressLifecycle => [
+        AddDirectPeerEndpoint,
+        ApplyMobPeerOverlay,
+        AttachMobIngress,
+        AttachSessionIngress,
+        BindSupervisor,
+        ClearLocalEndpoint,
+        DetachIngress,
+        DrainExitedClean,
+        DrainExitedRespawnable,
+        PublishLocalEndpoint,
+        RemoveDirectPeerEndpoint,
+        SpawnDrain,
+        StopDrain,
+    ],
+    SupervisorTrustLifecycle => [
+        AuthorizeSupervisor,
+        RevokeSupervisor,
+        SupervisorTrustEdgePublishFailed,
+        SupervisorTrustEdgePublished,
+        SupervisorTrustEdgeRevokeFailed,
+        SupervisorTrustEdgeRevoked,
+    ],
+    PeerRequestLifecycle => [
+        PeerRequestReceived,
+        PeerRequestSent,
+        PeerRequestTimedOut,
+        PeerResponseProgressArrived,
+        PeerResponseReplied,
+        PeerResponseTerminalArrived,
+    ],
+    VisibilityAuthorityLifecycle => [
+        CommitDeferredNames,
+        CommitVisibilityFilter,
+        StageDeferredNames,
+        StageVisibilityFilter,
+        SyncVisibilityRevisions,
+    ],
+    ExtractionLifecycle => [
+        EnterExtraction,
+        ExtractionStart,
+        ExtractionValidationFailed,
+        ExtractionValidationPassed,
+    ],
+    McpServerLifecycle => [
+        McpServerConnectPending,
+        McpServerConnected,
+        McpServerDisconnected,
+        McpServerFailed,
+        McpServerReload,
+    ],
+    ModelRoutingLifecycle => [
+        ModelRoutingStatus,
+        RequestFiniteSwitchTurn,
+        RequestUntilChangedSwitchTurn,
+        SetModelRoutingBaseline,
+    ],
+    ExternalSurfaceLifecycle => [
+        SurfaceApplyBoundary,
+        SurfaceCallFinished,
+        SurfaceCallStarted,
+        SurfaceFinalizeRemovalClean,
+        SurfaceFinalizeRemovalForced,
+        SurfaceMarkPendingFailed,
+        SurfaceMarkPendingSucceeded,
+        SurfaceRegister,
+        SurfaceShutdown,
+        SurfaceSnapshotAligned,
+        SurfaceStageAdd,
+        SurfaceStageReload,
+        SurfaceStageRemove,
+    ],
+    FailureRecoveryLifecycle => [
+        FatalFailure,
+        RecoverableFailure,
+    ],
+    UserInterruptDispatch => [
+        InterruptCurrentRun,
+    ],
+);
+
+macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {
+    ($($authority:ident => [$($variant:ident),+ $(,)?]),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum MeerkatMachineFieldlessRuntimeInternalInput {
+            $($($variant),+),+
+        }
+
+        impl MeerkatMachineFieldlessRuntimeInternalInput {
+            pub const ALL: &'static [Self] = &[
+                $($(Self::$variant),+),+
+            ];
+
+            #[must_use]
+            pub const fn runtime_internal_input(self) -> MeerkatMachineRuntimeInternalInput {
+                match self {
+                    $($(Self::$variant => MeerkatMachineRuntimeInternalInput::$variant,)+)+
+                }
+            }
+
+            #[must_use]
+            pub const fn input_variant(self) -> MeerkatMachineInputVariant {
+                self.runtime_internal_input().input_variant()
+            }
+
+            #[must_use]
+            pub const fn authority(self) -> MeerkatMachineFieldlessRuntimeInternalAuthority {
+                match self {
+                    $(
+                        $(Self::$variant)|+ => MeerkatMachineFieldlessRuntimeInternalAuthority::$authority,
+                    )+
+                }
+            }
+
+            #[must_use]
+            pub const fn requires_typed_runtime_internal_stager(self) -> bool {
+                matches!(
+                    self.authority(),
+                    MeerkatMachineFieldlessRuntimeInternalAuthority::UserInterruptDispatch
+                )
+            }
+
+            pub(crate) const fn dsl_input_variant(self) -> dsl::MeerkatMachineInputVariant {
+                match self {
+                    $($(Self::$variant => dsl::MeerkatMachineInputVariant::$variant,)+)+
+                }
+            }
+
+            pub(crate) fn dsl_input(self) -> dsl::MeerkatMachineInput {
+                match self {
+                    $($(Self::$variant => dsl::MeerkatMachineInput::$variant,)+)+
+                }
+            }
+
+            pub(crate) fn from_dsl_input_variant(
+                variant: dsl::MeerkatMachineInputVariant,
+            ) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|input| input.dsl_input_variant() == variant)
+            }
+
+            pub(crate) fn reject_raw_dsl_input(
+                input: &dsl::MeerkatMachineInput,
+            ) -> Result<(), String> {
+                if let Some(fieldless) = Self::from_dsl_input_variant(input.variant())
+                    && fieldless.requires_typed_runtime_internal_stager()
+                {
+                    let variant = fieldless.input_variant();
+                    return Err(format!(
+                        "fieldless runtime-internal input {variant:?} must use typed runtime-internal staging authority"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    };
+}
+
+meerkat_machine_fieldless_runtime_internal_inputs!(
+    RuntimeOwner => [
+        RuntimeExecutorExited,
+        PrimitiveApplied,
+        LlmReturnedTerminal,
+        ToolCallsResolved,
+        BoundaryContinue,
+        BoundaryComplete,
+        ExtractionStart,
+        ExtractionValidationPassed,
+        CancelNow,
+        RequestCancelAfterBoundary,
+        CancellationObserved,
+        TurnLimitReached,
+        BudgetExhausted,
+        TimeBudgetExceeded,
+        ForceCancelNoRun,
+        CancelWaitAll,
+        StopDrain,
+        DrainExitedClean,
+        DrainExitedRespawnable,
+        SurfaceShutdown,
+        BeginRealtimeBinding,
+        ReplaceRealtimeBinding,
+        DetachRealtimeBinding,
+        RequireRealtimeReattach,
+        ExhaustRealtimeReconnectCycle,
+        ClearRealtimeReconnectProgress,
+        MarkLiveTopologyDetached,
+        ApplyLiveTopologyIdentity,
+        ApplyLiveTopologyVisibility,
+        CompleteLiveTopology,
+        AbortLiveTopologyBeforeDetach,
+        FailLiveTopologyAfterDetach,
+        ProductTurnInFlight,
+        ProductTurnCommitted,
+        ProductOutputStarted,
+        ProductTurnInterrupted,
+        ProductTurnTerminal,
+        ClassifyRealtimeClientInputSubmitted,
+        ClassifyRealtimeMidTurnActivity,
+        ClassifyRealtimeTurnTerminated,
+        DetachIngress,
+        ClearLocalEndpoint,
+    ],
+    UserInterruptDispatch => [
+        InterruptCurrentRun,
+    ],
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeerkatMachineFieldlessRuntimeInternalAuthority {
+    RuntimeOwner,
+    UserInterruptDispatch,
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn canonical_meerkat_machine_runtime_internal_classifications()
+-> Vec<MeerkatMachineRuntimeInternalClassificationRecord> {
+    MeerkatMachineRuntimeInternalInput::CLASSIFICATIONS.to_vec()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -618,7 +1048,6 @@ pub enum MeerkatMachineCatalogInput {
     UnregisterSession,
     EnsureSessionWithExecutor,
     SetSilentIntents,
-    InterruptCurrentRun,
     CancelAfterBoundary,
     StopRuntimeExecutor,
     ContainsSession,
@@ -664,6 +1093,55 @@ pub enum MeerkatMachineCatalogInput {
 }
 
 impl MeerkatMachineCatalogInput {
+    pub const ALL: &'static [Self] = &[
+        Self::RegisterSession,
+        Self::UnregisterSession,
+        Self::EnsureSessionWithExecutor,
+        Self::SetSilentIntents,
+        Self::CancelAfterBoundary,
+        Self::StopRuntimeExecutor,
+        Self::ContainsSession,
+        Self::SessionHasExecutor,
+        Self::SessionHasComms,
+        Self::OpsLifecycleRegistry,
+        Self::PrepareBindings,
+        Self::InputState,
+        Self::ListActiveInputs,
+        Self::ReconfigureSessionLlmIdentity,
+        Self::StagePersistentFilter,
+        Self::RequestDeferredTools,
+        Self::PublishCommittedVisibleSet,
+        Self::SetPeerIngressContext,
+        Self::NotifyDrainExited,
+        Self::AbortAll,
+        Self::Abort,
+        Self::Wait,
+        Self::Ingest,
+        Self::PublishEvent,
+        Self::Retire,
+        Self::Recycle,
+        Self::Reset,
+        Self::Recover,
+        Self::Destroy,
+        Self::RuntimeState,
+        Self::RuntimeRealtimeAttachmentStatus,
+        Self::ModelRoutingStatus,
+        Self::SetModelRoutingBaseline,
+        Self::RequestFiniteSwitchTurn,
+        Self::RequestUntilChangedSwitchTurn,
+        Self::AdmitModelRoutingAssistantTurn,
+        Self::BeginImageOperation,
+        Self::ActivateImageOperationOverride,
+        Self::CompleteImageOperation,
+        Self::RestoreImageOperationOverride,
+        Self::LoadBoundaryReceipt,
+        Self::AcceptWithCompletion,
+        Self::AcceptWithoutWake,
+        Self::Prepare,
+        Self::Commit,
+        Self::Fail,
+    ];
+
     #[must_use]
     pub const fn input_variant(self) -> MeerkatMachineInputVariant {
         match self {
@@ -673,7 +1151,6 @@ impl MeerkatMachineCatalogInput {
                 MeerkatMachineInputVariant::EnsureSessionWithExecutor
             }
             Self::SetSilentIntents => MeerkatMachineInputVariant::SetSilentIntents,
-            Self::InterruptCurrentRun => MeerkatMachineInputVariant::InterruptCurrentRun,
             Self::CancelAfterBoundary => MeerkatMachineInputVariant::CancelAfterBoundary,
             Self::StopRuntimeExecutor => MeerkatMachineInputVariant::StopRuntimeExecutor,
             Self::ContainsSession => MeerkatMachineInputVariant::ContainsSession,
@@ -740,7 +1217,6 @@ impl MeerkatMachineCatalogInput {
             Self::UnregisterSession => "UnregisterSession",
             Self::EnsureSessionWithExecutor => "EnsureSessionWithExecutor",
             Self::SetSilentIntents => "SetSilentIntents",
-            Self::InterruptCurrentRun => "InterruptCurrentRun",
             Self::CancelAfterBoundary => "CancelAfterBoundary",
             Self::StopRuntimeExecutor => "StopRuntimeExecutor",
             Self::ContainsSession => "ContainsSession",
@@ -783,6 +1259,77 @@ impl MeerkatMachineCatalogInput {
             Self::Prepare => "Prepare",
             Self::Commit => "Commit",
             Self::Fail => "Fail",
+        }
+    }
+}
+
+impl MeerkatMachineCommandVariant {
+    #[must_use]
+    pub const fn catalog_input(self) -> Option<MeerkatMachineCatalogInput> {
+        match self {
+            Self::ConfigureModelRoutingBaseline
+            | Self::RequestSwitchTurn
+            | Self::RuntimeRealtimeChannelStatus
+            | Self::SessionModelRoutingStatus
+            | Self::PrepareLocalSessionBindings => None,
+            Self::RegisterSession => Some(MeerkatMachineCatalogInput::RegisterSession),
+            Self::UnregisterSession => Some(MeerkatMachineCatalogInput::UnregisterSession),
+            Self::EnsureSessionWithExecutor => {
+                Some(MeerkatMachineCatalogInput::EnsureSessionWithExecutor)
+            }
+            Self::SetSilentIntents => Some(MeerkatMachineCatalogInput::SetSilentIntents),
+            Self::CancelAfterBoundary => Some(MeerkatMachineCatalogInput::CancelAfterBoundary),
+            Self::StopRuntimeExecutor => Some(MeerkatMachineCatalogInput::StopRuntimeExecutor),
+            Self::ContainsSession => Some(MeerkatMachineCatalogInput::ContainsSession),
+            Self::SessionHasExecutor => Some(MeerkatMachineCatalogInput::SessionHasExecutor),
+            Self::SessionHasComms => Some(MeerkatMachineCatalogInput::SessionHasComms),
+            Self::OpsLifecycleRegistry => Some(MeerkatMachineCatalogInput::OpsLifecycleRegistry),
+            Self::PrepareBindings => Some(MeerkatMachineCatalogInput::PrepareBindings),
+            Self::InputState => Some(MeerkatMachineCatalogInput::InputState),
+            Self::ListActiveInputs => Some(MeerkatMachineCatalogInput::ListActiveInputs),
+            Self::ReconfigureSessionLlmIdentity => {
+                Some(MeerkatMachineCatalogInput::ReconfigureSessionLlmIdentity)
+            }
+            Self::StagePersistentFilter => Some(MeerkatMachineCatalogInput::StagePersistentFilter),
+            Self::RequestDeferredTools => Some(MeerkatMachineCatalogInput::RequestDeferredTools),
+            Self::PublishCommittedVisibleSet => {
+                Some(MeerkatMachineCatalogInput::PublishCommittedVisibleSet)
+            }
+            Self::SetPeerIngressContext => Some(MeerkatMachineCatalogInput::SetPeerIngressContext),
+            Self::NotifyDrainExited => Some(MeerkatMachineCatalogInput::NotifyDrainExited),
+            Self::AbortAll => Some(MeerkatMachineCatalogInput::AbortAll),
+            Self::Abort => Some(MeerkatMachineCatalogInput::Abort),
+            Self::Wait => Some(MeerkatMachineCatalogInput::Wait),
+            Self::Ingest => Some(MeerkatMachineCatalogInput::Ingest),
+            Self::PublishEvent => Some(MeerkatMachineCatalogInput::PublishEvent),
+            Self::Retire => Some(MeerkatMachineCatalogInput::Retire),
+            Self::Recycle => Some(MeerkatMachineCatalogInput::Recycle),
+            Self::Reset => Some(MeerkatMachineCatalogInput::Reset),
+            Self::Recover => Some(MeerkatMachineCatalogInput::Recover),
+            Self::Destroy => Some(MeerkatMachineCatalogInput::Destroy),
+            Self::RuntimeState => Some(MeerkatMachineCatalogInput::RuntimeState),
+            Self::RuntimeRealtimeAttachmentStatus => {
+                Some(MeerkatMachineCatalogInput::RuntimeRealtimeAttachmentStatus)
+            }
+            Self::AdmitModelRoutingAssistantTurn => {
+                Some(MeerkatMachineCatalogInput::AdmitModelRoutingAssistantTurn)
+            }
+            Self::BeginImageOperation => Some(MeerkatMachineCatalogInput::BeginImageOperation),
+            Self::ActivateImageOperationOverride => {
+                Some(MeerkatMachineCatalogInput::ActivateImageOperationOverride)
+            }
+            Self::CompleteImageOperation => {
+                Some(MeerkatMachineCatalogInput::CompleteImageOperation)
+            }
+            Self::RestoreImageOperationOverride => {
+                Some(MeerkatMachineCatalogInput::RestoreImageOperationOverride)
+            }
+            Self::LoadBoundaryReceipt => Some(MeerkatMachineCatalogInput::LoadBoundaryReceipt),
+            Self::AcceptWithCompletion => Some(MeerkatMachineCatalogInput::AcceptWithCompletion),
+            Self::AcceptWithoutWake => Some(MeerkatMachineCatalogInput::AcceptWithoutWake),
+            Self::Prepare => Some(MeerkatMachineCatalogInput::Prepare),
+            Self::Commit => Some(MeerkatMachineCatalogInput::Commit),
+            Self::Fail => Some(MeerkatMachineCatalogInput::Fail),
         }
     }
 }

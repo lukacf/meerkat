@@ -214,6 +214,58 @@ rust_test(
 )
 
 rust_test(
+    name = "inproc_canonical_peer_routing_test",
+    aliases = aliases(
+        package_name = "meerkat-comms",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "inproc_canonical_peer_routing",
+    crate_root = "tests/inproc_canonical_peer_routing.rs",
+    crate_features = [
+        "integration-real-tests",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "skills/multi-agent-comms/SKILL.md",
+    ],
+    srcs = [
+        "tests/inproc_canonical_peer_routing.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_BIN_NAME": "inproc_canonical_peer_routing",
+        "CARGO_MANIFEST_DIR": "./meerkat-comms",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "small",
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-comms",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-comms:meerkat_comms",
+        "//meerkat-contracts:meerkat_contracts",
+        "//meerkat-core:meerkat_core",
+        "//meerkat-skills:meerkat_skills",
+    ] + all_crate_deps(
+        package_name = "meerkat-comms",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "router_ambiguous_name_typed_error_test",
     aliases = aliases(
         package_name = "meerkat-comms",
@@ -373,6 +425,7 @@ test_suite(
     name = "fast_tests",
     tests = [
         ":inbox_admission_toctou_test",
+        ":inproc_canonical_peer_routing_test",
         ":meerkat_comms_unit_test",
         ":router_ambiguous_name_typed_error_test",
         ":trust_duplicate_name_ok_duplicate_id_rejected_test",

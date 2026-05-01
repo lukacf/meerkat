@@ -48,8 +48,14 @@ use meerkat_core::{
 use meerkat_core::{
     Session, SessionMetadata, SessionSystemContextState, SessionTooling, ToolCategoryOverride,
 };
-use meerkat_machine_schema::catalog::dsl::dsl_mob_machine as schema_mob_machine;
-use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind};
+use meerkat_machine_schema::catalog::dsl::{
+    dsl_mob_machine as schema_mob_machine,
+    mob_machine::{
+        MobMachineInput as SchemaMobMachineInput,
+        MobMachineInputVariant as SchemaMobMachineInputVariant,
+    },
+};
+use meerkat_machine_schema::{Expr, MachineSchema, TriggerKind, identity::InputVariantId};
 use meerkat_session::{SessionAgent, SessionAgentBuilder, SessionSnapshot};
 use meerkat_store::{MemoryStore, SessionStore};
 use serde::Serialize;
@@ -3231,8 +3237,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 candidate.interaction.id.0,
                             ))
                             .expect("record inbound peer request before response");
-                        let reply_name = candidate.interaction.from.clone();
-                        let to = test_trusted_peer_route(responder_runtime.as_ref(), &reply_name);
+                        let to = trust_candidate_sender_for_reply(
+                            responder_runtime.as_ref(),
+                            &candidate,
+                        )
+                        .await;
                         let bridge_parse: Result<super::bridge_protocol::BridgeCommand, _> =
                             serde_json::from_value(params.clone());
                         let mut remove_supervisors_after_response = Vec::new();
@@ -3911,6 +3920,47 @@ fn test_trusted_peer_route(comms: &meerkat_comms::CommsRuntime, name: &str) -> P
     let trusted = comms.trusted_peers_shared();
     let trusted = trusted.read();
     panic!("trusted or inproc peer route not found for {name}; trusted={trusted:?}");
+}
+
+async fn trust_candidate_sender_for_reply(
+    comms: &meerkat_comms::CommsRuntime,
+    candidate: &meerkat_core::interaction::PeerInputCandidate,
+) -> PeerRoute {
+    let route = candidate
+        .ingress
+        .route
+        .clone()
+        .or_else(|| {
+            candidate.interaction.from_route.map(|peer_id| {
+                PeerRoute::with_display_name(
+                    peer_id,
+                    PeerName::new(candidate.interaction.from.clone())
+                        .expect("candidate sender display name should be valid"),
+                )
+            })
+        })
+        .expect("peer request candidate must carry a typed reply route");
+    let display_name = route
+        .display_name
+        .clone()
+        .or_else(|| candidate.ingress.display_name.clone())
+        .expect("inproc reply route must carry the sender display name");
+    let signing_pubkey = candidate
+        .ingress
+        .signing_pubkey
+        .expect("peer request candidate must carry the sender signing pubkey");
+    let descriptor = TrustedPeerDescriptor::unsigned_with_pubkey(
+        display_name.as_str(),
+        route.peer_id.to_string(),
+        signing_pubkey,
+        format!("inproc://{}", display_name.as_str()),
+    )
+    .expect("typed ingress sender should convert to a reply trusted peer");
+    comms
+        .add_trusted_peer(descriptor)
+        .await
+        .expect("trust typed ingress sender for bridge reply");
+    route
 }
 
 fn with_unique_mob_id(mut definition: MobDefinition, label: &str) -> MobDefinition {
@@ -5805,7 +5855,7 @@ async fn test_external_member_spawn_rejects_bind_peer_id_pubkey_mismatch() {
             matches!(
                 &event.kind,
                 MobEventKind::MemberSpawned(spawned)
-                    if spawned.agent_identity == AgentIdentity::from("w-ext")
+                    if spawned.agent_identity.as_str() == "w-ext"
             )
         }),
         "rejected bind response must not append a member spawn event"
@@ -16458,13 +16508,13 @@ fn test_top_level_mob_schema_does_not_model_schema_only_rotation_transitions() {
         "top-level mob schema must not model schema-only AckRotation transitions"
     );
 
-    let manifest = crate::mob_machine::canonical_mob_machine_command_manifest();
+    let manifest = crate::mob_machine::MobMachineCommand::command_manifest();
     assert!(
-        !manifest.contains("RotateSupervisor"),
+        !manifest.contains(&"RotateSupervisor"),
         "canonical mob machine command surface must not include schema-only RotateSupervisor"
     );
     assert!(
-        !manifest.contains("AckRotation"),
+        !manifest.contains(&"AckRotation"),
         "canonical mob machine command surface must not include schema-only AckRotation"
     );
 }
@@ -25265,7 +25315,7 @@ struct MobRuntimeParitySchemaTransitionSummary {
 
 #[derive(Debug, Clone)]
 struct MobRuntimeParitySchemaRow {
-    input_variant: String,
+    input_variant: SchemaMobMachineInputVariant,
     classification: MobRuntimeParityClassification,
     left: Vec<MobRuntimeParitySchemaTransitionSummary>,
     right: Vec<MobRuntimeParitySchemaTransitionSummary>,
@@ -25301,6 +25351,7 @@ struct MobRuntimeParityPairSummary {
     mismatched_rows: usize,
     unprobed_rows: usize,
     surface_only_unprobed_rows: usize,
+    runtime_internal_unprobed_rows: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -25320,6 +25371,7 @@ struct MobRuntimeParityAuditSummary {
     mismatched_rows: usize,
     unprobed_rows: usize,
     surface_only_unprobed_rows: usize,
+    runtime_internal_unprobed_rows: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -25597,43 +25649,94 @@ fn mob_runtime_parity_target_pairs() -> &'static [(MobRuntimeParityPhase, MobRun
     ]
 }
 
+fn mob_schema_input_variant_id(input_variant: SchemaMobMachineInputVariant) -> InputVariantId {
+    InputVariantId::parse(input_variant.as_str()).expect("schema MobMachine input variant id")
+}
+
+fn mob_schema_input_variant_set(
+    input_ids: &[InputVariantId],
+) -> BTreeSet<SchemaMobMachineInputVariant> {
+    let input_ids = input_ids.iter().cloned().collect::<BTreeSet<_>>();
+    SchemaMobMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .filter(|input_variant| input_ids.contains(&mob_schema_input_variant_id(*input_variant)))
+        .collect()
+}
+
+fn mob_runtime_internal_input_variant_set() -> BTreeSet<SchemaMobMachineInputVariant> {
+    crate::canonical_mob_machine_runtime_internal_input_variant_manifest()
+        .into_iter()
+        .collect()
+}
+
+fn mob_runtime_parity_probe_required(
+    input_variant: SchemaMobMachineInputVariant,
+    surface_only_inputs: &BTreeSet<SchemaMobMachineInputVariant>,
+    runtime_internal_inputs: &BTreeSet<SchemaMobMachineInputVariant>,
+) -> bool {
+    !surface_only_inputs.contains(&input_variant)
+        && !runtime_internal_inputs.contains(&input_variant)
+}
+
+const MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED: &str =
+    "surface-only input: runtime probe not required";
+const MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED: &str =
+    "runtime-internal input: runtime probe not required";
+
 fn mob_runtime_parity_probe_for_input_variant(
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
 ) -> Option<MobRuntimeParityProbeInput> {
     match input_variant {
-        "Spawn" => Some(MobRuntimeParityProbeInput::Spawn),
-        "EnsureMember" => Some(MobRuntimeParityProbeInput::EnsureMember),
-        "Reconcile" => Some(MobRuntimeParityProbeInput::Reconcile),
-        "SubmitWork" => Some(MobRuntimeParityProbeInput::SubmitWork),
-        "RunFlow" => Some(MobRuntimeParityProbeInput::RunFlow),
-        "CancelFlow" => Some(MobRuntimeParityProbeInput::CancelFlow),
-        "Retire" => Some(MobRuntimeParityProbeInput::Retire),
-        "Respawn" => Some(MobRuntimeParityProbeInput::Respawn),
-        "RetireAll" => Some(MobRuntimeParityProbeInput::RetireAll),
-        "WireMembers" => Some(MobRuntimeParityProbeInput::WireMembers),
-        "UnwireMembers" => Some(MobRuntimeParityProbeInput::UnwireMembers),
-        "WireExternalPeer" => Some(MobRuntimeParityProbeInput::WireExternalPeer),
-        "UnwireExternalPeer" => Some(MobRuntimeParityProbeInput::UnwireExternalPeer),
-        "ExternalTurn" => Some(MobRuntimeParityProbeInput::ExternalTurn),
-        "InternalTurn" => Some(MobRuntimeParityProbeInput::InternalTurn),
-        "CancelWork" => Some(MobRuntimeParityProbeInput::CancelWork),
-        "CancelAllWork" => Some(MobRuntimeParityProbeInput::CancelAllWork),
-        "Stop" => Some(MobRuntimeParityProbeInput::Stop),
-        "Resume" => Some(MobRuntimeParityProbeInput::Resume),
-        "Complete" => Some(MobRuntimeParityProbeInput::Complete),
-        "Reset" => Some(MobRuntimeParityProbeInput::Reset),
-        "Destroy" => Some(MobRuntimeParityProbeInput::Destroy),
-        "TaskCreate" => Some(MobRuntimeParityProbeInput::TaskCreate),
-        "TaskUpdate" => Some(MobRuntimeParityProbeInput::TaskUpdate),
-        "SubscribeAgentEvents" => Some(MobRuntimeParityProbeInput::SubscribeAgentEvents),
-        "SubscribeAllAgentEvents" => Some(MobRuntimeParityProbeInput::SubscribeAllAgentEvents),
-        "SubscribeMobEvents" => Some(MobRuntimeParityProbeInput::SubscribeMobEvents),
-        "RecordOperatorActionProvenance" => {
+        SchemaMobMachineInputVariant::Spawn => Some(MobRuntimeParityProbeInput::Spawn),
+        SchemaMobMachineInputVariant::EnsureMember => {
+            Some(MobRuntimeParityProbeInput::EnsureMember)
+        }
+        SchemaMobMachineInputVariant::Reconcile => Some(MobRuntimeParityProbeInput::Reconcile),
+        SchemaMobMachineInputVariant::SubmitWork => Some(MobRuntimeParityProbeInput::SubmitWork),
+        SchemaMobMachineInputVariant::RunFlow => Some(MobRuntimeParityProbeInput::RunFlow),
+        SchemaMobMachineInputVariant::CancelFlow => Some(MobRuntimeParityProbeInput::CancelFlow),
+        SchemaMobMachineInputVariant::Retire => Some(MobRuntimeParityProbeInput::Retire),
+        SchemaMobMachineInputVariant::Respawn => Some(MobRuntimeParityProbeInput::Respawn),
+        SchemaMobMachineInputVariant::RetireAll => Some(MobRuntimeParityProbeInput::RetireAll),
+        SchemaMobMachineInputVariant::WireMembers => Some(MobRuntimeParityProbeInput::WireMembers),
+        SchemaMobMachineInputVariant::UnwireMembers => {
+            Some(MobRuntimeParityProbeInput::UnwireMembers)
+        }
+        SchemaMobMachineInputVariant::WireExternalPeer => {
+            Some(MobRuntimeParityProbeInput::WireExternalPeer)
+        }
+        SchemaMobMachineInputVariant::UnwireExternalPeer => {
+            Some(MobRuntimeParityProbeInput::UnwireExternalPeer)
+        }
+        SchemaMobMachineInputVariant::CancelWork => Some(MobRuntimeParityProbeInput::CancelWork),
+        SchemaMobMachineInputVariant::CancelAllWork => {
+            Some(MobRuntimeParityProbeInput::CancelAllWork)
+        }
+        SchemaMobMachineInputVariant::Stop => Some(MobRuntimeParityProbeInput::Stop),
+        SchemaMobMachineInputVariant::Resume => Some(MobRuntimeParityProbeInput::Resume),
+        SchemaMobMachineInputVariant::Complete => Some(MobRuntimeParityProbeInput::Complete),
+        SchemaMobMachineInputVariant::Reset => Some(MobRuntimeParityProbeInput::Reset),
+        SchemaMobMachineInputVariant::Destroy => Some(MobRuntimeParityProbeInput::Destroy),
+        SchemaMobMachineInputVariant::TaskCreate => Some(MobRuntimeParityProbeInput::TaskCreate),
+        SchemaMobMachineInputVariant::TaskUpdate => Some(MobRuntimeParityProbeInput::TaskUpdate),
+        SchemaMobMachineInputVariant::SubscribeAgentEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeAgentEvents)
+        }
+        SchemaMobMachineInputVariant::SubscribeAllAgentEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeAllAgentEvents)
+        }
+        SchemaMobMachineInputVariant::SubscribeMobEvents => {
+            Some(MobRuntimeParityProbeInput::SubscribeMobEvents)
+        }
+        SchemaMobMachineInputVariant::RecordOperatorActionProvenance => {
             Some(MobRuntimeParityProbeInput::RecordOperatorActionProvenance)
         }
-        "SetSpawnPolicy" => Some(MobRuntimeParityProbeInput::SetSpawnPolicy),
-        "Shutdown" => Some(MobRuntimeParityProbeInput::Shutdown),
-        "ForceCancel" => Some(MobRuntimeParityProbeInput::ForceCancel),
+        SchemaMobMachineInputVariant::SetSpawnPolicy => {
+            Some(MobRuntimeParityProbeInput::SetSpawnPolicy)
+        }
+        SchemaMobMachineInputVariant::Shutdown => Some(MobRuntimeParityProbeInput::Shutdown),
+        SchemaMobMachineInputVariant::ForceCancel => Some(MobRuntimeParityProbeInput::ForceCancel),
         _ => None,
     }
 }
@@ -26795,15 +26898,16 @@ fn mob_runtime_parity_transition_enabled(
 fn mob_runtime_parity_schema_transition_summaries_for_phase_input(
     schema: &MachineSchema,
     phase: &str,
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
     representative: Option<&MobRuntimeParitySnapshotSummary>,
 ) -> Vec<MobRuntimeParitySchemaTransitionSummary> {
+    let input_variant_name = input_variant.as_str();
     let mut summaries = schema
         .transitions
         .iter()
         .filter(|transition| {
             transition.on.kind() == TriggerKind::Input
-                && transition.on.variant_str() == input_variant
+                && transition.on.variant_str() == input_variant_name
                 && transition.from.iter().any(|from| from.as_str() == phase)
                 && mob_runtime_parity_transition_enabled(transition, representative)
         })
@@ -26880,7 +26984,7 @@ fn mob_runtime_parity_schema_row_for_input(
     schema: &MachineSchema,
     left_phase: MobRuntimeParityPhase,
     right_phase: MobRuntimeParityPhase,
-    input_variant: &str,
+    input_variant: SchemaMobMachineInputVariant,
     left_representative: Option<&MobRuntimeParitySnapshotSummary>,
     right_representative: Option<&MobRuntimeParitySnapshotSummary>,
 ) -> Option<MobRuntimeParitySchemaRow> {
@@ -26914,7 +27018,7 @@ fn mob_runtime_parity_schema_row_for_input(
     );
 
     Some(MobRuntimeParitySchemaRow {
-        input_variant: input_variant.to_string(),
+        input_variant,
         classification: classify_mob_runtime_parity_schema_row(&left, &right),
         left,
         right,
@@ -26927,53 +27031,63 @@ async fn build_mob_runtime_parity_pair_report(
     right_phase: MobRuntimeParityPhase,
 ) -> MobRuntimeParityPairReport {
     let mut rows = Vec::new();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let input_variant_name = input_variant.as_str();
         println!(
             "probing {} <-> {} on {}",
             left_phase.schema_name(),
             right_phase.schema_name(),
-            input_variant.name,
+            input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant.name.as_str());
-        let (mut probe, note) =
-            match mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str()) {
-                Some(probe_input) => {
-                    match probe_mob_runtime_parity_row(
-                        left_phase,
-                        right_phase,
-                        probe_input,
-                        MobRuntimeParityClassification::SameSurface,
-                    )
-                    .await
-                    {
-                        Ok(probe) => (Some(probe), None),
-                        Err(error) => (None, Some(format!("probe setup failed: {error}"))),
-                    }
+        let probe_required = mob_runtime_parity_probe_required(
+            input_variant,
+            &surface_only_inputs,
+            &runtime_internal_inputs,
+        );
+        let (mut probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
+            Some(probe_input) => {
+                match probe_mob_runtime_parity_row(
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                    MobRuntimeParityClassification::SameSurface,
+                )
+                .await
+                {
+                    Ok(probe) => (Some(probe), None),
+                    Err(error) => (None, Some(format!("probe setup failed: {error}"))),
                 }
-                None if probe_required => (
-                    None,
-                    Some(
-                        "required runtime probe missing; non-surface-only omissions fail closed"
-                            .to_string(),
-                    ),
+            }
+            None if probe_required => (
+                None,
+                Some(
+                    "required runtime probe missing; non-surface-only omissions fail closed"
+                        .to_string(),
                 ),
-                None => (
-                    None,
-                    Some("surface-only input: runtime probe not required".to_string()),
-                ),
-            };
+            ),
+            None if surface_only_inputs.contains(&input_variant) => (
+                None,
+                Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED.to_string()),
+            ),
+            None => (
+                None,
+                Some(MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED.to_string()),
+            ),
+        };
+
+        assert!(
+            !probe_required || probe.is_some(),
+            "required MobMachine runtime parity probe for {input_variant_name} was missing or failed setup before schema row classification: {note:?}"
+        );
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
             left_phase,
             right_phase,
-            input_variant.name.as_str(),
+            input_variant,
             probe.as_ref().and_then(|probe| probe.left.before.as_ref()),
             probe.as_ref().and_then(|probe| probe.right.before.as_ref()),
         ) else {
@@ -26986,7 +27100,7 @@ async fn build_mob_runtime_parity_pair_report(
         }
 
         rows.push(MobRuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             schema_classification: schema_row.classification,
             schema_left: schema_row.left,
@@ -27012,10 +27126,19 @@ async fn build_mob_runtime_parity_pair_report(
                     }
                 }
                 None if row.probe_required => summary.unprobed_rows += 1,
-                None => summary.surface_only_unprobed_rows += 1,
+                None if row.note.as_deref()
+                    == Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED) =>
+                {
+                    summary.surface_only_unprobed_rows += 1;
+                }
+                None => summary.runtime_internal_unprobed_rows += 1,
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime parity audit must fail closed when a required typed probe is missing"
     );
 
     MobRuntimeParityPairReport {
@@ -27032,53 +27155,63 @@ async fn build_mob_runtime_full_pair_report(
     right_phase: MobRuntimeParityPhase,
 ) -> MobRuntimeParityPairReport {
     let mut rows = Vec::new();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
 
-    for input_variant in &schema.inputs.variants {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let input_variant_name = input_variant.as_str();
         println!(
             "probing full {} <-> {} on {}",
             left_phase.schema_name(),
             right_phase.schema_name(),
-            input_variant.name,
+            input_variant_name,
         );
-        let probe_required = !surface_only_inputs.contains(input_variant.name.as_str());
-        let (probe, note) =
-            match mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str()) {
-                Some(probe_input) => {
-                    match probe_mob_runtime_full_parity_row(
-                        schema,
-                        left_phase,
-                        right_phase,
-                        probe_input,
-                    )
-                    .await
-                    {
-                        Ok(probe) => (Some(probe), None),
-                        Err(error) => (None, Some(format!("probe setup failed: {error}"))),
-                    }
+        let probe_required = mob_runtime_parity_probe_required(
+            input_variant,
+            &surface_only_inputs,
+            &runtime_internal_inputs,
+        );
+        let (probe, note) = match mob_runtime_parity_probe_for_input_variant(input_variant) {
+            Some(probe_input) => {
+                match probe_mob_runtime_full_parity_row(
+                    schema,
+                    left_phase,
+                    right_phase,
+                    probe_input,
+                )
+                .await
+                {
+                    Ok(probe) => (Some(probe), None),
+                    Err(error) => (None, Some(format!("probe setup failed: {error}"))),
                 }
-                None if probe_required => (
-                    None,
-                    Some(
-                        "required runtime probe missing; non-surface-only omissions fail closed"
-                            .to_string(),
-                    ),
+            }
+            None if probe_required => (
+                None,
+                Some(
+                    "required runtime probe missing; non-surface-only omissions fail closed"
+                        .to_string(),
                 ),
-                None => (
-                    None,
-                    Some("surface-only input: runtime probe not required".to_string()),
-                ),
-            };
+            ),
+            None if surface_only_inputs.contains(&input_variant) => (
+                None,
+                Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED.to_string()),
+            ),
+            None => (
+                None,
+                Some(MOB_RUNTIME_PARITY_RUNTIME_INTERNAL_PROBE_NOT_REQUIRED.to_string()),
+            ),
+        };
+
+        assert!(
+            !probe_required || probe.is_some(),
+            "required MobMachine full runtime parity probe for {input_variant_name} was missing or failed setup before schema row classification: {note:?}"
+        );
 
         let Some(schema_row) = mob_runtime_parity_schema_row_for_input(
             schema,
             left_phase,
             right_phase,
-            input_variant.name.as_str(),
+            input_variant,
             probe.as_ref().and_then(|probe| probe.left.before.as_ref()),
             probe.as_ref().and_then(|probe| probe.right.before.as_ref()),
         ) else {
@@ -27100,7 +27233,7 @@ async fn build_mob_runtime_full_pair_report(
         };
 
         rows.push(MobRuntimeParityRowReport {
-            input_variant: schema_row.input_variant,
+            input_variant: schema_row.input_variant.as_str().to_string(),
             probe_required,
             schema_classification: effective_schema_classification,
             schema_left: schema_row.left,
@@ -27126,10 +27259,19 @@ async fn build_mob_runtime_full_pair_report(
                     }
                 }
                 None if row.probe_required => summary.unprobed_rows += 1,
-                None => summary.surface_only_unprobed_rows += 1,
+                None if row.note.as_deref()
+                    == Some(MOB_RUNTIME_PARITY_SURFACE_ONLY_PROBE_NOT_REQUIRED) =>
+                {
+                    summary.surface_only_unprobed_rows += 1;
+                }
+                None => summary.runtime_internal_unprobed_rows += 1,
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime full parity audit must fail closed when a required typed probe is missing"
     );
 
     MobRuntimeParityPairReport {
@@ -27140,42 +27282,143 @@ async fn build_mob_runtime_full_pair_report(
     }
 }
 
-fn mob_runtime_parity_probe_variant_name(probe: MobRuntimeParityProbeInput) -> &'static str {
+fn mob_runtime_parity_probe_input_variant(
+    probe: MobRuntimeParityProbeInput,
+) -> Option<SchemaMobMachineInputVariant> {
     match probe {
-        MobRuntimeParityProbeInput::Spawn => "Spawn",
-        MobRuntimeParityProbeInput::EnsureMember => "EnsureMember",
-        MobRuntimeParityProbeInput::Reconcile => "Reconcile",
-        MobRuntimeParityProbeInput::SubmitWork => "SubmitWork",
-        MobRuntimeParityProbeInput::RunFlow => "RunFlow",
-        MobRuntimeParityProbeInput::CancelFlow => "CancelFlow",
-        MobRuntimeParityProbeInput::Retire => "Retire",
-        MobRuntimeParityProbeInput::Respawn => "Respawn",
-        MobRuntimeParityProbeInput::RetireAll => "RetireAll",
-        MobRuntimeParityProbeInput::WireMembers => "WireMembers",
-        MobRuntimeParityProbeInput::UnwireMembers => "UnwireMembers",
-        MobRuntimeParityProbeInput::WireExternalPeer => "WireExternalPeer",
-        MobRuntimeParityProbeInput::UnwireExternalPeer => "UnwireExternalPeer",
-        MobRuntimeParityProbeInput::ExternalTurn => "ExternalTurn",
-        MobRuntimeParityProbeInput::InternalTurn => "InternalTurn",
-        MobRuntimeParityProbeInput::CancelWork => "CancelWork",
-        MobRuntimeParityProbeInput::CancelAllWork => "CancelAllWork",
-        MobRuntimeParityProbeInput::Stop => "Stop",
-        MobRuntimeParityProbeInput::Resume => "Resume",
-        MobRuntimeParityProbeInput::Complete => "Complete",
-        MobRuntimeParityProbeInput::Reset => "Reset",
-        MobRuntimeParityProbeInput::Destroy => "Destroy",
-        MobRuntimeParityProbeInput::TaskCreate => "TaskCreate",
-        MobRuntimeParityProbeInput::TaskUpdate => "TaskUpdate",
-        MobRuntimeParityProbeInput::SubscribeAgentEvents => "SubscribeAgentEvents",
-        MobRuntimeParityProbeInput::SubscribeAllAgentEvents => "SubscribeAllAgentEvents",
-        MobRuntimeParityProbeInput::SubscribeMobEvents => "SubscribeMobEvents",
-        MobRuntimeParityProbeInput::RecordOperatorActionProvenance => {
-            "RecordOperatorActionProvenance"
+        MobRuntimeParityProbeInput::Spawn => Some(SchemaMobMachineInputVariant::Spawn),
+        MobRuntimeParityProbeInput::EnsureMember => {
+            Some(SchemaMobMachineInputVariant::EnsureMember)
         }
-        MobRuntimeParityProbeInput::SetSpawnPolicy => "SetSpawnPolicy",
-        MobRuntimeParityProbeInput::Shutdown => "Shutdown",
-        MobRuntimeParityProbeInput::ForceCancel => "ForceCancel",
+        MobRuntimeParityProbeInput::Reconcile => Some(SchemaMobMachineInputVariant::Reconcile),
+        MobRuntimeParityProbeInput::SubmitWork => Some(SchemaMobMachineInputVariant::SubmitWork),
+        MobRuntimeParityProbeInput::RunFlow => Some(SchemaMobMachineInputVariant::RunFlow),
+        MobRuntimeParityProbeInput::CancelFlow => Some(SchemaMobMachineInputVariant::CancelFlow),
+        MobRuntimeParityProbeInput::Retire => Some(SchemaMobMachineInputVariant::Retire),
+        MobRuntimeParityProbeInput::Respawn => Some(SchemaMobMachineInputVariant::Respawn),
+        MobRuntimeParityProbeInput::RetireAll => Some(SchemaMobMachineInputVariant::RetireAll),
+        MobRuntimeParityProbeInput::WireMembers => Some(SchemaMobMachineInputVariant::WireMembers),
+        MobRuntimeParityProbeInput::UnwireMembers => {
+            Some(SchemaMobMachineInputVariant::UnwireMembers)
+        }
+        MobRuntimeParityProbeInput::WireExternalPeer => {
+            Some(SchemaMobMachineInputVariant::WireExternalPeer)
+        }
+        MobRuntimeParityProbeInput::UnwireExternalPeer => {
+            Some(SchemaMobMachineInputVariant::UnwireExternalPeer)
+        }
+        MobRuntimeParityProbeInput::ExternalTurn | MobRuntimeParityProbeInput::InternalTurn => None,
+        MobRuntimeParityProbeInput::CancelWork => Some(SchemaMobMachineInputVariant::CancelWork),
+        MobRuntimeParityProbeInput::CancelAllWork => {
+            Some(SchemaMobMachineInputVariant::CancelAllWork)
+        }
+        MobRuntimeParityProbeInput::Stop => Some(SchemaMobMachineInputVariant::Stop),
+        MobRuntimeParityProbeInput::Resume => Some(SchemaMobMachineInputVariant::Resume),
+        MobRuntimeParityProbeInput::Complete => Some(SchemaMobMachineInputVariant::Complete),
+        MobRuntimeParityProbeInput::Reset => Some(SchemaMobMachineInputVariant::Reset),
+        MobRuntimeParityProbeInput::Destroy => Some(SchemaMobMachineInputVariant::Destroy),
+        MobRuntimeParityProbeInput::TaskCreate => Some(SchemaMobMachineInputVariant::TaskCreate),
+        MobRuntimeParityProbeInput::TaskUpdate => Some(SchemaMobMachineInputVariant::TaskUpdate),
+        MobRuntimeParityProbeInput::SubscribeAgentEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeAgentEvents)
+        }
+        MobRuntimeParityProbeInput::SubscribeAllAgentEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeAllAgentEvents)
+        }
+        MobRuntimeParityProbeInput::SubscribeMobEvents => {
+            Some(SchemaMobMachineInputVariant::SubscribeMobEvents)
+        }
+        MobRuntimeParityProbeInput::RecordOperatorActionProvenance => {
+            Some(SchemaMobMachineInputVariant::RecordOperatorActionProvenance)
+        }
+        MobRuntimeParityProbeInput::SetSpawnPolicy => {
+            Some(SchemaMobMachineInputVariant::SetSpawnPolicy)
+        }
+        MobRuntimeParityProbeInput::Shutdown => Some(SchemaMobMachineInputVariant::Shutdown),
+        MobRuntimeParityProbeInput::ForceCancel => Some(SchemaMobMachineInputVariant::ForceCancel),
     }
+}
+
+#[test]
+fn mob_runtime_parity_probe_manifest_round_trips_through_typed_generated_variants() {
+    for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+        let Some(probe) = mob_runtime_parity_probe_for_input_variant(input_variant) else {
+            continue;
+        };
+        assert_eq!(
+            mob_runtime_parity_probe_input_variant(probe).expect("typed probe variant"),
+            input_variant,
+            "mob runtime parity probe mapping must round-trip through typed generated input variants"
+        );
+    }
+}
+
+#[test]
+fn mob_runtime_parity_probe_inventory_closes_required_executable_probes() {
+    let schema = schema_mob_machine();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
+    let unprobed_required = SchemaMobMachineInput::variant_manifest()
+        .iter()
+        .copied()
+        .filter(|input_variant| {
+            mob_runtime_parity_probe_required(
+                *input_variant,
+                &surface_only_inputs,
+                &runtime_internal_inputs,
+            ) && mob_runtime_parity_probe_for_input_variant(*input_variant).is_none()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        unprobed_required.is_empty(),
+        "every non-surface MobMachine input that requires a runtime parity probe must be backed by the executable typed probe map; missing {unprobed_required:?}"
+    );
+}
+
+#[tokio::test]
+async fn mob_runtime_parity_pair_report_executes_required_probe_inventory() {
+    let schema = schema_mob_machine();
+    let report = build_mob_runtime_parity_pair_report(
+        &schema,
+        MobRuntimeParityPhase::Running,
+        MobRuntimeParityPhase::Stopped,
+    )
+    .await;
+
+    assert_eq!(
+        report.summary.unprobed_rows, 0,
+        "mob runtime parity report must fail closed on required probes that are missing or fail setup"
+    );
+    assert!(
+        report.summary.probed_rows > 0,
+        "mob runtime parity report must execute the typed probe map, not only inspect it"
+    );
+}
+
+#[tokio::test]
+async fn mob_runtime_parity_audit_writers_execute_required_probe_inventory() {
+    let full_report =
+        write_mob_runtime_full_parity_audit_report(mob_runtime_parity_full_report_path()).await;
+    assert_eq!(
+        full_report.summary.unprobed_rows, 0,
+        "full mob runtime parity audit must execute or explicitly exempt every typed input"
+    );
+    assert!(
+        full_report.summary.probed_rows > 0,
+        "full mob runtime parity audit must execute the typed probe map, not only inspect it"
+    );
+
+    let modeled_report =
+        write_mob_runtime_modeled_state_audit_report(mob_modeled_state_report_path()).await;
+    assert_eq!(
+        modeled_report.summary.unprobed_rows, 0,
+        "modeled-state audit must execute or explicitly exempt every typed input"
+    );
+    assert!(
+        modeled_report.summary.row_count > 0,
+        "modeled-state audit must exercise required typed runtime probes"
+    );
 }
 
 fn mob_modeled_normalize_json_value(value: serde_json::Value) -> serde_json::Value {
@@ -27697,10 +27940,10 @@ fn mob_modeled_kernel_input(
     before: &MobRuntimeParitySnapshotSummary,
     probe: MobRuntimeParityProbeInput,
 ) -> Result<meerkat_machine_kernels::test_oracle::KernelInput, String> {
-    let variant = meerkat_machine_schema::identity::InputVariantId::parse(
-        mob_runtime_parity_probe_variant_name(probe),
-    )
-    .expect("valid variant slug");
+    let input_variant = mob_runtime_parity_probe_input_variant(probe)
+        .ok_or_else(|| format!("{probe:?} has no MobMachine input variant"))?;
+    let variant = meerkat_machine_schema::identity::InputVariantId::parse(input_variant.as_str())
+        .expect("valid variant slug");
     let input_variant = schema
         .inputs
         .variant_named(&variant)
@@ -27904,11 +28147,8 @@ fn mob_modeled_runtime_report(
 
 async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModeledStateAuditReport {
     let schema = meerkat_machine_kernels::generated::mob::schema();
-    let surface_only_inputs = schema
-        .surface_only_inputs
-        .iter()
-        .map(|v| v.as_str())
-        .collect::<BTreeSet<_>>();
+    let surface_only_inputs = mob_schema_input_variant_set(&schema.surface_only_inputs);
+    let runtime_internal_inputs = mob_runtime_internal_input_variant_set();
     let mut rows = Vec::new();
 
     for phase in [
@@ -27916,16 +28156,19 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
         MobRuntimeParityPhase::Stopped,
         MobRuntimeParityPhase::Completed,
     ] {
-        for input_variant in &schema.inputs.variants {
-            if surface_only_inputs.contains(input_variant.name.as_str()) {
+        for input_variant in SchemaMobMachineInput::variant_manifest().iter().copied() {
+            let input_variant_name = input_variant.as_str();
+            if !mob_runtime_parity_probe_required(
+                input_variant,
+                &surface_only_inputs,
+                &runtime_internal_inputs,
+            ) {
                 continue;
             }
-            let Some(probe) =
-                mob_runtime_parity_probe_for_input_variant(input_variant.name.as_str())
-            else {
+            let Some(probe) = mob_runtime_parity_probe_for_input_variant(input_variant) else {
                 rows.push(MobModeledStateRowReport {
                     phase: phase.schema_name().to_string(),
-                    input_variant: input_variant.name.as_str().to_string(),
+                    input_variant: input_variant_name.to_string(),
                     aligned: false,
                     differing_keys: vec!["unprobed".to_string()],
                     runtime: MobModeledStateRuntimeReport {
@@ -27961,7 +28204,7 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
 
             rows.push(MobModeledStateRowReport {
                 phase: phase.schema_name().to_string(),
-                input_variant: input_variant.name.as_str().to_string(),
+                input_variant: input_variant_name.to_string(),
                 aligned,
                 differing_keys,
                 runtime: runtime_report,
@@ -27985,6 +28228,10 @@ async fn write_mob_runtime_modeled_state_audit_report(path: PathBuf) -> MobModel
             }
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob modeled-state audit must fail closed when a required typed probe is missing"
     );
 
     let report = MobModeledStateAuditReport {
@@ -28023,8 +28270,13 @@ async fn write_mob_runtime_full_parity_audit_report(path: PathBuf) -> MobRuntime
             summary.mismatched_rows += pair.summary.mismatched_rows;
             summary.unprobed_rows += pair.summary.unprobed_rows;
             summary.surface_only_unprobed_rows += pair.summary.surface_only_unprobed_rows;
+            summary.runtime_internal_unprobed_rows += pair.summary.runtime_internal_unprobed_rows;
             summary
         },
+    );
+    assert_eq!(
+        summary.unprobed_rows, 0,
+        "Mob runtime full parity audit must fail closed when a required typed probe is missing"
     );
 
     let report = MobRuntimeParityAuditReport {

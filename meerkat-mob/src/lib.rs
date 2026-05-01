@@ -91,8 +91,10 @@ pub use mob_machine::{
     MobMachineCatalogInput, MobMachineCommandClassification, MobMachineCommandClassificationRecord,
     MobMachineCommandVariant, MobMachineRuntimeInternalClassificationRecord,
     MobMachineRuntimeInternalReason, MobMachineShellMechanicReason,
-    canonical_mob_machine_command_classifications, canonical_mob_machine_command_manifest,
+    canonical_mob_machine_command_classifications,
+    canonical_mob_machine_command_input_variant_manifest, canonical_mob_machine_command_manifest,
     canonical_mob_machine_runtime_internal_classifications,
+    canonical_mob_machine_runtime_internal_input_variant_manifest,
     canonical_mob_machine_runtime_internal_manifest,
 };
 

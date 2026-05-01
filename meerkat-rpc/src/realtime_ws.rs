@@ -2315,37 +2315,31 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                         )
                                                         .await;
                                                         break;
-                                                    } else {
-                                                        let next_attempt = channel_status
-                                                            .attempt_count
-                                                            .saturating_add(1);
-                                                        let schedule = reconnect_retry
-                                                            .retry_schedule_for_attempt(
-                                                                next_attempt,
-                                                                now_utc,
-                                                                None,
-                                                            );
-                                                        schedule_reconnect_retry_in_dsl(
-                                                            &state.runtime,
-                                                            binding.as_ref(),
-                                                            &schedule,
+                                                    }
+                                                    let next_attempt =
+                                                        channel_status.attempt_count.saturating_add(1);
+                                                    let schedule = reconnect_retry.retry_schedule_for_attempt(
+                                                        next_attempt,
+                                                        now_utc,
+                                                        None,
+                                                    );
+                                                    schedule_reconnect_retry_in_dsl(
+                                                        &state.runtime,
+                                                        binding.as_ref(),
+                                                        &schedule,
+                                                    )
+                                                    .await;
+                                                    if let Ok(status) =
+                                                        current_channel_status(&state.runtime, binding.as_ref()).await
+                                                    {
+                                                        let _ = emit_status_update(
+                                                            &mut socket,
+                                                            &mut last_visible_status,
+                                                            status,
+                                                            false,
+                                                            Some((state.host.as_ref(), &registered)),
                                                         )
                                                         .await;
-                                                        if let Ok(status) = current_channel_status(
-                                                            &state.runtime,
-                                                            binding.as_ref(),
-                                                        )
-                                                        .await
-                                                        {
-                                                            let _ = emit_status_update(
-                                                                &mut socket,
-                                                                &mut last_visible_status,
-                                                                status,
-                                                                false,
-                                                                Some((state.host.as_ref(), &registered)),
-                                                            )
-                                                            .await;
-                                                        }
                                                     }
                                                 }
                                             }

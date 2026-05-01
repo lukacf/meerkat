@@ -1,10 +1,10 @@
 use crate::identity::{
     ActorId, CompositionDriverId, CompositionId, CompositionWitnessId, EffectVariantId,
-    EntryInputId, FieldId, InputVariantId, MachineId, MachineInstanceId, PhaseId, ProtocolId,
-    RouteId, SignalVariantId, StorePrimitiveId, TransactionPlanId, TransactionTriggerId,
-    TransitionId,
+    EntryInputId, FieldId, InputVariantId, MachineId, MachineInstanceId, NamedTypeId, PhaseId,
+    ProtocolId, RouteId, SignalVariantId, StorePrimitiveId, TransactionPlanId,
+    TransactionTriggerId, TransitionId,
 };
-use crate::{Expr, MachineSchema, TypeRef, machine::MachineSchemaError};
+use crate::{Expr, MachineSchema, RustTypeAtom, TypeRef, machine::MachineSchemaError};
 use indexmap::IndexSet;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1076,6 +1076,7 @@ impl CompositionSchema {
                 });
             }
         }
+        self.validate_named_type_bindings_across_machines(schemas)?;
 
         for route in &self.routes {
             let from_schema = schemas
@@ -1194,7 +1195,7 @@ impl CompositionSchema {
                             });
                         }
 
-                        if !literal_matches_type(expr, &to_field.ty) {
+                        if !literal_matches_type(to_schema, expr, &to_field.ty) {
                             return Err(CompositionSchemaError::RouteLiteralTypeMismatch {
                                 route: route.name.as_str().to_owned(),
                                 to_machine: route.to.machine.as_str().to_owned(),
@@ -1342,7 +1343,7 @@ impl CompositionSchema {
                             field: field.field.as_str().to_owned(),
                         });
                     }
-                    if !literal_matches_type(&field.expr, &target_field.ty) {
+                    if !literal_matches_type(machine_schema, &field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessLiteralTypeMismatch {
                             witness: witness.name.to_string(),
                             machine: preload.machine.as_str().to_owned(),
@@ -1419,7 +1420,7 @@ impl CompositionSchema {
                             field: field.field.as_str().to_owned(),
                         });
                     }
-                    if !literal_matches_type(&field.expr, &target_field.ty) {
+                    if !literal_matches_type(machine_schema, &field.expr, &target_field.ty) {
                         return Err(CompositionSchemaError::WitnessStateLiteralTypeMismatch {
                             witness: witness.name.to_string(),
                             machine: state.machine.as_str().to_owned(),
@@ -1718,6 +1719,42 @@ impl CompositionSchema {
                             });
                         }
                     }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_named_type_bindings_across_machines(
+        &self,
+        schemas: &[&MachineSchema],
+    ) -> Result<(), CompositionSchemaError> {
+        let referenced_schema_names = self
+            .machines
+            .iter()
+            .map(|instance| instance.machine_name.as_str())
+            .collect::<IndexSet<_>>();
+        let mut bindings_by_name = BTreeMap::<&str, (&str, &RustTypeAtom)>::new();
+
+        for schema in schemas {
+            if !referenced_schema_names.contains(schema.machine.as_str()) {
+                continue;
+            }
+            for binding in &schema.named_types {
+                let name = binding.name.as_str();
+                if let Some((first_machine, first_rust)) = bindings_by_name.get(name) {
+                    if !first_rust.has_same_composition_domain_shape(&binding.rust) {
+                        return Err(CompositionSchemaError::ConflictingNamedTypeBinding {
+                            name: name.to_owned(),
+                            first_machine: (*first_machine).to_owned(),
+                            first_rust: (*first_rust).clone(),
+                            second_machine: schema.machine.as_str().to_owned(),
+                            second_rust: binding.rust.clone(),
+                        });
+                    }
+                } else {
+                    bindings_by_name.insert(name, (schema.machine.as_str(), &binding.rust));
                 }
             }
         }
@@ -2143,6 +2180,13 @@ pub enum CompositionSchemaError {
         to_field: String,
         to_ty: TypeRef,
     },
+    ConflictingNamedTypeBinding {
+        name: String,
+        first_machine: String,
+        first_rust: RustTypeAtom,
+        second_machine: String,
+        second_rust: RustTypeAtom,
+    },
     RouteLiteralTypeMismatch {
         route: String,
         to_machine: String,
@@ -2451,6 +2495,16 @@ impl fmt::Display for CompositionSchemaError {
                 f,
                 "route `{route}` field type mismatch: {from_machine}.{from_field}:{from_ty:?} -> {to_machine}.{to_field}:{to_ty:?}"
             ),
+            Self::ConflictingNamedTypeBinding {
+                name,
+                first_machine,
+                first_rust,
+                second_machine,
+                second_rust,
+            } => write!(
+                f,
+                "named type `{name}` has conflicting Rust bindings across composition machines: {first_machine} declares {first_rust:?}, {second_machine} declares {second_rust:?}"
+            ),
             Self::RouteLiteralTypeMismatch {
                 route,
                 to_machine,
@@ -2754,17 +2808,96 @@ fn route_literal_expr_allowed(expr: &Expr) -> bool {
     }
 }
 
-fn literal_matches_type(expr: &Expr, ty: &TypeRef) -> bool {
+fn literal_matches_type(schema: &MachineSchema, expr: &Expr, ty: &TypeRef) -> bool {
     match (expr, ty) {
         (Expr::Bool(_), TypeRef::Bool) => true,
         (Expr::U64(_), TypeRef::U32 | TypeRef::U64) => true,
-        (Expr::String(_), TypeRef::String | TypeRef::Named(_)) => true,
-        (Expr::NamedVariant { enum_name, .. }, TypeRef::Enum(name)) => enum_name == name,
+        (Expr::String(_), TypeRef::String) => true,
+        (Expr::String(value), TypeRef::Named(name)) => {
+            string_literal_matches_named_type(schema, name, value)
+        }
+        (Expr::NamedVariant { enum_name, variant }, TypeRef::Enum(name)) => {
+            named_variant_literal_matches_enum_type(schema, name, enum_name, variant)
+        }
+        (Expr::NamedVariant { enum_name, variant }, TypeRef::Named(name)) => {
+            named_variant_literal_matches_named_type(schema, name, enum_name, variant)
+        }
         (Expr::None, TypeRef::Option(_)) => true,
-        (Expr::Some(inner), TypeRef::Option(inner_ty)) => literal_matches_type(inner, inner_ty),
+        (Expr::Some(inner), TypeRef::Option(inner_ty)) => {
+            literal_matches_type(schema, inner, inner_ty)
+        }
         (Expr::EmptyMap, TypeRef::Map(_, _)) => true,
-        (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => {
-            items.iter().all(|item| literal_matches_type(item, inner))
+        (Expr::SeqLiteral(items), TypeRef::Seq(inner)) => items
+            .iter()
+            .all(|item| literal_matches_type(schema, item, inner)),
+        _ => false,
+    }
+}
+
+fn string_literal_matches_named_type(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    value: &str,
+) -> bool {
+    match schema.named_type_binding(name).map(|binding| &binding.rust) {
+        Some(RustTypeAtom::String | RustTypeAtom::TypePath(_)) => true,
+        Some(RustTypeAtom::StringEnum { variants }) => {
+            variants.iter().any(|variant| variant.as_str() == value)
+        }
+        Some(RustTypeAtom::TypePathEnum { unit_variants, .. }) => unit_variants
+            .iter()
+            .any(|variant| variant.as_str() == value),
+        Some(
+            RustTypeAtom::U64
+            | RustTypeAtom::U32
+            | RustTypeAtom::U16
+            | RustTypeAtom::U8
+            | RustTypeAtom::Bool
+            | RustTypeAtom::TypePathFieldPresenceSet { .. }
+            | RustTypeAtom::TypePathStruct { .. },
+        )
+        | None => false,
+    }
+}
+
+fn named_variant_literal_matches_enum_type(
+    schema: &MachineSchema,
+    name: &crate::identity::EnumTypeId,
+    enum_name: &crate::identity::EnumTypeId,
+    variant: &crate::identity::EnumVariantId,
+) -> bool {
+    if enum_name != name {
+        return false;
+    }
+    let Ok(named_type_name) = NamedTypeId::parse(name.as_str()) else {
+        return false;
+    };
+    match schema
+        .named_type_binding(&named_type_name)
+        .map(|binding| &binding.rust)
+    {
+        Some(RustTypeAtom::StringEnum { variants }) => {
+            variants.iter().any(|allowed| allowed == variant)
+        }
+        _ => false,
+    }
+}
+
+fn named_variant_literal_matches_named_type(
+    schema: &MachineSchema,
+    name: &NamedTypeId,
+    enum_name: &crate::identity::EnumTypeId,
+    variant: &crate::identity::EnumVariantId,
+) -> bool {
+    if enum_name.as_str() != name.as_str() {
+        return false;
+    }
+    match schema.named_type_binding(name).map(|binding| &binding.rust) {
+        Some(RustTypeAtom::StringEnum { variants }) => {
+            variants.iter().any(|allowed| allowed == variant)
+        }
+        Some(RustTypeAtom::TypePathEnum { unit_variants, .. }) => {
+            unit_variants.iter().any(|allowed| allowed == variant)
         }
         _ => false,
     }

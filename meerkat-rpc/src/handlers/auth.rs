@@ -1184,7 +1184,7 @@ pub async fn handle_auth_logout(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use meerkat_core::handles::{

@@ -1,4 +1,9 @@
 use super::*;
+use crate::meerkat_machine_types::{
+    MeerkatMachineFieldlessRuntimeInternalInput,
+    canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest,
+    canonical_meerkat_machine_runtime_internal_input_variant_manifest,
+};
 
 /// Effects produced by an actual MeerkatMachine DSL transition.
 ///
@@ -25,6 +30,7 @@ pub(crate) fn apply_dsl_transition_on_authority(
     input: dsl::MeerkatMachineInput,
     context: &str,
 ) -> Result<DslTransitionEffects, String> {
+    MeerkatMachine::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
     let mut authority = authority
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -42,6 +48,55 @@ impl std::ops::Deref for DslTransitionEffects {
 }
 
 impl MeerkatMachine {
+    pub(super) async fn stage_session_runtime_internal_dsl_input(
+        &self,
+        session_id: &SessionId,
+        input: MeerkatMachineFieldlessRuntimeInternalInput,
+    ) -> Result<Box<dsl::MeerkatMachineState>, String> {
+        self.stage_session_runtime_internal_dsl_transition(session_id, input)
+            .await
+            .map(|staged| staged.previous_state)
+    }
+
+    pub(super) async fn stage_session_runtime_internal_dsl_transition(
+        &self,
+        session_id: &SessionId,
+        input: MeerkatMachineFieldlessRuntimeInternalInput,
+    ) -> Result<StagedSessionDslInput, String> {
+        let authority = self.session_dsl_authority(session_id).await?;
+        Self::stage_runtime_internal_dsl_transition_on_authority(&authority, input)
+    }
+
+    pub(super) fn stage_runtime_internal_dsl_transition_on_authority(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        input: MeerkatMachineFieldlessRuntimeInternalInput,
+    ) -> Result<StagedSessionDslInput, String> {
+        let variant = input.input_variant();
+        if !canonical_meerkat_machine_runtime_internal_input_variant_manifest().contains(&variant) {
+            return Err(format!(
+                "runtime-internal input {variant:?} is absent from the typed production manifest"
+            ));
+        }
+        if !canonical_meerkat_machine_runtime_internal_fieldless_input_variant_manifest()
+            .contains(&variant)
+        {
+            return Err(format!(
+                "runtime-internal input {variant:?} is absent from the typed fieldless manifest"
+            ));
+        }
+        if !input.requires_typed_runtime_internal_stager() {
+            return Err(format!(
+                "fieldless runtime-internal input {variant:?} is owned by {:?}, not the typed runtime-internal stager",
+                input.authority()
+            ));
+        }
+        Self::stage_dsl_transition_on_authority_after_typed_gate(
+            authority,
+            input.dsl_input(),
+            variant.as_str(),
+        )
+    }
+
     pub(super) async fn stage_session_dsl_input(
         &self,
         session_id: &SessionId,
@@ -68,6 +123,15 @@ impl MeerkatMachine {
         input: dsl::MeerkatMachineInput,
         context: &str,
     ) -> Result<StagedSessionDslInput, String> {
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
+        Self::stage_dsl_transition_on_authority_after_typed_gate(authority, input, context)
+    }
+
+    fn stage_dsl_transition_on_authority_after_typed_gate(
+        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
+        input: dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<StagedSessionDslInput, String> {
         let mut authority = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -79,6 +143,12 @@ impl MeerkatMachine {
             previous_state,
             effects,
         })
+    }
+
+    pub(super) fn reject_raw_fieldless_runtime_internal_dsl_input(
+        input: &dsl::MeerkatMachineInput,
+    ) -> Result<(), String> {
+        MeerkatMachineFieldlessRuntimeInternalInput::reject_raw_dsl_input(input)
     }
 
     pub(super) async fn apply_session_dsl_input(
@@ -103,6 +173,7 @@ impl MeerkatMachine {
         context: &str,
         dispatch_failure: CommittedEffectDispatchFailure,
     ) -> Result<(Box<dsl::MeerkatMachineState>, DslTransitionEffects), String> {
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
         let authority = self.session_dsl_authority(session_id).await?;
         let (previous_state, effects) = {
             let mut authority = authority

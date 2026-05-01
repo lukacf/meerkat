@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-fn read_runtime_source(relative: &str) -> String {
+fn read_runtime_source(relative: &str) -> Result<String, String> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    fs::read_to_string(manifest_dir.join(relative)).expect("read runtime source")
+    fs::read_to_string(manifest_dir.join(relative))
+        .map_err(|err| format!("read runtime source `{relative}`: {err}"))
 }
 
 fn production_source(source: &str) -> &str {
@@ -13,21 +14,25 @@ fn production_source(source: &str) -> &str {
         .unwrap_or(source)
 }
 
-fn peer_input_candidate_struct_body(source: &str) -> &str {
+fn peer_input_candidate_struct_body(source: &str) -> Result<&str, String> {
     let start = source
         .find("pub struct PeerInputCandidate")
-        .expect("PeerInputCandidate struct exists");
+        .ok_or_else(|| "PeerInputCandidate struct exists".to_string())?;
     let source = &source[start..];
     let end = source
         .find("\n}\n\n")
-        .expect("PeerInputCandidate struct body has closing brace");
-    &source[..end]
+        .ok_or_else(|| "PeerInputCandidate struct body has closing brace".to_string())?;
+    Ok(&source[..end])
 }
 
-fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
-    let start = source.find(signature).expect("function exists");
+fn function_body<'a>(source: &'a str, signature: &str) -> Result<&'a str, String> {
+    let start = source
+        .find(signature)
+        .ok_or_else(|| format!("function `{signature}` exists"))?;
     let source = &source[start..];
-    let body_start = source.find('{').expect("function has body");
+    let body_start = source
+        .find('{')
+        .ok_or_else(|| format!("function `{signature}` has body"))?;
     let mut depth = 0usize;
     for (index, byte) in source[body_start..].bytes().enumerate() {
         match byte {
@@ -35,29 +40,30 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return &source[body_start..=body_start + index];
+                    return Ok(&source[body_start..=body_start + index]);
                 }
             }
             _ => {}
         }
     }
-    panic!("function body closes");
+    Err(format!("function `{signature}` body closes"))
 }
 
 #[test]
-fn comms_drain_does_not_route_or_trust_on_inbox_interaction_from() {
-    let source = read_runtime_source("src/comms_drain.rs");
+fn comms_drain_does_not_route_or_trust_on_inbox_interaction_from() -> Result<(), String> {
+    let source = read_runtime_source("src/comms_drain.rs")?;
     let source = production_source(&source);
     let forbidden = concat!("candidate.interaction", ".from");
     assert!(
         !source.contains(forbidden),
         "comms_drain routing/trust must consume PeerIngressFact, not InboxInteraction::from"
     );
+    Ok(())
 }
 
 #[test]
-fn comms_bridge_does_not_project_peer_id_from_inbox_interaction_from() {
-    let source = read_runtime_source("src/comms_bridge.rs");
+fn comms_bridge_does_not_project_peer_id_from_inbox_interaction_from() -> Result<(), String> {
+    let source = read_runtime_source("src/comms_bridge.rs")?;
     let source = production_source(&source);
     for forbidden in [
         concat!("interaction", ".from"),
@@ -69,17 +75,18 @@ fn comms_bridge_does_not_project_peer_id_from_inbox_interaction_from() {
             "comms_bridge prompt/schema projection must consume PeerIngressFact: {forbidden}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn comms_drain_bridge_authority_matchers_do_not_consume_display_labels() {
-    let source = read_runtime_source("src/comms_drain.rs");
+fn comms_drain_bridge_authority_matchers_do_not_consume_display_labels() -> Result<(), String> {
+    let source = read_runtime_source("src/comms_drain.rs")?;
     let source = production_source(&source);
     for signature in [
         "fn sender_matches_bound_supervisor",
         "fn sender_matches_bridge_peer",
     ] {
-        let body = function_body(source, signature);
+        let body = function_body(source, signature)?;
         for forbidden in [".display_name", ".display_label()", "peer.name"] {
             assert!(
                 !body.contains(forbidden),
@@ -87,16 +94,18 @@ fn comms_drain_bridge_authority_matchers_do_not_consume_display_labels() {
             );
         }
     }
+    Ok(())
 }
 
 #[test]
-fn peer_input_candidate_does_not_duplicate_ingress_class_or_auth() {
-    let source = read_runtime_source("../meerkat-core/src/interaction.rs");
-    let body = peer_input_candidate_struct_body(&source);
+fn peer_input_candidate_does_not_duplicate_ingress_class_or_auth() -> Result<(), String> {
+    let source = read_runtime_source("../meerkat-core/src/interaction.rs")?;
+    let body = peer_input_candidate_struct_body(&source)?;
     for forbidden in ["pub class:", "pub auth:"] {
         assert!(
             !body.contains(forbidden),
             "PeerInputCandidate must derive class/auth from PeerIngressFact, not carry duplicate field: {forbidden}"
         );
     }
+    Ok(())
 }

@@ -437,7 +437,12 @@ impl MeerkatMachine {
                 };
                 drv.sync_control_projection_from_dsl_authority();
                 let report = prepared_destroy.report;
-                match machine_commit_prepared_destroy(&mut drv, prepared_destroy.lifecycle).await {
+                match Box::pin(machine_commit_prepared_destroy(
+                    &mut drv,
+                    prepared_destroy.lifecycle,
+                ))
+                .await
+                {
                     Ok(()) => {}
                     Err(err) => {
                         drv.sync_control_projection_from_dsl_authority();

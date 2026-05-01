@@ -250,9 +250,34 @@ impl MachineSchema {
         {
             let mut referenced: IndexSet<String> = IndexSet::new();
             collect_named_type_references_machine(self, &mut referenced);
+            for binding in &self.named_types {
+                collect_named_type_references_binding(binding, &mut referenced);
+            }
             for name in &referenced {
                 if !seen_bindings.contains(name.as_str()) {
                     return Err(MachineSchemaError::MissingNamedTypeBinding { name: name.clone() });
+                }
+            }
+        }
+        {
+            let mut referenced: IndexSet<String> = IndexSet::new();
+            collect_enum_type_references_machine(self, &mut referenced);
+            for name in &referenced {
+                let Some(binding) = self
+                    .named_types
+                    .iter()
+                    .find(|binding| binding.name.as_str() == name.as_str())
+                else {
+                    return Err(MachineSchemaError::MissingStringEnumBinding {
+                        name: name.clone(),
+                    });
+                };
+                if !matches!(binding.rust, RustTypeAtom::StringEnum { .. }) {
+                    return Err(MachineSchemaError::InvalidStringEnumBinding {
+                        name: name.clone(),
+                        reason: "TypeRef::Enum domains must use RustTypeAtom::StringEnum"
+                            .to_owned(),
+                    });
                 }
             }
         }
@@ -1163,12 +1188,114 @@ impl Expr {
 fn validate_named_type_binding_payload(
     binding: &NamedTypeBinding,
 ) -> Result<(), MachineSchemaError> {
-    let RustTypeAtom::StringEnum { variants } = &binding.rust else {
-        return Ok(());
-    };
+    match &binding.rust {
+        RustTypeAtom::StringEnum { variants } => {
+            validate_named_variant_domain(binding.name.as_str(), variants)
+        }
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => {
+            let variants = unit_variants
+                .iter()
+                .chain(structural_variants.iter().map(|variant| &variant.variant))
+                .cloned()
+                .collect::<Vec<_>>();
+            validate_named_variant_domain(binding.name.as_str(), &variants)?;
+            validate_type_path_enum_structural_variants(binding.name.as_str(), structural_variants)
+        }
+        RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => {
+            validate_type_path_field_presence_set(binding.name.as_str(), fields)
+        }
+        RustTypeAtom::TypePathStruct { fields, .. } => {
+            validate_type_path_struct(binding.name.as_str(), fields)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_type_path_field_presence_set(
+    name: &str,
+    fields: &[FieldId],
+) -> Result<(), MachineSchemaError> {
+    if fields.is_empty() {
+        return Err(MachineSchemaError::InvalidStringEnumBinding {
+            name: name.to_owned(),
+            reason: "field-presence named-type binding must define at least one field".to_owned(),
+        });
+    }
+    let mut seen: IndexSet<&str> = IndexSet::new();
+    for field in fields {
+        if !seen.insert(field.as_str()) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: name.to_owned(),
+                reason: format!("field-presence binding defines duplicate field `{field}`"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_type_path_struct(
+    name: &str,
+    fields: &[crate::TypePathStructField],
+) -> Result<(), MachineSchemaError> {
+    if fields.is_empty() {
+        return Err(MachineSchemaError::InvalidStringEnumBinding {
+            name: name.to_owned(),
+            reason: "struct named-type binding must define at least one field".to_owned(),
+        });
+    }
+    let mut seen: IndexSet<&str> = IndexSet::new();
+    for field in fields {
+        if !seen.insert(field.name.as_str()) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: name.to_owned(),
+                reason: format!("struct binding defines duplicate field `{}`", field.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_type_path_enum_structural_variants(
+    name: &str,
+    variants: &[crate::TypePathEnumStructuralVariant],
+) -> Result<(), MachineSchemaError> {
+    for variant in variants {
+        if variant.fields.is_empty() {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: name.to_owned(),
+                reason: format!(
+                    "structural variant `{}` must define at least one payload field",
+                    variant.variant
+                ),
+            });
+        }
+        let mut fields: IndexSet<&str> = IndexSet::new();
+        for field in &variant.fields {
+            if !fields.insert(field.name.as_str()) {
+                return Err(MachineSchemaError::InvalidStringEnumBinding {
+                    name: name.to_owned(),
+                    reason: format!(
+                        "structural variant `{}` defines duplicate payload field `{}`",
+                        variant.variant, field.name
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_named_variant_domain(
+    name: &str,
+    variants: &[EnumVariantId],
+) -> Result<(), MachineSchemaError> {
     if variants.is_empty() {
         return Err(MachineSchemaError::InvalidStringEnumBinding {
-            name: binding.name.as_str().to_owned(),
+            name: name.to_owned(),
             reason: "must define at least one variant".to_owned(),
         });
     }
@@ -1179,7 +1306,7 @@ fn validate_named_type_binding_payload(
         let raw = variant.as_str();
         if !seen_values.insert(raw) {
             return Err(MachineSchemaError::InvalidStringEnumBinding {
-                name: binding.name.as_str().to_owned(),
+                name: name.to_owned(),
                 reason: format!("defines duplicate variant `{raw}`"),
             });
         }
@@ -1187,7 +1314,7 @@ fn validate_named_type_binding_payload(
         let rust_identifier = string_enum_variant_rust_ident(raw);
         if let Some(first) = seen_rust_idents.get(&rust_identifier) {
             return Err(MachineSchemaError::InvalidStringEnumBinding {
-                name: binding.name.as_str().to_owned(),
+                name: name.to_owned(),
                 reason: format!(
                     "variants `{first}` and `{raw}` sanitize to duplicate Rust identifier `{rust_identifier}`"
                 ),
@@ -1245,6 +1372,51 @@ pub(crate) fn collect_named_type_references_machine(
             collect_named_type_references_type(&param.ty, out);
         }
         collect_named_type_references_type(&helper.returns, out);
+    }
+}
+
+fn collect_named_type_references_binding(binding: &NamedTypeBinding, out: &mut IndexSet<String>) {
+    if let RustTypeAtom::TypePathStruct { fields, .. } = &binding.rust {
+        for field in fields {
+            if let crate::TypePathStructFieldAtom::Named(name) = &field.atom {
+                out.insert(name.as_str().to_owned());
+            }
+        }
+    }
+}
+
+fn collect_enum_type_references_type(ty: &TypeRef, out: &mut IndexSet<String>) {
+    match ty {
+        TypeRef::Enum(id) => {
+            out.insert(id.as_str().to_owned());
+        }
+        TypeRef::Option(inner) | TypeRef::Set(inner) | TypeRef::Seq(inner) => {
+            collect_enum_type_references_type(inner, out);
+        }
+        TypeRef::Map(key, value) => {
+            collect_enum_type_references_type(key, out);
+            collect_enum_type_references_type(value, out);
+        }
+        TypeRef::Bool | TypeRef::U32 | TypeRef::U64 | TypeRef::String | TypeRef::Named(_) => {}
+    }
+}
+
+fn collect_enum_type_references_machine(schema: &MachineSchema, out: &mut IndexSet<String>) {
+    for field in &schema.state.fields {
+        collect_enum_type_references_type(&field.ty, out);
+    }
+    for enum_schema in [&schema.inputs, &schema.signals, &schema.effects] {
+        for variant in &enum_schema.variants {
+            for field in &variant.fields {
+                collect_enum_type_references_type(&field.ty, out);
+            }
+        }
+    }
+    for helper in schema.helpers.iter().chain(schema.derived.iter()) {
+        for param in &helper.params {
+            collect_enum_type_references_type(&param.ty, out);
+        }
+        collect_enum_type_references_type(&helper.returns, out);
     }
 }
 
@@ -1325,19 +1497,43 @@ fn validate_string_enum_named_variants_expr(
 ) -> Result<(), MachineSchemaError> {
     match expr {
         Expr::NamedVariant { enum_name, variant } => {
-            let Ok(named_type_name) = NamedTypeId::parse(enum_name.as_str()) else {
-                return Ok(());
-            };
-            if let Some(NamedTypeBinding {
-                rust: RustTypeAtom::StringEnum { variants },
-                ..
-            }) = schema.named_type_binding(&named_type_name)
-                && !variants.iter().any(|allowed| allowed == variant)
-            {
-                return Err(MachineSchemaError::UnknownStringEnumVariant {
-                    enum_name: enum_name.as_str().to_owned(),
-                    variant: variant.as_str().to_owned(),
+            let named_type_name = NamedTypeId::parse(enum_name.as_str()).map_err(|_| {
+                MachineSchemaError::InvalidStringEnumBinding {
+                    name: enum_name.as_str().to_owned(),
+                    reason: "Expr::NamedVariant enum domains must be valid NamedTypeId entries"
+                        .to_owned(),
+                }
+            })?;
+            let Some(binding) = schema.named_type_binding(&named_type_name) else {
+                return Err(MachineSchemaError::MissingStringEnumBinding {
+                    name: enum_name.as_str().to_owned(),
                 });
+            };
+            match &binding.rust {
+                RustTypeAtom::StringEnum { variants } => {
+                    if !variants.iter().any(|allowed| allowed == variant) {
+                        return Err(MachineSchemaError::UnknownStringEnumVariant {
+                            enum_name: enum_name.as_str().to_owned(),
+                            variant: variant.as_str().to_owned(),
+                        });
+                    }
+                }
+                RustTypeAtom::TypePathEnum { unit_variants, .. } => {
+                    if !unit_variants.iter().any(|allowed| allowed == variant) {
+                        return Err(MachineSchemaError::UnknownStringEnumVariant {
+                            enum_name: enum_name.as_str().to_owned(),
+                            variant: variant.as_str().to_owned(),
+                        });
+                    }
+                }
+                _ => {
+                    return Err(MachineSchemaError::InvalidStringEnumBinding {
+                        name: enum_name.as_str().to_owned(),
+                        reason:
+                            "Expr::NamedVariant domains must use RustTypeAtom::StringEnum or RustTypeAtom::TypePathEnum"
+                                .to_owned(),
+                    });
+                }
             }
         }
         Expr::SeqLiteral(items) | Expr::And(items) | Expr::Or(items) => {
@@ -1448,6 +1644,7 @@ pub enum MachineSchemaError {
     SurfaceOnlyInputHasTransition { variant: String, transition: String },
     DuplicateNamedTypeBinding { name: String },
     MissingNamedTypeBinding { name: String },
+    MissingStringEnumBinding { name: String },
     UnknownStringEnumVariant { enum_name: String, variant: String },
     InvalidStringEnumBinding { name: String, reason: String },
 }
@@ -1516,6 +1713,12 @@ impl fmt::Display for MachineSchemaError {
                     "named type `{name}` is referenced by this schema but has no NamedTypeBinding entry in `named_types`"
                 )
             }
+            Self::MissingStringEnumBinding { name } => {
+                write!(
+                    f,
+                    "enum type `{name}` is referenced by this schema but has no StringEnum NamedTypeBinding entry in `named_types`"
+                )
+            }
             Self::UnknownStringEnumVariant { enum_name, variant } => {
                 write!(
                     f,
@@ -1539,8 +1742,8 @@ impl std::error::Error for MachineSchemaError {}
 mod tests {
     use crate::identity::{EnumTypeId, EnumVariantId, NamedTypeId};
     use crate::{
-        Expr, MachineSchema, MachineSchemaError, NamedTypeBinding, RustTypeAtom, Update,
-        catalog::dsl::dsl_meerkat_machine as meerkat_machine,
+        Expr, InvariantSchema, MachineSchema, MachineSchemaError, NamedTypeBinding, RustTypeAtom,
+        Update, catalog::dsl::dsl_meerkat_machine as meerkat_machine,
     };
 
     #[test]
@@ -1576,6 +1779,21 @@ mod tests {
             vec!["Destroyed".to_owned()]
         );
         assert_eq!(schema.validate(), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_struct_binding_with_missing_nested_named_binding() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .retain(|binding| binding.name.as_str() != "ToolSourceKind");
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::MissingNamedTypeBinding {
+                name: "ToolSourceKind".into(),
+            })
+        );
     }
 
     fn replace_register_op_status_update(schema: &mut MachineSchema, status: &str) {
@@ -1683,6 +1901,99 @@ mod tests {
                 && message.contains("foo-bar")
                 && message.contains("foo_bar"),
             "error should identify colliding StringEnum variants, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_enum_type_without_string_enum_binding() {
+        let mut schema = meerkat_machine();
+        schema
+            .named_types
+            .retain(|binding| binding.name.as_str() != "OperationStatus");
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::MissingStringEnumBinding {
+                name: "OperationStatus".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_enum_type_with_unconstrained_string_binding() {
+        let mut schema = meerkat_machine();
+        let binding = schema
+            .named_types
+            .iter_mut()
+            .find(|binding| binding.name.as_str() == "OperationStatus")
+            .expect("OperationStatus binding");
+        binding.rust = RustTypeAtom::String;
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: "OperationStatus".into(),
+                reason: "TypeRef::Enum domains must use RustTypeAtom::StringEnum".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unbound_named_variant_literal_without_typed_surface_reference() {
+        let mut schema = meerkat_machine();
+        schema.invariants.push(InvariantSchema {
+            name: "synthetic_unbound_enum_literal".to_owned(),
+            expr: Expr::NamedVariant {
+                enum_name: EnumTypeId::parse("SyntheticStatus").expect("enum type slug"),
+                variant: EnumVariantId::parse("Ready").expect("enum variant slug"),
+            },
+        });
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::MissingStringEnumBinding {
+                name: "SyntheticStatus".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_named_variant_literal_with_unconstrained_string_binding() {
+        let mut schema = meerkat_machine();
+        schema.invariants.push(InvariantSchema {
+            name: "synthetic_string_bound_enum_literal".to_owned(),
+            expr: Expr::NamedVariant {
+                enum_name: EnumTypeId::parse("AgentRuntimeId").expect("enum type slug"),
+                variant: EnumVariantId::parse("Ready").expect("enum variant slug"),
+            },
+        });
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: "AgentRuntimeId".into(),
+                reason: "Expr::NamedVariant domains must use RustTypeAtom::StringEnum or RustTypeAtom::TypePathEnum".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_type_path_enum_named_variant_literal() {
+        let mut schema = meerkat_machine();
+        schema.invariants.push(InvariantSchema {
+            name: "synthetic_unknown_tool_filter_literal".to_owned(),
+            expr: Expr::NamedVariant {
+                enum_name: EnumTypeId::parse("ToolFilter").expect("enum type slug"),
+                variant: EnumVariantId::parse("Bogus").expect("enum variant slug"),
+            },
+        });
+
+        assert_eq!(
+            schema.validate(),
+            Err(MachineSchemaError::UnknownStringEnumVariant {
+                enum_name: "ToolFilter".into(),
+                variant: "Bogus".into(),
+            })
         );
     }
 

@@ -2118,8 +2118,8 @@ impl CommsRuntime {
     where
         F: FnMut(ResolvedPeer),
     {
-        let inproc_peers =
-            InprocRegistry::global().peers_in_namespace(self.inproc_namespace().unwrap_or(""));
+        let registry = InprocRegistry::global();
+        let inproc_peers = registry.peers_in_namespace(self.inproc_namespace().unwrap_or(""));
         let inproc_by_name: std::collections::HashMap<String, crate::identity::PubKey> =
             inproc_peers
                 .iter()
@@ -2133,8 +2133,18 @@ impl CommsRuntime {
 
         {
             let trusted = self.trusted_peers.read();
+            let trusted_peer_id_counts: HashMap<PeerId, usize> = trusted
+                .peers
+                .iter()
+                .filter(|peer| peer.has_raw_sendable_identity())
+                .fold(HashMap::new(), |mut counts, peer| {
+                    *counts
+                        .entry(self.router.peer_id_for_pubkey(&peer.pubkey))
+                        .or_default() += 1;
+                    counts
+                });
             for peer in &trusted.peers {
-                if peer.pubkey.is_zero() {
+                if !peer.has_raw_sendable_identity() {
                     tracing::warn!(
                         peer_name = %peer.name,
                         "skipping zero-pubkey trusted peer in peer directory"
@@ -2144,9 +2154,17 @@ impl CommsRuntime {
                 if peer.name == participant_name || peer.pubkey == self.public_key {
                     continue;
                 }
+                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
                 trusted_names.insert(peer.name.clone());
                 trusted_pubkeys.insert(peer.pubkey);
-                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
+                if trusted_peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
+                    tracing::warn!(
+                        peer_name = %peer.name,
+                        peer_id = %peer_id,
+                        "skipping duplicate trusted peer id in peer directory"
+                    );
+                    continue;
+                }
                 if private_peer_ids.contains(&peer_id) {
                     continue;
                 }
@@ -2198,7 +2216,19 @@ impl CommsRuntime {
         }
 
         for inproc in &inproc_peers {
-            if private_peer_ids.contains(&peer_id_from_pubkey(&inproc.pubkey)) {
+            if inproc.pubkey.is_zero() {
+                continue;
+            }
+            let peer_id = peer_id_from_pubkey(&inproc.pubkey);
+            if registry.pubkey_registration_count_any_namespace(&inproc.pubkey) != 1 {
+                tracing::warn!(
+                    peer_name = %inproc.name,
+                    peer_id = %peer_id,
+                    "skipping duplicate inproc peer id in auth-disabled peer directory"
+                );
+                continue;
+            }
+            if private_peer_ids.contains(&peer_id) {
                 continue;
             }
             let name = match PeerName::new(inproc.name.clone()) {
@@ -2221,7 +2251,7 @@ impl CommsRuntime {
             }
             on_peer(ResolvedPeer {
                 name,
-                peer_id: peer_id_from_pubkey(&inproc.pubkey),
+                peer_id,
                 address: meerkat_core::comms::PeerAddress::new(
                     meerkat_core::comms::PeerTransport::Inproc,
                     peer_name_str.clone(),

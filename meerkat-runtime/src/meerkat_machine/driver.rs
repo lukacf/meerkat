@@ -1362,12 +1362,33 @@ pub(crate) struct RecoveredIngressEntry {
     pub policy: crate::policy::PolicyDecision,
 }
 
+fn expected_recovered_runtime_semantics(
+    state: &InputState,
+) -> Option<crate::ingress_types::RuntimeInputSemantics> {
+    let persisted_input = state.persisted_input.as_ref()?;
+    let policy = &state.policy.as_ref()?.decision;
+    Some(
+        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            policy,
+            persisted_input.kind(),
+        ),
+    )
+}
+
 pub(crate) fn machine_build_recovered_ingress_entry(
     state: &InputState,
 ) -> Option<RecoveredIngressEntry> {
     let persisted_input = state.persisted_input.as_ref()?;
     let runtime_semantics = state.runtime_semantics?;
     let policy = state.policy.as_ref()?.decision.clone();
+    if runtime_semantics
+        != crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            &policy,
+            persisted_input.kind(),
+        )
+    {
+        return None;
+    }
     let handling_mode = crate::accept::handling_mode_from_policy(&policy);
     let content_shape = crate::ingress_types::ContentShape::from_kind(persisted_input.kind());
     let primitive_projection = crate::input::runtime_input_projection(persisted_input);
@@ -1398,6 +1419,14 @@ fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
     if state.policy.is_none() {
         return format!(
             "store corruption: recovered input '{}' missing runtime admission policy stamp; cannot recover without runtime-stamped policy and lane metadata",
+            state.input_id
+        );
+    }
+    if let Some(expected) = expected_recovered_runtime_semantics(state)
+        && state.runtime_semantics != Some(expected)
+    {
+        return format!(
+            "store corruption: recovered input '{}' has runtime execution semantics stamp that does not match persisted input kind and admission policy; cannot recover with contradictory runtime-stamped execution kind",
             state.input_id
         );
     }
@@ -2486,6 +2515,21 @@ mod recovery_tests {
         }
     }
 
+    fn state_with_runtime_semantics(
+        input: Input,
+        decision: crate::policy::PolicyDecision,
+        runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+    ) -> crate::input_state::InputState {
+        let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
+        state.persisted_input = Some(input);
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::policy_table::DEFAULT_POLICY_VERSION,
+            decision,
+        });
+        state.runtime_semantics = Some(runtime_semantics);
+        state
+    }
+
     #[test]
     fn recovered_ingress_entry_requires_persisted_input_for_content_shape() {
         let mut state = crate::input_state::InputState::new_accepted(InputId::new());
@@ -2532,6 +2576,89 @@ mod recovery_tests {
         assert!(
             machine_build_recovered_ingress_entry(&state).is_none(),
             "recovery must not derive policy or handling mode when the durable policy stamp is missing"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_prompt_stamped_as_resume_pending() {
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.execution_kind =
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a prompt row whose durable stamp says ResumePending"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_continuation_stamped_as_content_turn() {
+        let input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let decision = policy(ApplyMode::StageRunBoundary);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.execution_kind =
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a continuation row whose durable stamp says ContentTurn"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_boundary_mismatch() {
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.boundary =
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a durable stamp whose boundary disagrees with policy"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_terminal_intent_mismatch() {
+        let input = crate::input::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            Some(meerkat_core::comms::PeerName::new("reviewer").expect("peer name")),
+            meerkat_core::PeerCorrelationId::new(),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({"status": "complete"}),
+        );
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.peer_response_terminal_apply_intent = None;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a terminal peer-response stamp with missing terminal apply intent"
         );
     }
 

@@ -186,18 +186,6 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         now,
         Some(meerkat_core::persisted_token_expires_at_epoch_secs(&tokens)),
     );
-    let snapshot = auth_lease.snapshot(&lease_key);
-    if snapshot.generation == 0 && snapshot.phase.is_none() && !snapshot.credential_present {
-        if token_phase == AuthStatusPhase::Expired {
-            return Ok(ManagedStoreTokens {
-                store,
-                key,
-                tokens,
-                lifecycle: ManagedStoreLifecycle::RefreshRequired,
-            });
-        }
-        publish_managed_store_tokens_lifecycle(env, binding, &tokens)?;
-    }
 
     match AuthStatusPhase::from_lease_snapshot(now, &auth_lease.snapshot(&lease_key)) {
         AuthStatusPhase::Valid | AuthStatusPhase::Expiring => {

@@ -298,8 +298,8 @@ impl AnthropicOAuthRuntime {
 
     /// Console OAuth → API key provisioning. POST to `API_KEY_CREATE_URL`
     /// with `Authorization: Bearer <access_token>`; the response carries
-    /// the new API key. We persist it as an api_key entry.
-    pub async fn provision_api_key(
+    /// the new API key. The caller owns lifecycle admission and persistence.
+    pub async fn provision_api_key_tokens(
         &self,
         access_token: &str,
     ) -> Result<PersistedTokens, AnthropicOAuthError> {
@@ -340,6 +340,17 @@ impl AnthropicOAuthRuntime {
             account_id: None,
             metadata: serde_json::Value::Null,
         };
+        Ok(tokens)
+    }
+
+    /// Console OAuth → API key provisioning. POST to `API_KEY_CREATE_URL`
+    /// with `Authorization: Bearer <access_token>`; the response carries
+    /// the new API key. We persist it as an api_key entry.
+    pub async fn provision_api_key(
+        &self,
+        access_token: &str,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
+        let tokens = self.provision_api_key_tokens(access_token).await?;
         self.save_persisted(&tokens).await?;
         Ok(tokens)
     }

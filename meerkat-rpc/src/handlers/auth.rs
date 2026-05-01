@@ -32,8 +32,8 @@ use meerkat_providers::auth_store::{
     persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
-    OAuthDevicePollLease, OAuthFlowError, resolve_oauth_provider, validate_oauth_login_binding,
-    validate_oauth_target_binding_for_auth_mode,
+    OAuthDevicePollLease, OAuthFlowError, OAuthProviderIdentity, resolve_oauth_provider,
+    validate_oauth_login_binding, validate_oauth_target_binding_for_auth_mode,
 };
 
 use super::{RpcResponseExt, parse_params};
@@ -1400,47 +1400,82 @@ pub async fn handle_auth_login_provision_api_key(
     ) {
         return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
     }
-    let store = match require_token_store(runtime, id.clone()) {
-        Ok(s) => s,
-        Err(r) => return r,
-    };
-    let key = TokenKey::from_connection_ref(&connection_ref);
     let lease_key = LeaseKey::from_connection_ref(&connection_ref);
     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let previous = match store.load(&key).await {
-        Ok(previous) => previous,
+    let flow_authority = runtime.oauth_flow_authority();
+    let provision_provider = OAuthProviderIdentity::AnthropicConsoleApiKey;
+    let provision_redirect_uri = a_oauth::MANUAL_REDIRECT_URL;
+    let provision_state = match flow_authority.start(
+        connection_ref.clone(),
+        provision_provider,
+        provision_redirect_uri.to_string(),
+        "provision-api-key".to_string(),
+    ) {
+        Ok(state) => state,
+        Err(OAuthFlowError::CapacityExceeded { .. }) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                "oauth state registry is at capacity",
+            );
+        }
         Err(e) => {
             return RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
-                format!("TokenStore load failed: {e}"),
+                format!("oauth provision lifecycle admission failed: {e}"),
             );
+        }
+    };
+    let store = match require_token_store(runtime, id.clone()) {
+        Ok(s) => s,
+        Err(r) => {
+            let _ = flow_authority.consume(
+                &provision_state,
+                &connection_ref,
+                provision_provider,
+                provision_redirect_uri,
+            );
+            return r;
         }
     };
     // Console endpoints drive `scope = org:create_api_key user:profile`.
     // The runtime wrapper's `provision_api_key` POSTs to
     // API_KEY_CREATE_URL with `Authorization: Bearer <access_token>`
-    // and persists the returned api_key via `save_persisted`.
+    // and returns the API key token bundle; this handler owns the
+    // TokenStore/AuthMachine commit and terminal flow consume.
     let endpoints = a_oauth::console_endpoints(a_oauth::MANUAL_REDIRECT_URL);
     let oauth_runtime = a_oauth::AnthropicOAuthRuntime::new_with_default_coordinator(
         Arc::clone(&store),
         endpoints,
-        key.clone(),
+        TokenKey::from_connection_ref(&connection_ref),
     );
-    match oauth_runtime.provision_api_key(&parsed.access_token).await {
+    match oauth_runtime
+        .provision_api_key_tokens(&parsed.access_token)
+        .await
+    {
         Ok(tokens) => {
-            let auth_lease = runtime.auth_lease_handle();
-            if let Err(resp) = publish_saved_tokens_and_restore_on_lifecycle_failure(
+            if let Err(resp) = save_tokens_and_consume_browser_flow_unlocked(
                 id.clone(),
-                store.as_ref(),
-                auth_lease.as_ref(),
+                &store,
+                runtime,
                 &connection_ref,
-                &key,
                 &tokens,
-                previous.as_ref(),
+                BrowserFlowConsume {
+                    authority: flow_authority.as_ref(),
+                    state: &provision_state,
+                    provider: provision_provider,
+                    redirect_uri: provision_redirect_uri,
+                },
             )
             .await
             {
+                let _ = flow_authority.consume(
+                    &provision_state,
+                    &connection_ref,
+                    provision_provider,
+                    provision_redirect_uri,
+                );
                 return resp;
             }
             RpcResponse::success(
@@ -1455,11 +1490,19 @@ pub async fn handle_auth_login_provision_api_key(
                 },
             )
         }
-        Err(e) => RpcResponse::error(
-            id,
-            error::INTERNAL_ERROR,
-            format!("provision_api_key failed: {e}"),
-        ),
+        Err(e) => {
+            let _ = flow_authority.consume(
+                &provision_state,
+                &connection_ref,
+                provision_provider,
+                provision_redirect_uri,
+            );
+            RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("provision_api_key failed: {e}"),
+            )
+        }
     }
 }
 
@@ -1912,19 +1955,27 @@ mod tests {
         config
     }
 
-    fn config_with_anthropic_oauth_to_api_key_wrong_backend_binding() -> meerkat_core::Config {
+    fn config_with_anthropic_oauth_to_api_key_binding() -> meerkat_core::Config {
         let mut config = config_with_anthropic_api_key_binding();
+        config
+            .realm
+            .get_mut("dev")
+            .unwrap()
+            .auth
+            .get_mut("anthropic_api_key")
+            .unwrap()
+            .auth_method = "oauth_to_api_key".into();
+        config
+    }
+
+    fn config_with_anthropic_oauth_to_api_key_wrong_backend_binding() -> meerkat_core::Config {
+        let mut config = config_with_anthropic_oauth_to_api_key_binding();
         let section = config.realm.get_mut("dev").unwrap();
         section
             .backend
             .get_mut("anthropic_backend")
             .unwrap()
             .backend_kind = "bedrock".into();
-        section
-            .auth
-            .get_mut("anthropic_api_key")
-            .unwrap()
-            .auth_method = "oauth_to_api_key".into();
         config
     }
 
@@ -2733,6 +2784,57 @@ mod tests {
         .await;
 
         assert_invalid_params_message(resp, "backend_kind 'bedrock'");
+    }
+
+    #[tokio::test]
+    async fn provision_api_key_requires_runtime_oauth_flow_admission_before_token_store() {
+        let runtime = test_runtime_with_config_without_token_store(
+            config_with_anthropic_oauth_to_api_key_binding(),
+        );
+        let authority = runtime.oauth_flow_authority();
+        let mut admitted = 0usize;
+        loop {
+            match authority.start(
+                openai_connection_ref(),
+                meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+                format!("http://127.0.0.1:{admitted}/callback"),
+                format!("verifier-{admitted}"),
+            ) {
+                Ok(_) => {
+                    admitted += 1;
+                    assert!(
+                        admitted < 2048,
+                        "test should reach the default OAuth flow capacity before 2048 starts"
+                    );
+                }
+                Err(OAuthFlowError::CapacityExceeded { .. }) => break,
+                Err(err) => panic!("unexpected OAuth flow admission error: {err}"),
+            }
+        }
+        let params = raw_params(serde_json::json!({
+            "access_token": "console-access-token",
+            "realm_id": "dev",
+            "binding_id": "default_anthropic"
+        }));
+
+        let resp = handle_auth_login_provision_api_key(
+            Some(RpcId::Num(1)),
+            Some(params.as_ref()),
+            &runtime,
+        )
+        .await;
+
+        let error = resp
+            .error
+            .expect("provision should fail at runtime OAuth flow admission");
+        assert_eq!(error.code, crate::error::INTERNAL_ERROR);
+        assert!(
+            error
+                .message
+                .contains("oauth state registry is at capacity"),
+            "expected runtime OAuth authority failure before TokenStore access, got `{}`",
+            error.message
+        );
     }
 
     #[tokio::test]

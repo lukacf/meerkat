@@ -25,6 +25,7 @@ const DEFAULT_MAX_OUTSTANDING_FLOWS: usize = 1024;
 
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+const ANTHROPIC_CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const ANTHROPIC_SCOPES: &[&str] = &[
     "user:profile",
@@ -33,6 +34,7 @@ const ANTHROPIC_SCOPES: &[&str] = &[
     "user:mcp_servers",
     "user:file_upload",
 ];
+const ANTHROPIC_CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
 const ANTHROPIC_BETA_HEADER_NAME: &str = "anthropic-beta";
 const ANTHROPIC_BETA_HEADER_VALUE: &str = "oauth-2025-04-20";
 
@@ -66,6 +68,7 @@ const GOOGLE_SCOPES: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OAuthProviderIdentity {
     AnthropicClaudeAi,
+    AnthropicConsoleApiKey,
     OpenAiChatGpt,
     GoogleCodeAssist,
 }
@@ -83,6 +86,7 @@ impl OAuthProviderIdentity {
     pub fn canonical_alias(self) -> &'static str {
         match self {
             Self::AnthropicClaudeAi => "anthropic",
+            Self::AnthropicConsoleApiKey => "anthropic_console_api_key",
             Self::OpenAiChatGpt => "openai",
             Self::GoogleCodeAssist => "google",
         }
@@ -90,7 +94,7 @@ impl OAuthProviderIdentity {
 
     pub fn provider(self) -> Provider {
         match self {
-            Self::AnthropicClaudeAi => Provider::Anthropic,
+            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => Provider::Anthropic,
             Self::OpenAiChatGpt => Provider::OpenAI,
             Self::GoogleCodeAssist => Provider::Gemini,
         }
@@ -99,6 +103,7 @@ impl OAuthProviderIdentity {
     pub fn auth_mode(self) -> PersistedAuthMode {
         match self {
             Self::AnthropicClaudeAi => PersistedAuthMode::ClaudeAiOauth,
+            Self::AnthropicConsoleApiKey => PersistedAuthMode::OauthToApiKey,
             Self::OpenAiChatGpt => PersistedAuthMode::ChatgptOauth,
             Self::GoogleCodeAssist => PersistedAuthMode::GoogleOauth,
         }
@@ -106,7 +111,7 @@ impl OAuthProviderIdentity {
 
     pub fn backend_kind(self) -> &'static str {
         match self {
-            Self::AnthropicClaudeAi => "anthropic_api",
+            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => "anthropic_api",
             Self::OpenAiChatGpt => "chatgpt_backend",
             Self::GoogleCodeAssist => "google_code_assist",
         }
@@ -114,7 +119,7 @@ impl OAuthProviderIdentity {
 
     pub fn client_secret(self) -> Option<&'static str> {
         match self {
-            Self::AnthropicClaudeAi | Self::OpenAiChatGpt => None,
+            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey | Self::OpenAiChatGpt => None,
             Self::GoogleCodeAssist => Some(GOOGLE_CLIENT_SECRET),
         }
     }
@@ -128,6 +133,18 @@ impl OAuthProviderIdentity {
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
                 scopes: strings(ANTHROPIC_SCOPES),
+                extra_headers: vec![(
+                    ANTHROPIC_BETA_HEADER_NAME.into(),
+                    ANTHROPIC_BETA_HEADER_VALUE.into(),
+                )],
+            },
+            Self::AnthropicConsoleApiKey => OAuthEndpoints {
+                client_id: ANTHROPIC_CLIENT_ID.into(),
+                authorize_url: ANTHROPIC_CONSOLE_AUTHORIZE_URL.into(),
+                token_url: ANTHROPIC_TOKEN_URL.into(),
+                device_code_url: None,
+                redirect_uri: redirect_uri.into(),
+                scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
                 extra_headers: vec![(
                     ANTHROPIC_BETA_HEADER_NAME.into(),
                     ANTHROPIC_BETA_HEADER_VALUE.into(),

@@ -15,11 +15,13 @@ use meerkat_auth_core::oauth_flow::{
     OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow, PersistedOAuthDeviceFlow,
 };
 use meerkat_core::ConnectionRef;
+use meerkat_core::handles::{DslTransitionError, LeaseKey};
 
 use crate::auth_machine::dsl as auth_dsl;
 use crate::store::RuntimeStore;
 
 use super::RuntimeAuthLeaseHandle;
+use super::auth_lease::AuthLeaseReleaseObserver;
 
 fn current_time_millis() -> u64 {
     SystemTime::now()
@@ -41,6 +43,38 @@ pub struct RuntimeOAuthFlowHandle {
     registry: Arc<OAuthFlowRegistry>,
     lifecycle: Arc<RuntimeAuthLeaseHandle>,
     store: Option<Weak<dyn RuntimeStore>>,
+    _release_observer: Option<Arc<OAuthPayloadReleaseObserver>>,
+}
+
+#[derive(Debug)]
+struct OAuthPayloadReleaseObserver {
+    registry: Arc<OAuthFlowRegistry>,
+    store: Option<Weak<dyn RuntimeStore>>,
+}
+
+impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
+    fn auth_lease_released(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        let target = ConnectionRef {
+            realm: lease_key.realm.clone(),
+            binding: lease_key.binding.clone(),
+            profile: lease_key.profile.clone(),
+        };
+        self.registry.retain_flows_with_lifecycle(
+            |record_target, _| record_target != &target,
+            |record_target, _| record_target != &target,
+        );
+        persist_registry_payloads(
+            &self.registry,
+            self.store.as_ref(),
+            "release_oauth_flow_payloads",
+        )
+        .map_err(|err| {
+            DslTransitionError::new(
+                "AuthLeaseReleaseObserver::release_oauth_flow_payloads",
+                err.to_string(),
+            )
+        })
+    }
 }
 
 impl RuntimeOAuthFlowHandle {
@@ -49,11 +83,7 @@ impl RuntimeOAuthFlowHandle {
     }
 
     pub fn new_with_auth_lease(ttl: Duration, lifecycle: Arc<RuntimeAuthLeaseHandle>) -> Self {
-        Self {
-            registry: Arc::new(OAuthFlowRegistry::new(ttl)),
-            lifecycle,
-            store: None,
-        }
+        Self::new_with_capacity_auth_lease_and_store(ttl, 1024, lifecycle, None)
     }
 
     pub fn new_with_capacity(ttl: Duration, max_outstanding: usize) -> Self {
@@ -69,11 +99,7 @@ impl RuntimeOAuthFlowHandle {
         max_outstanding: usize,
         lifecycle: Arc<RuntimeAuthLeaseHandle>,
     ) -> Self {
-        Self {
-            registry: Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding)),
-            lifecycle,
-            store: None,
-        }
+        Self::new_with_capacity_auth_lease_and_store(ttl, max_outstanding, lifecycle, None)
     }
 
     pub fn new_with_persistent_store_and_auth_lease(
@@ -95,10 +121,18 @@ impl RuntimeOAuthFlowHandle {
         lifecycle: Arc<RuntimeAuthLeaseHandle>,
         store: Option<Weak<dyn RuntimeStore>>,
     ) -> Self {
+        let registry = Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding));
+        let release_observer = Arc::new(OAuthPayloadReleaseObserver {
+            registry: Arc::clone(&registry),
+            store: store.clone(),
+        });
+        let release_observer_dyn: Arc<dyn AuthLeaseReleaseObserver> = release_observer.clone();
+        lifecycle.add_release_observer(Arc::downgrade(&release_observer_dyn));
         let handle = Self {
-            registry: Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding)),
+            registry,
             lifecycle,
             store,
+            _release_observer: Some(release_observer),
         };
         handle.rehydrate_persisted_payloads();
         handle
@@ -394,8 +428,14 @@ fn persist_registry_payloads(
     store: Option<&Weak<dyn RuntimeStore>>,
     operation: &'static str,
 ) -> Result<(), OAuthFlowError> {
-    let Some(store) = store.and_then(Weak::upgrade) else {
+    let Some(store) = store else {
         return Ok(());
+    };
+    let Some(store) = store.upgrade() else {
+        return Err(OAuthFlowError::PersistenceFailed {
+            operation,
+            detail: "runtime store is no longer available".to_string(),
+        });
     };
     let snapshot = registry.snapshot_for_persistence(current_time_millis());
     let bytes = serde_json::to_vec(&snapshot).map_err(|err| OAuthFlowError::PersistenceFailed {

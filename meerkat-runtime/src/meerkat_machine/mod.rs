@@ -119,14 +119,10 @@ fn persistent_auth_authorities(
     let mut authorities = authorities
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(existing) = authorities.get(&key) {
-        match &key {
-            PersistentAuthAuthorityKey::Durable(_) => return Arc::clone(existing),
-            PersistentAuthAuthorityKey::Process(_) if existing.store.upgrade().is_some() => {
-                return Arc::clone(existing);
-            }
-            PersistentAuthAuthorityKey::Process(_) => {}
-        }
+    if let Some(existing) = authorities.get(&key)
+        && existing.store.upgrade().is_some()
+    {
+        return Arc::clone(existing);
     }
     let auth_lease = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
     let oauth_flows = Arc::new(

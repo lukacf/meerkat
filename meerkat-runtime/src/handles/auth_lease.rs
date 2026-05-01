@@ -16,7 +16,7 @@
 //! evolution from core-runtime evolution.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -74,6 +74,11 @@ fn emit_audit(
 #[derive(Clone)]
 pub struct RuntimeAuthLeaseHandle {
     machines: Arc<Mutex<AuthLeaseRegistry>>,
+    release_observers: Arc<Mutex<Vec<Weak<dyn AuthLeaseReleaseObserver>>>>,
+}
+
+pub(crate) trait AuthLeaseReleaseObserver: Send + Sync {
+    fn auth_lease_released(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 }
 
 #[cfg(test)]
@@ -129,6 +134,7 @@ impl RuntimeAuthLeaseHandle {
     pub fn new() -> Self {
         Self {
             machines: Arc::new(Mutex::new(AuthLeaseRegistry::default())),
+            release_observers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -139,6 +145,35 @@ impl RuntimeAuthLeaseHandle {
     /// the session bindings.
     pub fn ephemeral() -> Self {
         Self::new()
+    }
+
+    pub(crate) fn add_release_observer(&self, observer: Weak<dyn AuthLeaseReleaseObserver>) {
+        self.release_observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(observer);
+    }
+
+    fn notify_release_observers(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+        let observers = {
+            let mut guard = self
+                .release_observers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut observers = Vec::new();
+            guard.retain(|observer| match observer.upgrade() {
+                Some(observer) => {
+                    observers.push(observer);
+                    true
+                }
+                None => false,
+            });
+            observers
+        };
+        for observer in observers {
+            observer.auth_lease_released(lease_key)?;
+        }
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -496,6 +531,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::release_lease",
             true,
         )?;
+        self.notify_release_observers(lease_key)?;
         #[cfg(test)]
         run_release_after_accept_hook(lease_key);
         Ok(())
@@ -826,6 +862,7 @@ mod tests {
 
         let acquire_handle = RuntimeAuthLeaseHandle {
             machines: Arc::clone(&h.machines),
+            release_observers: Arc::clone(&h.release_observers),
         };
         let acquire_key = key.clone();
         let hook_key = key.clone();

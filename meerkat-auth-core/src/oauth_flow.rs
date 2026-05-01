@@ -626,6 +626,9 @@ impl OAuthDevicePollLease {
         };
         if result.is_ok() {
             self.active = false;
+            if let Some(lifecycle) = &self.lifecycle {
+                lifecycle.device_flow_payloads_changed()?;
+            }
         } else if matches!(result, Err(OAuthFlowError::Missing))
             && let Some(lifecycle) = &self.lifecycle
         {

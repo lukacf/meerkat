@@ -87,10 +87,12 @@ pub struct HookParams {
 
 /// Skills parameters for session/turn requests.
 ///
-/// `preload_skills` and `skill_refs` both carry typed `SkillKey`s — there is
-/// no legacy string path. Wire ingress parses JSON objects directly to
-/// `SkillKey` (`{"source_uuid":"…","skill_name":"…"}`); malformed input is a
-/// typed ingress error, not a legacy-upgrade.
+/// `preload_skills` carries typed `SkillKey`s
+/// (`{"source_uuid":"…","skill_name":"…"}`); first-turn `skill_refs` carries
+/// tagged `SkillRef`s
+/// (`{"kind":"structured","source_uuid":"…","skill_name":"…"}`). There is no
+/// legacy string path, and malformed input is a typed ingress error, not a
+/// legacy-upgrade.
 ///
 /// `Some([])` is normalized to `None` to prevent silent misconfiguration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

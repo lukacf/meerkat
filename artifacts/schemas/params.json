@@ -9330,7 +9330,7 @@
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Skills parameters for session/turn requests.\n\n`preload_skills` and `skill_refs` both carry typed `SkillKey`s — there is\nno legacy string path. Wire ingress parses JSON objects directly to\n`SkillKey` (`{\"source_uuid\":\"…\",\"skill_name\":\"…\"}`); malformed input is a\ntyped ingress error, not a legacy-upgrade.\n\n`Some([])` is normalized to `None` to prevent silent misconfiguration.",
+    "description": "Skills parameters for session/turn requests.\n\n`preload_skills` carries typed `SkillKey`s\n(`{\"source_uuid\":\"…\",\"skill_name\":\"…\"}`); first-turn `skill_refs` carries\ntagged `SkillRef`s\n(`{\"kind\":\"structured\",\"source_uuid\":\"…\",\"skill_name\":\"…\"}`). There is no\nlegacy string path, and malformed input is a typed ingress error, not a\nlegacy-upgrade.\n\n`Some([])` is normalized to `None` to prevent silent misconfiguration.",
     "properties": {
       "preload_skills": {
         "items": {

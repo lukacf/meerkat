@@ -1606,13 +1606,16 @@ impl MultiBackendProvisioner {
                     .await?;
                 let effective_bootstrap_token =
                     Self::bridge_bootstrap_token_from_binding(address, bootstrap_token)?;
+                let rebound_peer =
+                    Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address, pubkey)?;
                 self.persist_rebound_binding(
                     peer_id,
                     Some(effective_bootstrap_token.clone()),
                     &bind,
+                    pubkey,
                 )
                 .await?;
-                return Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address, pubkey);
+                return Ok(rebound_peer);
             }
             return Err(Self::bridge_rejection_error(rejection));
         }
@@ -1667,11 +1670,13 @@ impl MultiBackendProvisioner {
         prior_peer_id: &str,
         bootstrap_token: Option<super::bridge_protocol::BridgeBootstrapToken>,
         bind: &super::bridge_protocol::BridgeBindResponse,
+        pubkey: Option<[u8; 32]>,
     ) -> Result<(), MobError> {
         let Some(persistence) = self.binding_persistence.as_ref() else {
             return Ok(());
         };
         let canonical_address = super::bridge_protocol::canonicalize_bridge_address(&bind.address);
+        Self::peer_only_spec_from_parts(&bind.peer_id, &canonical_address, pubkey)?;
         let updated_entries = persistence
             .roster
             .write()
@@ -1755,9 +1760,17 @@ impl MultiBackendProvisioner {
                 Some(effective_bootstrap_token.as_str()),
             )
             .await?;
+        let canonical_address =
+            super::bridge_protocol::canonicalize_bridge_address(&bind_response.address);
+        let _validated_bind_response = Self::validated_external_peer_spec(
+            &peer_name,
+            &bind_response.peer_id,
+            &canonical_address,
+            pubkey,
+        )?;
         let member_ref = MemberRef::BackendPeer {
             peer_id: bind_response.peer_id,
-            address: super::bridge_protocol::canonicalize_bridge_address(&bind_response.address),
+            address: canonical_address,
             pubkey,
             bootstrap_token: Some(effective_bootstrap_token),
             session_id: None,

@@ -3003,6 +3003,7 @@ struct LiveExternalPeerHarness {
     delivered_inputs: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
+    bind_peer_id_override: Arc<RwLock<Option<String>>>,
     fail_next_authorize: Arc<AtomicBool>,
     fail_next_bind: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
@@ -3074,6 +3075,10 @@ impl LiveExternalPeerHarness {
     fn fail_next_bind(&self) {
         self.fail_next_bind.store(true, Ordering::Relaxed);
     }
+
+    async fn override_next_bind_peer_id(&self, peer_id: String) {
+        *self.bind_peer_id_override.write().await = Some(peer_id);
+    }
 }
 
 impl Drop for LiveExternalPeerHarness {
@@ -3113,6 +3118,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_received_intents = received_intents.clone();
     let supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>> = Arc::new(RwLock::new(None));
     let responder_supervisor_state = supervisor_state.clone();
+    let bind_peer_id_override: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+    let responder_bind_peer_id_override = bind_peer_id_override.clone();
     let fail_next_authorize = Arc::new(AtomicBool::new(false));
     let responder_fail_next_authorize = fail_next_authorize.clone();
     let fail_next_bind = Arc::new(AtomicBool::new(false));
@@ -3246,7 +3253,16 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                                 }
                                                 serde_json::to_value(
                                                     super::bridge_protocol::BridgeBindResponse {
-                                                        peer_id: responder_runtime.public_key().to_peer_id().to_string(),
+                                                        peer_id: responder_bind_peer_id_override
+                                                            .write()
+                                                            .await
+                                                            .take()
+                                                            .unwrap_or_else(|| {
+                                                                responder_runtime
+                                                                    .public_key()
+                                                                    .to_peer_id()
+                                                                    .to_string()
+                                                            }),
                                                         address: format!("inproc://{peer_name}"),
                                                         capabilities:
                                                             super::bridge_protocol::BridgeCapabilities {
@@ -3584,6 +3600,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         delivered_inputs,
         received_intents,
         supervisor_state,
+        bind_peer_id_override,
         fail_next_authorize,
         fail_next_bind,
         task,
@@ -5648,6 +5665,48 @@ async fn test_restarted_peer_only_member_rebinds_when_supervisor_state_is_lost()
         external.delivered_input_ids().await.len(),
         1,
         "rebound peer should still receive the requested input"
+    );
+}
+
+#[tokio::test]
+async fn test_external_member_spawn_rejects_bind_peer_id_pubkey_mismatch() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-bind-peer-id-mismatch",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob_with_real_comms(definition).await;
+    let external = spawn_live_external_peer(&test_comms_name_for(&mob_id, "worker", "w-ext")).await;
+    let mismatched_peer_id = PeerId::from_ed25519_pubkey(&[77u8; 32]).to_string();
+    external
+        .override_next_bind_peer_id(mismatched_peer_id)
+        .await;
+
+    let err = handle
+        .spawn_with_binding(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-ext"),
+            None,
+            external.binding(),
+        )
+        .await
+        .expect_err("bind response peer id must derive from the stored pubkey");
+
+    assert!(
+        err.to_string().contains("pubkey-derived id"),
+        "unexpected error: {err}"
+    );
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                MobEventKind::MemberSpawned(spawned)
+                    if spawned.agent_identity == AgentIdentity::from("w-ext")
+            )
+        }),
+        "rejected bind response must not append a member spawn event"
     );
 }
 

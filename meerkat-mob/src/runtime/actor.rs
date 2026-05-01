@@ -835,6 +835,7 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let crate::RuntimeBinding::External {
             peer_id: prior_peer_id,
+            pubkey,
             ..
         } = prior_binding
         else {
@@ -843,6 +844,12 @@ impl MobActor {
         let bootstrap_token = Some(Self::bridge_bootstrap_token_from_binding(prior_binding)?);
         let canonical_address =
             super::bridge_protocol::canonicalize_bridge_address(&bind_response.address);
+        Self::peer_only_spec_from_parts(
+            &bind_response.peer_id,
+            &canonical_address,
+            "persist_rebound_binding",
+            *pubkey,
+        )?;
         let updated_entries = self
             .roster
             .write()

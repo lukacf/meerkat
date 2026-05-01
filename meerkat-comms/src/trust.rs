@@ -30,6 +30,16 @@ pub enum TrustError {
     /// Ed25519 key material.
     #[error("trusted peer pubkey must be non-zero for {name}")]
     ZeroPubkey { name: String },
+    /// A raw [`TrustEntry`] tried to bind a routing identity that does not
+    /// derive from its signing key.
+    #[error(
+        "trusted peer id {peer_id} does not match pubkey-derived id {derived_peer_id} for {name}"
+    )]
+    PeerIdPubkeyMismatch {
+        name: String,
+        peer_id: PeerId,
+        derived_peer_id: PeerId,
+    },
 }
 
 /// Error resolving a [`PeerName`] to a routing-key [`PeerId`].
@@ -73,6 +83,14 @@ impl TrustEntry {
         if self.pubkey.is_zero() {
             return Err(TrustError::ZeroPubkey {
                 name: self.name.as_str().to_string(),
+            });
+        }
+        let derived_peer_id = self.pubkey.to_peer_id();
+        if derived_peer_id != self.peer_id {
+            return Err(TrustError::PeerIdPubkeyMismatch {
+                name: self.name.as_str().to_string(),
+                peer_id: self.peer_id,
+                derived_peer_id,
             });
         }
         Ok(())
@@ -687,6 +705,93 @@ mod tests {
         assert!(peers.get_peer(&zero_pubkey).is_none());
         assert!(peers.get_by_name("zero-peer").is_none());
         assert!(peers.find_by_peer_id(&zero_pubkey.to_peer_id()).is_none());
+    }
+
+    #[test]
+    fn test_trust_store_rejects_peer_id_pubkey_mismatch() {
+        let trusted_pubkey = PubKey::new([8u8; 32]);
+        let mismatched_peer_id = PubKey::new([7u8; 32]).to_peer_id();
+        let mut store = TrustStore::new();
+
+        let result = store.insert(TrustEntry {
+            peer_id: mismatched_peer_id,
+            name: PeerName::new("mismatched-peer").unwrap(),
+            pubkey: trusted_pubkey,
+            address: PeerAddress::parse("inproc://mismatched-peer").unwrap(),
+            meta: PeerMeta::default(),
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(TrustError::PeerIdPubkeyMismatch {
+                    peer_id,
+                    derived_peer_id,
+                    ..
+                }) if peer_id == mismatched_peer_id
+                    && derived_peer_id == trusted_pubkey.to_peer_id()
+            ),
+            "raw TrustEntry authority must reject peer ids that do not derive from the pubkey"
+        );
+        assert!(
+            store.is_empty(),
+            "mismatched raw trust entry must not enter the canonical trust store"
+        );
+
+        let result = store.upsert(TrustEntry {
+            peer_id: mismatched_peer_id,
+            name: PeerName::new("mismatched-peer").unwrap(),
+            pubkey: trusted_pubkey,
+            address: PeerAddress::parse("inproc://mismatched-peer").unwrap(),
+            meta: PeerMeta::default(),
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(TrustError::PeerIdPubkeyMismatch {
+                    peer_id,
+                    derived_peer_id,
+                    ..
+                }) if peer_id == mismatched_peer_id
+                    && derived_peer_id == trusted_pubkey.to_peer_id()
+            ),
+            "raw TrustEntry upsert must reject peer ids that do not derive from the pubkey"
+        );
+        assert!(
+            store.is_empty(),
+            "mismatched raw trust entry must not enter the canonical trust store through upsert"
+        );
+    }
+
+    #[test]
+    fn test_trust_store_duplicate_peer_id_uses_pubkey_derived_id() {
+        let pubkey = PubKey::new([9u8; 32]);
+        let peer_id = pubkey.to_peer_id();
+        let mut store = TrustStore::new();
+
+        store
+            .insert(TrustEntry {
+                peer_id,
+                name: PeerName::new("first-peer").unwrap(),
+                pubkey,
+                address: PeerAddress::parse("inproc://first-peer").unwrap(),
+                meta: PeerMeta::default(),
+            })
+            .expect("derived peer id should insert");
+
+        let result = store.insert(TrustEntry {
+            peer_id,
+            name: PeerName::new("duplicate-peer").unwrap(),
+            pubkey,
+            address: PeerAddress::parse("inproc://duplicate-peer").unwrap(),
+            meta: PeerMeta::default(),
+        });
+
+        assert!(
+            matches!(result, Err(TrustError::DuplicatePeerId { peer_id: id }) if id == peer_id)
+        );
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

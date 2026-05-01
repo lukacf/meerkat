@@ -235,6 +235,18 @@ impl Roster {
                 // peer's name (as AgentIdentity) to `wired_to`. Resume
                 // path replays these events to reinstate trust without
                 // consulting a live comms runtime.
+                if let Err(reason) =
+                    TrustedPeerDescriptor::validate_pubkey_for_peer_id(spec.peer_id, &spec.pubkey)
+                {
+                    tracing::warn!(
+                        local = %local,
+                        peer_id = %spec.peer_id,
+                        peer_name = %spec.name,
+                        reason = %reason,
+                        "skipping invalid ExternalPeerWired descriptor during roster projection"
+                    );
+                    return;
+                }
                 if let Some(entry) = self.entries.get_mut(local) {
                     let external_identity = AgentIdentity::from(spec.name.as_str());
                     entry.wired_to.insert(external_identity.clone());
@@ -847,6 +859,112 @@ mod tests {
             roster1.get(&MeerkatId::from("a")).unwrap().role,
             roster2.get(&MeerkatId::from("a")).unwrap().role,
         );
+    }
+
+    #[test]
+    fn test_project_skips_invalid_external_peer_wired_spec() {
+        let local = AgentIdentity::from("local");
+        let zero_pubkey_external = AgentIdentity::from("remote-mob/worker/zero");
+        let mismatch_external = AgentIdentity::from("remote-mob/worker/mismatch");
+        let zero_pubkey_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            zero_pubkey_external.as_str(),
+            PeerId::new(),
+            "inproc://remote-mob/worker/zero",
+        )
+        .expect("legacy invalid external peer spec should still decode");
+        let mismatch_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            mismatch_external.as_str(),
+            PeerId::new(),
+            "inproc://remote-mob/worker/mismatch",
+        )
+        .expect("legacy invalid external peer spec should still decode")
+        .with_pubkey([8u8; 32]);
+        let events = vec![
+            make_event(
+                1,
+                spawned_kind(
+                    local.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                2,
+                MobEventKind::ExternalPeerWired {
+                    local: local.clone(),
+                    spec: zero_pubkey_spec,
+                },
+            ),
+            make_event(
+                3,
+                MobEventKind::ExternalPeerWired {
+                    local: local.clone(),
+                    spec: mismatch_spec,
+                },
+            ),
+        ];
+
+        let roster = Roster::project(&events);
+        let entry = roster
+            .get_by_identity(&local)
+            .expect("local member should project");
+
+        assert!(
+            entry.external_peer_specs.is_empty(),
+            "invalid external peer specs must not hydrate resume trust state"
+        );
+        assert!(
+            !entry.wired_to.contains(&zero_pubkey_external),
+            "zero-pubkey external peer specs must not project as wired edges"
+        );
+        assert!(
+            !entry.wired_to.contains(&mismatch_external),
+            "invalid external peer specs must not project as wired edges"
+        );
+    }
+
+    #[test]
+    fn test_project_accepts_valid_external_peer_wired_spec() {
+        let local = AgentIdentity::from("local");
+        let external = AgentIdentity::from("remote-mob/worker/agent-b");
+        let pubkey = [8u8; 32];
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        let spec = TrustedPeerDescriptor::unsigned_with_pubkey(
+            external.as_str(),
+            peer_id.to_string(),
+            pubkey,
+            "inproc://remote-mob/worker/agent-b",
+        )
+        .expect("valid external peer spec");
+        let events = vec![
+            make_event(
+                1,
+                spawned_kind(
+                    local.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                2,
+                MobEventKind::ExternalPeerWired {
+                    local: local.clone(),
+                    spec,
+                },
+            ),
+        ];
+
+        let roster = Roster::project(&events);
+        let entry = roster
+            .get_by_identity(&local)
+            .expect("local member should project");
+
+        assert!(entry.external_peer_specs.contains_key(&external));
+        assert!(entry.wired_to.contains(&external));
     }
 
     #[test]

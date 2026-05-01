@@ -792,9 +792,12 @@ mod tests {
 
     #[test]
     fn test_external_peer_wired_roundtrip() {
-        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+        let pubkey = [8u8; 32];
+        let peer_id = meerkat_core::comms::PeerId::from_ed25519_pubkey(&pubkey);
+        let spec = TrustedPeerDescriptor::unsigned_with_pubkey(
             "remote-mob/worker/agent-b",
-            meerkat_core::comms::PeerId::new(),
+            peer_id.to_string(),
+            pubkey,
             "inproc://remote-mob/worker/agent-b",
         )
         .expect("valid external peer");

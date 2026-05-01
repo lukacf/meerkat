@@ -5012,6 +5012,7 @@ mod tests {
     use meerkat::AgentBuildConfig;
     use meerkat_client::{LlmClient, LlmError};
     use meerkat_core::StopReason;
+    use meerkat_core::lifecycle::core_executor::CoreExecutor as _;
     use meerkat_core::lifecycle::run_primitive::{
         KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride,
     };
@@ -5453,6 +5454,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_runtime_executor_context_only_apply_rematerializes_stale_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize runtime session".into(),
+                initial_event_tx,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        runtime
+            .service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard_live_session");
+        runtime
+            .runtime_adapter()
+            .unregister_session(&session_id)
+            .await;
+
+        let runtime = Arc::new(runtime);
+        let mut executor =
+            crate::session_executor::SessionRuntimeExecutor::new(Arc::clone(&runtime), session_id);
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-executor-stale-rematerialize".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "executor checkpoint-only runtime context after stale live session"
+                            .to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+
+        let output = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("executor context-only apply should rematerialize stale sessions");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
     async fn context_only_runtime_apply_rejects_build_only_overrides() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = make_runtime(temp_factory(&temp), 10);
@@ -5536,6 +5601,48 @@ mod tests {
 
         assert!(
             error.message.contains("context-only") && error.message.contains("materialization"),
+            "unexpected rejection reason: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_runtime_executor_rejects_context_only_materialization_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+        let mut executor = crate::session_executor::SessionRuntimeExecutor::new(
+            Arc::clone(&runtime),
+            SessionId::new(),
+        );
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-executor-materialization-metadata".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    model: Some(ModelId::new("gpt-context-only")),
+                    ..Default::default()
+                }),
+                build_only_overrides: None,
+            });
+
+        let error = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect_err("executor context-only applies must reject materialization metadata");
+
+        assert!(
+            error
+                .to_string()
+                .contains(CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR),
             "unexpected rejection reason: {error:?}"
         );
     }

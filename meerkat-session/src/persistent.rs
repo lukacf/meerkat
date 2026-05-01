@@ -403,6 +403,21 @@ fn metadata_marks_archived(metadata: &serde_json::Map<String, serde_json::Value>
         .unwrap_or(false)
 }
 
+fn first_system_prompt_content(session: &Session) -> Option<&str> {
+    session
+        .messages()
+        .first()
+        .and_then(|message| match message {
+            meerkat_core::types::Message::System(system) => Some(system.content.as_str()),
+            _ => None,
+        })
+}
+
+fn runtime_context_base_differs(stored: &Session, live: &Session) -> bool {
+    stored.system_context_state() != live.system_context_state()
+        || first_system_prompt_content(stored) != first_system_prompt_content(live)
+}
+
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     fn archived_not_found(id: &SessionId) -> SessionControlError {
         SessionControlError::Session(SessionError::NotFound { id: id.clone() })
@@ -890,6 +905,58 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             stored_message_count = stored.messages().len(),
             stored_is_archived,
             "discarding stale live session in favor of newer durable session-store snapshot"
+        );
+        self.discard_live_session(id).await?;
+        Ok(true)
+    }
+
+    async fn discard_stale_live_session_for_runtime_context_apply(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        let live = match self.export_live_session(id).await {
+            Ok(session) => session,
+            Err(SessionError::NotFound { .. }) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+
+        let (stored, runtime_backed) = if let Some(runtime_store) = self.runtime_store.as_ref() {
+            let Some(runtime) =
+                Self::load_runtime_session_snapshot_for_session(runtime_store, id).await?
+            else {
+                return Ok(false);
+            };
+            (runtime, true)
+        } else {
+            let Some(stored) = self
+                .store
+                .load(id)
+                .await
+                .map_err(|e| SessionError::Store(Box::new(e)))?
+            else {
+                return Ok(false);
+            };
+            (stored, false)
+        };
+
+        let stored_has_more_transcript = stored.messages().len() > live.messages().len();
+        let stored_is_archived = metadata_marks_archived(stored.metadata());
+        let runtime_context_base_changed =
+            runtime_backed && runtime_context_base_differs(&stored, &live);
+
+        if !stored_has_more_transcript && !stored_is_archived && !runtime_context_base_changed {
+            return Ok(false);
+        }
+
+        tracing::debug!(
+            session_id = %id,
+            live_updated_at = ?live.updated_at(),
+            stored_updated_at = ?stored.updated_at(),
+            live_message_count = live.messages().len(),
+            stored_message_count = stored.messages().len(),
+            stored_is_archived,
+            runtime_context_base_changed,
+            "discarding stale live session in favor of newer durable runtime context snapshot"
         );
         self.discard_live_session(id).await?;
         Ok(true)
@@ -1547,7 +1614,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
-        let _ = self.discard_stale_live_session_if_needed(id).await?;
+        let _ = self
+            .discard_stale_live_session_for_runtime_context_apply(id)
+            .await?;
         self.inner
             .apply_runtime_system_context(id, appends.clone())
             .await?;
@@ -5232,6 +5301,131 @@ mod tests {
                 .system_context_state()
                 .is_none_or(|state| state.pending.is_empty()),
             "failed context append must not be committed before rematerialization"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_context_append_evicts_same_length_runtime_context_drift() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Some(runtime_store.clone()),
+            memory_blob_store(),
+        );
+
+        let result = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+
+        service
+            .apply_runtime_turn(
+                &result.session_id,
+                RunId::new(),
+                runtime_content_turn_request("runtime committed turn"),
+                RunApplyBoundary::Immediate,
+                vec![],
+            )
+            .await
+            .expect("runtime-backed turn should succeed");
+        service
+            .apply_runtime_context_appends(
+                &result.session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "base durable context".to_string(),
+                    source: Some("runtime:base".to_string()),
+                    idempotency_key: Some("base-runtime-context".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect("baseline runtime context append should succeed");
+        let live_before = service
+            .export_live_session(&result.session_id)
+            .await
+            .expect("live session should export");
+
+        let mut newer_runtime_session = live_before.clone();
+        newer_runtime_session.append_system_context_blocks(&[PendingSystemContextAppend {
+            text: "newer durable context".to_string(),
+            source: Some("runtime:newer".to_string()),
+            idempotency_key: Some("newer-runtime-context".to_string()),
+            accepted_at: meerkat_core::time_compat::SystemTime::now(),
+        }]);
+        assert_eq!(
+            newer_runtime_session.messages().len(),
+            live_before.messages().len(),
+            "test must seed a same-length runtime context drift"
+        );
+        assert_ne!(
+            newer_runtime_session.system_context_state(),
+            live_before.system_context_state(),
+            "test must seed newer runtime-owned system context state"
+        );
+
+        let session_snapshot =
+            serde_json::to_vec(&newer_runtime_session).expect("runtime snapshot should serialize");
+        runtime_store
+            .commit_session_boundary(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(
+                    &result.session_id,
+                ),
+                SessionDelta { session_snapshot },
+                RunId::new(),
+                RunApplyBoundary::Immediate,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect("runtime snapshot commit should succeed");
+
+        let error = service
+            .apply_runtime_context_appends(
+                &result.session_id,
+                RunId::new(),
+                vec![PendingSystemContextAppend {
+                    text: "context that must wait for rematerialization".to_string(),
+                    source: Some("runtime:test".to_string()),
+                    idempotency_key: Some("stale-live-context".to_string()),
+                    accepted_at: meerkat_core::time_compat::SystemTime::now(),
+                }],
+                vec![InputId::new()],
+            )
+            .await
+            .expect_err("same-length runtime context drift should evict stale live handle");
+
+        assert!(
+            error.to_string().contains("session not found"),
+            "unexpected error after stale live eviction: {error}"
+        );
+        let authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should remain present");
+        let first_message = authoritative
+            .messages()
+            .first()
+            .expect("authoritative runtime snapshot should keep first message");
+        let system_text = match first_message {
+            Message::System(system) => system.content.as_str(),
+            other => panic!("expected first authoritative message to be system, got {other:?}"),
+        };
+        assert!(
+            system_text.contains("newer durable context"),
+            "authoritative runtime context should remain intact: {system_text}"
+        );
+        assert!(
+            !system_text.contains("context that must wait for rematerialization"),
+            "failed context append must not be committed before rematerialization: {system_text}"
         );
     }
 

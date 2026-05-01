@@ -29,6 +29,10 @@ use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionError, StartTurnRequest};
 use meerkat_core::types::SessionId;
 #[cfg(feature = "runtime-adapter")]
+use meerkat_core::{
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+};
+#[cfg(feature = "runtime-adapter")]
 #[allow(unused_imports)]
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
 #[cfg(feature = "runtime-adapter")]
@@ -553,9 +557,142 @@ mod tests {
         MultiBackendProvisioner, runtime_completion_to_mob_result, session_turn_error_to_mob_error,
     };
     use crate::error::MobError;
+    #[cfg(feature = "runtime-adapter")]
+    use meerkat_core::lifecycle::core_executor::CoreExecutor as _;
     use meerkat_core::service::SessionError;
     use meerkat_core::types::SessionId;
     use serde_json::json;
+    #[cfg(feature = "runtime-adapter")]
+    use std::sync::Arc;
+
+    #[cfg(feature = "runtime-adapter")]
+    struct ContextOnlyMobSessionService;
+
+    #[cfg(feature = "runtime-adapter")]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl meerkat_core::service::SessionService for ContextOnlyMobSessionService {
+        async fn create_session(
+            &self,
+            _req: meerkat_core::service::CreateSessionRequest,
+        ) -> Result<meerkat_core::RunResult, SessionError> {
+            unreachable!("context-only executor tests only exercise guard paths")
+        }
+
+        async fn start_turn(
+            &self,
+            _id: &SessionId,
+            _req: meerkat_core::service::StartTurnRequest,
+        ) -> Result<meerkat_core::RunResult, SessionError> {
+            unreachable!("context-only executor tests only exercise guard paths")
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unreachable!("context-only executor tests only exercise guard paths")
+        }
+
+        async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+            Err(SessionError::NotRunning { id: id.clone() })
+        }
+
+        async fn read(
+            &self,
+            _id: &SessionId,
+        ) -> Result<meerkat_core::service::SessionView, SessionError> {
+            unreachable!("context-only executor tests only exercise guard paths")
+        }
+
+        async fn list(
+            &self,
+            _query: meerkat_core::service::SessionQuery,
+        ) -> Result<Vec<meerkat_core::service::SessionSummary>, SessionError> {
+            unreachable!("context-only executor tests only exercise guard paths")
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unreachable!("context-only executor tests only exercise guard paths")
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl meerkat_core::service::SessionServiceCommsExt for ContextOnlyMobSessionService {}
+
+    #[cfg(feature = "runtime-adapter")]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl meerkat_core::service::SessionServiceControlExt for ContextOnlyMobSessionService {
+        async fn append_system_context(
+            &self,
+            _id: &SessionId,
+            _req: meerkat_core::service::AppendSystemContextRequest,
+        ) -> Result<
+            meerkat_core::service::AppendSystemContextResult,
+            meerkat_core::service::SessionControlError,
+        > {
+            Ok(meerkat_core::service::AppendSystemContextResult {
+                status: meerkat_core::service::AppendSystemContextStatus::Applied,
+            })
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl meerkat_core::service::SessionServiceHistoryExt for ContextOnlyMobSessionService {
+        async fn read_history(
+            &self,
+            _id: &SessionId,
+            _query: meerkat_core::service::SessionHistoryQuery,
+        ) -> Result<meerkat_core::service::SessionHistoryPage, SessionError> {
+            unreachable!("context-only executor tests only exercise guard paths")
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl crate::runtime::MobSessionService for ContextOnlyMobSessionService {}
+
+    #[cfg(feature = "runtime-adapter")]
+    fn test_mob_session_runtime_executor() -> super::MobSessionRuntimeExecutor {
+        super::MobSessionRuntimeExecutor::new(
+            Arc::new(ContextOnlyMobSessionService),
+            Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+            SessionId::new(),
+            Arc::new(super::RuntimeSessionState {
+                queued_turns: tokio::sync::Mutex::new(super::RuntimeSessionQueue::default()),
+            }),
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        )
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    fn context_only_mob_runtime_primitive(
+        turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+        build_only_overrides: Option<
+            meerkat_core::lifecycle::run_primitive::RuntimeBuildOnlyTurnOverrides,
+        >,
+    ) -> meerkat_core::lifecycle::run_primitive::RunPrimitive {
+        meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(
+            meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![
+                    meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
+                        key: "ctx-mob-session-runtime".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                            text: "context-only runtime context".to_string(),
+                        },
+                    },
+                ],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata,
+                build_only_overrides,
+            },
+        )
+    }
 
     #[test]
     fn runtime_callback_pending_maps_to_typed_mob_error() {
@@ -771,6 +908,64 @@ mod tests {
         );
         assert_eq!(instructions[0].body, "follow mob protocol");
     }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn mob_session_runtime_executor_rejects_context_only_build_only_overrides() {
+        let mut executor = test_mob_session_runtime_executor();
+        let primitive = context_only_mob_runtime_primitive(
+            None,
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeBuildOnlyTurnOverrides {
+                    system_prompt: Some("context-only system".to_string()),
+                    ..Default::default()
+                },
+            ),
+        );
+
+        let error = executor
+            .apply(meerkat_core::lifecycle::RunId::new(), primitive)
+            .await
+            .expect_err("mob session runtime executor must reject build-only context metadata");
+
+        assert!(
+            error
+                .to_string()
+                .contains(meerkat_core::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn mob_session_runtime_executor_rejects_context_only_materialization_metadata() {
+        let mut executor = test_mob_session_runtime_executor();
+        let primitive = context_only_mob_runtime_primitive(
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                        "gpt-context-only",
+                    )),
+                    ..Default::default()
+                },
+            ),
+            None,
+        );
+
+        let error = executor
+            .apply(meerkat_core::lifecycle::RunId::new(), primitive)
+            .await
+            .expect_err(
+                "mob session runtime executor context-only applies must reject materialization metadata",
+            );
+
+        assert!(
+            error
+                .to_string()
+                .contains(meerkat_core::CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -876,6 +1071,29 @@ fn pending_system_context_appends_for_runtime_executor(
 }
 
 #[cfg(feature = "runtime-adapter")]
+fn reject_context_only_unmaterializable_metadata(
+    primitive: &RunPrimitive,
+) -> Result<(), CoreExecutorError> {
+    if primitive
+        .build_only_overrides()
+        .is_some_and(|overrides| !overrides.is_empty())
+    {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
+        ));
+    }
+    if primitive
+        .turn_metadata()
+        .is_some_and(|metadata| metadata.has_materialization_recovery_fields())
+    {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutor for MobSessionRuntimeExecutor {
@@ -908,6 +1126,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         // system-context appends, but terminal peer responses carry a typed
         // apply intent that requires a requester reaction turn.
         if primitive.is_context_only_apply_without_turn() {
+            reject_context_only_unmaterializable_metadata(&primitive)?;
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };

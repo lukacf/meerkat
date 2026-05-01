@@ -15,8 +15,10 @@ use meerkat_core::lifecycle::core_executor::{
 };
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::{SessionError, SessionService};
-use meerkat_core::types::SessionId;
-use meerkat_core::{BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, EventEnvelope};
+use meerkat_core::types::{ContentInput, SessionId};
+use meerkat_core::{
+    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR, EventEnvelope,
+};
 use tokio::sync::mpsc;
 
 use crate::router::NotificationSink;
@@ -180,6 +182,28 @@ fn pending_system_context_appends_from_primitive(
         .collect()
 }
 
+fn reject_context_only_unmaterializable_metadata(
+    primitive: &RunPrimitive,
+) -> Result<(), CoreExecutorError> {
+    if primitive
+        .build_only_overrides()
+        .is_some_and(|overrides| !overrides.is_empty())
+    {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
+        ));
+    }
+    if primitive
+        .turn_metadata()
+        .is_some_and(|metadata| metadata.has_materialization_recovery_fields())
+    {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR,
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl CoreExecutor for SessionRuntimeExecutor {
     fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
@@ -211,28 +235,19 @@ impl CoreExecutor for SessionRuntimeExecutor {
         // system-context appends, but terminal peer responses carry a typed
         // apply intent that requires a requester reaction turn.
         if primitive.is_context_only_apply_without_turn() {
-            if primitive
-                .build_only_overrides()
-                .is_some_and(|overrides| !overrides.is_empty())
-            {
-                return Err(CoreExecutorError::apply_failed_primitive_rejected(
-                    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
-                ));
-            }
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("context-only apply without turn only matches staged primitives");
-            };
+            reject_context_only_unmaterializable_metadata(&primitive)?;
+            let (event_tx, _event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(1);
             return self
                 .runtime
-                .apply_runtime_context_appends_via_service(
+                .apply_runtime_turn(
                     &self.session_id,
                     run_id,
-                    pending_system_context_appends_from_primitive(&staged.context_appends),
-                    primitive.apply_boundary(),
-                    staged.contributing_input_ids.clone(),
+                    &primitive,
+                    ContentInput::Text(String::new()),
+                    event_tx,
                 )
                 .await
-                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
+                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.message));
         }
         let prompt = primitive.extract_content_input();
 
@@ -325,14 +340,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         }
 
         if primitive.is_context_only_apply_without_turn() {
-            if primitive
-                .build_only_overrides()
-                .is_some_and(|overrides| !overrides.is_empty())
-            {
-                return Err(CoreExecutorError::apply_failed_primitive_rejected(
-                    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
-                ));
-            }
+            reject_context_only_unmaterializable_metadata(&primitive)?;
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
@@ -510,7 +518,9 @@ mod tests {
             _id: &SessionId,
             _req: AppendSystemContextRequest,
         ) -> Result<AppendSystemContextResult, SessionControlError> {
-            unreachable!("boundary-handle tests only call cancel_after_boundary")
+            Ok(AppendSystemContextResult {
+                status: meerkat_core::service::AppendSystemContextStatus::Applied,
+            })
         }
     }
 
@@ -567,6 +577,53 @@ mod tests {
             error
                 .to_string()
                 .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_rpc_executor_rejects_context_only_materialization_metadata() {
+        let session_service: Arc<dyn MobSessionService> =
+            Arc::new(BoundaryCancelSessionService::unsupported());
+        let session_id = SessionId::new();
+        let mut executor =
+            MobRpcRuntimeExecutor::new(session_service, session_id, NotificationSink::noop());
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![
+                    meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
+                        key: "ctx-mob-rpc-materialization-metadata".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "context-only runtime context".to_string(),
+                        },
+                    },
+                ],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                            "gpt-context-only",
+                        )),
+                        ..Default::default()
+                    },
+                ),
+                build_only_overrides: None,
+            });
+
+        let error = executor
+            .apply(meerkat_core::lifecycle::RunId::new(), primitive)
+            .await
+            .expect_err(
+                "mob RPC executor context-only applies must reject materialization metadata",
+            );
+
+        assert!(
+            error
+                .to_string()
+                .contains(meerkat_core::CONTEXT_ONLY_MATERIALIZATION_METADATA_ERROR),
             "unexpected rejection reason: {error}"
         );
     }

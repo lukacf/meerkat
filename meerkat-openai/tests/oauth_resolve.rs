@@ -35,6 +35,18 @@ use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnviro
 use meerkat_openai::runtime::oauth as o_oauth;
 
 fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
+    openai_realm_with_source(
+        backend_kind,
+        auth_method,
+        CredentialSourceSpec::PlatformDefault,
+    )
+}
+
+fn openai_realm_with_source(
+    backend_kind: &str,
+    auth_method: &str,
+    source: CredentialSourceSpec,
+) -> RealmConnectionSet {
     let mut backend = BTreeMap::new();
     backend.insert(
         backend_kind.into(),
@@ -51,7 +63,7 @@ fn openai_realm(backend_kind: &str, auth_method: &str) -> RealmConnectionSet {
         AuthProfileConfig {
             provider: "openai".into(),
             auth_method: auth_method.into(),
-            source: CredentialSourceSpec::PlatformDefault,
+            source,
             constraints: AuthConstraints {
                 allow_interactive_login: true,
                 ..Default::default()
@@ -237,6 +249,103 @@ async fn openai_managed_chatgpt_oauth_rejects_token_without_auth_lifecycle() {
 }
 
 #[tokio::test]
+async fn openai_managed_chatgpt_oauth_rejects_wrong_persisted_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ApiKey,
+                primary_secret: Some("stale-api-key-on-chatgpt-binding".into()),
+                refresh_token: Some("rt".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: vec![],
+                account_id: Some("acct-1".into()),
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("credential mode ApiKey"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_rejects_wrong_source_even_with_matching_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ChatgptOauth,
+                primary_secret: Some("fresh-chatgpt-access".into()),
+                refresh_token: Some("rt".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: o_oauth::CHATGPT_SCOPES
+                    .iter()
+                    .map(|s| (*s).into())
+                    .collect(),
+                account_id: Some("acct-1".into()),
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let realm = openai_realm_with_source(
+        "chatgpt_backend",
+        "managed_chatgpt_oauth",
+        CredentialSourceSpec::ExternalResolver {
+            handle: "external-chatgpt".into(),
+        },
+    );
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("source 'external_resolver'"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
 async fn openai_chatgpt_oauth_refresh_returns_refreshed_expiry_for_lease_publication() {
     let app = Router::new().route(
         "/oauth/token",
@@ -346,6 +455,50 @@ async fn openai_external_chatgpt_tokens_returns_persisted_access() {
     assert_eq!(
         connection.resolved_secret(),
         Some("externally-managed-access".to_string()),
+    );
+}
+
+#[tokio::test]
+async fn openai_external_chatgpt_tokens_rejects_chatgpt_oauth_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_chatgpt").expect("valid slugs"),
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ChatgptOauth,
+                primary_secret: Some("managed-chatgpt-access".into()),
+                refresh_token: Some("rt".into()),
+                id_token: None,
+                expires_at: None,
+                last_refresh: Some(Utc::now()),
+                scopes: vec![],
+                account_id: Some("acct-managed".into()),
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let realm = openai_realm("chatgpt_backend", "external_chatgpt_tokens");
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(std::sync::Arc::new(meerkat_openai::OpenAiProviderRuntime));
+    let err = registry
+        .resolve(&realm, &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("credential mode ChatgptOauth"),
+        "got {err}"
     );
 }
 

@@ -15,7 +15,7 @@ use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthStatusPhase;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::auth::{PersistedAuthMode, TokenKey};
+use meerkat_core::auth::{PersistedTokens, TokenKey};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::handles::AuthLeasePhase;
 use meerkat_core::{
@@ -152,13 +152,7 @@ async fn resolve_managed_store_secret(
             .await
             .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
             .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
-        let expected = managed_store_auth_mode(&binding.auth_profile.auth_method)?;
-        if tokens.auth_mode != expected {
-            return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                "managed_store credential mode {:?} does not match binding auth_method '{}'",
-                tokens.auth_mode, binding.auth_profile.auth_method,
-            )));
-        }
+        require_persisted_auth_mode(&tokens, &binding.auth_profile.auth_method)?;
         tokens.primary_secret.ok_or_else(|| {
             ProviderAuthError::SourceResolutionFailed(
                 "managed_store credential has no primary_secret".into(),
@@ -174,6 +168,26 @@ async fn resolve_managed_store_secret(
                 .into(),
         ))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn require_persisted_auth_mode(
+    tokens: &PersistedTokens,
+    auth_method: &str,
+) -> Result<(), ProviderAuthError> {
+    let expected =
+        crate::auth_store::persisted_auth_mode_for_auth_method(auth_method).ok_or_else(|| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "auth_method '{auth_method}' cannot resolve persisted credentials from TokenStore"
+            ))
+        })?;
+    if tokens.auth_mode != expected {
+        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "persisted credential mode {:?} does not match binding auth_method '{}' (expected {:?})",
+            tokens.auth_mode, auth_method, expected,
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -197,19 +211,6 @@ pub fn require_credential_lifecycle_authority(
         Some(AuthLeasePhase::ReauthRequired | AuthLeasePhase::Released) | None => {
             Err(interactive_login_error(binding))
         }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn managed_store_auth_mode(auth_method: &str) -> Result<PersistedAuthMode, ProviderAuthError> {
-    match auth_method {
-        "api_key" | "api_key_express" | "foundry_api_key" => Ok(PersistedAuthMode::ApiKey),
-        "static_bearer" | "bearer_api_key" | "bedrock_bearer" => {
-            Ok(PersistedAuthMode::StaticBearer)
-        }
-        other => Err(ProviderAuthError::SourceResolutionFailed(format!(
-            "auth_method '{other}' cannot resolve simple credentials from managed_store"
-        ))),
     }
 }
 

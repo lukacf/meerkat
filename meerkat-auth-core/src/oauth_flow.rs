@@ -13,11 +13,13 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use meerkat_core::{ConnectionRef, Provider};
+use meerkat_core::{AuthProfile, ConnectionRef, CredentialSourceSpec, Provider};
 use parking_lot::Mutex;
 
 use crate::auth_oauth::OAuthEndpoints;
-use crate::auth_store::PersistedAuthMode;
+use crate::auth_store::{
+    PersistedAuthMode, credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
+};
 
 const DEFAULT_MAX_OUTSTANDING_FLOWS: usize = 1024;
 
@@ -182,6 +184,77 @@ pub fn resolve_oauth_provider(
         auth_mode: identity.auth_mode(),
         client_secret: identity.client_secret(),
     })
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OAuthTargetValidationError {
+    #[error("OAuth target provider mismatch: expected {expected:?}, got {actual:?}")]
+    ProviderMismatch {
+        expected: Provider,
+        actual: Provider,
+    },
+    #[error(
+        "OAuth target auth_method '{auth_method}' cannot store credential mode {expected_mode:?}"
+    )]
+    AuthMethodMismatch {
+        auth_method: String,
+        expected_mode: PersistedAuthMode,
+    },
+    #[error(
+        "OAuth target source '{source_kind}' cannot store OAuth credentials; expected source.kind = 'managed_store' or 'platform_default'"
+    )]
+    SourceMismatch { source_kind: &'static str },
+}
+
+pub fn validate_oauth_login_target(
+    auth_profile: &AuthProfile,
+    identity: OAuthProviderIdentity,
+) -> Result<(), OAuthTargetValidationError> {
+    validate_oauth_target_for_auth_mode(auth_profile, identity.provider(), identity.auth_mode())
+}
+
+pub fn validate_oauth_target_for_auth_mode(
+    auth_profile: &AuthProfile,
+    expected_provider: Provider,
+    expected_mode: PersistedAuthMode,
+) -> Result<(), OAuthTargetValidationError> {
+    if auth_profile.provider != expected_provider {
+        return Err(OAuthTargetValidationError::ProviderMismatch {
+            expected: expected_provider,
+            actual: auth_profile.provider,
+        });
+    }
+    match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+        Some(actual_mode) if actual_mode == expected_mode => {}
+        _ => {
+            return Err(OAuthTargetValidationError::AuthMethodMismatch {
+                auth_method: auth_profile.auth_method.clone(),
+                expected_mode,
+            });
+        }
+    }
+    if !oauth_source_can_store_flow_credentials(&auth_profile.source) {
+        return Err(OAuthTargetValidationError::SourceMismatch {
+            source_kind: source_kind_label(&auth_profile.source),
+        });
+    }
+    Ok(())
+}
+
+fn oauth_source_can_store_flow_credentials(source: &CredentialSourceSpec) -> bool {
+    credential_source_uses_persisted_store(source)
+}
+
+fn source_kind_label(source: &CredentialSourceSpec) -> &'static str {
+    match source {
+        CredentialSourceSpec::InlineSecret { .. } => "inline_secret",
+        CredentialSourceSpec::ManagedStore => "managed_store",
+        CredentialSourceSpec::Env { .. } => "env",
+        CredentialSourceSpec::ExternalResolver { .. } => "external_resolver",
+        CredentialSourceSpec::PlatformDefault => "platform_default",
+        CredentialSourceSpec::Command { .. } => "command",
+        CredentialSourceSpec::FileDescriptor { .. } => "file_descriptor",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

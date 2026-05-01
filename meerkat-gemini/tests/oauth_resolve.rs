@@ -27,6 +27,10 @@ use meerkat_gemini::runtime::oauth;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 
 fn code_assist_realm() -> RealmConnectionSet {
+    code_assist_realm_with_source(CredentialSourceSpec::PlatformDefault)
+}
+
+fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectionSet {
     let mut backend = BTreeMap::new();
     backend.insert(
         "code_assist".into(),
@@ -43,7 +47,7 @@ fn code_assist_realm() -> RealmConnectionSet {
         AuthProfileConfig {
             provider: "gemini".into(),
             auth_method: "google_oauth".into(),
-            source: CredentialSourceSpec::PlatformDefault,
+            source,
             constraints: AuthConstraints {
                 allow_interactive_login: true,
                 ..Default::default()
@@ -212,6 +216,90 @@ async fn google_oauth_rejects_token_without_auth_lifecycle() {
             )
         ),
         "got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn google_oauth_rejects_wrong_persisted_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
+            &PersistedTokens {
+                auth_mode: PersistedAuthMode::ApiKey,
+                primary_secret: Some("stale-google-api-key".into()),
+                refresh_token: Some("refresh-google".into()),
+                id_token: None,
+                expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
+                last_refresh: Some(Utc::now()),
+                scopes: vec![],
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let err = registry
+        .resolve(&code_assist_realm(), &default_connection_ref(), &env)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("credential mode ApiKey"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn google_oauth_rejects_wrong_source_even_with_matching_mode() {
+    let store = Arc::new(EphemeralTokenStore::new());
+    store
+        .save(
+            &TokenKey::parse("dev", "default_code_assist").expect("valid slugs"),
+            &persisted_google_oauth("fresh-google-access"),
+        )
+        .await
+        .unwrap();
+
+    let env = ResolverEnvironment::testing()
+        .with_token_store(store)
+        .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+    let registry = ProviderRuntimeRegistry::empty()
+        .with_runtime(Arc::new(meerkat_gemini::GoogleProviderRuntime));
+    let err = registry
+        .resolve(
+            &code_assist_realm_with_source(CredentialSourceSpec::ExternalResolver {
+                handle: "external-google".into(),
+            }),
+            &default_connection_ref(),
+            &env,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            meerkat_llm_core::provider_runtime::ProviderAuthError::SourceResolutionFailed(_)
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("source 'external_resolver'"),
+        "got {err}"
     );
 }
 

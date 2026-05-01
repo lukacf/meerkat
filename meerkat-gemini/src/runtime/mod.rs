@@ -18,7 +18,13 @@ use meerkat_auth_core::resolver::{
     resolve_simple_secret,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
-use meerkat_auth_core::resolver::{refresh_allowed, require_credential_lifecycle_authority};
+use meerkat_auth_core::resolver::{
+    refresh_allowed, require_credential_lifecycle_authority, require_persisted_auth_mode,
+};
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+use meerkat_auth_core::{
+    auth_store::PersistedAuthMode, oauth_flow::validate_oauth_target_for_auth_mode,
+};
 #[cfg(all(not(target_arch = "wasm32"), feature = "adc"))]
 use meerkat_llm_core::provider_runtime::binding::DynamicLease;
 use meerkat_llm_core::provider_runtime::binding::{
@@ -234,6 +240,12 @@ impl ProviderRuntime for GoogleProviderRuntime {
             GoogleAuthMethod::GoogleOauth => {
                 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
                 {
+                    validate_oauth_target_for_auth_mode(
+                        &binding.auth_profile,
+                        Provider::Gemini,
+                        PersistedAuthMode::GoogleOauth,
+                    )
+                    .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
                     let store = env
                         .token_store
                         .as_ref()
@@ -246,6 +258,10 @@ impl ProviderRuntime for GoogleProviderRuntime {
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
                         .ok_or_else(|| interactive_login_error(binding))?;
+                    require_persisted_auth_mode(
+                        &persisted,
+                        binding.auth_profile.auth_method.as_str(),
+                    )?;
                     use chrono::{Duration, Utc};
                     let fresh = persisted
                         .expires_at

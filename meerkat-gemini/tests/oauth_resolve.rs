@@ -99,7 +99,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         _lease_key: &LeaseKey,
         _expires_at: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition { generation: 1 })
+        Ok(AuthLeaseTransition {
+            generation: 1,
+            credential_published_at_millis: None,
+        })
     }
 
     fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -116,7 +119,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         _new_expires_at: u64,
         _now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition { generation: 1 })
+        Ok(AuthLeaseTransition {
+            generation: 1,
+            credential_published_at_millis: None,
+        })
     }
 
     fn refresh_failed(
@@ -141,6 +147,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
             expires_at: None,
             credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         }
     }
 }

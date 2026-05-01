@@ -713,9 +713,13 @@ mod tests {
                     expires_at: (expires_at != u64::MAX).then_some(expires_at),
                     credential_present: true,
                     generation,
+                    credential_published_at_millis: None,
                 },
             );
-            Ok(AuthLeaseTransition { generation })
+            Ok(AuthLeaseTransition {
+                generation,
+                credential_published_at_millis: None,
+            })
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -766,6 +770,7 @@ mod tests {
                     expires_at: None,
                     credential_present: false,
                     generation: 0,
+                    credential_published_at_millis: None,
                 })
         }
     }
@@ -794,6 +799,7 @@ mod tests {
                 expires_at: Some(1_900_000_000),
                 credential_present: true,
                 generation: 7,
+                credential_published_at_millis: None,
             },
         );
         let agent = AgentBuilder::new()

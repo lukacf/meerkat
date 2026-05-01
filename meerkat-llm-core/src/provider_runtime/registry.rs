@@ -44,6 +44,7 @@ pub type NowFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// methods (Claude.ai, ChatGPT, Google OAuth-personal) to find a
 /// persisted access/refresh token. Absent store → OAuth paths return
 /// `AuthError::InteractiveLoginRequired`.
+#[derive(Clone)]
 pub struct ResolverEnvironment {
     pub env_lookup: EnvLookup,
     pub external_resolvers: BTreeMap<String, Arc<dyn ExternalAuthResolverHandle>>,

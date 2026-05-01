@@ -119,7 +119,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         _lease_key: &LeaseKey,
         _expires_at: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition { generation: 1 })
+        Ok(AuthLeaseTransition {
+            generation: 1,
+            credential_published_at_millis: None,
+        })
     }
 
     fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -136,7 +139,10 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
         _new_expires_at: u64,
         _now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError> {
-        Ok(AuthLeaseTransition { generation: 1 })
+        Ok(AuthLeaseTransition {
+            generation: 1,
+            credential_published_at_millis: None,
+        })
     }
 
     fn refresh_failed(
@@ -161,6 +167,7 @@ impl AuthLeaseHandle for StaticAuthLeaseHandle {
             expires_at: None,
             credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         }
     }
 }
@@ -177,6 +184,7 @@ impl BootstrappingAuthLeaseHandle {
                 expires_at: None,
                 credential_present: false,
                 generation: 0,
+                credential_published_at_millis: None,
             }),
         })
     }
@@ -198,6 +206,7 @@ impl AuthLeaseHandle for BootstrappingAuthLeaseHandle {
         snapshot.generation = snapshot.generation.saturating_add(1);
         Ok(AuthLeaseTransition {
             generation: snapshot.generation,
+            credential_published_at_millis: None,
         })
     }
 
@@ -262,6 +271,7 @@ impl RejectingAuthLeaseHandle {
                 expires_at: Some(expires_at.timestamp().max(0) as u64),
                 credential_present: true,
                 generation: 1,
+                credential_published_at_millis: None,
             },
         })
     }
@@ -353,6 +363,35 @@ impl RefreshCoordinator for StoreUpdatingRefreshCoordinator {
             .await
             .map_err(|e| RefreshError::Refresh(e.to_string()))?;
         refresh_fn().await
+    }
+}
+
+struct CommitObservingRefreshCoordinator {
+    store: Arc<dyn TokenStore>,
+}
+
+#[async_trait::async_trait]
+impl RefreshCoordinator for CommitObservingRefreshCoordinator {
+    async fn with_refresh(
+        &self,
+        key: TokenKey,
+        refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        let refreshed = refresh_fn().await?;
+        let stored = self
+            .store
+            .load(&key)
+            .await
+            .map_err(|e| RefreshError::Refresh(e.to_string()))?
+            .ok_or_else(|| RefreshError::Refresh("TokenStore missing after refresh".into()))?;
+        if stored.primary_secret != refreshed.primary_secret
+            || !meerkat_core::tokens_lifecycle_published(&stored)
+        {
+            return Err(RefreshError::Refresh(
+                "refresh commit escaped coordinator lock".into(),
+            ));
+        }
+        Ok(refreshed)
     }
 }
 
@@ -871,6 +910,95 @@ async fn openai_chatgpt_oauth_runtime_reloads_store_after_refresh_coordination()
         0,
         "runtime should adopt already committed fresh tokens after refresh coordination"
     );
+}
+
+#[tokio::test]
+async fn openai_managed_chatgpt_oauth_commits_before_refresh_coordinator_returns() {
+    let app = Router::new().route(
+        "/oauth/token",
+        post(move |Form(_form): Form<serde_json::Value>| async move {
+            Json(serde_json::json!({
+                "access_token": "coordinated-refreshed-access",
+                "refresh_token": "coordinated-rotated-rt",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "scope": "openid profile email offline_access",
+            }))
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
+    let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+    let expired = PersistedTokens {
+        auth_mode: PersistedAuthMode::ChatgptOauth,
+        primary_secret: Some("expired-chatgpt-access".into()),
+        refresh_token: Some("refresh-chatgpt".into()),
+        id_token: None,
+        expires_at: Some(Utc::now() - ChronoDuration::minutes(5)),
+        last_refresh: Some(Utc::now() - ChronoDuration::hours(1)),
+        scopes: vec![],
+        account_id: Some("acct-1".into()),
+        metadata: serde_json::Value::Null,
+    };
+    store
+        .save(
+            &key,
+            &meerkat_core::mark_tokens_lifecycle_published_for_generation(&expired, 1),
+        )
+        .await
+        .unwrap();
+
+    let endpoints = OAuthEndpoints {
+        client_id: o_oauth::CHATGPT_CLIENT_ID.into(),
+        authorize_url: o_oauth::CHATGPT_AUTHORIZE_URL.into(),
+        token_url: format!("http://{addr}/oauth/token"),
+        device_code_url: None,
+        redirect_uri: "http://127.0.0.1:0/callback".into(),
+        scopes: o_oauth::CHATGPT_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect(),
+        extra_headers: vec![],
+    };
+    let runtime = o_oauth::OpenAiOAuthRuntime::new(
+        Arc::clone(&store),
+        Arc::new(CommitObservingRefreshCoordinator {
+            store: Arc::clone(&store),
+        }),
+        endpoints,
+        key.clone(),
+    );
+    let commit_store = Arc::clone(&store);
+    let commit_key = key.clone();
+    let resolved = runtime
+        .get_or_refresh_tokens_with_commit(Box::new(move |tokens| {
+            Box::pin(async move {
+                let committed = meerkat_core::mark_tokens_lifecycle_published(&tokens);
+                commit_store
+                    .save(&commit_key, &committed)
+                    .await
+                    .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                Ok(committed)
+            })
+        }))
+        .await
+        .expect("refresh commit should complete before coordinator releases its lock");
+
+    assert_eq!(
+        resolved.primary_secret.as_deref(),
+        Some("coordinated-refreshed-access")
+    );
+    let stored = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(
+        stored.primary_secret.as_deref(),
+        Some("coordinated-refreshed-access")
+    );
+    assert!(meerkat_core::tokens_lifecycle_published(&stored));
 }
 
 #[tokio::test]

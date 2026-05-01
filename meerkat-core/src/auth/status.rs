@@ -167,6 +167,7 @@ mod tests {
             expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
             credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &valid).as_public_str(),
@@ -178,6 +179,7 @@ mod tests {
             expires_at: Some((now - Duration::seconds(1)).timestamp() as u64),
             credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &expired).as_public_str(),
@@ -189,6 +191,7 @@ mod tests {
             expires_at: Some((now + Duration::minutes(10)).timestamp() as u64),
             credential_present: false,
             generation: 1,
+            credential_published_at_millis: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &stale_token_without_machine).as_public_str(),

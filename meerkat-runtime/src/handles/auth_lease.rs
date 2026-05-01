@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::ConnectionRef;
@@ -26,6 +27,13 @@ use meerkat_core::handles::{
 };
 
 use crate::auth_machine::dsl as auth_dsl;
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
 
 /// Emit a structured audit record for every accepted auth-lease DSL
 /// transition. REST/RPC surfaces (and any other `tracing::Subscriber`
@@ -102,6 +110,7 @@ struct AuthLeaseRegistry {
     // lifecycle state; it is retained after release so authorizer-side token
     // material can detect a later reacquire even when the expiry is identical.
     generations: HashMap<LeaseKey, u64>,
+    credential_published_at_millis: HashMap<LeaseKey, u64>,
 }
 
 impl std::fmt::Debug for RuntimeAuthLeaseHandle {
@@ -146,9 +155,14 @@ impl RuntimeAuthLeaseHandle {
         input: auth_dsl::AuthMachineInput,
         context: &'static str,
         create_if_missing: bool,
-    ) -> Result<u64, DslTransitionError> {
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         let action = Self::audit_action_for(&input);
         let remove_after_accept = matches!(&input, auth_dsl::AuthMachineInput::Release);
+        let publishes_credential = matches!(
+            &input,
+            auth_dsl::AuthMachineInput::Acquire { .. }
+                | auth_dsl::AuthMachineInput::CompleteRefresh { .. }
+        );
         let mut guard = self
             .machines
             .lock()
@@ -192,11 +206,24 @@ impl RuntimeAuthLeaseHandle {
         let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
         *generation = generation.saturating_add(1);
         let accepted_generation = *generation;
+        let credential_published_at_millis = if publishes_credential {
+            let published_at = current_time_millis();
+            guard
+                .credential_published_at_millis
+                .insert(lease_key.clone(), published_at);
+            Some(published_at)
+        } else {
+            guard.credential_published_at_millis.get(lease_key).copied()
+        };
         if remove_after_accept {
             guard.authorities.remove(lease_key);
+            guard.credential_published_at_millis.remove(lease_key);
         }
         emit_audit(lease_key, action, from_phase, to_phase);
-        Ok(accepted_generation)
+        Ok(AuthLeaseTransition::new(
+            accepted_generation,
+            credential_published_at_millis,
+        ))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -345,7 +372,6 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::acquire_lease",
             true,
         )
-        .map(|generation| AuthLeaseTransition { generation })
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -388,7 +414,6 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             "AuthLeaseHandle::complete_refresh",
             false,
         )
-        .map(|generation| AuthLeaseTransition { generation })
     }
 
     fn refresh_failed(
@@ -464,6 +489,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         };
         let generation = guard.generations.entry(lease_key.clone()).or_insert(0);
         *generation = generation.saturating_add(1);
+        guard.credential_published_at_millis.remove(lease_key);
         if remove_after_accept {
             guard.authorities.remove(lease_key);
         }
@@ -488,6 +514,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 expires_at: None,
                 credential_present: false,
                 generation,
+                credential_published_at_millis: None,
             };
         }
         match guard.authorities.get(lease_key) {
@@ -496,12 +523,18 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
                 expires_at: machine.state.expires_at,
                 credential_present: machine.state.credential_present,
                 generation,
+                credential_published_at_millis: machine
+                    .state
+                    .credential_present
+                    .then(|| guard.credential_published_at_millis.get(lease_key).copied())
+                    .flatten(),
             },
             None => AuthLeaseSnapshot {
                 phase: None,
                 expires_at: None,
                 credential_present: false,
                 generation,
+                credential_published_at_millis: None,
             },
         }
     }

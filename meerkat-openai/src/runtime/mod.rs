@@ -188,21 +188,36 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                     endpoints,
                                     managed.key.clone(),
                                 );
-                                let refreshed = runtime
-                                    .get_or_refresh_tokens_uncommitted()
+                                let commit_env = env.clone();
+                                let commit_binding = binding.clone();
+                                runtime
+                                    .get_or_refresh_tokens_with_commit(Box::new(move |tokens| {
+                                        Box::pin(async move {
+                                            publish_managed_store_tokens_lifecycle_and_save(
+                                                &commit_env,
+                                                &commit_binding,
+                                                &managed,
+                                                &tokens,
+                                            )
+                                            .await
+                                            .map_err(
+                                                |e| {
+                                                    meerkat_auth_core::RefreshError::Refresh(
+                                                        e.to_string(),
+                                                    )
+                                                },
+                                            )
+                                        })
+                                    }))
                                     .await
                                     .map_err(|e| match e {
-                                    oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                        interactive_login_error(binding)
-                                    }
-                                    other => {
-                                        ProviderAuthError::SourceResolutionFailed(other.to_string())
-                                    }
-                                })?;
-                                publish_managed_store_tokens_lifecycle_and_save(
-                                    env, binding, &managed, &refreshed,
-                                )
-                                .await?
+                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
+                                            interactive_login_error(binding)
+                                        }
+                                        other => ProviderAuthError::SourceResolutionFailed(
+                                            other.to_string(),
+                                        ),
+                                    })?
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),

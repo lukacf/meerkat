@@ -151,6 +151,7 @@ impl Default for RecordingAuthLeaseHandle {
                 expires_at: None,
                 credential_present: false,
                 generation: 0,
+                credential_published_at_millis: None,
             }),
             generation: Mutex::new(0),
             fail_action: Mutex::new(None),
@@ -215,7 +216,10 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             credential_present: true,
             generation,
         };
-        Ok(AuthLeaseTransition { generation })
+        Ok(AuthLeaseTransition {
+            generation,
+            credential_published_at_millis: None,
+        })
     }
 
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -263,7 +267,10 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             credential_present: true,
             generation,
         };
-        Ok(AuthLeaseTransition { generation })
+        Ok(AuthLeaseTransition {
+            generation,
+            credential_published_at_millis: None,
+        })
     }
 
     fn refresh_failed(
@@ -309,6 +316,7 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
             expires_at: None,
             credential_present: false,
             generation: self.next_generation(),
+            credential_published_at_millis: None,
         };
         Ok(())
     }

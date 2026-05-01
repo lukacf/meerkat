@@ -11,9 +11,10 @@
 //! For the `managed_chatgpt_oauth` path we use the token bundle;
 //! `api_key` mode reads `OPENAI_API_KEY` straight.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
+use futures::future::BoxFuture;
 use thiserror::Error;
 
 use meerkat_auth_core::auth_oauth::{
@@ -48,6 +49,12 @@ pub const CHATGPT_SCOPES: &[&str] = &[
 // Wire header constants are defined in `auth.rs` (unconditional module) so
 // they remain available when the interactive OAuth flow is feature-gated off.
 pub use meerkat_core::provider_matrix::openai_auth::{CHATGPT_ACCOUNT_HEADER, FEDRAMP_HEADER};
+
+pub type TokenCommitFn = Box<
+    dyn FnOnce(PersistedTokens) -> BoxFuture<'static, Result<PersistedTokens, RefreshError>>
+        + Send
+        + 'static,
+>;
 
 // ---------------------------------------------------------------------
 // Endpoints
@@ -194,8 +201,9 @@ impl OpenAiOAuthRuntime {
             && tokens.primary_secret.is_some()
     }
 
-    pub async fn get_or_refresh_tokens_uncommitted(
+    async fn get_or_refresh_tokens_with_commit_slot(
         &self,
+        commit_fn: Option<TokenCommitFn>,
     ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
@@ -204,10 +212,12 @@ impl OpenAiOAuthRuntime {
         if Self::token_is_fresh(&persisted) {
             return Ok(persisted);
         }
+        let commit_slot = Arc::new(Mutex::new(commit_fn));
         let http = self.http.clone();
         let endpoints = self.endpoints.clone();
         let token_store = Arc::clone(&self.token_store);
         let key = self.key.clone();
+        let commit_slot_for_refresh = Arc::clone(&commit_slot);
         let refreshed =
             self.refresh_coord
                 .with_refresh(
@@ -217,6 +227,7 @@ impl OpenAiOAuthRuntime {
                         let endpoints = endpoints.clone();
                         let token_store = Arc::clone(&token_store);
                         let key = key.clone();
+                        let commit_slot = Arc::clone(&commit_slot_for_refresh);
                         Box::pin(async move {
                             let current = token_store
                                 .load(&key)
@@ -228,7 +239,14 @@ impl OpenAiOAuthRuntime {
                                     )
                                 })?;
                             if OpenAiOAuthRuntime::token_is_fresh(&current) {
-                                return Ok(current);
+                                let commit = commit_slot
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .take();
+                                return match commit {
+                                    Some(commit) => commit(current).await,
+                                    None => Ok(current),
+                                };
                             }
                             let refresh_token = current.refresh_token.clone().ok_or_else(|| {
                                 RefreshError::Refresh("missing refresh_token".into())
@@ -238,18 +256,47 @@ impl OpenAiOAuthRuntime {
                                 exchange_refresh_token(&http, &endpoints, &refresh_token, None)
                                     .await
                                     .map_err(|e| RefreshError::Refresh(e.to_string()))?;
-                            oauth_result_to_persisted(
+                            let refreshed = oauth_result_to_persisted(
                                 result,
                                 PersistedAuthMode::ChatgptOauth,
                                 Some(refresh_token),
                                 account_id,
                             )
-                            .map_err(|e| RefreshError::Refresh(e.to_string()))
+                            .map_err(|e| RefreshError::Refresh(e.to_string()))?;
+                            let commit = commit_slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take();
+                            match commit {
+                                Some(commit) => commit(refreshed).await,
+                                None => Ok(refreshed),
+                            }
                         })
                     }),
                 )
                 .await?;
-        Ok(refreshed)
+        let commit = commit_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        match commit {
+            Some(commit) => Ok(commit(refreshed).await?),
+            None => Ok(refreshed),
+        }
+    }
+
+    pub async fn get_or_refresh_tokens_uncommitted(
+        &self,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
+        self.get_or_refresh_tokens_with_commit_slot(None).await
+    }
+
+    pub async fn get_or_refresh_tokens_with_commit(
+        &self,
+        commit_fn: TokenCommitFn,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
+        self.get_or_refresh_tokens_with_commit_slot(Some(commit_fn))
+            .await
     }
 
     pub async fn get_or_refresh_tokens(&self) -> Result<PersistedTokens, OpenAiOAuthError> {

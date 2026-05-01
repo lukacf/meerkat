@@ -83,9 +83,17 @@ pub fn persisted_auth_mode_uses_oauth_login_lifecycle(mode: PersistedAuthMode) -
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenLifecyclePublication {
+    pub generation: Option<u64>,
+    pub expires_at: u64,
+    pub credential_published_at_millis: Option<u64>,
+}
+
 fn mark_tokens_lifecycle_published_inner(
     tokens: &PersistedTokens,
     generation: Option<u64>,
+    credential_published_at_millis: Option<u64>,
 ) -> PersistedTokens {
     if !persisted_auth_mode_uses_oauth_login_lifecycle(tokens.auth_mode) {
         return tokens.clone();
@@ -94,12 +102,21 @@ fn mark_tokens_lifecycle_published_inner(
     let mut marked = tokens.clone();
     let mut marker = serde_json::json!({
         "published": true,
-        "version": 1,
+        "version": 2,
+        "expires_at": persisted_token_expires_at_epoch_secs(tokens),
     });
     if let Some(generation) = generation
         && let Some(marker) = marker.as_object_mut()
     {
         marker.insert("generation".to_string(), serde_json::json!(generation));
+    }
+    if let Some(credential_published_at_millis) = credential_published_at_millis
+        && let Some(marker) = marker.as_object_mut()
+    {
+        marker.insert(
+            "credential_published_at_millis".to_string(),
+            serde_json::json!(credential_published_at_millis),
+        );
     }
     match &mut marked.metadata {
         serde_json::Value::Object(map) => {
@@ -122,14 +139,36 @@ fn mark_tokens_lifecycle_published_inner(
 }
 
 pub fn mark_tokens_lifecycle_published(tokens: &PersistedTokens) -> PersistedTokens {
-    mark_tokens_lifecycle_published_inner(tokens, None)
+    mark_tokens_lifecycle_published_inner(tokens, None, None)
 }
 
 pub fn mark_tokens_lifecycle_published_for_generation(
     tokens: &PersistedTokens,
     generation: u64,
 ) -> PersistedTokens {
-    mark_tokens_lifecycle_published_inner(tokens, Some(generation))
+    mark_tokens_lifecycle_published_inner(tokens, Some(generation), None)
+}
+
+pub fn mark_tokens_lifecycle_published_for_transition(
+    tokens: &PersistedTokens,
+    transition: AuthLeaseTransition,
+) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(
+        tokens,
+        Some(transition.generation),
+        transition.credential_published_at_millis,
+    )
+}
+
+pub fn mark_tokens_lifecycle_published_for_snapshot(
+    tokens: &PersistedTokens,
+    snapshot: &AuthLeaseSnapshot,
+) -> PersistedTokens {
+    mark_tokens_lifecycle_published_inner(
+        tokens,
+        Some(snapshot.generation),
+        snapshot.credential_published_at_millis,
+    )
 }
 
 pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
@@ -142,13 +181,34 @@ pub fn tokens_lifecycle_published(tokens: &PersistedTokens) -> bool {
 }
 
 pub fn tokens_lifecycle_published_generation(tokens: &PersistedTokens) -> Option<u64> {
+    tokens_lifecycle_publication(tokens).and_then(|publication| publication.generation)
+}
+
+pub fn tokens_lifecycle_publication(tokens: &PersistedTokens) -> Option<TokenLifecyclePublication> {
     if !tokens_lifecycle_published(tokens) {
         return None;
     }
+    let marker = tokens.metadata.get(TOKEN_LIFECYCLE_METADATA_KEY)?;
+    let generation = marker.get("generation").and_then(serde_json::Value::as_u64);
+    let expires_at = marker
+        .get("expires_at")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| persisted_token_expires_at_epoch_secs(tokens));
+    let credential_published_at_millis = marker
+        .get("credential_published_at_millis")
+        .and_then(serde_json::Value::as_u64);
+    Some(TokenLifecyclePublication {
+        generation,
+        expires_at,
+        credential_published_at_millis,
+    })
+}
+
+pub fn tokens_lifecycle_published_credential_time(tokens: &PersistedTokens) -> Option<u64> {
     tokens
         .metadata
         .get(TOKEN_LIFECYCLE_METADATA_KEY)
-        .and_then(|marker| marker.get("generation"))
+        .and_then(|marker| marker.get("credential_published_at_millis"))
         .and_then(serde_json::Value::as_u64)
 }
 
@@ -357,7 +417,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((lease_key.clone(), expires_at));
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -374,7 +437,10 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn refresh_failed(
@@ -403,6 +469,7 @@ mod tests {
                 expires_at: None,
                 credential_present: true,
                 generation: 1,
+                credential_published_at_millis: None,
             }
         }
     }
@@ -688,6 +755,7 @@ mod tests {
             expires_at: Some((now + chrono::Duration::hours(1)).timestamp() as u64),
             credential_present: true,
             generation: 1,
+            credential_published_at_millis: None,
         };
 
         let status = project_published_auth_status(now, None, &snapshot);

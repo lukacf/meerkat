@@ -199,7 +199,7 @@ struct TokenCommitSnapshot {
     lease_key: meerkat_core::handles::LeaseKey,
     previous: Option<PersistedTokens>,
     previous_lifecycle: meerkat_core::handles::AuthLeaseSnapshot,
-    lifecycle_generation: u64,
+    lifecycle_transition: meerkat_core::handles::AuthLeaseTransition,
 }
 
 async fn save_tokens_and_publish_lifecycle_commit_unlocked(
@@ -252,7 +252,7 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         lease_key,
         previous,
         previous_lifecycle,
-        lifecycle_generation: transition.generation,
+        lifecycle_transition: transition,
     };
     if mark_for_rehydration {
         mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
@@ -267,9 +267,9 @@ async fn mark_token_commit_lifecycle_published_unlocked(
     commit: &TokenCommitSnapshot,
     tokens: &PersistedTokens,
 ) -> Result<(), (StatusCode, String)> {
-    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_generation(
+    let committed_tokens = meerkat_core::mark_tokens_lifecycle_published_for_transition(
         tokens,
-        commit.lifecycle_generation,
+        commit.lifecycle_transition,
     );
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
         let message = match rollback_token_commit(token_store, auth_lease, commit).await {
@@ -355,9 +355,9 @@ async fn rollback_token_commit(
                 let restored_snapshot = auth_lease.snapshot(&commit.lease_key);
                 if restored_snapshot.credential_present {
                     let restored_previous =
-                        meerkat_core::mark_tokens_lifecycle_published_for_generation(
+                        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(
                             previous,
-                            restored_snapshot.generation,
+                            &restored_snapshot,
                         );
                     token_store
                         .save(&commit.key, &restored_previous)
@@ -1571,6 +1571,7 @@ pub async fn get_auth_status(
             expires_at: None,
             credential_present: false,
             generation: snapshot.generation,
+            credential_published_at_millis: None,
         };
         (None, &unknown_snapshot)
     } else if token_matches_binding {
@@ -1588,6 +1589,7 @@ pub async fn get_auth_status(
             expires_at: None,
             credential_present: false,
             generation: snapshot.generation,
+            credential_published_at_millis: None,
         };
         (None, &unknown_snapshot)
     };
@@ -1752,7 +1754,10 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn refresh_failed(
@@ -1777,6 +1782,7 @@ mod tests {
                 expires_at: None,
                 credential_present: false,
                 generation: 0,
+                credential_published_at_millis: None,
             }
         }
     }
@@ -1789,7 +1795,10 @@ mod tests {
             _lease_key: &LeaseKey,
             _expires_at: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -1806,7 +1815,10 @@ mod tests {
             _new_expires_at: u64,
             _now: u64,
         ) -> Result<AuthLeaseTransition, DslTransitionError> {
-            Ok(AuthLeaseTransition { generation: 1 })
+            Ok(AuthLeaseTransition {
+                generation: 1,
+                credential_published_at_millis: None,
+            })
         }
 
         fn refresh_failed(
@@ -1834,6 +1846,7 @@ mod tests {
                 expires_at: Some(1_800_000_000),
                 credential_present: true,
                 generation: 1,
+                credential_published_at_millis: None,
             }
         }
     }

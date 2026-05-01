@@ -1019,12 +1019,16 @@ impl std::fmt::Display for LeaseKey {
 /// when the expiry timestamp is unchanged. `credential_present` distinguishes
 /// credential lifecycle authority from OAuth login-flow membership that may
 /// keep an AuthMachine instance alive after credential rollback.
+/// `credential_published_at_millis` advances only when credential material is
+/// acquired/refreshed, so durable TokenStore markers do not become stale when
+/// OAuth flow membership transitions advance the broader machine generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
     pub expires_at: Option<u64>,
     pub credential_present: bool,
     pub generation: u64,
+    pub credential_published_at_millis: Option<u64>,
 }
 
 /// Result of an accepted auth lease lifecycle transition.
@@ -1032,9 +1036,21 @@ pub struct AuthLeaseSnapshot {
 /// `generation` is the projection version assigned while the transition is
 /// accepted, so consumers can bind derived material to the exact lease state
 /// that published it without taking a later snapshot.
+/// `credential_published_at_millis` is the durable credential publication
+/// timestamp attached to acquired/refreshed credential material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
     pub generation: u64,
+    pub credential_published_at_millis: Option<u64>,
+}
+
+impl AuthLeaseTransition {
+    pub fn new(generation: u64, credential_published_at_millis: Option<u64>) -> Self {
+        Self {
+            generation,
+            credential_published_at_millis,
+        }
+    }
 }
 
 /// Window (in seconds) before `expires_at` at which a `valid` lease is

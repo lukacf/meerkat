@@ -237,8 +237,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const session = await client.createSession(
         "My name is TsBot and my favorite color is teal. Reply briefly.",
         {
-          model: anthropicModel(),
-          provider: "anthropic",
+          turnMetadata: { model: anthropicModel(), provider: "anthropic" },
         },
       );
       assert.ok(session.id);
@@ -285,8 +284,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const deferred = await client.createDeferredSession(
         "Remember the codeword ORBIT-7 for later.",
         {
-          model: anthropicModel(),
-          provider: "anthropic",
+          turnMetadata: { model: anthropicModel(), provider: "anthropic" },
         },
       );
 
@@ -344,8 +342,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
       const session = await clientA.createSession(
         "Remember that the passphrase is comet-trail.",
         {
-          model: anthropicModel(),
-          provider: "anthropic",
+          turnMetadata: { model: anthropicModel(), provider: "anthropic" },
         },
       );
       const sessionId = session.id;
@@ -588,8 +585,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         client.createSession(
         "When asked through realtime, reply with TS-REALTIME-59 and mention cedar.",
         {
-          model: "gpt-realtime-1.5",
-          provider: "openai",
+          turnMetadata: { model: "gpt-realtime-1.5", provider: "openai" },
         },
         ),
       );
@@ -701,8 +697,7 @@ request.size="1024x1024", request.quality="low", request.format="webp",
 request.count=1, and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
 After the tool returns, reply with TS-OPENAI-75-DONE and no extra prose.`,
           {
-            model: anthropicModel(),
-            provider: "anthropic",
+            turnMetadata: { model: anthropicModel(), provider: "anthropic" },
             enableBuiltins: true,
           },
         ),
@@ -750,8 +745,7 @@ request.size="1536x1024", request.quality="auto", request.format="png", request.
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
 After the tool returns, reply with CROSS-IMAGE-76-FIRST and no extra prose.`,
           {
-            model: openaiStressModel(),
-            provider: "openai",
+            turnMetadata: { model: openaiStressModel(), provider: "openai" },
             enableBuiltins: true,
           },
         ),
@@ -861,8 +855,7 @@ animated sitcom-style composer portrait with BACH-77 still visible.
 After both tool calls finish, describe the second image in detail and rate it on a 1-10 Simpson-like scale.
 Your final reply must include STACKED-IMAGE-77-DONE.`,
           {
-            model: anthropicModel(),
-            provider: "anthropic",
+            turnMetadata: { model: anthropicModel(), provider: "anthropic" },
             enableBuiltins: true,
           },
         ),
@@ -908,8 +901,7 @@ request.size="1536x1024", request.quality="auto", request.format="png", request.
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
 After the image is generated, reply with CROSS-RELAY-78-GENERATED and no extra prose.`,
           {
-            model: openaiStressModel(),
-            provider: "openai",
+            turnMetadata: { model: openaiStressModel(), provider: "openai" },
             enableBuiltins: true,
           },
         ),
@@ -1052,8 +1044,7 @@ request.size="1536x1024", request.quality="auto", request.format="png", request.
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
 After the image is generated, reply with RESUME-80-GENERATED.`,
           {
-            model: anthropicModel(),
-            provider: "anthropic",
+            turnMetadata: { model: anthropicModel(), provider: "anthropic" },
             enableBuiltins: true,
           },
         ),
@@ -1124,8 +1115,7 @@ request.size="1024x1024", request.quality="low", request.format="webp", request.
 and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
 After the image is generated, reply with ${marker}-DONE and no extra prose.`,
             {
-              model: anthropicModel(),
-              provider: "anthropic",
+              turnMetadata: { model: anthropicModel(), provider: "anthropic" },
               enableBuiltins: true,
             },
           )
@@ -1175,8 +1165,7 @@ request.size="1024x1024", request.quality="low", request.format="webp", request.
 and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
 After the image is generated, reply with SDK-ROUNDTRIP-82-GENERATED.`,
           {
-            model: anthropicModel(),
-            provider: "anthropic",
+            turnMetadata: { model: anthropicModel(), provider: "anthropic" },
             enableBuiltins: true,
           },
         ),
@@ -1206,8 +1195,7 @@ After the image is generated, reply with SDK-ROUNDTRIP-82-GENERATED.`,
             },
           ],
           {
-            model: openaiStressModel(),
-            provider: "openai",
+            turnMetadata: { model: openaiStressModel(), provider: "openai" },
           },
         ),
         240000,

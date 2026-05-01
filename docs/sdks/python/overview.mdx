@@ -74,6 +74,10 @@ asyncio.run(main())
 - `additional_instructions`
 - `keep_alive`, `model`, `provider`, `provider_params`
 
+Session creation uses the canonical `turn_metadata` carrier for first-turn
+runtime metadata such as `model`, `provider`, `provider_params`,
+`skill_references`, `additional_instructions`, and `keep_alive`.
+
 ### Config APIs
 
 - `await client.get_config() -> ConfigEnvelope`

@@ -122,6 +122,7 @@ impl McpScheduleContext {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
+        let keep_alive = create.requests_keep_alive();
         let model = create
             .require_model_name()
             .map_err(ScheduleDomainError::InvalidSchedule)?
@@ -224,7 +225,7 @@ impl McpScheduleContext {
             self.ingress_context()
                 .configure_session(&session_id, None, false)
                 .await;
-            update_peer_ingress_context(self, &session_id).await;
+            update_peer_ingress_context(self, &session_id, keep_alive).await;
         }
 
         match result {
@@ -427,22 +428,21 @@ async fn deliver_scheduled_event(
     ))
 }
 
-async fn update_peer_ingress_context(_context: &McpScheduleContext, _session_id: &SessionId) {
+async fn update_peer_ingress_context(
+    _context: &McpScheduleContext,
+    _session_id: &SessionId,
+    keep_alive: bool,
+) {
     #[cfg(feature = "comms")]
     {
-        // Post-wave-c the raw `load_persisted` escape hatch is gone.
-        // `SessionInfo` (returned by `service.read()`) does not surface
-        // `keep_alive`, so we default to `false` — matches the
-        // pre-retype `.unwrap_or(false)` fallback. Sessions that need
-        // comms-driven keep-alive configure it through the canonical
-        // `RuntimeTurnMetadata.keep_alive` on create.
-        let keep_alive = false;
         let comms_rt = _context.service.comms_runtime(_session_id).await;
         _context
             .runtime_adapter
             .update_peer_ingress_context(_session_id, keep_alive, comms_rt)
             .await;
     }
+    #[cfg(not(feature = "comms"))]
+    let _ = keep_alive;
 }
 
 fn session_metadata_marks_archived(session: &Session) -> bool {
@@ -451,4 +451,32 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .get("session_archived")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mcp_scheduled_materialization_applies_canonical_keep_alive_to_peer_ingress() {
+        let source = include_str!("schedule_host.rs");
+        let start = source
+            .find("    async fn materialize_scheduled_session")
+            .expect("scheduled materialization should exist");
+        let end = source
+            .find("struct McpScheduleTargetAdapter")
+            .expect("scheduled materialization end sentinel should exist");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("let keep_alive = create.requests_keep_alive();"),
+            "MCP scheduled materialization must derive keep_alive from RuntimeTurnMetadata"
+        );
+        assert!(
+            body.contains("update_peer_ingress_context(self, &session_id, keep_alive).await"),
+            "MCP scheduled materialization must apply canonical keep_alive to peer ingress"
+        );
+        assert!(
+            !body.contains("let keep_alive = false"),
+            "MCP scheduled materialization must not synthesize split keep_alive defaults"
+        );
+    }
 }

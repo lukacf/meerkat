@@ -5,6 +5,8 @@ import type {
   MobTurnStartOptions,
   PeerCorrelationId,
   PeerId,
+  RuntimeTurnMetadata,
+  SessionOptions,
   SpawnManySpec,
   SpawnSpec,
 } from "../src/index.js";
@@ -44,6 +46,30 @@ import type {
   WireToolAccessPolicy,
   WireToolFilter,
 } from "../src/generated/types.js";
+
+const publicRuntimeTurnMetadata: RuntimeTurnMetadata = {
+  model: "claude-sonnet-4-6",
+  provider: "anthropic",
+  skillReferences: [
+    { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
+  ],
+  additionalInstructions: ["stay concise"],
+  keepAlive: true,
+};
+
+const publicSessionOptions: SessionOptions = {
+  turnMetadata: publicRuntimeTurnMetadata,
+  labels: { team: "sdk" },
+};
+
+void publicSessionOptions;
+
+const publicSessionOptionsWithSplitMetadata: SessionOptions = {
+  // @ts-expect-error session creation metadata belongs inside turnMetadata.
+  model: "claude-sonnet-4-6",
+};
+
+void publicSessionOptionsWithSplitMetadata;
 
 const spawnSpec: SpawnSpec = {
   profile: "worker",

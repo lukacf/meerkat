@@ -140,26 +140,7 @@ impl RuntimeBackedScheduleSessionHost {
                 ),
             )
             .await;
-        self.update_peer_ingress_context(session_id).await;
         Ok(())
-    }
-
-    async fn update_peer_ingress_context(&self, session_id: &SessionId) {
-        #[cfg(feature = "comms")]
-        {
-            // Post-wave-c the raw `load_persisted` escape hatch is
-            // gone. `SessionInfo` (returned by `service.read()`) does
-            // not currently surface `keep_alive`, so we default to
-            // `false` — matches the pre-retype `.unwrap_or(false)`
-            // fallback. Sessions that legitimately need
-            // comms-driven keep-alive configure it through the
-            // canonical `RuntimeTurnMetadata.keep_alive` on create.
-            let keep_alive = false;
-            configure_peer_ingress(&self.runtime_adapter, &self.service, session_id, keep_alive)
-                .await;
-        }
-        #[cfg(not(feature = "comms"))]
-        let _ = session_id;
     }
 
     fn build_materialized_request(
@@ -350,5 +331,26 @@ mod tests {
 
         assert!(!build.keep_alive);
         assert!(create.requests_keep_alive());
+    }
+
+    #[test]
+    fn runtime_registration_does_not_reapply_split_keep_alive_default() {
+        let source = include_str!("runtime_schedule_host.rs");
+        let start = source
+            .find("    async fn ensure_runtime_session_registered")
+            .expect("registration helper should exist");
+        let end = source
+            .find("    fn build_materialized_request")
+            .expect("materialized request helper should follow registration");
+        let body = &source[start..end];
+
+        assert!(
+            !body.contains("update_peer_ingress_context"),
+            "runtime schedule registration must not overwrite canonical keep_alive with a split default"
+        );
+        assert!(
+            !body.contains("let keep_alive = false"),
+            "runtime schedule registration must not synthesize split keep_alive defaults"
+        );
     }
 }

@@ -139,6 +139,19 @@ SkillRef = SkillKey
 """A skill reference, expressed as a structured :class:`SkillKey`."""
 
 
+class RuntimeTurnMetadata(TypedDict, total=False):
+    """Canonical runtime metadata carrier for session creation."""
+
+    model: str
+    provider: str
+    provider_params: dict[str, Any]
+    connection_ref: dict[str, str]
+    keep_alive: dict[str, Any]
+    skill_references: list[SkillRef]
+    flow_tool_overlay: dict[str, Any]
+    additional_instructions: list[dict[str, str]]
+
+
 class TextBlock(TypedDict):
     type: Literal["text"]
     text: str

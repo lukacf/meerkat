@@ -105,6 +105,7 @@ import type {
   PeerId,
   PeerResponseTerminalOptions,
   RunResult,
+  RuntimeTurnMetadata,
   Schedule,
   ScheduleListOptions,
   ScheduleOccurrencesOptions,
@@ -201,17 +202,9 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
-type RuntimeTurnMetadataOptions = {
+type RuntimeTurnMetadataOptions = RuntimeTurnMetadata & {
   readonly skillRefs?: readonly SkillRef[];
-  readonly flowToolOverlay?: TurnOptions["flowToolOverlay"];
-  readonly additionalInstructions?: readonly string[];
-  readonly keepAlive?: TurnOptions["keepAlive"];
-  readonly model?: TurnOptions["model"];
-  readonly provider?: TurnOptions["provider"];
-  readonly providerParams?: TurnOptions["providerParams"];
-  readonly clearProviderParams?: TurnOptions["clearProviderParams"];
-  readonly connectionRef?: TurnOptions["connectionRef"];
-  readonly clearConnectionRef?: TurnOptions["clearConnectionRef"];
+  readonly skillReferences?: readonly SkillRef[];
 };
 
 type RuntimeTurnMetadataPayload = NonNullable<MobTurnStartParams["turn_metadata"]>;
@@ -307,7 +300,7 @@ function runtimeTurnMetadataPayload(
 ): RuntimeTurnMetadataPayload | undefined {
   if (!options) return undefined;
   const metadata: RuntimeTurnMetadataPayload = {};
-  const wireRefs = skillKeysToWire(options.skillRefs);
+  const wireRefs = skillKeysToWire(options.skillReferences ?? options.skillRefs);
   if (wireRefs) {
     metadata.skill_references = wireRefs;
   }
@@ -581,7 +574,7 @@ export class MeerkatClient {
    * @example
    * ```ts
    * const session = await client.createSession("Summarise this project", {
-   *   model: "claude-sonnet-4-5",
+   *   turnMetadata: { model: "claude-sonnet-4-5" },
    * });
    * console.log(session.text);
    * ```
@@ -3073,13 +3066,7 @@ export class MeerkatClient {
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
     if (options.labels != null) params.labels = options.labels;
-    const turnMetadata = runtimeTurnMetadataPayload({
-      ...options,
-      skillRefs:
-        options.preloadSkills != null || options.skillRefs != null
-          ? [...(options.preloadSkills ?? []), ...(options.skillRefs ?? [])]
-          : undefined,
-    });
+    const turnMetadata = runtimeTurnMetadataPayload(options.turnMetadata);
     if (turnMetadata) params.turn_metadata = turnMetadata;
     if (options.appContext !== undefined) params.app_context = options.appContext;
     if (options.shellEnv != null) params.shell_env = options.shellEnv;

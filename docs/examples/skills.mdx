@@ -213,32 +213,36 @@ skill injection through `turn_metadata.skill_references`.
 
     result = await client.create_session(
         "Extract emails",
-        preload_skills=[
-            SkillKey(
-                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
-                skill_name="email-extractor",
-            ),
-            SkillKey(
-                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
-                skill_name="markdown-formatter",
-            ),
-        ],
+        turn_metadata={
+            "skill_references": [
+                SkillKey(
+                    source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                    skill_name="email-extractor",
+                ),
+                SkillKey(
+                    source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                    skill_name="markdown-formatter",
+                ),
+            ],
+        },
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const result = await client.createSession("Extract emails", {
-      preloadSkills: [
-        {
-          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-          skillName: "email-extractor",
-        },
-        {
-          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-          skillName: "markdown-formatter",
-        },
-      ],
+      turnMetadata: {
+        skillReferences: [
+          {
+            sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+            skillName: "email-extractor",
+          },
+          {
+            sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+            skillName: "markdown-formatter",
+          },
+        ],
+      },
     });
     ```
   </Tab>
@@ -343,32 +347,36 @@ first turn rather than preloaded into the session system prompt. SDKs keep
 
     result = await client.create_session(
         "Extract emails",
-        skill_refs=[
-            SkillKey(
-                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
-                skill_name="email-extractor",
-            ),
-            SkillKey(
-                source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
-                skill_name="markdown-formatter",
-            ),
-        ],
+        turn_metadata={
+            "skill_references": [
+                SkillKey(
+                    source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                    skill_name="email-extractor",
+                ),
+                SkillKey(
+                    source_uuid="dc256086-0d2f-4f61-a307-320d4148107f",
+                    skill_name="markdown-formatter",
+                ),
+            ],
+        },
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const result = await client.createSession("Extract emails", {
-      skillRefs: [
-        {
-          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-          skillName: "email-extractor",
-        },
-        {
-          sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
-          skillName: "markdown-formatter",
-        },
-      ],
+      turnMetadata: {
+        skillReferences: [
+          {
+            sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+            skillName: "email-extractor",
+          },
+          {
+            sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f",
+            skillName: "markdown-formatter",
+          },
+        ],
+      },
     });
     ```
   </Tab>

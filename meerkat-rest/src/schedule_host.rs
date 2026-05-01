@@ -97,6 +97,7 @@ impl RestScheduleContext {
         create: &SessionMaterializationSpec,
         prompt_system_prompt: Option<&str>,
     ) -> Result<SessionId, ScheduleDomainError> {
+        let keep_alive = create.requests_keep_alive();
         let model = create
             .require_model_name()
             .map_err(ScheduleDomainError::InvalidSchedule)?
@@ -167,6 +168,7 @@ impl RestScheduleContext {
             .create_session(create_req)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
+        update_peer_ingress_context(self, &result.session_id, keep_alive).await;
         Ok(result.session_id)
     }
 }
@@ -315,14 +317,11 @@ async fn deliver_scheduled_event(
 }
 
 #[cfg(feature = "comms")]
-async fn update_peer_ingress_context(context: &RestScheduleContext, session_id: &SessionId) {
-    // Post-wave-c the raw `load_persisted` escape hatch is gone.
-    // `SessionInfo` (returned by `service.read()`) does not surface
-    // `keep_alive`, so we default to `false` — matches the pre-retype
-    // `.unwrap_or(false)` fallback. Sessions that need comms-driven
-    // keep-alive configure it through the canonical
-    // `RuntimeTurnMetadata.keep_alive` on create.
-    let keep_alive = false;
+async fn update_peer_ingress_context(
+    context: &RestScheduleContext,
+    session_id: &SessionId,
+    keep_alive: bool,
+) {
     let comms_rt = context
         .runtime
         .session_service
@@ -336,7 +335,12 @@ async fn update_peer_ingress_context(context: &RestScheduleContext, session_id: 
 }
 
 #[cfg(not(feature = "comms"))]
-async fn update_peer_ingress_context(_context: &RestScheduleContext, _session_id: &SessionId) {}
+async fn update_peer_ingress_context(
+    _context: &RestScheduleContext,
+    _session_id: &SessionId,
+    _keep_alive: bool,
+) {
+}
 
 #[cfg(test)]
 mod tests {
@@ -355,11 +359,22 @@ mod tests {
             body.contains("build_config.initial_turn_metadata = create.initial_turn_metadata()"),
             "REST scheduled materialization must stage first-turn metadata through RuntimeTurnMetadata"
         );
+        assert!(
+            body.contains("let keep_alive = create.requests_keep_alive();"),
+            "REST scheduled materialization must derive keep_alive from RuntimeTurnMetadata"
+        );
+        assert!(
+            body.contains(
+                "update_peer_ingress_context(self, &result.session_id, keep_alive).await"
+            ),
+            "REST scheduled materialization must apply canonical keep_alive to peer ingress"
+        );
         for split in [
             "build_config.provider = create.provider",
             "build_config.provider_params = create.provider_params.clone()",
             "build_config.additional_instructions = (!create.additional_instructions.is_empty())",
             "build_config.keep_alive = create.keep_alive",
+            "let keep_alive = false",
         ] {
             assert!(
                 !body.contains(split),

@@ -81,6 +81,7 @@ export type {
   PeerResponseTerminalOptions,
   ProviderModelCatalog,
   RunResult,
+  RuntimeTurnMetadata,
   Schedule,
   ScheduleListOptions,
   ScheduleOccurrencesOptions,

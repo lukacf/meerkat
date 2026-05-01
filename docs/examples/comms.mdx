@@ -55,7 +55,12 @@ Keep-alive sessions stay resident so later comms or external events can wake the
     ```python
     session = await client.create_session(
         "You are a coordinator.",
-        keep_alive=True,
+        turn_metadata={
+            "keep_alive": {
+                "action": "set",
+                "value": {"policy": "pinned", "ttl_secs": 30},
+            },
+        },
         comms_name="agent-a",
     )
     ```
@@ -63,7 +68,7 @@ Keep-alive sessions stay resident so later comms or external events can wake the
   <Tab title="TypeScript">
     ```typescript
     const session = await client.createSession("You are a coordinator.", {
-      keepAlive: true,
+      turnMetadata: { keepAlive: true },
       commsName: "agent-a",
     });
     ```

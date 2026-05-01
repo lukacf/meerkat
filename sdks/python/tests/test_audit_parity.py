@@ -221,7 +221,11 @@ async def test_create_session_with_extended_create_fields():
     await client.create_session(
         "hi",
         labels={"foo": "bar"},
-        additional_instructions=["You are concise."],
+        turn_metadata={
+            "additional_instructions": [
+                {"kind": "user", "body": "You are concise."},
+            ],
+        },
         app_context={"app": "sdk"},
         shell_env={"FOO": "BAR"},
         external_tools=[{"name": "tool_a", "description": "Tool A", "input_schema": {"type": "object"}}],

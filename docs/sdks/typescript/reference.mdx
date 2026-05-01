@@ -565,15 +565,18 @@ class SkillNotFoundError extends MeerkatError {}
 
 ## Skills
 
-Both `createSession()` and `session.turn()` accept structured skill parameters.
+`createSession()` accepts first-turn skills inside `turnMetadata.skillReferences`.
+`session.turn()` keeps the `skillRefs` convenience option for per-turn injection.
 
 ```typescript
 // Preload skills into the system prompt at session creation
 const session = await client.createSession("Hello!", {
-  preloadSkills: [
-    { sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f", skillName: "extraction-email" },
-    { sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f", skillName: "formatting-markdown" },
-  ],
+  turnMetadata: {
+    skillReferences: [
+      { sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f", skillName: "extraction-email" },
+      { sourceUuid: "dc256086-0d2f-4f61-a307-320d4148107f", skillName: "formatting-markdown" },
+    ],
+  },
 });
 
 // Inject a skill for a specific turn via session.turn()

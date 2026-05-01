@@ -50,7 +50,7 @@ init_runtime(
 
 ```javascript
 const handle = create_session(mobpackBytes, JSON.stringify({
-  model: "claude-sonnet-4-6",
+  turn_metadata: { model: "claude-sonnet-4-6" },
 }));
 
 const result = JSON.parse(await start_turn(handle, "Hello", "{}"));

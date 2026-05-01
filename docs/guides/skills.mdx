@@ -312,7 +312,7 @@ creation:
 }
 ```
 
-See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers. CLI `--skill` and SDK `preload_skills` / `preloadSkills` are convenience options that serialize into the canonical metadata carrier.
+See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers. Session creation uses `turn_metadata.skill_references` (or `turnMetadata.skillReferences` in TypeScript); per-turn SDK helpers keep `skill_refs` / `skillRefs` convenience options that serialize into the canonical metadata carrier.
 
 ## Skill introspection
 

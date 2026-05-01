@@ -83,9 +83,16 @@ struct MobDefinition {
 // Session Types
 // ═══════════════════════════════════════════════════════════
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RuntimeTurnMetadata {
+    #[serde(default)]
+    model: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SessionConfig {
-    model: String,
+    turn_metadata: RuntimeTurnMetadata,
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
@@ -94,6 +101,22 @@ struct SessionConfig {
 
 fn default_max_tokens() -> u32 {
     4096
+}
+
+fn session_config_model(config: &SessionConfig) -> Result<&str, JsValue> {
+    let Some(model) = config.turn_metadata.model.as_deref() else {
+        return Err(err_js(
+            "invalid_config",
+            "turn_metadata.model is required for session creation",
+        ));
+    };
+    if model.trim().is_empty() {
+        return Err(err_js(
+            "invalid_config",
+            "turn_metadata.model must not be empty",
+        ));
+    }
+    Ok(model)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,17 +506,14 @@ fn looks_like_windows_absolute(path: &str) -> bool {
 /// Create a session from a mobpack archive.
 ///
 /// Extracts skills, assembles system prompt, returns a session handle.
-/// `config_json`: `{ "model": "...", "system_prompt"?: "...", "max_tokens"?: N }`
+/// `config_json`: `{ "turn_metadata": { "model": "..." }, "system_prompt"?: "...", "max_tokens"?: N }`
 #[wasm_bindgen]
 pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
     let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
 
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
-
-    if config.model.trim().is_empty() {
-        return Err(err_js("invalid_config", "model must not be empty"));
-    }
+    let model = session_config_model(&config)?.to_string();
 
     let (compiled_prompt, truncation_event) = compile_system_prompt(
         &parsed.definition.id,
@@ -510,7 +530,7 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
         let mut session = RuntimeSession {
             handle,
             mob_id: parsed.definition.id,
-            model: config.model,
+            model,
             max_tokens: config.max_tokens,
             compiled_system_prompt: compiled_prompt,
             skills: parsed.skills,
@@ -936,7 +956,7 @@ mod tests {
     #[test]
     fn create_session_extracts_skills() {
         let pack = fixture_mobpack(false);
-        let config = r#"{"model":"claude-sonnet-4-5"}"#;
+        let config = r#"{"turn_metadata":{"model":"claude-sonnet-4-5"}}"#;
         let handle = create_session(&pack, config).expect("create_session");
         assert!(handle > 0);
 
@@ -956,8 +976,15 @@ mod tests {
 
     #[test]
     fn session_config_rejects_empty_model() {
-        let config: SessionConfig = serde_json::from_str(r#"{"model":""}"#).expect("parse");
-        assert!(config.model.trim().is_empty());
+        let config: SessionConfig =
+            serde_json::from_str(r#"{"turn_metadata":{"model":""}}"#).expect("parse");
+        assert!(session_config_model(&config).is_err());
+    }
+
+    #[test]
+    fn session_config_rejects_top_level_model() {
+        serde_json::from_str::<SessionConfig>(r#"{"model":"claude-sonnet-4-5"}"#)
+            .expect_err("top-level model must be rejected");
     }
 
     #[test]
@@ -975,7 +1002,7 @@ mod tests {
     #[test]
     fn snapshot_restore_roundtrip() {
         let pack = fixture_mobpack(false);
-        let config = r#"{"model":"gpt-5.2","max_tokens":1024}"#;
+        let config = r#"{"turn_metadata":{"model":"gpt-5.2"},"max_tokens":1024}"#;
         let handle = create_session(&pack, config).expect("create");
 
         let snap = snapshot_session(handle).expect("snapshot");
@@ -995,7 +1022,7 @@ mod tests {
     #[test]
     fn snapshot_schema_version_recorded() {
         let pack = fixture_mobpack(false);
-        let config = r#"{"model":"test"}"#;
+        let config = r#"{"turn_metadata":{"model":"test"}}"#;
         let handle = create_session(&pack, config).expect("create");
 
         let snap_json = snapshot_session(handle).expect("snap");
@@ -1028,7 +1055,7 @@ mod tests {
     #[test]
     fn registry_remove_works() {
         let pack = fixture_mobpack(false);
-        let config = r#"{"model":"test"}"#;
+        let config = r#"{"turn_metadata":{"model":"test"}}"#;
         let handle = create_session(&pack, config).expect("create");
 
         // Session exists
@@ -1105,7 +1132,7 @@ mod tests {
     #[test]
     fn poll_events_drains() {
         let pack = fixture_mobpack(false);
-        let config = r#"{"model":"test"}"#;
+        let config = r#"{"turn_metadata":{"model":"test"}}"#;
         let handle = create_session(&pack, config).expect("create");
 
         // First poll should be empty (or just truncation if skills are huge)

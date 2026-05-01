@@ -107,6 +107,7 @@ from .types import (
     RealtimeTurningMode,
     RealtimeVideoChunk,
     RunResult,
+    RuntimeTurnMetadata,
     RuntimeAcceptParams,
     RuntimeAcceptResult,
     RuntimeRealtimeAttachmentStatusResult,

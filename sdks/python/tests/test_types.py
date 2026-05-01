@@ -819,7 +819,10 @@ async def test_create_session_skill_refs_use_turn_metadata_carrier() -> None:
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    await client.create_session("Use skills", preload_skills=[preload_key], skill_refs=[key])
+    await client.create_session(
+        "Use skills",
+        turn_metadata={"skill_references": [preload_key, key]},
+    )
 
     assert seen == [
         (
@@ -841,6 +844,30 @@ async def test_create_session_skill_refs_use_turn_metadata_carrier() -> None:
             },
         )
     ]
+
+
+def test_create_session_signature_exposes_single_turn_metadata_carrier() -> None:
+    import inspect
+
+    retired = [
+        "model",
+        "provider",
+        "connection_ref",
+        "keep_alive",
+        "provider_params",
+        "preload_skills",
+        "skill_refs",
+        "additional_instructions",
+    ]
+    for method in [
+        MeerkatClient.create_session,
+        MeerkatClient.create_session_streaming,
+        MeerkatClient.create_deferred_session,
+    ]:
+        parameters = inspect.signature(method).parameters
+        assert "turn_metadata" in parameters
+        for field in retired:
+            assert field not in parameters
 
 
 @pytest.mark.asyncio

@@ -95,8 +95,7 @@ async with MeerkatClient() as client:
     await client.connect(realm_id="team-alpha")
     session = await client.create_session(
         prompt="Let's talk.",
-        model="gpt-realtime-1.5",
-        provider="openai",
+        turn_metadata={"model": "gpt-realtime-1.5", "provider": "openai"},
     )
 ```
 </CodeGroup>
@@ -277,8 +276,7 @@ async with MeerkatClient() as client:
     # 1. Create a session on a realtime-capable model — transport attaches automatically.
     session = await client.create_session(
         prompt="Ready for realtime audio.",
-        model="gpt-realtime-1.5",
-        provider="openai",
+        turn_metadata={"model": "gpt-realtime-1.5", "provider": "openai"},
     )
 
     # 2. Wait for the binding to reach BindingReady.

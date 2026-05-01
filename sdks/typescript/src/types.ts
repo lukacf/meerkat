@@ -243,6 +243,20 @@ export interface TurnOptions {
   readonly clearConnectionRef?: boolean;
 }
 
+/** Canonical runtime metadata carrier for session creation. */
+export interface RuntimeTurnMetadata {
+  readonly skillReferences?: SkillRef[];
+  readonly flowToolOverlay?: TurnToolOverlay;
+  readonly additionalInstructions?: string[];
+  readonly keepAlive?: boolean;
+  readonly model?: string;
+  readonly provider?: string;
+  readonly providerParams?: Record<string, unknown>;
+  readonly clearProviderParams?: boolean;
+  readonly connectionRef?: WireConnectionRef;
+  readonly clearConnectionRef?: boolean;
+}
+
 export interface EventEnvelope<T = unknown> {
   readonly timestamp_ms: number;
   readonly source_id: string;
@@ -636,8 +650,6 @@ export interface ScheduleToolCallRequest {
 
 /** Options for creating a new session. */
 export interface SessionOptions {
-  model?: string;
-  provider?: string;
   systemPrompt?: string;
   maxTokens?: number;
   outputSchema?: Record<string, unknown>;
@@ -647,15 +659,11 @@ export interface SessionOptions {
   enableShell?: boolean;
   enableMemory?: boolean;
   enableMob?: boolean;
-  keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;
   budgetLimits?: Record<string, unknown>;
-  providerParams?: Record<string, unknown>;
-  preloadSkills?: SkillRef[];
-  skillRefs?: SkillRef[];
+  turnMetadata?: RuntimeTurnMetadata;
   labels?: Readonly<Record<string, string>>;
-  additionalInstructions?: readonly string[];
   appContext?: unknown;
   shellEnv?: Readonly<Record<string, string>>;
   externalTools?: readonly Record<string, unknown>[];

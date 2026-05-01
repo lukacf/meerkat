@@ -230,8 +230,7 @@ if include_scenario(37):
 
             session = await client.create_session(
                 "My name is PyBot37 and my favorite color is teal. Reply briefly.",
-                model=smoke_model(),
-                provider="anthropic",
+                turn_metadata={"model": smoke_model(), "provider": "anthropic"},
             )
 
             assert session.id
@@ -280,8 +279,7 @@ if include_scenario(38):
         async with live_client() as client:
             session = await client.create_session(
                 "Remember the codeword ORBIT-38 for later and reply READY.",
-                model=smoke_model(),
-                provider="anthropic",
+                turn_metadata={"model": smoke_model(), "provider": "anthropic"},
             )
 
             injected = await session.inject_context(
@@ -321,8 +319,7 @@ if include_scenario(39):
         async with live_client(**realm) as client_a:
             session = await client_a.create_session(
                 f"Remember this persistent marker exactly: {marker}. Reply briefly.",
-                model=smoke_model(),
-                provider="anthropic",
+                turn_metadata={"model": smoke_model(), "provider": "anthropic"},
             )
             session_id = session.id
 
@@ -562,8 +559,7 @@ if include_scenario(57):
             async with live_client() as client:
                 session = await client.create_session(
                     "When asked through realtime, reply with PY-REALTIME-57 and mention cedar.",
-                    model=smoke_model(),
-                    provider="anthropic",
+                    turn_metadata={"model": smoke_model(), "provider": "anthropic"},
                 )
 
                 channel = RealtimeChannel.session(client, session.id)
@@ -912,8 +908,7 @@ After the tool returns, reply with PY-GEMINI-74-DONE and no extra prose.
 """
             session = await client.create_session(
                 prompt,
-                model=smoke_model(),
-                provider="anthropic",
+                turn_metadata={"model": smoke_model(), "provider": "anthropic"},
                 enable_builtins=True,
             )
             assert "py-gemini-74" in session.text.lower()

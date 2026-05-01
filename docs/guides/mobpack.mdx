@@ -113,7 +113,10 @@ The runtime uses `tokio_with_wasm` as a drop-in tokio replacement (backed by the
 API:
 
 ```js
-const handle = runtime.create_session(mobpackBytes, '{"model":"claude-sonnet-4-6","api_key":"sk-..."}');
+const handle = runtime.create_session(
+  mobpackBytes,
+  '{"turn_metadata":{"model":"claude-sonnet-4-6"}}',
+);
 const result = await runtime.start_turn(handle, "Your prompt here", "{}");
 const events = runtime.poll_events(handle);
 ```

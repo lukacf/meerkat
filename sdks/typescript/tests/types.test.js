@@ -787,16 +787,16 @@ describe("Session wrappers", () => {
 
     await client.createSession("Hello", {
       labels: { team: "sdk" },
-      additionalInstructions: ["be terse"],
+      turnMetadata: {
+        additionalInstructions: ["be terse"],
+        skillReferences: [
+          { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "preload" },
+          { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
+        ],
+      },
       appContext: { tenant: "acme" },
       shellEnv: { FOO: "bar" },
       externalTools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
-      preloadSkills: [
-        { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "preload" },
-      ],
-      skillRefs: [
-        { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
-      ],
     });
 
     assert.deepEqual(seen[0], {

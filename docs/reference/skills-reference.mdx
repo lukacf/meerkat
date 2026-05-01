@@ -21,7 +21,7 @@ Use this page when you need exact skill-system vocabulary rather than a task wal
 }
 ```
 
-`preload_skills` carries plain `SkillKey` objects; `skill_refs` carries tagged `SkillRef` objects. Legacy string refs are rejected.
+`turn_metadata.skill_references` carries plain `SkillKey` objects for first-turn/session creation and per-turn injection. Legacy top-level `preload_skills`, `skill_refs`, and string refs are rejected on wire/API surfaces.
 
 ## Source Identity
 
@@ -49,8 +49,7 @@ Shadowing is keyed by the full `SkillKey`, not by `skill_name` alone. Two source
 
 ## Activation paths
 
-- **Preload at session creation**: `preload_skills: SkillKey[]`; content is resolved into the system prompt before the first turn.
-- **First-turn injection at session creation**: raw RPC/REST requests use top-level `skill_refs: SkillRef[]`.
+- **First-turn/session creation**: raw RPC/REST requests use `turn_metadata.skill_references: SkillKey[]`.
 - **Per-turn injection**: raw RPC/REST requests use `turn_metadata.skill_references: SkillKey[]`; SDK turn helpers expose `skill_refs: SkillRef[]` convenience options that resolve into that runtime metadata carrier.
 - **CLI preload convenience**: `rkat run --skill <skill-name>` resolves a runtime-local slug to a builtin-source key.
 

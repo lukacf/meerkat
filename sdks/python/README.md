@@ -45,13 +45,13 @@ asyncio.run(main())
 
 `create_session`, `create_session_streaming`, and `create_deferred_session` support:
 
-- model/provider controls: `model`, `provider`, `max_tokens`, `system_prompt`, `provider_params`
+- first-turn runtime metadata: `turn_metadata` (`model`, `provider`, `provider_params`, `skill_references`, `additional_instructions`, `keep_alive`)
+- generation controls: `max_tokens`, `system_prompt`
 - structured output: `output_schema`, `structured_output_retries`
 - runtime/tool toggles: `enable_builtins`, `enable_shell`, `enable_memory`, `enable_mob`
-- comms/runtime metadata: `keep_alive`, `comms_name`, `peer_meta`, `budget_limits`
-- skills: `preload_skills`, `skill_refs`
+- comms/runtime config: `comms_name`, `peer_meta`, `budget_limits`
 - session metadata: `labels`
-- additional session config: `additional_instructions`, `app_context`, `shell_env`, `external_tools`
+- additional session config: `app_context`, `shell_env`, `external_tools`
 
 ### Session queries
 

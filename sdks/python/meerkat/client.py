@@ -106,6 +106,7 @@ from .types import (
     EventEnvelope,
     McpLiveOpResponse,
     RunResult,
+    RuntimeTurnMetadata,
     SchemaWarning,
     SessionDetails,
     SessionAssistantBlock,
@@ -670,9 +671,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
-        model: str | None = None,
-        provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -682,15 +681,10 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_mob: bool | None = None,
-        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
-        provider_params: dict[str, Any] | None = None,
-        preload_skills: list[SkillRef] | None = None,
-        skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
-        additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
@@ -701,25 +695,21 @@ class MeerkatClient:
 
             session = await client.create_session(
                 "Summarise this project",
-                model="claude-sonnet-4-5",
+                turn_metadata={"model": "claude-sonnet-4-5"},
             )
             print(session.text)
         """
         params = self._build_create_params(
-            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            prompt, turn_metadata=turn_metadata,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
-            budget_limits=budget_limits, provider_params=provider_params,
-            preload_skills=preload_skills,
-            skill_refs=skill_refs,
+            budget_limits=budget_limits,
             labels=labels,
-            additional_instructions=additional_instructions,
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
@@ -732,9 +722,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
-        model: str | None = None,
-        provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -744,15 +732,10 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_mob: bool | None = None,
-        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
-        provider_params: dict[str, Any] | None = None,
-        preload_skills: list[SkillRef] | None = None,
-        skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
-        additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
@@ -772,20 +755,16 @@ class MeerkatClient:
         if not self._dispatcher or not self._process or not self._process.stdin:
             raise MeerkatError("NOT_CONNECTED", "Client not connected")
         params = self._build_create_params(
-            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            prompt, turn_metadata=turn_metadata,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
-            budget_limits=budget_limits, provider_params=provider_params,
-            preload_skills=preload_skills,
-            skill_refs=skill_refs,
+            budget_limits=budget_limits,
             labels=labels,
-            additional_instructions=additional_instructions,
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
@@ -809,9 +788,7 @@ class MeerkatClient:
         self,
         prompt: str | list[ContentBlock],
         *,
-        model: str | None = None,
-        provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -821,15 +798,10 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_mob: bool | None = None,
-        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
-        provider_params: dict[str, Any] | None = None,
-        preload_skills: list[SkillRef] | None = None,
-        skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
-        additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
@@ -844,25 +816,21 @@ class MeerkatClient:
 
             deferred = await client.create_deferred_session(
                 "Summarise this project",
-                model="claude-sonnet-4-5",
+                turn_metadata={"model": "claude-sonnet-4-5"},
             )
             result = await deferred.start_turn("Begin")
         """
         params = self._build_create_params(
-            prompt, model=model, provider=provider, connection_ref=connection_ref,
+            prompt, turn_metadata=turn_metadata,
             system_prompt=system_prompt,
             max_tokens=max_tokens, output_schema=output_schema,
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_mob=enable_mob,
-            keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
-            budget_limits=budget_limits, provider_params=provider_params,
-            preload_skills=preload_skills,
-            skill_refs=skill_refs,
+            budget_limits=budget_limits,
             labels=labels,
-            additional_instructions=additional_instructions,
             app_context=app_context,
             shell_env=shell_env,
             external_tools=external_tools,
@@ -2661,9 +2629,7 @@ class MeerkatClient:
     def _build_create_params(
         prompt: str | list[ContentBlock],
         *,
-        model: str | None = None,
-        provider: str | None = None,
-        connection_ref: dict[str, str] | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
         output_schema: dict[str, Any] | None = None,
@@ -2673,15 +2639,10 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_mob: bool | None = None,
-        keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
         budget_limits: dict[str, Any] | None = None,
-        provider_params: dict[str, Any] | None = None,
-        preload_skills: list[SkillRef] | None = None,
-        skill_refs: list[SkillRef] | None = None,
         labels: dict[str, str] | None = None,
-        additional_instructions: list[str] | None = None,
         app_context: dict[str, Any] | None = None,
         shell_env: dict[str, str] | None = None,
         external_tools: list[dict[str, Any]] | None = None,
@@ -2713,22 +2674,8 @@ class MeerkatClient:
             params["budget_limits"] = budget_limits
         if labels is not None:
             params["labels"] = labels
-        combined_skill_refs = (
-            [*(preload_skills or []), *(skill_refs or [])]
-            if preload_skills is not None or skill_refs is not None
-            else None
-        )
-        turn_metadata = _runtime_turn_metadata(
-            skill_refs=combined_skill_refs,
-            additional_instructions=additional_instructions,
-            keep_alive=keep_alive,
-            model=model,
-            provider=provider,
-            provider_params=provider_params,
-            connection_ref=connection_ref,
-        )
         if turn_metadata is not None:
-            params["turn_metadata"] = turn_metadata
+            params["turn_metadata"] = _wire_value(turn_metadata)
         if app_context is not None:
             params["app_context"] = app_context
         if shell_env is not None:

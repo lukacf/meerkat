@@ -9,6 +9,7 @@
 //! and destroys its owned mobs in a single call.
 
 use async_trait::async_trait;
+use meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError, SessionService};
@@ -49,6 +50,78 @@ const TOOL_MOB_PROFILE_LIST: &str = "mob_profile_list";
 const TOOL_MOB_PROFILE_UPDATE: &str = "mob_profile_update";
 const TOOL_MOB_PROFILE_DELETE: &str = "mob_profile_delete";
 const TOOL_MOB_PROFILE_LIST_SOURCES: &str = "mob_profile_list_sources";
+
+fn apply_agent_spawn_turn_metadata(
+    spec: &mut SpawnMemberSpec,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
+) -> Result<(), String> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err("agent mob spawn turn_metadata.handling_mode is not supported".to_string());
+    }
+    if metadata.skill_references.is_some() {
+        return Err("agent mob spawn turn_metadata.skill_references is not supported".to_string());
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err("agent mob spawn turn_metadata.flow_tool_overlay is not supported".to_string());
+    }
+    if metadata.provider.is_some() {
+        return Err("agent mob spawn turn_metadata.provider is not supported".to_string());
+    }
+    if metadata.keep_alive.is_some() {
+        return Err("agent mob spawn turn_metadata.keep_alive is not supported".to_string());
+    }
+    if metadata.render_metadata.is_some() {
+        return Err("agent mob spawn turn_metadata.render_metadata is not supported".to_string());
+    }
+
+    if let Some(model) = metadata.model {
+        spec.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        spec.provider_params_override = match provider_params {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
+                Some(params.to_legacy_provider_value())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "agent mob spawn turn_metadata.provider_params clear is not supported"
+                        .to_string(),
+                );
+            }
+        };
+    }
+    if let Some(instructions) = metadata.additional_instructions {
+        let instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.body)
+            .filter(|body| !body.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            spec.additional_instructions = Some(instructions);
+        }
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        spec.connection_ref = match connection_ref {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
+                Some(connection_ref)
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "agent mob spawn turn_metadata.connection_ref clear is not supported"
+                        .to_string(),
+                );
+            }
+        };
+    }
+
+    Ok(())
+}
 
 // ─── ResolvedSpawnTooling ────────────────────────────────────────────────
 
@@ -643,9 +716,8 @@ impl AgentMobToolSurface {
         // Don't use auto_wire_parent — it requires an orchestrator member in the roster.
         // We wire explicitly below using PeerTarget::External.
         spec.auto_wire_parent = false;
-        if let Some(instructions) = args.additional_instructions {
-            spec.additional_instructions = Some(vec![instructions]);
-        }
+        apply_agent_spawn_turn_metadata(&mut spec, args.turn_metadata)
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
 
         // Resolve spawn tooling: default to InheritParent for delegates
         let tooling = args
@@ -802,9 +874,8 @@ impl AgentMobToolSurface {
             spec.inherited_tool_filter = resolved.inherited_tool_filter;
             spec.override_profile = resolved.override_profile;
         }
-        if let Some(cref) = args.connection_ref {
-            spec.connection_ref = Some(cref);
-        }
+        apply_agent_spawn_turn_metadata(&mut spec, args.turn_metadata)
+            .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
 
         let spawn_result = self
             .state
@@ -1253,16 +1324,17 @@ fn build_tool_defs_with_profile_support(
                         "type": "string",
                         "description": "Unique identifier for this helper (auto-generated if omitted)"
                     },
-                    "additional_instructions": {
-                        "type": "string",
-                        "description": "Extra instructions appended to the helper's system prompt"
+                    "turn_metadata": {
+                        "type": "object",
+                        "description": "Canonical runtime turn metadata carrier for supported helper spawn overrides, including model, provider_params set, connection_ref set, and additional_instructions."
                     },
                     "tooling": {
                         "type": "object",
                         "description": "Spawn tooling mode. Controls the helper's model and tool surface. Options: {\"mode\":\"inherit_parent\"} (default, inherits your tools), {\"mode\":\"minimal\"} (comms only), or {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\"name\":\"...\"}} / {\"mode\":\"profile\",\"source\":{\"type\":\"inline\",\"model\":\"...\",\"tools\":{...}}}. Overlays: allow_overlay/deny_overlay arrays narrow the tool set."
                     }
                 },
-                "required": ["task"]
+                "required": ["task"],
+                "additionalProperties": false
             }),
         ),
         tool_def(
@@ -1376,9 +1448,14 @@ fn build_tool_defs_with_profile_support(
                     "tooling": {
                         "type": "object",
                         "description": "Override the profile's model/tool config. Options: {\"mode\":\"inherit_parent\"} (your tools), {\"mode\":\"minimal\"} (comms only), or {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\"name\":\"...\"}} / {\"mode\":\"profile\",\"source\":{\"type\":\"inline\",\"model\":\"...\",\"tools\":{...}}}. Add allow_overlay/deny_overlay arrays to narrow the tool set."
+                    },
+                    "turn_metadata": {
+                        "type": "object",
+                        "description": "Canonical runtime turn metadata carrier for supported member spawn overrides, including model, provider_params set, connection_ref set, and additional_instructions."
                     }
                 },
-                "required": ["mob_id", "profile", "member_id"]
+                "required": ["mob_id", "profile", "member_id"],
+                "additionalProperties": false
             }),
         ),
         tool_def(
@@ -1705,12 +1782,13 @@ fn build_tool_defs_with_profile_support(
 // ─── Argument types ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DelegateArgs {
     task: String,
     #[serde(default)]
     member_id: Option<String>,
     #[serde(default)]
-    additional_instructions: Option<String>,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     tooling: Option<meerkat_mob::SpawnTooling>,
 }
@@ -1726,6 +1804,7 @@ struct MobIdArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SpawnMemberArgs {
     mob_id: String,
     profile: String,
@@ -1740,13 +1819,8 @@ struct SpawnMemberArgs {
     auto_wire_parent: Option<bool>,
     #[serde(default)]
     tooling: Option<meerkat_mob::SpawnTooling>,
-    /// Per-member auth binding (deferral §1). Accepts the struct
-    /// `{"realm": "...", "binding": "..."}` (wire-contract shape).
-    /// When set, this member resolves credentials via the named
-    /// realm + binding; otherwise the member uses env-default /
-    /// config-realm fallback.
     #[serde(default)]
-    connection_ref: Option<meerkat_core::ConnectionRef>,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 #[derive(Deserialize)]
@@ -2696,6 +2770,96 @@ mod tests {
         let delegate = defs.iter().find(|d| d.name == "delegate").unwrap();
         let required = delegate.input_schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("task")));
+    }
+
+    #[test]
+    fn agent_tool_delegate_args_reject_retired_split_metadata_carriers() {
+        let err = match serde_json::from_value::<DelegateArgs>(json!({
+            "task": "summarize the current branch",
+            "additional_instructions": "legacy split carrier"
+        })) {
+            Ok(_) => panic!("delegate must reject retired top-level additional_instructions"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("additional_instructions")
+                || err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn agent_tool_spawn_member_args_use_turn_metadata_for_connection_ref() {
+        let args = serde_json::from_value::<SpawnMemberArgs>(json!({
+            "mob_id": "mob",
+            "profile": "worker",
+            "member_id": "w1",
+            "turn_metadata": {
+                "connection_ref": {
+                    "action": "set",
+                    "value": {
+                        "realm": "dev",
+                        "binding": "default_openai"
+                    }
+                }
+            }
+        }))
+        .expect("mob_spawn_member must accept canonical turn_metadata connection carrier");
+
+        assert!(args.turn_metadata.is_some());
+
+        let err = match serde_json::from_value::<SpawnMemberArgs>(json!({
+            "mob_id": "mob",
+            "profile": "worker",
+            "member_id": "w1",
+            "connection_ref": {
+                "realm": "dev",
+                "binding": "default_openai"
+            }
+        })) {
+            Ok(_) => panic!("mob_spawn_member must reject retired top-level connection_ref"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("connection_ref") || err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn agent_tool_spawn_turn_metadata_applies_supported_member_fields() {
+        let turn_metadata = serde_json::from_value::<WireRuntimeTurnMetadata>(json!({
+            "model": "gpt-5.4-mini",
+            "additional_instructions": [
+                { "kind": "user", "body": "stay concise" }
+            ],
+            "connection_ref": {
+                "action": "set",
+                "value": {
+                    "realm": "dev",
+                    "binding": "default_openai"
+                }
+            }
+        }))
+        .expect("canonical turn_metadata should deserialize");
+
+        let mut spec = SpawnMemberSpec::new("worker", "w1");
+        apply_agent_spawn_turn_metadata(&mut spec, Some(turn_metadata))
+            .expect("supported spawn metadata should apply");
+
+        assert_eq!(spec.model_override.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(
+            spec.additional_instructions.as_deref(),
+            Some(["stay concise".to_string()].as_slice())
+        );
+        assert_eq!(
+            spec.connection_ref
+                .as_ref()
+                .map(|connection_ref| connection_ref.binding.as_str()),
+            Some("default_openai")
+        );
     }
 
     #[tokio::test]

@@ -1358,32 +1358,9 @@ mod scenario_10_memory {
             .with_turn_state_handle(Arc::new(
                 meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
             ));
-        let authority = {
-            const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
-            // SAFETY: the canonical factory seal constant is non-zero.
-            #[allow(unsafe_code)]
-            let seal =
-                unsafe { std::num::NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
-
-            // SAFETY: this smoke test composes factory-equivalent persisted
-            // session/build metadata and runtime turn-state handle above.
-            #[allow(unsafe_code)]
-            unsafe {
-                std::mem::transmute::<
-                    std::num::NonZeroUsize,
-                    meerkat_agent_build_authority::AgentFactoryBuildAuthority,
-                >(seal)
-            }
-        };
-        let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            authority,
-            builder,
-            llm_adapter,
-            memory_tools,
-            store_adapter,
-        )
-        .await
-        .expect("factory-policy memory smoke builder");
+        let mut agent = builder
+            .build_standalone(llm_adapter, memory_tools, store_adapter)
+            .await;
 
         // Turn 1: Distinctive content
         let r1 = agent

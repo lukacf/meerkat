@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,15 +20,86 @@ use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
 #[allow(unsafe_code)]
 fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
-    // SAFETY: the canonical factory seal constant is non-zero.
-    let seal = unsafe { NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct AgentFactoryBuildAuthoritySeal {
+        words: [u64; 4],
+    }
 
-    // SAFETY: `AgentFactoryBuildAuthority` is a transparent wrapper around the
-    // private non-zero seal validated by `meerkat-agent-build-authority`. This
-    // helper is private to the facade factory module and is only called after
-    // `AgentFactory::build_agent` has composed factory policy metadata.
-    unsafe { std::mem::transmute::<NonZeroUsize, _>(seal) }
+    #[derive(Clone, Copy)]
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct AgentFactoryBuildAuthorityRepr {
+        seal: AgentFactoryBuildAuthoritySeal,
+    }
+
+    const FALLBACK_AUTHORITY_WORDS: [u64; 4] = [
+        0xf4_22_2f_48_41_5f_d0_3b,
+        0x91_7c_40_22_7a_8a_61_d9,
+        0x5c_c6_93_13_d4_89_a2_7e,
+        0xaa_d5_0e_b8_20_64_7f_11,
+    ];
+
+    const fn hex_nibble(byte: u8) -> u64 {
+        match byte {
+            b'0'..=b'9' => (byte - b'0') as u64,
+            b'a'..=b'f' => (byte - b'a' + 10) as u64,
+            b'A'..=b'F' => (byte - b'A' + 10) as u64,
+            _ => 0,
+        }
+    }
+
+    const fn authority_word(value: Option<&str>, fallback: u64) -> u64 {
+        let Some(value) = value else {
+            return fallback;
+        };
+        let bytes = value.as_bytes();
+        let mut index = 0;
+        let mut word = 0_u64;
+        while index < bytes.len() {
+            word = (word << 4) | hex_nibble(bytes[index]);
+            index += 1;
+        }
+        word
+    }
+
+    const CANONICAL_AUTHORITY_WORDS: [u64; 4] = [
+        authority_word(
+            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_0"),
+            FALLBACK_AUTHORITY_WORDS[0],
+        ),
+        authority_word(
+            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_1"),
+            FALLBACK_AUTHORITY_WORDS[1],
+        ),
+        authority_word(
+            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_2"),
+            FALLBACK_AUTHORITY_WORDS[2],
+        ),
+        authority_word(
+            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_3"),
+            FALLBACK_AUTHORITY_WORDS[3],
+        ),
+    ];
+
+    let authority = AgentFactoryBuildAuthorityRepr {
+        seal: AgentFactoryBuildAuthoritySeal {
+            words: CANONICAL_AUTHORITY_WORDS,
+        },
+    };
+
+    // SAFETY: this is the only production mint site for the private authority
+    // representation. The local mirror is kept in lockstep with
+    // `meerkat-agent-build-authority` and this helper is private to the facade
+    // factory module after `AgentFactory::build_agent` has composed policy
+    // metadata.
+    unsafe {
+        std::mem::transmute::<
+            AgentFactoryBuildAuthorityRepr,
+            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
+        >(authority)
+    }
 }
 
 /// Default system prompt for wasm32 builds.

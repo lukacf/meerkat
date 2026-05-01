@@ -762,15 +762,7 @@ impl SessionAgentBuilder for CompactionAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            test_factory_build_authority(),
-            builder,
-            client,
-            tools,
-            store,
-        )
-        .await
-        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent = builder.build_standalone(client, tools, store).await;
         Ok(CompactionSessionAgent { agent })
     }
 }
@@ -802,33 +794,9 @@ impl SessionAgentBuilder for RealAgentBuilder {
         });
         let tools = Arc::new(StaticToolDispatcher::new(&["alpha", "beta"]));
         let store = Arc::new(NoopSessionStore);
-        let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            test_factory_build_authority(),
-            builder,
-            client,
-            tools,
-            store,
-        )
-        .await
-        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent = builder.build_standalone(client, tools, store).await;
 
         Ok(RealSessionAgent { agent })
-    }
-}
-
-#[allow(unsafe_code)]
-fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
-    // SAFETY: the canonical factory seal constant is non-zero.
-    let seal = unsafe { std::num::NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
-
-    // SAFETY: session integration tests construct factory-equivalent session
-    // metadata, build state, and runtime turn-state handles before finalizing.
-    unsafe {
-        std::mem::transmute::<
-            std::num::NonZeroUsize,
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
-        >(seal)
     }
 }
 

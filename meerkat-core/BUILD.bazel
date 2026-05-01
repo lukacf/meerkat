@@ -37,6 +37,7 @@ rust_library(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -72,6 +73,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -123,6 +125,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -175,6 +178,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -229,6 +233,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -280,6 +285,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -338,6 +344,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -390,6 +397,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -441,6 +449,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -495,6 +504,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -547,6 +557,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -599,6 +610,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -651,6 +663,7 @@ rust_test(
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
+        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [

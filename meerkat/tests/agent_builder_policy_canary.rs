@@ -158,6 +158,8 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("export_name")
         && !source.contains("link_name")
         && !source.contains("extern \"Rust\"")
+        && !source.contains("#[repr(transparent)]")
+        && !source.contains("NonZeroUsize")
         && !source.contains("pub const fn")
         && !source.contains("pub unsafe fn")
         && !source.contains("pub const unsafe fn")
@@ -165,7 +167,7 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("pub fn mint")
         && source.matches("pub fn ").count() == 1
         && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
-        && source.contains("seal: NonZeroUsize")
+        && source.contains("seal: private::AuthoritySeal")
 }
 
 fn agent_mod_reexport_is_internal_feature_gated(source: &str) -> bool {
@@ -375,6 +377,137 @@ meerkat-core = {{ path = "{}" }}
             || stderr.contains("mint_agent_factory_build_authority")
             || stderr.contains("link_name"),
         "downstream direct-authority fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_direct_authority_dep_cannot_transmute_factory_policy_finalizer() -> std::io::Result<()>
+{
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_direct_authority_dep_cannot_transmute_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-direct-authority-transmute"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat = {{ path = "{}", default-features = false }}
+meerkat-agent-build-authority = {{ path = "{}" }}
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat").display(),
+            repo_root().join("meerkat-agent-build-authority").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!(
+            "fixtures/agent_builder_policy/downstream_transmute_authority_forged_factory_policy.rs"
+        ),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream direct-authority transmute fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("transmute")
+            || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("assertion failed"),
+        "downstream direct-authority transmute fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_direct_authority_dep_cannot_mirror_factory_policy_finalizer() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_direct_authority_dep_cannot_mirror_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-direct-authority-mirror"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat = {{ path = "{}", default-features = false }}
+meerkat-agent-build-authority = {{ path = "{}" }}
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat").display(),
+            repo_root().join("meerkat-agent-build-authority").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!(
+            "fixtures/agent_builder_policy/downstream_mirror_authority_forged_factory_policy.rs"
+        ),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream direct-authority mirror fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("assertion failed")
+            || stderr.contains("InvalidBuildAuthority")
+            || stderr.contains("is_canonical_factory_authority"),
+        "downstream direct-authority mirror fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }

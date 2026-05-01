@@ -4704,33 +4704,9 @@ impl SessionAgentBuilder for OverlayProbeSessionAgentBuilder {
         });
         let tools = Arc::new(OverlayProbeDispatcher::new());
         let store = Arc::new(OverlayProbeSessionStore);
-        let agent = meerkat_core::agent::build_agent_after_factory_policy(
-            test_factory_build_authority(),
-            builder,
-            client,
-            tools,
-            store,
-        )
-        .await
-        .map_err(|err| SessionError::Unsupported(err.to_string()))?;
+        let agent = builder.build_standalone(client, tools, store).await;
 
         Ok(OverlayProbeSessionAgent { agent })
-    }
-}
-
-#[allow(unsafe_code)]
-fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
-    // SAFETY: the canonical factory seal constant is non-zero.
-    let seal = unsafe { std::num::NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
-
-    // SAFETY: runtime integration tests compose factory-equivalent policy state
-    // before crossing the core factory-policy finalizer.
-    unsafe {
-        std::mem::transmute::<
-            std::num::NonZeroUsize,
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
-        >(seal)
     }
 }
 

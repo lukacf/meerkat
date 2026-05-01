@@ -39,8 +39,7 @@ tokio_with_wasm = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
-meerkat-agent-build-authority = { workspace = true }
-meerkat-core = { workspace = true, features = ["internal-agent-factory-build"] }
+meerkat-core = { workspace = true, features = ["standalone-agent-builder"] }
 meerkat-store = { workspace = true, features = ["memory"] }
 meerkat-runtime = { workspace = true }
 

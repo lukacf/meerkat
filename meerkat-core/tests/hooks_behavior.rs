@@ -299,31 +299,7 @@ async fn build_agent(
         ))
         .with_hook_engine(Arc::new(hooks));
 
-    meerkat_core::agent::build_agent_after_factory_policy(
-        test_factory_build_authority(),
-        builder,
-        client,
-        tools,
-        store,
-    )
-    .await
-    .expect("factory policy test builder")
-}
-
-#[allow(unsafe_code)]
-fn test_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    const CANONICAL_FACTORY_SEAL_VALUE: usize = 0x6d_6b_74_21;
-    // SAFETY: the canonical factory seal constant is non-zero.
-    let seal = unsafe { std::num::NonZeroUsize::new_unchecked(CANONICAL_FACTORY_SEAL_VALUE) };
-
-    // SAFETY: this helper is confined to core integration tests that construct
-    // factory-equivalent session policy state before finalizing.
-    unsafe {
-        std::mem::transmute::<
-            std::num::NonZeroUsize,
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
-        >(seal)
-    }
+    builder.build_standalone(client, tools, store).await
 }
 
 fn test_hooks() -> TestHookEngine {

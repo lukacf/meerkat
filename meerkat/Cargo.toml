@@ -60,6 +60,7 @@ async-trait = { workspace = true }
 schemars = { workspace = true }
 which = { workspace = true }
 indexmap = { workspace = true }
+meerkat-core = { workspace = true, features = ["standalone-agent-builder"] }
 # meerkat-mob and meerkat-mcp-server depend on us, not the other way around.
 # Binaries (rkat, meerkat-rest) depend on them directly.
 

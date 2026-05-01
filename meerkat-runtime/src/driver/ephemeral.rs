@@ -655,7 +655,7 @@ impl EphemeralRuntimeDriver {
     /// into the ledger before this call, so we must not rebuild physical queue
     /// projections until the full recovery batch has entered the DSL.
     #[allow(clippy::too_many_arguments)]
-    pub fn admit_recovered_to_ingress(
+    pub(crate) fn admit_recovered_to_ingress(
         &mut self,
         work_id: InputId,
         content_shape: ContentShape,
@@ -669,6 +669,18 @@ impl EphemeralRuntimeDriver {
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
     ) -> Result<(), RuntimeDriverError> {
+        let persisted_input =
+            recovered_state.persisted_input.as_ref().ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "store corruption: recovered input '{work_id}' has no persisted input; cannot validate recovered runtime semantics"
+                ))
+            })?;
+        let expected = RuntimeInputSemantics::from_policy_and_kind(&policy, persisted_input.kind());
+        if runtime_semantics != expected {
+            return Err(RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{work_id}' has runtime execution semantics stamp that does not match persisted input kind and admission policy; cannot recover with contradictory runtime-stamped execution kind"
+            )));
+        }
         self.recover_input_lifecycle(
             &work_id,
             &content_shape,

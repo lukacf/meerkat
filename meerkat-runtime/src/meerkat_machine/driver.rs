@@ -1803,6 +1803,56 @@ mod tests {
     }
 
     #[test]
+    fn recovered_ingress_admission_rejects_mismatched_runtime_semantics() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "recovered-admission-mismatch",
+        ));
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let input_id = input.id().clone();
+        let policy = queue_policy(
+            crate::policy::WakeMode::WakeIfIdle,
+            crate::policy::DrainPolicy::QueueNextTurn,
+        );
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(state.clone()));
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &policy,
+                input.kind(),
+            );
+        runtime_semantics.execution_kind =
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending;
+
+        let err = driver
+            .admit_recovered_to_ingress(
+                input_id.clone(),
+                ContentShape::from_kind(input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                runtime_semantics,
+                crate::input::runtime_input_projection(&input),
+                true,
+                &state,
+                &seed,
+                policy,
+                None,
+                None,
+            )
+            .expect_err("lower-level recovered admission must reject contradictory stamps");
+
+        assert!(
+            err.to_string()
+                .contains("does not match persisted input kind and admission policy"),
+            "unexpected recovery error: {err}"
+        );
+        assert!(
+            driver.admitted_runtime_semantics(&input_id).is_none(),
+            "failed recovered admission must not record mismatched runtime semantics"
+        );
+    }
+
+    #[test]
     fn prompt_batch_selection_drives_incompatible_prefix_before_prompt() {
         let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
             "mixed-prefix-test",
@@ -1834,6 +1884,11 @@ mod tests {
         let seed = queued_seed();
         assert!(driver.ledger_mut().recover(resume_state.clone()));
         assert!(driver.ledger_mut().recover(prompt_state.clone()));
+        let mut resume_policy = queue_policy(
+            crate::policy::WakeMode::None,
+            crate::policy::DrainPolicy::QueueNextTurn,
+        );
+        resume_policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
 
         driver
             .admit_recovered_to_ingress(
@@ -1850,10 +1905,7 @@ mod tests {
                 false,
                 &resume_state,
                 &seed,
-                queue_policy(
-                    crate::policy::WakeMode::None,
-                    crate::policy::DrainPolicy::QueueNextTurn,
-                ),
+                resume_policy,
                 None,
                 None,
             )
@@ -1912,6 +1964,11 @@ mod tests {
         let seed = queued_seed();
         assert!(driver.ledger_mut().recover(prefix_state.clone()));
         assert!(driver.ledger_mut().recover(prompt_state.clone()));
+        let mut prefix_policy = queue_policy(
+            crate::policy::WakeMode::None,
+            crate::policy::DrainPolicy::QueueNextTurn,
+        );
+        prefix_policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
 
         driver
             .admit_recovered_to_ingress(
@@ -1928,10 +1985,7 @@ mod tests {
                 false,
                 &prefix_state,
                 &seed,
-                queue_policy(
-                    crate::policy::WakeMode::None,
-                    crate::policy::DrainPolicy::QueueNextTurn,
-                ),
+                prefix_policy,
                 None,
                 None,
             )
@@ -2137,6 +2191,7 @@ mod tests {
             crate::policy::WakeMode::WakeIfIdle,
             crate::policy::DrainPolicy::SteerBatch,
         );
+        policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
         policy.routing_disposition = crate::policy::RoutingDisposition::Steer;
 
         assert!(driver.ledger_mut().recover(state.clone()));

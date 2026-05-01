@@ -631,6 +631,15 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
+    /// Runtime-local Ed25519 public key bytes, if available.
+    ///
+    /// This is the typed form of [`Self::public_key`]. Trust installation
+    /// paths that need to verify `PeerId`/pubkey consistency should prefer
+    /// this method over reparsing the string carrier.
+    fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        None
+    }
+
     /// Runtime-local advertised comms address, if available.
     ///
     /// This is the canonical address the runtime expects peers to use when

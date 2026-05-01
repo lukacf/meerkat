@@ -405,11 +405,13 @@ impl Roster {
                 MemberRef::BackendPeer {
                     peer_id,
                     address,
+                    pubkey,
                     bootstrap_token,
                     ..
                 } => MemberRef::BackendPeer {
                     peer_id: peer_id.clone(),
                     address: address.clone(),
+                    pubkey: *pubkey,
                     bootstrap_token: bootstrap_token.clone(),
                     session_id: Some(bridge_session_id),
                 },
@@ -468,22 +470,25 @@ impl Roster {
         next_peer_id: &str,
         next_address: &str,
         bootstrap_token: Option<meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken>,
-    ) -> Vec<(AgentIdentity, Generation)> {
+    ) -> Vec<(AgentIdentity, Generation, Option<[u8; 32]>)> {
         let mut updated = Vec::new();
         for entry in self.entries.values_mut() {
             match &entry.member_ref {
                 MemberRef::BackendPeer {
                     peer_id,
+                    pubkey,
                     session_id: None,
                     ..
                 } if peer_id == prior_peer_id => {
+                    let pubkey = *pubkey;
                     entry.member_ref = MemberRef::BackendPeer {
                         peer_id: next_peer_id.to_string(),
                         address: next_address.to_string(),
+                        pubkey,
                         bootstrap_token: bootstrap_token.clone(),
                         session_id: None,
                     };
-                    updated.push((entry.agent_identity.clone(), entry.generation));
+                    updated.push((entry.agent_identity.clone(), entry.generation, pubkey));
                 }
                 _ => {}
             }
@@ -740,6 +745,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-1".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                pubkey: None,
                 bootstrap_token: None,
                 session_id: Some(old_sid),
             },
@@ -924,6 +930,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-1".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-1".to_string(),
+                pubkey: None,
                 bootstrap_token: None,
                 session_id: Some(sid.clone()),
             },
@@ -943,6 +950,7 @@ mod tests {
             MemberRef::BackendPeer {
                 peer_id: "peer-ext-2".to_string(),
                 address: "https://backend.example.invalid/mesh/ext-2".to_string(),
+                pubkey: None,
                 bootstrap_token: None,
                 session_id: None,
             },

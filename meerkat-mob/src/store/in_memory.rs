@@ -1488,6 +1488,7 @@ mod tests {
                 address: "inproc://worker-1".to_string(),
                 bootstrap_token: None,
                 session_id: None,
+                pubkey: None,
             }),
             bootstrap_token: None,
             status: crate::store::ExternalBindingOverlayStatus::Normalized,

@@ -93,6 +93,24 @@ pub struct AgentMobToolSurface {
 }
 
 impl AgentMobToolSurface {
+    fn trusted_descriptor_from_runtime(
+        name: &str,
+        peer_id: PeerId,
+        address: String,
+        runtime: &dyn meerkat_core::agent::CommsRuntime,
+    ) -> Result<meerkat_core::comms::TrustedPeerDescriptor, String> {
+        let pubkey = runtime.public_key_bytes().ok_or_else(|| {
+            format!("comms runtime for '{name}' does not expose public key bytes")
+        })?;
+        let address = runtime.advertised_address().unwrap_or(address);
+        meerkat_core::comms::TrustedPeerDescriptor::unsigned_with_pubkey(
+            name.to_string(),
+            peer_id.to_string(),
+            pubkey,
+            address,
+        )
+    }
+
     fn synthetic_parent_peer_added_fields(parent_name: &str) -> (String, String, String) {
         let mut parts = parent_name.split('/');
         match (parts.next(), parts.next(), parts.next(), parts.next()) {
@@ -495,32 +513,6 @@ impl AgentMobToolSurface {
             return false;
         };
 
-        // Inproc delegation wiring: the parent and helper live on the same
-        // node, so identity authorization is the router's identity map, not
-        // envelope signatures. `test_only_unsigned_typed` stamps a zero pubkey —
-        // signature verification would fail closed, which is the correct
-        // property here because the inproc transport bypasses it.
-        let Ok(parent_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned_typed(
-            name.as_str(),
-            *peer_id,
-            format!("inproc://{name}"),
-        ) else {
-            return false;
-        };
-
-        let helper_trusts_parent = self
-            .state
-            .mob_wire(
-                mob_id,
-                identity.clone(),
-                meerkat_mob::PeerTarget::External(parent_spec),
-            )
-            .await
-            .is_ok();
-        if !helper_trusts_parent {
-            return false;
-        }
-
         let Ok(handle) = self.state.handle_for(mob_id).await else {
             return false;
         };
@@ -535,20 +527,6 @@ impl AgentMobToolSurface {
         if helper_comms_name == *name {
             return false;
         }
-        // Same reasoning as `parent_spec` above: inproc transport, zero
-        // pubkey by design.
-        let Ok(helper_spec) = meerkat_core::comms::TrustedPeerDescriptor::test_only_unsigned_typed(
-            &helper_comms_name,
-            helper_peer_id,
-            format!("inproc://{helper_comms_name}"),
-        ) else {
-            return false;
-        };
-
-        if comms_rt.add_trusted_peer(helper_spec).await.is_err() {
-            return false;
-        }
-
         let peer_description = handle
             .definition()
             .resolve_inline_profile(&entry.role)
@@ -566,6 +544,41 @@ impl AgentMobToolSurface {
         let Some(helper_runtime) = helper_runtime else {
             return false;
         };
+
+        let Ok(parent_spec) = Self::trusted_descriptor_from_runtime(
+            name.as_str(),
+            *peer_id,
+            format!("inproc://{name}"),
+            comms_rt.as_ref(),
+        ) else {
+            return false;
+        };
+
+        let helper_trusts_parent = self
+            .state
+            .mob_wire(
+                mob_id,
+                identity.clone(),
+                meerkat_mob::PeerTarget::External(parent_spec),
+            )
+            .await
+            .is_ok();
+        if !helper_trusts_parent {
+            return false;
+        }
+
+        let Ok(helper_spec) = Self::trusted_descriptor_from_runtime(
+            &helper_comms_name,
+            helper_peer_id,
+            format!("inproc://{helper_comms_name}"),
+            helper_runtime.as_ref(),
+        ) else {
+            return false;
+        };
+
+        if comms_rt.add_trusted_peer(helper_spec).await.is_err() {
+            return false;
+        }
 
         let notify_parent = Self::notify_peer_added(
             &helper_runtime,
@@ -2110,7 +2123,7 @@ mod tests {
     struct TestCommsRuntime {
         name: String,
         peer_id: PeerId,
-        public_key: String,
+        public_key_bytes: [u8; 32],
         trusted: tokio::sync::RwLock<HashMap<String, TrustedPeerDescriptor>>,
         inbox: tokio::sync::RwLock<Vec<InboxInteraction>>,
         notify: Arc<tokio::sync::Notify>,
@@ -2119,10 +2132,21 @@ mod tests {
 
     impl TestCommsRuntime {
         async fn new(name: &str, registry: Arc<TestCommsRegistry>) -> Arc<Self> {
+            let mut public_key_bytes = [0u8; 32];
+            for (index, byte) in name.bytes().enumerate() {
+                let slot = index % public_key_bytes.len();
+                public_key_bytes[slot] = public_key_bytes[slot]
+                    .wrapping_add(byte)
+                    .wrapping_add(index as u8);
+            }
+            if public_key_bytes == [0u8; 32] {
+                public_key_bytes[0] = 1;
+            }
+            let peer_id = PeerId::from_ed25519_pubkey(&public_key_bytes);
             let runtime = Arc::new(Self {
                 name: name.into(),
-                peer_id: PeerId::new(),
-                public_key: "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                peer_id,
+                public_key_bytes,
                 trusted: tokio::sync::RwLock::new(HashMap::new()),
                 inbox: tokio::sync::RwLock::new(Vec::new()),
                 notify: Arc::new(tokio::sync::Notify::new()),
@@ -2139,11 +2163,13 @@ mod tests {
             Some(self.peer_id)
         }
 
-        fn public_key(&self) -> Option<String> {
-            Some(self.public_key.clone())
+        fn public_key_bytes(&self) -> Option<[u8; 32]> {
+            Some(self.public_key_bytes)
         }
 
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
+            TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                .map_err(SendError::Validation)?;
             self.trusted
                 .write()
                 .await
@@ -2153,8 +2179,10 @@ mod tests {
 
         async fn add_private_trusted_peer(
             &self,
-            _peer: TrustedPeerDescriptor,
+            peer: TrustedPeerDescriptor,
         ) -> Result<(), SendError> {
+            TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
+                .map_err(SendError::Validation)?;
             Ok(())
         }
 
@@ -3240,15 +3268,14 @@ mod tests {
         let parent_name = "parent/lead/l-1".to_string();
         let parent_comms = service.register_external_comms(&parent_name).await;
         let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
-        let parent_public_key = parent_comms.public_key().expect("parent public key");
-        assert!(
-            parent_public_key.starts_with("ed25519:"),
-            "test fixture should expose transport public-key material separately"
-        );
-        assert_ne!(
-            parent_peer_id.to_string(),
-            parent_public_key,
-            "regression fixture must keep canonical peer id distinct from public key"
+        let parent_public_key = parent_comms
+            .public_key_bytes()
+            .expect("parent public key bytes");
+        assert_ne!(parent_public_key, [0u8; 32]);
+        assert_eq!(
+            parent_peer_id,
+            PeerId::from_ed25519_pubkey(&parent_public_key),
+            "regression fixture must derive peer id from typed public-key bytes"
         );
         let session_id = SessionId::new();
         let surface = AgentMobToolSurface::new(
@@ -3306,6 +3333,24 @@ mod tests {
                 .iter()
                 .any(|entry| entry.name.as_str() == parent_name),
             "delegate should expose the creating meerkat in helper peers()"
+        );
+        assert!(
+            parent_comms
+                .trusted
+                .read()
+                .await
+                .values()
+                .any(|spec| spec.name.as_str() == helper_name && !spec.has_zero_pubkey()),
+            "parent must trust helper with a non-zero pubkey"
+        );
+        assert!(
+            helper_comms
+                .trusted
+                .read()
+                .await
+                .values()
+                .any(|spec| spec.name.as_str() == parent_name && !spec.has_zero_pubkey()),
+            "helper must trust parent with a non-zero pubkey"
         );
 
         let parent_inbox = CoreCommsRuntime::drain_inbox_interactions(&*parent_comms).await;

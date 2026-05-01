@@ -1874,6 +1874,20 @@ mod tests {
     const PEER_ID_CURRENT_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000cccc"; // "current-supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
 
+    fn trusted_peer_from_runtime(
+        name: &str,
+        runtime: &meerkat_comms::CommsRuntime,
+    ) -> TrustedPeerDescriptor {
+        let pubkey = runtime.public_key();
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            name,
+            pubkey.to_peer_id().as_str(),
+            *pubkey.as_bytes(),
+            format!("inproc://{name}"),
+        )
+        .expect("valid non-zero trusted peer descriptor")
+    }
+
     #[derive(Default)]
     struct CountingPeerInteractionHandle {
         inbound: std::sync::Mutex<HashSet<meerkat_core::PeerCorrelationId>>,
@@ -2427,12 +2441,15 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> = Arc::new(
             meerkat_comms::CommsRuntime::inproc_only("bridge-response-spoof").expect("runtime"),
         );
-        let spoofed_peer_id = PeerId::new();
+        let spoofed_key = meerkat_comms::Keypair::generate();
+        let spoofed_pubkey = spoofed_key.public_key();
+        let spoofed_peer_id = spoofed_pubkey.to_peer_id();
         runtime
             .add_trusted_peer(
-                TrustedPeerDescriptor::test_only_unsigned_typed(
+                TrustedPeerDescriptor::unsigned_with_pubkey(
                     "spoofed-target",
-                    spoofed_peer_id,
+                    spoofed_peer_id.as_str(),
+                    *spoofed_pubkey.as_bytes(),
                     "inproc://spoofed-target",
                 )
                 .expect("valid spoofed target"),
@@ -2909,12 +2926,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-added").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-added").unwrap();
-        let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
-            "peer-added".to_string(),
-            peer.public_key().to_peer_id().as_str(),
-            "inproc://peer-added".to_string(),
-        )
-        .unwrap();
+        let peer_spec = trusted_peer_from_runtime("peer-added", &peer);
         let candidate = lifecycle_candidate(
             PeerInputClass::PeerLifecycleAdded,
             "mob.peer_added",
@@ -2948,12 +2960,7 @@ mod tests {
         let runtime: Arc<dyn CommsRuntime> =
             Arc::new(meerkat_comms::CommsRuntime::inproc_only("receiver-removed").unwrap());
         let peer = meerkat_comms::CommsRuntime::inproc_only("peer-removed").unwrap();
-        let peer_spec = TrustedPeerDescriptor::test_only_unsigned(
-            "peer-removed".to_string(),
-            peer.public_key().to_peer_id().as_str(),
-            "inproc://peer-removed".to_string(),
-        )
-        .unwrap();
+        let peer_spec = trusted_peer_from_runtime("peer-removed", &peer);
         runtime.add_trusted_peer(peer_spec.clone()).await.unwrap();
 
         let unwired = lifecycle_candidate(
@@ -3598,12 +3605,8 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let current_supervisor = TrustedPeerDescriptor::test_only_unsigned(
-            "mob/__mob_supervisor__",
-            supervisor_runtime.public_key().to_peer_id().as_str(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .expect("valid supervisor spec");
+        let current_supervisor =
+            trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
         adapter
             .stage_supervisor_bind(
                 &session_id,
@@ -4705,12 +4708,7 @@ mod tests {
         let adapter = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();
         adapter.register_session(session_id.clone()).await;
-        let supervisor = TrustedPeerDescriptor::test_only_unsigned(
-            "mob/__mob_supervisor__",
-            supervisor_runtime.public_key().to_peer_id().as_str(),
-            "inproc://mob/__mob_supervisor__",
-        )
-        .unwrap();
+        let supervisor = trusted_peer_from_runtime("mob/__mob_supervisor__", &supervisor_runtime);
         runtime
             .add_trusted_peer(supervisor.clone())
             .await

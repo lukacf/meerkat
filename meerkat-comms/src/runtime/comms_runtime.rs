@@ -190,17 +190,17 @@ fn descriptor_for_inproc_peer(name: &str, pubkey: PubKey) -> Result<TrustedPeerD
 /// two identities disagree).
 fn descriptor_to_trusted_peer(descriptor: TrustedPeerDescriptor) -> Result<TrustedPeer, SendError> {
     let pubkey = PubKey::new(descriptor.pubkey);
-    // `test_only_unsigned` fixtures carry a zero pubkey (inproc transport
-    // bypasses signature verification); skip the consistency match in that
-    // case. Any non-zero pubkey must hash to the descriptor's `peer_id`.
-    if descriptor.pubkey != [0u8; 32] {
-        let derived = pubkey.to_peer_id();
-        if derived != descriptor.peer_id {
-            return Err(SendError::Validation(format!(
-                "TrustedPeerDescriptor.peer_id {} does not match pubkey-derived id {}",
-                descriptor.peer_id, derived
-            )));
-        }
+    if descriptor.has_zero_pubkey() {
+        return Err(SendError::Validation(
+            "TrustedPeerDescriptor.pubkey must be non-zero for trust registration".to_string(),
+        ));
+    }
+    let derived = pubkey.to_peer_id();
+    if derived != descriptor.peer_id {
+        return Err(SendError::Validation(format!(
+            "TrustedPeerDescriptor.peer_id {} does not match pubkey-derived id {}",
+            descriptor.peer_id, derived
+        )));
     }
     Ok(TrustedPeer {
         name: descriptor.name.as_string(),
@@ -311,6 +311,10 @@ impl CoreCommsRuntime for CommsRuntime {
 
     fn public_key(&self) -> Option<String> {
         Some(self.public_key.to_pubkey_string())
+    }
+
+    fn public_key_bytes(&self) -> Option<[u8; 32]> {
+        Some(*self.public_key.as_bytes())
     }
 
     fn advertised_address(&self) -> Option<String> {
@@ -5229,6 +5233,36 @@ mod tests {
         assert!(matches!(result, Err(SendError::Validation(_))));
     }
 
+    #[tokio::test]
+    async fn test_add_trusted_peer_zero_pubkey_is_rejected_at_trust_registration() {
+        let runtime = CommsRuntime::inproc_only("trust-zero-pubkey-sender").unwrap();
+        let zero_pubkey_spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            "zero-pubkey-peer",
+            PeerId::new(),
+            "inproc://zero-pubkey-peer",
+        )
+        .expect("test-only descriptor should build before trust registration");
+
+        let result = CoreCommsRuntime::add_trusted_peer(&runtime, zero_pubkey_spec).await;
+
+        match result {
+            Err(SendError::Validation(message)) => {
+                assert!(
+                    message.contains("pubkey") && message.contains("non-zero"),
+                    "unexpected validation message: {message}"
+                );
+            }
+            other => panic!("zero-pubkey trust registration must fail, got {other:?}"),
+        }
+        assert!(
+            CoreCommsRuntime::peers(&runtime)
+                .await
+                .iter()
+                .all(|entry| entry.name.as_str() != "zero-pubkey-peer"),
+            "rejected zero-pubkey peer must not enter the peer directory"
+        );
+    }
+
     #[test]
     fn test_core_runtime_public_key_is_exposed_via_trait() {
         let runtime = CommsRuntime::inproc_only("pub-key-trait").unwrap();
@@ -5237,7 +5271,14 @@ mod tests {
             public_key
                 .as_ref()
                 .is_some_and(|id| id.starts_with("ed25519:")),
-            "public_key should be available and formatted as ed25519 peer id"
+            "public_key should be available and formatted as an ed25519 public key"
+        );
+        let public_key_bytes = <CommsRuntime as CoreCommsRuntime>::public_key_bytes(&runtime)
+            .expect("typed public key bytes should be available");
+        assert_ne!(public_key_bytes, [0u8; 32]);
+        assert_eq!(
+            <CommsRuntime as CoreCommsRuntime>::peer_id(&runtime),
+            Some(PeerId::from_ed25519_pubkey(&public_key_bytes))
         );
     }
 
@@ -6165,50 +6206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remove_trusted_peer_preserves_descriptor_peer_id_for_zero_pubkey() {
-        let suffix = Uuid::new_v4().simple().to_string();
-        let runtime = CommsRuntime::inproc_only(&format!("rm-zero-pubkey-{suffix}")).unwrap();
-        let peer_id = PeerId::new();
-        let peer_name = format!("legacy-peer-{suffix}");
-        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
-            peer_name.clone(),
-            peer_id,
-            format!("inproc://{peer_name}"),
-        )
-        .expect("valid zero-pubkey descriptor");
-
-        CoreCommsRuntime::add_trusted_peer(&runtime, spec)
-            .await
-            .expect("add zero-pubkey trusted peer");
-
-        let peers = CoreCommsRuntime::peers(&runtime).await;
-        let entry = peers
-            .iter()
-            .find(|entry| entry.name.as_str() == peer_name)
-            .expect("zero-pubkey peer should be listed");
-        assert_eq!(
-            entry.peer_id, peer_id,
-            "directory must preserve descriptor PeerId rather than derive from zero pubkey"
-        );
-
-        let removed = CoreCommsRuntime::remove_trusted_peer(&runtime, &peer_id.to_string())
-            .await
-            .expect("remove zero-pubkey peer by PeerId");
-        assert!(
-            removed,
-            "zero-pubkey peer should remove by descriptor PeerId"
-        );
-        assert!(
-            CoreCommsRuntime::peers(&runtime)
-                .await
-                .iter()
-                .all(|entry| entry.name.as_str() != peer_name),
-            "zero-pubkey peer should not remain listed after removal"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_remove_private_trusted_peer_preserves_descriptor_peer_id_for_zero_pubkey() {
+    async fn test_add_private_trusted_peer_zero_pubkey_is_rejected_at_trust_registration() {
         let suffix = Uuid::new_v4().simple().to_string();
         let runtime = CommsRuntime::inproc_only(&format!("rm-private-zero-{suffix}")).unwrap();
         let peer_id = PeerId::new();
@@ -6220,25 +6218,21 @@ mod tests {
         )
         .expect("valid zero-pubkey descriptor");
 
-        CoreCommsRuntime::add_private_trusted_peer(&runtime, spec)
-            .await
-            .expect("add private zero-pubkey trusted peer");
+        let result = CoreCommsRuntime::add_private_trusted_peer(&runtime, spec).await;
 
-        assert!(
-            CoreCommsRuntime::peers(&runtime)
-                .await
-                .iter()
-                .all(|entry| entry.name.as_str() != peer_name),
-            "private zero-pubkey peer should be hidden from public directory"
-        );
-
+        match result {
+            Err(SendError::Validation(message)) => {
+                assert!(
+                    message.contains("pubkey") && message.contains("non-zero"),
+                    "unexpected validation message: {message}"
+                );
+            }
+            other => panic!("private zero-pubkey trust registration must fail, got {other:?}"),
+        }
         let removed = CoreCommsRuntime::remove_private_trusted_peer(&runtime, &peer_id.to_string())
             .await
-            .expect("remove private zero-pubkey peer by PeerId");
-        assert!(
-            removed,
-            "private zero-pubkey peer should remove by descriptor PeerId"
-        );
+            .expect("remove after rejected private add should still validate peer id");
+        assert!(!removed, "rejected private peer must not enter trust");
     }
 
     #[tokio::test]

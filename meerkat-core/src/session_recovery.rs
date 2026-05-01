@@ -72,11 +72,9 @@ impl RecoveredSessionBuild {
         CreateSessionRequest {
             model: self.model,
             prompt: ContentInput::Text(String::new()),
-            render_metadata: None,
             system_prompt: self.system_prompt,
             max_tokens: self.max_tokens,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(self.build),
@@ -331,7 +329,7 @@ pub fn build_recovered_session(
         runtime_build_mode: context
             .runtime_build_mode
             .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
-        initial_turn_metadata: None,
+        initial_turn_metadata: overrides.turn_metadata.clone(),
     };
     build.apply_persisted_mob_operator_access(
         overrides

@@ -660,11 +660,9 @@ mod tests {
         let mut req = meerkat_core::service::CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "hello".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(meerkat_core::service::SessionBuildOptions {

@@ -29,6 +29,7 @@ use meerkat_core::types::RenderMetadata;
 
 /// Common header for all input variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InputHeader {
     /// Unique ID for this input.
     pub id: InputId,
@@ -53,7 +54,7 @@ pub struct InputHeader {
 
 /// Where the input originated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum InputOrigin {
     /// Human operator / external API caller.
@@ -928,6 +929,56 @@ mod tests {
             message.contains("model")
                 || message.contains("provider_params")
                 || message.contains("unknown field"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn input_header_rejects_smuggled_split_metadata_fields() {
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: "hello".into(),
+            blocks: None,
+            turn_metadata: None,
+        });
+        let mut json = serde_json::to_value(&input).unwrap();
+        json["header"]["provider_params"] = serde_json::json!({ "temperature": 0.9 });
+
+        let err = serde_json::from_value::<Input>(json)
+            .expect_err("runtime input header must reject stale split metadata fields");
+        let message = err.to_string();
+        assert!(
+            message.contains("provider_params") || message.contains("unknown field"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn input_origin_rejects_smuggled_split_metadata_fields() {
+        let mut header = make_header();
+        header.source = InputOrigin::Peer {
+            peer_id: "peer-1".into(),
+            display_identity: None,
+            runtime_id: None,
+        };
+        let input = Input::Peer(PeerInput {
+            header,
+            convention: Some(PeerConvention::Message),
+            body: "hi there".into(),
+            payload: None,
+            blocks: None,
+            handling_mode: None,
+        });
+        let mut json = serde_json::to_value(&input).unwrap();
+        json["header"]["source"]["turn_metadata"] = serde_json::json!({
+            "model": "stale-model"
+        });
+
+        let err = serde_json::from_value::<Input>(json)
+            .expect_err("runtime input source must reject stale split metadata fields");
+        let message = err.to_string();
+        assert!(
+            message.contains("turn_metadata") || message.contains("unknown field"),
             "unexpected error: {message}"
         );
     }

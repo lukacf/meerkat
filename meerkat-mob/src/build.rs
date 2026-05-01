@@ -288,12 +288,10 @@ pub fn to_create_session_request(
     CreateSessionRequest {
         model: config.model.clone(),
         prompt,
-        render_metadata: None,
         system_prompt: config.system_prompt.clone(),
         max_tokens: config.max_tokens,
         event_tx: None,
 
-        skill_references: None,
         // Mob runtime owns lifecycle startup and starts autonomous host loops
         // explicitly after provisioning. Avoid synchronous first-turn execution
         // during create_session so spawn does not block on LLM latency, and do

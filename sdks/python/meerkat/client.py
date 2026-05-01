@@ -2687,12 +2687,6 @@ class MeerkatClient:
         external_tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"prompt": prompt}
-        if model:
-            params["model"] = model
-        if provider:
-            params["provider"] = provider
-        if connection_ref is not None:
-            params["connection_ref"] = connection_ref
         if system_prompt:
             params["system_prompt"] = system_prompt
         if max_tokens:
@@ -2711,25 +2705,27 @@ class MeerkatClient:
             params["enable_memory"] = enable_memory
         if enable_mob is not None:
             params["enable_mob"] = enable_mob
-        if keep_alive is not None:
-            params["keep_alive"] = keep_alive
         if comms_name:
             params["comms_name"] = comms_name
         if peer_meta is not None:
             params["peer_meta"] = peer_meta
         if budget_limits is not None:
             params["budget_limits"] = budget_limits
-        if provider_params is not None:
-            params["provider_params"] = provider_params
         if preload_skills is not None:
             params["preload_skills"] = _skill_keys_to_wire(preload_skills)
-        wire_refs = _skill_refs_to_wire(skill_refs)
-        if wire_refs is not None:
-            params["skill_refs"] = wire_refs
         if labels is not None:
             params["labels"] = labels
-        if additional_instructions is not None:
-            params["additional_instructions"] = additional_instructions
+        turn_metadata = _runtime_turn_metadata(
+            skill_refs=skill_refs,
+            additional_instructions=additional_instructions,
+            keep_alive=keep_alive,
+            model=model,
+            provider=provider,
+            provider_params=provider_params,
+            connection_ref=connection_ref,
+        )
+        if turn_metadata is not None:
+            params["turn_metadata"] = turn_metadata
         if app_context is not None:
             params["app_context"] = app_context
         if shell_env is not None:

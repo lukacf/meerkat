@@ -18,6 +18,7 @@ use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
     ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
 };
+use meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata;
 use meerkat_contracts::{RealtimeOpenRequest, SkillsParams};
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
@@ -107,12 +108,11 @@ pub struct MeerkatRunInput {
     pub prompt: String,
     #[serde(default)]
     pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
+    /// Canonical first-turn runtime metadata carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    #[serde(default)]
-    pub provider: Option<ProviderInput>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
@@ -136,11 +136,6 @@ pub struct MeerkatRunInput {
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
-    /// Keep session alive after turn completes, listening for comms messages.
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    /// Requires comms_name when enabled.
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
     /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
@@ -156,9 +151,6 @@ pub struct MeerkatRunInput {
     /// Enable mob tools.
     #[serde(default)]
     pub enable_mob: Option<bool>,
-    /// Provider-specific parameters (e.g., thinking config).
-    #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -166,35 +158,15 @@ pub struct MeerkatRunInput {
     /// (source_uuid + skill_name).
     #[serde(default)]
     pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
-    /// Structured refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Legacy compatibility skill refs for per-turn injection.
-    #[serde(default)]
-    pub skill_references: Option<Vec<String>>,
     /// Key-value labels attached at session creation (e.g. workflow tagging).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
-    /// Additional system-level instructions prepended to the prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
     /// Opaque application context forwarded to the agent build pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
     /// Per-agent environment variables injected into shell tool subprocesses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_env: Option<std::collections::HashMap<String, String>>,
-    /// Route this session's LLM calls through a realm-scoped provider
-    /// binding. Typed `WireConnectionRef` referencing a
-    /// `[realm.<realm>.binding.<binding>]` entry in the active Config.
-    /// Pre-wave-c this was `Option<String>` parsed as `"realm:binding"`
-    /// — the string form is now rejected at the deserialization
-    /// boundary (dogma #5: no untyped joins on the ingress seam).
-    /// When set, the provider runtime registry resolves the binding's
-    /// auth profile and backend profile through the standard
-    /// `ProviderRuntime::resolve` pipeline (Phase 4d.mcp.1).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_ref: Option<meerkat_contracts::WireConnectionRef>,
 }
 
 fn default_structured_output_retries() -> u32 {
@@ -204,13 +176,16 @@ fn default_structured_output_retries() -> u32 {
 fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
     !input.tool_results.is_empty()
         || !input.tools.is_empty()
-        || input.model.is_some()
-        || input.provider.is_some()
+        || input.turn_metadata.as_ref().is_some_and(|metadata| {
+            metadata.model.is_some()
+                || metadata.provider.is_some()
+                || metadata.provider_params.is_some()
+                || metadata.connection_ref.is_some()
+        })
         || input.max_tokens.is_some()
         || input.system_prompt.is_some()
         || input.output_schema.is_some()
         || input.structured_output_retries.is_some()
-        || input.provider_params.is_some()
         || input.hooks_override.is_some()
         || input.enable_builtins.is_some()
         || input
@@ -842,25 +817,18 @@ pub struct MeerkatResumeInput {
     /// Configuration for built-in tools (only used when enable_builtins is true)
     #[serde(default)]
     pub builtin_config: Option<BuiltinConfigInput>,
-    /// Keep session alive after turn completes, listening for comms messages.
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
+    /// Canonical per-turn runtime metadata carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
     /// Friendly metadata for peer discovery.
     #[serde(default)]
     pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Optional model override for resume.
-    #[serde(default)]
-    pub model: Option<String>,
     /// Optional max_tokens override for resume.
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Optional provider override for resume.
-    #[serde(default)]
-    pub provider: Option<ProviderInput>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
@@ -877,9 +845,6 @@ pub struct MeerkatResumeInput {
     /// Enable mob tools.
     #[serde(default)]
     pub enable_mob: Option<bool>,
-    /// Provider-specific parameters (e.g., thinking config).
-    #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
     /// Explicit budget limits for this resumed run.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimitsInput>,
@@ -887,18 +852,6 @@ pub struct MeerkatResumeInput {
     /// (source_uuid + skill_name).
     #[serde(default)]
     pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
-    /// Structured refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Legacy compatibility skill refs for per-turn injection.
-    #[serde(default)]
-    pub skill_references: Option<Vec<String>>,
-    /// Optional per-turn tool overlay.
-    #[serde(default)]
-    pub flow_tool_overlay: Option<TurnToolOverlayInput>,
-    /// Additional system-level instructions prepended to the prompt for this turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1072,105 +1025,35 @@ impl From<TurnToolOverlayInput> for meerkat_core::service::TurnToolOverlay {
     }
 }
 
-const MCP_TURN_KEEP_ALIVE_TTL_SECS: u64 = 30;
-
-fn resume_turn_keep_alive_policy(
-    requested: Option<bool>,
-) -> Option<
-    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
-        meerkat_core::lifecycle::run_primitive::KeepAlivePolicy,
-    >,
-> {
-    match requested {
-        Some(true) => Some(
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
-                meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                    ttl: std::time::Duration::from_secs(MCP_TURN_KEEP_ALIVE_TTL_SECS),
-                    policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-                },
-            ),
-        ),
-        Some(false) => Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
-        None => None,
-    }
-}
-
-struct McpTurnMetadataInput {
-    skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-    flow_tool_overlay: Option<TurnToolOverlayInput>,
-    additional_instructions: Option<Vec<String>>,
-    model: Option<String>,
-    provider: Option<Provider>,
-    provider_params: Option<serde_json::Value>,
-    provider_for_params: Provider,
-    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
-    keep_alive: Option<bool>,
-}
-
-fn mcp_turn_metadata(
-    input: McpTurnMetadataInput,
+fn normalize_mcp_turn_metadata(
+    metadata: Option<WireRuntimeTurnMetadata>,
+    resolved_model: Option<&str>,
 ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
-    let McpTurnMetadataInput {
-        skill_references,
-        flow_tool_overlay,
-        additional_instructions,
-        model,
-        provider,
-        provider_params,
-        provider_for_params,
-        connection_ref,
-        keep_alive,
-    } = input;
-    let additional_instructions = additional_instructions.and_then(|instructions| {
-        let instructions = instructions
-            .into_iter()
-            .filter(|body| !body.trim().is_empty())
-            .map(
-                |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
-                    body,
-                },
-            )
-            .collect::<Vec<_>>();
-        (!instructions.is_empty()).then_some(instructions)
-    });
-    let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-        skill_references,
-        flow_tool_overlay: flow_tool_overlay.map(Into::into),
-        additional_instructions,
-        model: model.map(meerkat_core::lifecycle::run_primitive::ModelId::new),
-        provider,
-        provider_params: provider_params.map(|params| {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
-                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::from_legacy_provider_value(
-                    provider_for_params.as_str(),
-                    &params,
-                ),
-            )
-        }),
-        connection_ref: connection_ref.map(|connection_ref| {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
-                meerkat_core::ConnectionRef::from(connection_ref),
-            )
-        }),
-        keep_alive: resume_turn_keep_alive_policy(keep_alive),
-        ..Default::default()
-    };
+    let mut metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        metadata.map(Into::into)?;
+    if metadata.provider.is_some()
+        && metadata.model.is_none()
+        && let Some(resolved_model) = resolved_model
+    {
+        metadata.model = Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+            resolved_model,
+        ));
+    }
     (!metadata.is_empty()).then_some(metadata)
 }
 
-fn mcp_create_turn_metadata_model(
-    requested_model: Option<&str>,
-    provider: Option<Provider>,
-    resolved_model: &str,
-) -> Option<String> {
-    (requested_model.is_some() || provider.is_some()).then(|| resolved_model.to_string())
-}
-
-fn resume_turn_metadata(
-    input: McpTurnMetadataInput,
-) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
-    mcp_turn_metadata(input)
+fn turn_metadata_keep_alive_override(
+    metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+) -> Result<Option<bool>, String> {
+    match metadata.and_then(|metadata| metadata.keep_alive.as_ref()) {
+        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)) => {
+            resolve_keep_alive(Some(true))
+        }
+        Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => {
+            resolve_keep_alive(Some(false))
+        }
+        None => Ok(None),
+    }
 }
 
 fn turn_metadata_provider_params_for_build(
@@ -2011,10 +1894,6 @@ fn canonical_skill_keys(
     skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     skill_references: Option<Vec<String>>,
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, String> {
-    // Wave-b retypes removed the legacy stringly `skill_references` path:
-    // `SkillsParams` now flattens only typed `skill_refs` into `SkillKey`
-    // via `canonical_skill_keys()` (no registry lookup at wire boundary).
-    // Reject any caller still supplying the legacy string form.
     if skill_references
         .as_ref()
         .is_some_and(|refs| !refs.is_empty())
@@ -2767,9 +2646,22 @@ async fn handle_meerkat_run(
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
     let ingress = state.runtime_ingress_context();
-    let keep_alive_override =
-        resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
-    // Create: no persisted session to inherit from, so None → false.
+    let config = state
+        .config_runtime
+        .get()
+        .await
+        .map(|snapshot| snapshot.config)
+        .unwrap_or_default();
+    let metadata_model = input
+        .turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.model.clone());
+    let model = metadata_model.unwrap_or_else(|| config.agent.model.clone());
+    let initial_turn_metadata =
+        normalize_mcp_turn_metadata(input.turn_metadata.clone(), Some(&model));
+    let keep_alive_override = turn_metadata_keep_alive_override(initial_turn_metadata.as_ref())
+        .map_err(ToolCallError::invalid_params)?;
+    // Create: no persisted session to inherit from, so None -> false.
     let keep_alive = keep_alive_override.unwrap_or(false);
     if keep_alive
         && input
@@ -2781,16 +2673,6 @@ async fn handle_meerkat_run(
             "keep_alive requires comms_name",
         ));
     }
-    let config = state
-        .config_runtime
-        .get()
-        .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
-    let model = input
-        .model
-        .clone()
-        .unwrap_or_else(|| config.agent.model.clone());
 
     // Build callback tools supplied by the MCP client. The per-session live
     // MCP router is created after runtime bindings are prepared so its surface
@@ -2799,12 +2681,6 @@ async fn handle_meerkat_run(
 
     let enable_shell_override = input.builtin_config.as_ref().and_then(|c| c.enable_shell);
     let preload_skills = input.preload_skills.clone();
-    let skill_references = canonical_skill_keys(
-        &config,
-        input.skill_refs.clone(),
-        input.skill_references.clone(),
-    )
-    .map_err(ToolCallError::invalid_params)?;
 
     // Parse output schema if provided
     let output_schema =
@@ -2868,7 +2744,10 @@ async fn handle_meerkat_run(
     });
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let provider_override = input.provider.map(ProviderInput::to_provider);
+    let metadata_model_for_binding = initial_turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.model.as_ref())
+        .map(ToString::to_string);
     let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
         session
             .session_metadata()
@@ -2877,24 +2756,11 @@ async fn handle_meerkat_run(
         session
             .session_metadata()
             .and_then(|meta| meta.self_hosted_server_id),
-        input.model.as_deref(),
-        provider_override,
+        metadata_model_for_binding.as_deref(),
+        initial_turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.provider),
     );
-    let provider_for_params = provider_override
-        .or(llm_binding.provider)
-        .or_else(|| meerkat_core::Provider::infer_from_model(&model))
-        .unwrap_or(meerkat_core::Provider::Other);
-    let initial_turn_metadata = mcp_turn_metadata(McpTurnMetadataInput {
-        skill_references: skill_references.clone(),
-        flow_tool_overlay: None,
-        additional_instructions: input.additional_instructions.clone(),
-        model: mcp_create_turn_metadata_model(input.model.as_deref(), provider_override, &model),
-        provider: provider_override,
-        provider_params: input.provider_params.clone(),
-        provider_for_params,
-        connection_ref: input.connection_ref.clone(),
-        keep_alive: keep_alive_override,
-    });
     let mut build = SessionBuildOptions {
         provider: initial_turn_metadata
             .as_ref()
@@ -2941,12 +2807,18 @@ async fn handle_meerkat_run(
         additional_instructions: None,
         shell_env: input.shell_env.clone(),
         resume_override_mask: ResumeOverrideMask {
-            model: input.model.is_some(),
+            model: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.model.is_some()),
             provider: llm_binding.provider_overridden,
             max_tokens: input.max_tokens.is_some(),
             structured_output_retries: input.structured_output_retries.is_some(),
-            provider_params: input.provider_params.is_some(),
-            connection_ref: input.connection_ref.is_some(),
+            provider_params: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.provider_params.is_some()),
+            connection_ref: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.connection_ref.is_some()),
             preload_skills: input.preload_skills.is_some(),
             keep_alive: keep_alive_override.is_some(),
             comms_name: input.comms_name.is_some(),
@@ -2963,12 +2835,10 @@ async fn handle_meerkat_run(
     let req = CreateSessionRequest {
         model,
         prompt: input.prompt.into(),
-        render_metadata: None,
         system_prompt: input.system_prompt,
         max_tokens: input.max_tokens,
         event_tx: event_tx.clone(),
 
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
@@ -3024,12 +2894,6 @@ async fn handle_meerkat_resume(
 ) -> Result<Value, ToolCallError> {
     validate_public_peer_meta(input.peer_meta.as_ref()).map_err(ToolCallError::invalid_params)?;
     let ingress = state.runtime_ingress_context();
-    let config = state
-        .config_runtime
-        .get()
-        .await
-        .map(|snapshot| snapshot.config)
-        .unwrap_or_default();
 
     let session_id = meerkat::SessionId::parse(&input.session_id)
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
@@ -3082,10 +2946,9 @@ async fn handle_meerkat_resume(
         .builtin_config
         .as_ref()
         .and_then(|cfg| cfg.enable_shell);
-    // §10: inherit, disable, and set are different facts.
-    // None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    let keep_alive_override =
-        resolve_keep_alive(input.keep_alive).map_err(ToolCallError::invalid_params)?;
+    let turn_metadata = normalize_mcp_turn_metadata(input.turn_metadata.clone(), None);
+    let keep_alive_override = turn_metadata_keep_alive_override(turn_metadata.as_ref())
+        .map_err(ToolCallError::invalid_params)?;
     let keep_alive = match keep_alive_override {
         Some(val) => val,
         None => stored_metadata.as_ref().is_some_and(|meta| meta.keep_alive),
@@ -3104,12 +2967,6 @@ async fn handle_meerkat_resume(
             "keep_alive requires comms_name",
         ));
     }
-    let provider_override = input.provider.map(ProviderInput::to_provider);
-    let stored_provider = stored_metadata
-        .as_ref()
-        .map(|meta| meta.provider)
-        .unwrap_or(meerkat_core::Provider::Other);
-    let provider_for_params = provider_override.unwrap_or(stored_provider);
 
     let resume_bindings = state
         .runtime_adapter
@@ -3151,23 +3008,6 @@ async fn handle_meerkat_resume(
         input.prompt
     };
     let preload_skills = input.preload_skills.clone();
-    let skill_references = canonical_skill_keys(
-        &config,
-        input.skill_refs.clone(),
-        input.skill_references.clone(),
-    )
-    .map_err(ToolCallError::invalid_params)?;
-    let turn_metadata = resume_turn_metadata(McpTurnMetadataInput {
-        skill_references: skill_references.clone(),
-        flow_tool_overlay: input.flow_tool_overlay.clone(),
-        additional_instructions: input.additional_instructions.clone(),
-        model: input.model.clone(),
-        provider: provider_override,
-        provider_params: input.provider_params.clone(),
-        provider_for_params,
-        connection_ref: None,
-        keep_alive: keep_alive_override,
-    });
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -3532,24 +3372,24 @@ mod tests {
 
     #[test]
     fn resume_turn_metadata_carries_flow_and_additional_instructions() {
-        let metadata = resume_turn_metadata(McpTurnMetadataInput {
-            skill_references: None,
-            flow_tool_overlay: Some(TurnToolOverlayInput {
-                allowed_tools: Some(vec!["lookup".to_string()]),
-                blocked_tools: None,
-            }),
-            additional_instructions: Some(vec![
-                "apply the resume instruction".to_string(),
-                "   ".to_string(),
-            ]),
-            model: None,
-            provider: None,
-            provider_params: None,
-            provider_for_params: meerkat_core::Provider::Other,
-            connection_ref: None,
-            keep_alive: Some(true),
-        })
-        .expect("metadata should be populated");
+        let wire: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+            "flow_tool_overlay": {
+                "allowed_tools": ["lookup"]
+            },
+            "additional_instructions": [
+                { "kind": "user", "body": "apply the resume instruction" }
+            ],
+            "keep_alive": {
+                "action": "set",
+                "value": {
+                    "ttl_secs": 30,
+                    "policy": "pinned"
+                }
+            }
+        }))
+        .expect("wire metadata");
+        let metadata =
+            normalize_mcp_turn_metadata(Some(wire), None).expect("metadata should be populated");
 
         let flow_tool_overlay = metadata.flow_tool_overlay.expect("flow overlay");
         assert_eq!(
@@ -3579,18 +3419,29 @@ mod tests {
 
     #[test]
     fn resume_turn_metadata_carries_llm_and_provider_overrides() {
-        let metadata = resume_turn_metadata(McpTurnMetadataInput {
-            skill_references: None,
-            flow_tool_overlay: None,
-            additional_instructions: None,
-            model: Some("claude-opus-4-7".to_string()),
-            provider: Some(meerkat_core::Provider::Anthropic),
-            provider_params: Some(serde_json::json!({ "effort": "xhigh" })),
-            provider_for_params: meerkat_core::Provider::Anthropic,
-            connection_ref: None,
-            keep_alive: Some(true),
-        })
-        .expect("metadata should be populated");
+        let wire: WireRuntimeTurnMetadata = serde_json::from_value(serde_json::json!({
+            "model": "claude-opus-4-7",
+            "provider": "anthropic",
+            "provider_params": {
+                "action": "set",
+                "value": {
+                    "provider_tag": {
+                        "provider": "unknown",
+                        "bag": { "effort": "xhigh" }
+                    }
+                }
+            },
+            "keep_alive": {
+                "action": "set",
+                "value": {
+                    "ttl_secs": 30,
+                    "policy": "pinned"
+                }
+            }
+        }))
+        .expect("wire metadata");
+        let metadata =
+            normalize_mcp_turn_metadata(Some(wire), None).expect("metadata should be populated");
 
         assert_eq!(
             metadata.model.as_ref().map(ToString::to_string),
@@ -3616,30 +3467,36 @@ mod tests {
 
     #[test]
     fn mcp_turn_metadata_carries_run_connection_ref_and_skill_refs() {
-        use meerkat_core::connection::{BindingId, RealmId};
         use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
 
         let skill = SkillKey::new(
             SourceUuid::parse("33333333-3333-4333-8333-333333333333").expect("source uuid"),
             SkillName::parse("demo-skill").expect("skill name"),
         );
-        let connection_ref = meerkat_contracts::WireConnectionRef {
-            realm: RealmId::parse("test-realm").expect("realm"),
-            binding: BindingId::parse("primary").expect("binding"),
-            profile: None,
-        };
-        let metadata = mcp_turn_metadata(McpTurnMetadataInput {
+        let wire = WireRuntimeTurnMetadata {
             skill_references: Some(vec![skill.clone()]),
-            flow_tool_overlay: None,
-            additional_instructions: None,
             model: Some("gpt-5.4".to_string()),
             provider: Some(meerkat_core::Provider::OpenAI),
-            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
-            provider_for_params: meerkat_core::Provider::OpenAI,
-            connection_ref: Some(connection_ref),
-            keep_alive: Some(true),
-        })
-        .expect("metadata should be populated");
+            connection_ref: Some(
+                serde_json::from_value(serde_json::json!({
+                    "action": "set",
+                    "value": {
+                        "realm": "test-realm",
+                        "binding": "primary"
+                    }
+                }))
+                .expect("connection ref override"),
+            ),
+            keep_alive: Some(
+                serde_json::from_value(serde_json::json!({
+                    "action": "clear"
+                }))
+                .expect("keep-alive override"),
+            ),
+            ..Default::default()
+        };
+        let metadata = normalize_mcp_turn_metadata(Some(wire), Some("fallback-model"))
+            .expect("metadata should be populated");
 
         assert_eq!(metadata.skill_references, Some(vec![skill]));
         assert!(metadata.provider_params.is_some());
@@ -3650,15 +3507,126 @@ mod tests {
     #[test]
     fn mcp_create_provider_only_metadata_includes_resolved_model() {
         assert_eq!(
-            mcp_create_turn_metadata_model(None, Some(meerkat_core::Provider::OpenAI), "gpt-5.4"),
+            normalize_mcp_turn_metadata(
+                Some(WireRuntimeTurnMetadata {
+                    provider: Some(meerkat_core::Provider::OpenAI),
+                    ..Default::default()
+                }),
+                Some("gpt-5.4"),
+            )
+            .and_then(|metadata| metadata.model.map(|model| model.to_string())),
             Some("gpt-5.4".to_string()),
             "provider-only MCP run must carry resolved model in RuntimeTurnMetadata"
         );
-        assert_eq!(
-            mcp_create_turn_metadata_model(None, None, "gpt-5.4"),
-            None,
-            "default run without provider/model should not stamp metadata identity"
-        );
+    }
+
+    #[test]
+    fn mcp_run_input_accepts_turn_metadata_carrier() {
+        let input: MeerkatRunInput = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "turn_metadata": {
+                "model": "gpt-5.4",
+                "provider": "openai",
+                "skill_references": [
+                    {
+                        "source_uuid": "33333333-3333-4333-8333-333333333333",
+                        "skill_name": "demo-skill"
+                    }
+                ],
+                "additional_instructions": [
+                    { "kind": "user", "body": "stay concise" }
+                ],
+                "keep_alive": {
+                    "action": "clear"
+                }
+            }
+        }))
+        .expect("MCP run must accept canonical turn_metadata");
+
+        let metadata = input
+            .turn_metadata
+            .expect("turn metadata should be present");
+        assert_eq!(metadata.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(metadata.provider, Some(meerkat_core::Provider::OpenAI));
+        assert!(metadata.skill_references.is_some());
+        assert!(metadata.additional_instructions.is_some());
+        assert!(metadata.keep_alive.is_some());
+    }
+
+    #[test]
+    fn mcp_run_input_rejects_split_turn_metadata_fields() {
+        for field in [
+            "model",
+            "provider",
+            "provider_params",
+            "connection_ref",
+            "keep_alive",
+            "skill_refs",
+            "skill_references",
+            "additional_instructions",
+        ] {
+            let mut value = serde_json::json!({ "prompt": "hello" });
+            value
+                .as_object_mut()
+                .expect("object")
+                .insert(field.to_string(), serde_json::json!("stale"));
+            let err = serde_json::from_value::<MeerkatRunInput>(value)
+                .expect_err("MCP run must reject split turn metadata fields");
+            let message = err.to_string();
+            assert!(
+                message.contains(field) || message.contains("unknown field"),
+                "unexpected error for {field}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_resume_input_accepts_turn_metadata_carrier_and_rejects_split_fields() {
+        let input: MeerkatResumeInput = serde_json::from_value(serde_json::json!({
+            "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "prompt": "resume",
+            "turn_metadata": {
+                "flow_tool_overlay": {
+                    "allowed_tools": ["shell"]
+                },
+                "additional_instructions": [
+                    { "kind": "user", "body": "continue carefully" }
+                ]
+            }
+        }))
+        .expect("MCP resume must accept canonical turn_metadata");
+        let metadata = input
+            .turn_metadata
+            .expect("turn metadata should be present");
+        assert!(metadata.flow_tool_overlay.is_some());
+        assert!(metadata.additional_instructions.is_some());
+
+        for field in [
+            "model",
+            "provider",
+            "provider_params",
+            "keep_alive",
+            "skill_refs",
+            "skill_references",
+            "flow_tool_overlay",
+            "additional_instructions",
+        ] {
+            let mut value = serde_json::json!({
+                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
+                "prompt": "resume"
+            });
+            value
+                .as_object_mut()
+                .expect("object")
+                .insert(field.to_string(), serde_json::json!("stale"));
+            let err = serde_json::from_value::<MeerkatResumeInput>(value)
+                .expect_err("MCP resume must reject split turn metadata fields");
+            let message = err.to_string();
+            assert!(
+                message.contains(field) || message.contains("unknown field"),
+                "unexpected error for {field}: {message}"
+            );
+        }
     }
 
     #[test]
@@ -4029,12 +3997,20 @@ mod tests {
     fn test_meerkat_run_input_parsing() {
         let input_json = json!({
             "prompt": "Hello",
-            "model": "claude-sonnet-4"
+            "turn_metadata": {
+                "model": "claude-sonnet-4"
+            }
         });
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.prompt, "Hello");
-        assert_eq!(input.model, Some("claude-sonnet-4".to_string()));
+        assert_eq!(
+            input
+                .turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.model.as_deref()),
+            Some("claude-sonnet-4")
+        );
         assert_eq!(input.max_tokens, None);
         assert_eq!(input.structured_output_retries, None);
         assert!(input.output_schema.is_none());
@@ -4061,9 +4037,7 @@ mod tests {
     fn test_meerkat_tool_inputs_reject_unknown_stale_metadata_fields() {
         let run_err = serde_json::from_value::<MeerkatRunInput>(json!({
             "prompt": "Hello",
-            "turn_metadata": {
-                "model": "stale-run-model"
-            }
+            "model": "stale-run-model"
         }))
         .expect_err("meerkat_run must reject unknown stale metadata fields");
         let run_message = run_err.to_string();
@@ -4365,13 +4339,26 @@ mod tests {
     fn test_meerkat_run_input_with_keep_alive() {
         let input_json = json!({
             "prompt": "Hello",
-            "keep_alive": true,
+            "turn_metadata": {
+                "keep_alive": {
+                    "action": "set",
+                    "value": {
+                        "ttl_secs": 30,
+                        "policy": "pinned"
+                    }
+                }
+            },
             "comms_name": "test-agent"
         });
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
         assert_eq!(input.prompt, "Hello");
-        assert_eq!(input.keep_alive, Some(true));
+        assert!(
+            input
+                .turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.keep_alive.is_some())
+        );
         assert_eq!(input.comms_name, Some("test-agent".to_string()));
     }
 
@@ -4383,7 +4370,7 @@ mod tests {
         });
 
         let input: MeerkatRunInput = serde_json::from_value(input_json).unwrap();
-        assert_eq!(input.keep_alive, None);
+        assert!(input.turn_metadata.is_none());
         assert!(input.comms_name.is_none());
     }
 
@@ -4455,9 +4442,20 @@ mod tests {
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,
-                model: Some("claude-opus-4-6".to_string()),
+                turn_metadata: Some(
+                    serde_json::from_value(serde_json::json!({
+                        "model": "claude-opus-4-6",
+                        "keep_alive": {
+                            "action": "set",
+                            "value": {
+                                "ttl_secs": 30,
+                                "policy": "pinned"
+                            }
+                        }
+                    }))
+                    .expect("turn metadata"),
+                ),
                 max_tokens: Some(4096),
-                provider: None,
                 output_schema: None,
                 structured_output_retries: Some(2),
                 stream: false,
@@ -4465,22 +4463,16 @@ mod tests {
                 tools: vec![],
                 enable_builtins: Some(false),
                 builtin_config: None,
-                keep_alive: Some(true),
                 comms_name: None, // Missing!
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
-                provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
-                skill_refs: None,
-                skill_references: None,
                 labels: None,
-                additional_instructions: None,
                 app_context: None,
                 shell_env: None,
-                connection_ref: None,
             },
             None,
             None,
@@ -4504,9 +4496,13 @@ mod tests {
             MeerkatRunInput {
                 prompt: "test".to_string(),
                 system_prompt: None,
-                model: Some("claude-opus-4-6".to_string()),
+                turn_metadata: Some(
+                    serde_json::from_value(serde_json::json!({
+                        "model": "claude-opus-4-6"
+                    }))
+                    .expect("turn metadata"),
+                ),
                 max_tokens: Some(4096),
-                provider: None,
                 output_schema: None,
                 structured_output_retries: Some(2),
                 stream: false,
@@ -4514,22 +4510,16 @@ mod tests {
                 tools: vec![],
                 enable_builtins: Some(false),
                 builtin_config: None,
-                keep_alive: Some(false),
                 comms_name: None,
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
-                provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
-                skill_refs: None,
-                skill_references: None,
                 labels: None,
-                additional_instructions: None,
                 app_context: None,
                 shell_env: None,
-                connection_ref: None,
             },
             None,
             Some(context),
@@ -4554,9 +4544,8 @@ mod tests {
                 session_id,
                 prompt: "Resume".to_string(),
                 system_prompt: None,
-                model: None,
+                turn_metadata: None,
                 max_tokens: None,
-                provider: None,
                 output_schema: None,
                 structured_output_retries: None,
                 stream: false,
@@ -4565,19 +4554,13 @@ mod tests {
                 tool_results: vec![],
                 enable_builtins: None,
                 builtin_config: None,
-                keep_alive: None,
                 comms_name: None,
                 peer_meta: None,
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
-                provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
-                skill_refs: None,
-                skill_references: None,
-                flow_tool_overlay: None,
-                additional_instructions: None,
             },
             None,
             Some(context),
@@ -4786,16 +4769,26 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[test]
-    fn test_tools_list_has_keep_alive_parameter() {
+    fn test_tools_list_has_turn_metadata_keep_alive_parameter() {
         let tools = tools_list();
         let run_tool = &tools[0];
 
-        // Verify keep_alive parameter exists in the schema (nullable boolean)
-        assert!(run_tool["inputSchema"]["properties"]["keep_alive"].is_object());
+        let schema = &run_tool["inputSchema"];
+        assert!(schema["properties"]["turn_metadata"].is_object());
+        assert!(
+            !schema["properties"]["keep_alive"].is_object(),
+            "keep_alive must live under turn_metadata, not as a split run parameter"
+        );
+        assert!(
+            serde_json::to_string(schema)
+                .expect("schema should serialize")
+                .contains("keep_alive"),
+            "turn_metadata schema should still expose the keep_alive override"
+        );
 
         // Verify comms_name parameter exists in the schema
-        assert!(run_tool["inputSchema"]["properties"]["comms_name"].is_object());
-        let comms_name_type = &run_tool["inputSchema"]["properties"]["comms_name"]["type"];
+        assert!(schema["properties"]["comms_name"].is_object());
+        let comms_name_type = &schema["properties"]["comms_name"]["type"];
         assert!(
             comms_name_type == "string"
                 || comms_name_type

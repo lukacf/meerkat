@@ -434,11 +434,9 @@ mod image_generation_substrate {
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "make an image".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -524,12 +522,9 @@ mod scenario_22_session_service_lifecycle {
             .create_session(CreateSessionRequest {
                 model: smoke_model(),
                 prompt: "I am EphBot. Remember this name.".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
                 build: None,

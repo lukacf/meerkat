@@ -346,6 +346,8 @@ pub struct AgentBuildConfig {
     /// Runtime build mode — determines how the factory resolves the ops lifecycle
     /// registry and completion feed. See [`RuntimeBuildMode`] for details.
     pub runtime_build_mode: meerkat_core::RuntimeBuildMode,
+    /// Canonical metadata reserved for a deferred session's first runtime turn.
+    pub initial_turn_metadata: Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     /// Pre-resolved metadata entries to inject into the session before agent build.
     ///
     /// These are set on the session's internal metadata map before `AgentBuilder::build()`
@@ -430,6 +432,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("additional_instructions", &self.additional_instructions)
             .field("wait_for_mcp", &self.wait_for_mcp)
             .field("runtime_build_mode", &self.runtime_build_mode)
+            .field(
+                "initial_turn_metadata",
+                &self.initial_turn_metadata.is_some(),
+            )
             .finish()
     }
 }
@@ -488,6 +494,7 @@ impl AgentBuildConfig {
             call_timeout_override: meerkat_core::CallTimeoutOverride::default(),
             resume_override_mask: meerkat_core::service::ResumeOverrideMask::default(),
             runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
+            initial_turn_metadata: None,
             initial_metadata_entries: std::collections::BTreeMap::new(),
         }
     }
@@ -579,6 +586,7 @@ impl AgentBuildConfig {
         self.call_timeout_override = build.call_timeout_override.clone();
         self.resume_override_mask = build.resume_override_mask;
         self.runtime_build_mode = build.runtime_build_mode.clone();
+        self.initial_turn_metadata = build.initial_turn_metadata.clone();
     }
 
     /// Convert build options to the service transport representation.
@@ -625,7 +633,7 @@ impl AgentBuildConfig {
             call_timeout_override: self.call_timeout_override.clone(),
             resume_override_mask: self.resume_override_mask,
             runtime_build_mode: self.runtime_build_mode.clone(),
-            initial_turn_metadata: None,
+            initial_turn_metadata: self.initial_turn_metadata.clone(),
         }
     }
 }

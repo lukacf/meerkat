@@ -454,10 +454,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         })
     }
 
-    fn nullable(schema: Value) -> Value {
-        serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
-    }
-
     fn rest_manual_components() -> Map<String, Value> {
         let mut components = Map::new();
         let json_value = schema_ref("JsonValue");
@@ -470,10 +466,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         let labels = serde_json::json!({
             "type": "object",
             "additionalProperties": { "type": "string" }
-        });
-        let string_array = serde_json::json!({
-            "type": "array",
-            "items": { "type": "string" }
         });
 
         components.insert("JsonValue".to_string(), json_value_schema());
@@ -576,17 +568,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         );
         components.insert(
             "RestCreateSessionRequest".to_string(),
-            object_schema(
+            closed_object_schema(
                 vec![
                     ("prompt", content_input.clone()),
                     ("system_prompt", string_schema()),
-                    ("model", string_schema()),
-                    ("provider", string_schema()),
+                    ("turn_metadata", schema_ref("WireRuntimeTurnMetadata")),
                     ("max_tokens", integer_schema()),
                     ("output_schema", json_value.clone()),
                     ("structured_output_retries", integer_schema()),
                     ("verbose", bool_schema()),
-                    ("keep_alive", nullable(bool_schema())),
                     ("comms_name", string_schema()),
                     ("peer_meta", json_value.clone()),
                     ("hooks_override", json_value.clone()),
@@ -595,7 +585,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                     ("enable_memory", bool_schema()),
                     ("enable_mob", bool_schema()),
                     ("budget_limits", json_value.clone()),
-                    ("provider_params", json_value.clone()),
                     (
                         "preload_skills",
                         serde_json::json!({
@@ -603,15 +592,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                             "items": schema_ref("SkillKey")
                         }),
                     ),
-                    (
-                        "skill_refs",
-                        serde_json::json!({
-                            "type": "array",
-                            "items": schema_ref("SkillRef")
-                        }),
-                    ),
                     ("labels", labels),
-                    ("additional_instructions", string_array),
                     ("app_context", json_value.clone()),
                     (
                         "shell_env",
@@ -1815,6 +1796,56 @@ mod tests {
                     "{name} advertises {field}={contract_name}, but no emitted schema exports that contract"
                 );
             }
+        }
+
+        fs::remove_dir_all(&output_dir).unwrap();
+    }
+
+    #[test]
+    fn emitted_rest_create_session_request_exposes_single_turn_metadata_carrier() {
+        let output_dir = temp_output_dir("rest-create-turn-metadata");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let rest: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.join("rest-openapi.json")).unwrap())
+                .unwrap();
+        let request = rest
+            .pointer("/components/schemas/RestCreateSessionRequest")
+            .expect("RestCreateSessionRequest schema must be emitted");
+        let properties = request
+            .pointer("/properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("RestCreateSessionRequest schema must expose properties");
+        assert!(
+            properties.contains_key("turn_metadata"),
+            "REST create must expose the single turn_metadata carrier"
+        );
+        assert_eq!(
+            properties
+                .get("turn_metadata")
+                .and_then(|schema| schema.get("$ref")),
+            Some(&serde_json::Value::String(
+                "#/components/schemas/WireRuntimeTurnMetadata".to_string()
+            )),
+            "REST create must expose typed runtime turn metadata"
+        );
+        assert_eq!(
+            request.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "REST create schema must reject split or unknown top-level turn metadata fields"
+        );
+        for split_field in [
+            "skill_refs",
+            "additional_instructions",
+            "keep_alive",
+            "model",
+            "provider",
+            "provider_params",
+        ] {
+            assert!(
+                !properties.contains_key(split_field),
+                "REST create must not expose split turn metadata field {split_field}"
+            );
         }
 
         fs::remove_dir_all(&output_dir).unwrap();

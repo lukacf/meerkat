@@ -795,7 +795,7 @@ async def test_create_session_returns_runtime_backed_session_wrapper() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_session_skill_refs_use_tagged_wire_refs() -> None:
+async def test_create_session_skill_refs_use_turn_metadata_carrier() -> None:
     client = MeerkatClient()
     seen: list[tuple[str, dict[str, object]]] = []
     key = SkillKey(
@@ -828,13 +828,14 @@ async def test_create_session_skill_refs_use_tagged_wire_refs() -> None:
                         "skill_name": "read",
                     }
                 ],
-                "skill_refs": [
-                    {
-                        "kind": "structured",
-                        "source_uuid": "00000000-0000-4000-8000-000000000001",
-                        "skill_name": "read",
-                    }
-                ],
+                "turn_metadata": {
+                    "skill_references": [
+                        {
+                            "source_uuid": "00000000-0000-4000-8000-000000000001",
+                            "skill_name": "read",
+                        }
+                    ]
+                },
             },
         )
     ]

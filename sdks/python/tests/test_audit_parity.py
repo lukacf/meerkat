@@ -230,7 +230,9 @@ async def test_create_session_with_extended_create_fields():
     args, _kwargs = client._request.call_args
     assert args[0] == "session/create"
     assert args[1]["labels"] == {"foo": "bar"}
-    assert args[1]["additional_instructions"] == ["You are concise."]
+    assert args[1]["turn_metadata"]["additional_instructions"] == [
+        {"kind": "user", "body": "You are concise."}
+    ]
     assert args[1]["app_context"] == {"app": "sdk"}
     assert args[1]["shell_env"] == {"FOO": "BAR"}
     assert args[1]["external_tools"][0]["name"] == "tool_a"

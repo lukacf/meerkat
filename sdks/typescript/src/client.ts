@@ -181,12 +181,12 @@ function normalizeSkillRef(ref: SkillRef): SkillKeyWire {
   return { source_uuid: ref.sourceUuid, skill_name: ref.skillName };
 }
 
-function skillKeysToWire(refs: SkillRef[] | undefined): SkillKeyWire[] | undefined {
+function skillKeysToWire(refs: readonly SkillRef[] | undefined): SkillKeyWire[] | undefined {
   if (!refs) return undefined;
   return refs.map(normalizeSkillRef);
 }
 
-function skillRefsToWire(refs: SkillRef[] | undefined): SkillRefWire[] | undefined {
+function skillRefsToWire(refs: readonly SkillRef[] | undefined): SkillRefWire[] | undefined {
   if (!refs) return undefined;
   return refs.map((ref) => ({ kind: "structured", ...normalizeSkillRef(ref) }));
 }
@@ -201,19 +201,18 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
-type RuntimeTurnMetadataOptions = Pick<
-  TurnOptions,
-  | "skillRefs"
-  | "flowToolOverlay"
-  | "additionalInstructions"
-  | "keepAlive"
-  | "model"
-  | "provider"
-  | "providerParams"
-  | "clearProviderParams"
-  | "connectionRef"
-  | "clearConnectionRef"
->;
+type RuntimeTurnMetadataOptions = {
+  readonly skillRefs?: readonly SkillRef[];
+  readonly flowToolOverlay?: TurnOptions["flowToolOverlay"];
+  readonly additionalInstructions?: readonly string[];
+  readonly keepAlive?: TurnOptions["keepAlive"];
+  readonly model?: TurnOptions["model"];
+  readonly provider?: TurnOptions["provider"];
+  readonly providerParams?: TurnOptions["providerParams"];
+  readonly clearProviderParams?: TurnOptions["clearProviderParams"];
+  readonly connectionRef?: TurnOptions["connectionRef"];
+  readonly clearConnectionRef?: TurnOptions["clearConnectionRef"];
+};
 
 type RuntimeTurnMetadataPayload = NonNullable<MobTurnStartParams["turn_metadata"]>;
 
@@ -3059,8 +3058,6 @@ export class MeerkatClient {
     const params: Record<string, unknown> = { prompt };
     if (!options) return params;
 
-    if (options.model) params.model = options.model;
-    if (options.provider) params.provider = options.provider;
     if (options.systemPrompt) params.system_prompt = options.systemPrompt;
     if (options.maxTokens) params.max_tokens = options.maxTokens;
     if (options.outputSchema != null) params.output_schema = options.outputSchema;
@@ -3072,20 +3069,15 @@ export class MeerkatClient {
     if (options.enableShell != null) params.enable_shell = options.enableShell;
     if (options.enableMemory != null) params.enable_memory = options.enableMemory;
     if (options.enableMob != null) params.enable_mob = options.enableMob;
-    if (options.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
-    if (options.providerParams != null) params.provider_params = options.providerParams;
     if (options.preloadSkills != null) {
       params.preload_skills = skillKeysToWire(options.preloadSkills);
     }
-    const wireRefs = skillRefsToWire(options.skillRefs);
-    if (wireRefs) params.skill_refs = wireRefs;
     if (options.labels != null) params.labels = options.labels;
-    if (options.additionalInstructions != null) {
-      params.additional_instructions = options.additionalInstructions;
-    }
+    const turnMetadata = runtimeTurnMetadataPayload(options);
+    if (turnMetadata) params.turn_metadata = turnMetadata;
     if (options.appContext !== undefined) params.app_context = options.appContext;
     if (options.shellEnv != null) params.shell_env = options.shellEnv;
     if (options.externalTools != null) params.external_tools = options.externalTools;

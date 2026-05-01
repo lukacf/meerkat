@@ -12,7 +12,7 @@ use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use crate::types::{ContentInput, Message, RenderMetadata, RunResult, SessionId, ToolDef, Usage};
+use crate::types::{ContentInput, Message, RunResult, SessionId, ToolDef, Usage};
 use crate::{
     AgentToolDispatcher, BudgetLimits, HookRunOverrides, OutputSchema, PeerMeta, Provider, Session,
     SessionLlmIdentity, ToolCategoryOverride,
@@ -149,16 +149,12 @@ pub struct CreateSessionRequest {
     pub model: String,
     /// Initial user prompt (text or multimodal).
     pub prompt: ContentInput,
-    /// Optional normalized rendering metadata for the initial prompt.
-    pub render_metadata: Option<RenderMetadata>,
     /// Optional system prompt override.
     pub system_prompt: Option<String>,
     /// Max tokens per LLM turn.
     pub max_tokens: Option<u32>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
-    /// Canonical SkillKeys to resolve and inject for the first turn.
-    pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Initial turn behavior for this session creation call.
     pub initial_turn: InitialTurnPolicy,
     /// How to treat `prompt` when `initial_turn == Defer`.
@@ -1229,6 +1225,34 @@ mod tests {
             .await
             .expect_err("default implementation should fail loudly");
         assert!(matches!(err, SessionError::Unsupported(name) if name == "has_live_session"));
+    }
+
+    #[test]
+    fn create_session_request_exposes_single_initial_turn_metadata_carrier() {
+        let source = include_str!("mod.rs");
+        let start = source
+            .find("pub struct CreateSessionRequest")
+            .expect("CreateSessionRequest exists");
+        let end = source[start..]
+            .find("impl CreateSessionRequest")
+            .map(|offset| start + offset)
+            .expect("CreateSessionRequest impl follows");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("pub initial_turn_metadata: Option<RuntimeTurnMetadata>")
+                || body.contains("pub build: Option<SessionBuildOptions>"),
+            "create must expose a canonical first-turn metadata carrier"
+        );
+        for split_field in [
+            concat!("pub ", "render", "_metadata:"),
+            concat!("pub ", "skill", "_references:"),
+        ] {
+            assert!(
+                !body.contains(split_field),
+                "CreateSessionRequest must not expose split first-turn carrier field {split_field}"
+            );
+        }
     }
 
     #[test]

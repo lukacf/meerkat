@@ -855,94 +855,6 @@ fn resolve_keep_alive(requested: Option<bool>) -> Result<Option<bool>, ApiError>
     }
 }
 
-/// Default keep-alive TTL applied to per-turn metadata when the REST wire
-/// carries the boolean `keep_alive: true` override. Mirrors the canonical
-/// default used elsewhere in the runtime layer.
-const REST_TURN_KEEP_ALIVE_TTL_SECS: u64 = 30;
-
-/// Translate the REST wire `Option<bool>` keep-alive override into the typed
-/// tri-state override carried on `RuntimeTurnMetadata`.
-///
-/// * `Some(true)` -> `Some(Pinned, ttl = REST_TURN_KEEP_ALIVE_TTL_SECS)` —
-///   opts in to a caller-owned keep-alive lifetime for this turn.
-/// * `Some(false)` -> `Some(Clear)` — explicitly disables keep-alive.
-/// * `None` -> `None` — inherit the stored session value.
-fn resolve_turn_keep_alive_policy(
-    requested: Option<bool>,
-) -> Option<
-    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<
-        meerkat_core::lifecycle::run_primitive::KeepAlivePolicy,
-    >,
-> {
-    match requested {
-        Some(true) => Some(
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
-                meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                    ttl: std::time::Duration::from_secs(REST_TURN_KEEP_ALIVE_TTL_SECS),
-                    policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
-                },
-            ),
-        ),
-        Some(false) => Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear),
-        None => None,
-    }
-}
-
-/// Translate the REST wire `Option<Vec<String>>` additional-instructions list
-/// into the typed `Option<Vec<TurnInstruction>>` carried on
-/// `RuntimeTurnMetadata`. The REST envelope does not carry a role per entry;
-/// strings are interpreted as `TurnInstructionKind::User` to match the
-/// end-user prompt lineage they originate from.
-fn resolve_turn_additional_instructions(
-    requested: Option<Vec<String>>,
-) -> Option<Vec<meerkat_core::lifecycle::run_primitive::TurnInstruction>> {
-    requested.map(|instructions| {
-        instructions
-            .into_iter()
-            .map(
-                |body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
-                    body,
-                },
-            )
-            .collect()
-    })
-}
-
-fn rest_create_turn_metadata(
-    skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
-    additional_instructions: Option<Vec<String>>,
-    model: Option<String>,
-    provider: Option<Provider>,
-    provider_params: Option<Value>,
-    provider_for_params: Provider,
-    keep_alive: Option<bool>,
-) -> Option<RuntimeTurnMetadata> {
-    let metadata = RuntimeTurnMetadata {
-        skill_references,
-        additional_instructions: resolve_turn_additional_instructions(additional_instructions),
-        model: model.map(ModelId::new),
-        provider,
-        provider_params: provider_params.map(|params| {
-            TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
-                provider_for_params.as_str(),
-                &params,
-            ))
-        }),
-        keep_alive: resolve_turn_keep_alive_policy(keep_alive),
-        ..Default::default()
-    };
-    (!metadata.is_empty()).then_some(metadata)
-}
-
-fn rest_create_turn_metadata_model(
-    requested_model: Option<&str>,
-    provider: Option<Provider>,
-    resolved_model: &str,
-) -> Option<String> {
-    (requested_model.is_some() || provider.is_some()).then(|| resolved_model.to_string())
-}
-
 fn runtime_metadata_provider_params_for_build(
     metadata: Option<&RuntimeTurnMetadata>,
 ) -> Option<Value> {
@@ -957,6 +869,17 @@ fn runtime_metadata_keep_alive_for_create(metadata: Option<&RuntimeTurnMetadata>
         metadata.and_then(|metadata| metadata.keep_alive.as_ref()),
         Some(TurnMetadataOverride::Set(_))
     )
+}
+
+fn normalize_create_turn_metadata(
+    metadata: Option<WireRuntimeTurnMetadata>,
+    resolved_model: &str,
+) -> Option<RuntimeTurnMetadata> {
+    let mut metadata: RuntimeTurnMetadata = metadata.map(Into::into)?;
+    if metadata.provider.is_some() && metadata.model.is_none() {
+        metadata.model = Some(ModelId::new(resolved_model));
+    }
+    (!metadata.is_empty()).then_some(metadata)
 }
 
 fn validate_public_peer_meta(peer_meta: Option<&meerkat_core::PeerMeta>) -> Result<(), ApiError> {
@@ -978,10 +901,9 @@ pub struct CreateSessionRequest {
     pub prompt: ContentInput,
     #[serde(default)]
     pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub model: Option<Cow<'static, str>>,
-    #[serde(default)]
-    pub provider: Option<Provider>,
+    /// Canonical first-turn runtime metadata carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     /// JSON schema for structured output extraction (wrapper or raw schema).
@@ -994,11 +916,6 @@ pub struct CreateSessionRequest {
     /// Enable verbose event logging (server-side).
     #[serde(default)]
     pub verbose: bool,
-    /// Keep session alive after turn completes, listening for comms messages.
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    /// Requires comms_name when enabled.
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
     /// Agent name for inter-agent communication. Required for keep_alive.
     #[serde(default)]
     pub comms_name: Option<String>,
@@ -1023,21 +940,12 @@ pub struct CreateSessionRequest {
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
-    /// Provider-specific parameters (for example reasoning config).
-    #[serde(default)]
-    pub provider_params: Option<Value>,
     /// Skills to preload into the system prompt.
     #[serde(default)]
     pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
-    /// Structured refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
     /// Optional key-value labels attached at session creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
-    /// Additional instruction sections appended to the system prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
     /// Opaque application context passed through to custom builders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<Value>,
@@ -2755,35 +2663,19 @@ async fn create_session_inner(
     {
         return RequestTerminal::RespondWithoutPublish(Err(e));
     }
-    let keep_alive_override = match resolve_keep_alive(req.keep_alive) {
-        Ok(v) => v,
-        Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
-    };
-    // Create: no persisted session to inherit from, so None → false.
-    let keep_alive = keep_alive_override.unwrap_or(false);
-    let model_override = req.model.clone();
-    let model = model_override
-        .clone()
-        .unwrap_or_else(|| state.default_model.clone());
+    let metadata_model = req
+        .turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.model.clone());
+    let model = metadata_model.unwrap_or_else(|| state.default_model.to_string());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
-    let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
-    {
+    let initial_turn_metadata = normalize_create_turn_metadata(req.turn_metadata.clone(), &model);
+    let keep_alive_override = match rest_turn_keep_alive_override(initial_turn_metadata.as_ref()) {
         Ok(v) => v,
         Err(e) => return RequestTerminal::RespondWithoutPublish(Err(e)),
     };
-    let provider_for_params = req
-        .provider
-        .or_else(|| Provider::infer_from_model(model.as_ref()))
-        .unwrap_or(Provider::Other);
-    let initial_turn_metadata = rest_create_turn_metadata(
-        skill_references.clone(),
-        req.additional_instructions.clone(),
-        rest_create_turn_metadata_model(model_override.as_deref(), req.provider, &model),
-        req.provider,
-        req.provider_params.clone(),
-        provider_for_params,
-        keep_alive_override,
-    );
+    // Create: no persisted session to inherit from, so None -> false.
+    let keep_alive = keep_alive_override.unwrap_or(false);
 
     // Early cancel check — before any stateful work.
     if let Some(ctx) = req_ctx.as_ref()
@@ -2886,20 +2778,26 @@ async fn create_session_inner(
     }
 
     let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
-    let initial_identity =
-        match resolve_validation_identity(&state.config_runtime, &model, req.provider).await {
-            Ok(identity) => identity,
-            Err(err) => {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
-            }
-        };
+    let initial_identity = match resolve_validation_identity(
+        &state.config_runtime,
+        &model,
+        initial_turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.provider),
+    )
+    .await
+    {
+        Ok(identity) => identity,
+        Err(err) => {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(ApiError::BadRequest(err)));
+        }
+    };
     let mut build = SessionBuildOptions {
         provider: initial_turn_metadata
             .as_ref()
-            .and_then(|metadata| metadata.provider)
-            .or(req.provider),
+            .and_then(|metadata| metadata.provider),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req
@@ -2938,11 +2836,17 @@ async fn create_session_inner(
         additional_instructions: None,
         shell_env: req.shell_env,
         resume_override_mask: ResumeOverrideMask {
-            model: model_override.is_some(),
-            provider: req.provider.is_some(),
+            model: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.model.is_some()),
+            provider: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.provider.is_some()),
             max_tokens: req.max_tokens.is_some(),
             structured_output_retries: req.structured_output_retries.is_some(),
-            provider_params: req.provider_params.is_some(),
+            provider_params: initial_turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.provider_params.is_some()),
             preload_skills: req.preload_skills.is_some(),
             keep_alive: keep_alive_override.is_some(),
             comms_name: req.comms_name.is_some(),
@@ -2953,7 +2857,9 @@ async fn create_session_inner(
         blob_store_override: None,
         mob_tools: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-        initial_turn_metadata: None,
+        initial_turn_metadata: initial_turn_metadata
+            .clone()
+            .map(|metadata| meerkat_runtime::runtime_stamped_prompt_turn_metadata(Some(metadata))),
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -2963,12 +2869,10 @@ async fn create_session_inner(
     let svc_req = SvcCreateSessionRequest {
         model: model.to_string(),
         prompt: req.prompt.clone(),
-        render_metadata: None,
         system_prompt: req.system_prompt,
         max_tokens: Some(max_tokens),
         event_tx: Some(caller_event_tx.clone()),
 
-        skill_references: None,
         initial_turn: InitialTurnPolicy::Defer,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(build),
@@ -4765,11 +4669,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5185,13 +5087,25 @@ mod tests {
     fn test_create_session_request_parsing_with_keep_alive() {
         let req_json = serde_json::json!({
             "prompt": "Hello",
-            "keep_alive": true,
+            "turn_metadata": {
+                "keep_alive": {
+                    "action": "set",
+                    "value": {
+                        "ttl_secs": 30,
+                        "policy": "pinned"
+                    }
+                }
+            },
             "comms_name": "test-agent"
         });
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
         assert_eq!(req.prompt, ContentInput::Text("Hello".to_string()));
-        assert_eq!(req.keep_alive, Some(true));
+        assert!(
+            req.turn_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.keep_alive.is_some())
+        );
         assert_eq!(req.comms_name, Some("test-agent".to_string()));
     }
 
@@ -5202,7 +5116,7 @@ mod tests {
         });
 
         let req: CreateSessionRequest = serde_json::from_value(req_json).unwrap();
-        assert_eq!(req.keep_alive, None);
+        assert!(req.turn_metadata.is_none());
         assert!(req.comms_name.is_none());
     }
 
@@ -5292,12 +5206,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5369,12 +5280,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5446,12 +5354,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5509,11 +5414,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5573,11 +5476,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5821,11 +5722,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -5884,11 +5783,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -6038,12 +5935,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -6240,38 +6134,95 @@ mod tests {
     }
 
     #[test]
-    fn test_create_session_request_rejects_stale_turn_metadata_field() {
-        let err = serde_json::from_value::<CreateSessionRequest>(serde_json::json!({
+    fn test_create_session_request_accepts_turn_metadata_carrier() {
+        let req = serde_json::from_value::<CreateSessionRequest>(serde_json::json!({
             "prompt": "Hello",
             "turn_metadata": {
-                "model": "retired-create-model"
+                "model": "gpt-5.4",
+                "provider": "openai",
+                "additional_instructions": [
+                    { "kind": "user", "body": "stay concise" }
+                ],
+                "keep_alive": {
+                    "action": "set",
+                    "value": {
+                        "ttl_secs": 30,
+                        "policy": "pinned"
+                    }
+                }
             }
         }))
-        .expect_err("REST create must reject stale top-level turn metadata");
-        let message = err.to_string();
+        .expect("REST create must accept canonical turn_metadata");
+        let metadata = req.turn_metadata.expect("turn metadata should be present");
+        assert_eq!(metadata.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(metadata.provider, Some(Provider::OpenAI));
+        assert!(metadata.additional_instructions.is_some());
+        assert!(metadata.keep_alive.is_some());
+    }
+
+    #[test]
+    fn test_create_session_request_rejects_split_turn_metadata_fields() {
+        for field in [
+            "model",
+            "provider",
+            "provider_params",
+            "keep_alive",
+            "skill_refs",
+            "additional_instructions",
+        ] {
+            let mut value = serde_json::json!({ "prompt": "Hello" });
+            value
+                .as_object_mut()
+                .expect("object")
+                .insert(field.to_string(), serde_json::json!("stale"));
+            let err = serde_json::from_value::<CreateSessionRequest>(value)
+                .expect_err("REST create must reject split turn metadata fields");
+            let message = err.to_string();
+            assert!(
+                message.contains(field) || message.contains("unknown field"),
+                "unexpected deserialize error for {field}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rest_create_uses_canonical_turn_metadata_without_split_builder() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn create_session_inner")
+            .expect("create_session_inner exists");
+        let end = source[start..]
+            .find("// Early cancel check")
+            .map(|offset| start + offset)
+            .expect("create setup sentinel exists");
+        let setup = &source[start..end];
+
         assert!(
-            message.contains("turn_metadata") || message.contains("unknown field"),
-            "unexpected deserialize error: {message}"
+            !setup.contains("rest_create_turn_metadata("),
+            "REST create must not rebuild metadata from split top-level fields"
+        );
+        assert!(
+            setup.contains("req.turn_metadata"),
+            "REST create must use the canonical turn_metadata request field"
         );
     }
 
     #[test]
-    fn test_rest_create_turn_metadata_carries_split_inputs_once() {
-        use meerkat_core::lifecycle::run_primitive::KeepAliveMode;
+    fn test_rest_create_normalizes_canonical_turn_metadata() {
         use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
 
         let skill = SkillKey::new(
             SourceUuid::parse("33333333-3333-4333-8333-333333333333").expect("source uuid"),
             SkillName::parse("demo-skill").expect("skill name"),
         );
-        let metadata = rest_create_turn_metadata(
-            Some(vec![skill.clone()]),
-            Some(vec!["prefer concise answers".to_string()]),
-            Some("gpt-5.4".to_string()),
-            Some(Provider::OpenAI),
-            Some(serde_json::json!({ "temperature": 0.2 })),
-            Provider::OpenAI,
-            Some(true),
+        let metadata = normalize_create_turn_metadata(
+            Some(WireRuntimeTurnMetadata {
+                skill_references: Some(vec![skill.clone()]),
+                model: Some("gpt-5.4".to_string()),
+                provider: Some(Provider::OpenAI),
+                ..Default::default()
+            }),
+            "fallback-model",
         )
         .expect("create metadata should be populated");
 
@@ -6281,34 +6232,21 @@ mod tests {
             Some("gpt-5.4".to_string())
         );
         assert_eq!(metadata.provider, Some(Provider::OpenAI));
-        assert_eq!(
-            metadata
-                .additional_instructions
-                .as_ref()
-                .and_then(|instructions| instructions.first())
-                .map(|instruction| instruction.body.as_str()),
-            Some("prefer concise answers")
-        );
-        assert!(metadata.provider_params.is_some());
-        let TurnMetadataOverride::Set(keep_alive) =
-            metadata.keep_alive.expect("keep-alive metadata")
-        else {
-            panic!("keep-alive true should set a policy");
-        };
-        assert_eq!(keep_alive.policy, KeepAliveMode::Pinned);
     }
 
     #[test]
     fn test_rest_create_provider_only_metadata_includes_resolved_model() {
         assert_eq!(
-            rest_create_turn_metadata_model(None, Some(Provider::OpenAI), "gpt-5.4"),
+            normalize_create_turn_metadata(
+                Some(WireRuntimeTurnMetadata {
+                    provider: Some(Provider::OpenAI),
+                    ..Default::default()
+                }),
+                "gpt-5.4",
+            )
+            .and_then(|metadata| metadata.model.map(|model| model.to_string())),
             Some("gpt-5.4".to_string()),
             "provider-only REST create must carry resolved model in RuntimeTurnMetadata"
-        );
-        assert_eq!(
-            rest_create_turn_metadata_model(None, None, "gpt-5.4"),
-            None,
-            "default create without provider/model should not stamp metadata identity"
         );
     }
 
@@ -6447,11 +6385,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -6530,11 +6466,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -6626,11 +6560,9 @@ mod tests {
             .create_session(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(state.max_tokens),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {

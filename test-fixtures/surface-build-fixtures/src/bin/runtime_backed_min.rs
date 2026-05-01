@@ -43,11 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         meerkat_core::service::CreateSessionRequest {
             model: config.agent.model.clone(),
             prompt: "".to_string().into(),
-            render_metadata: None,
             system_prompt: Some("runtime-backed fixture".to_string()),
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(meerkat_core::service::SessionBuildOptions::default()),

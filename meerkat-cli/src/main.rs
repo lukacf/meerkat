@@ -5813,6 +5813,49 @@ async fn run_agent(
             .transpose()
             .map_err(|e| anyhow::anyhow!("Invalid --app-context JSON: {e}"))?;
 
+        let initial_turn_metadata =
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    model.to_string(),
+                )),
+                provider: Some(provider.as_core()),
+                provider_params: provider_params.clone().map(|params| {
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::from_legacy_provider_value(
+                            provider.as_core().as_str(),
+                            &params,
+                        ),
+                    )
+                }),
+                connection_ref: connection_ref.clone().map(|connection_ref| {
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        connection_ref,
+                    )
+                }),
+                keep_alive: keep_alive.then(|| {
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                            ttl: std::time::Duration::from_secs(30),
+                            policy: meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                        },
+                    )
+                }),
+                flow_tool_overlay: flow_tool_overlay.clone(),
+                additional_instructions: (!instructions.is_empty()).then(|| {
+                    instructions
+                        .iter()
+                        .cloned()
+                        .map(|body| meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                            kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                            body,
+                        })
+                        .collect::<Vec<_>>()
+                }),
+                ..Default::default()
+            };
+        let initial_turn_metadata =
+            (!initial_turn_metadata.is_empty()).then_some(initial_turn_metadata);
+
         let output_pipeline =
             CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
@@ -5854,7 +5897,7 @@ async fn run_agent(
             },
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-            initial_turn_metadata: None,
+            initial_turn_metadata: initial_turn_metadata.clone(),
             resume_override_mask: Default::default(),
             call_timeout_override: Default::default(),
             blob_store_override: None,
@@ -5879,12 +5922,9 @@ async fn run_agent(
         let create_req = CreateSessionRequest {
             model: model.to_string(),
             prompt: prompt.to_string().into(),
-            render_metadata: None,
             system_prompt,
             max_tokens: Some(max_tokens),
             event_tx: output_pipeline.event_sender(),
-
-            skill_references: None,
             // Always defer — the runtime adapter handles execution.
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
@@ -5946,24 +5986,9 @@ async fn run_agent(
                 ));
             }
 
-            // Post-wave-a: `keep_alive` is now a typed `KeepAlivePolicy`
-            // (ttl + mode), not a boolean. The CLI `--keep-alive` flag still
-            // carries the session-level intent via `update_peer_ingress_context`
-            // below; this per-turn overlay is not the seam that enables it.
-            // Until the CLI exposes ttl/mode surface, leave the per-turn
-            // metadata atom unset.
-            let _ = keep_alive;
             let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
                 prompt.to_string(),
-                Some(
-                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        keep_alive: None,
-                        skill_references: None,
-                        flow_tool_overlay,
-                        additional_instructions: None,
-                        ..Default::default()
-                    },
-                ),
+                initial_turn_metadata.clone(),
             ));
             let (_outcome, handle) = runtime_adapter
                 .accept_input_with_completion(&session_id, input)
@@ -6573,12 +6598,9 @@ async fn resume_session_with_llm_override(
                 .create_session(CreateSessionRequest {
                     model,
                     prompt: prompt.to_string().into(),
-                    render_metadata: None,
                     system_prompt,
                     max_tokens,
                     event_tx: output_pipeline.event_sender(),
-
-                    skill_references: None,
                     // Always defer — runtime adapter handles execution.
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
@@ -7228,13 +7250,11 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .create_session(CreateSessionRequest {
                 model: create.model.clone(),
                 prompt: "".into(),
-                render_metadata: None,
                 system_prompt: prompt_system_prompt
                     .map(str::to_owned)
                     .or_else(|| create.system_prompt.clone()),
                 max_tokens: create.max_tokens,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
@@ -13628,12 +13648,9 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "list tools".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(build),
@@ -13723,11 +13740,9 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
@@ -13813,11 +13828,9 @@ capabilities = ["definitely_missing_capability"]
             .create_session(CreateSessionRequest {
                 model: "gpt-5.4".to_string(),
                 prompt: "seed".to_string().into(),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: Some(32),
                 event_tx: None,
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -13886,11 +13899,9 @@ capabilities = ["definitely_missing_capability"]
         let req = CreateSessionRequest {
             model: "gpt-5.4".to_string(),
             prompt: "list tools".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: Some(32),
             event_tx: None,
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {

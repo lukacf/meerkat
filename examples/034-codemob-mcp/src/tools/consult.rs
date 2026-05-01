@@ -137,11 +137,9 @@ pub async fn handle(
     let req = CreateSessionRequest {
         model,
         prompt: prompt.into(),
-        render_metadata: None,
         system_prompt: Some(system_prompt),
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build),

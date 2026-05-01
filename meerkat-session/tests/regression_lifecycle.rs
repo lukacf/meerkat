@@ -886,12 +886,9 @@ fn create_req(prompt: &str) -> CreateSessionRequest {
     CreateSessionRequest {
         model: "mock".to_string(),
         prompt: prompt.to_string().into(),
-        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,

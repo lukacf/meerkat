@@ -4,24 +4,20 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use meerkat::AgentBuildConfig;
-use meerkat_contracts::SkillsParams;
+use meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::lifecycle::run_primitive::{
-    KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
-    TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
-};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RuntimeTurnMetadata, TurnMetadataOverride};
 use meerkat_core::service::SessionQuery;
-use meerkat_core::skills::{SkillKey, SkillRef};
+use meerkat_core::skills::SkillKey;
 use meerkat_core::{
-    BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, Provider, ToolCategoryOverride,
+    BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, ToolCategoryOverride,
 };
 use meerkat_runtime::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
-use super::skills::reject_retired_skill_references;
 use super::{RpcResponseExt, parse_params, parse_session_id_for_runtime};
 use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
@@ -67,9 +63,7 @@ pub struct CreateSessionParams {
     #[serde(default)]
     pub initial_turn: Option<InitialTurn>,
     #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
@@ -89,9 +83,6 @@ pub struct CreateSessionParams {
     /// Enable shell tool. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_shell: Option<bool>,
-    /// Keep the agent alive after the initial turn (enables comms drain loop).
-    #[serde(default)]
-    pub keep_alive: bool,
     /// Agent name for comms (required when keep_alive is true).
     #[serde(default)]
     pub comms_name: Option<String>,
@@ -107,28 +98,12 @@ pub struct CreateSessionParams {
     /// Explicit budget limits for this session.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimits>,
-    /// Provider-specific parameters (e.g., thinking config).
-    #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
-    /// Override the realm-scoped connection binding for this session.
-    #[serde(default)]
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
     /// Structured skill keys to preload into the system prompt.
     #[serde(default)]
     pub preload_skills: Option<Vec<SkillKey>>,
-    /// Skill IDs to resolve and inject for the first turn.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<SkillRef>>,
-    /// Retired legacy string refs. Kept only to return a typed ingress error
-    /// when old clients send the field.
-    #[serde(default, deserialize_with = "reject_retired_skill_references")]
-    pub skill_references: Option<Vec<String>>,
     /// Key-value labels attached to the session for filtering and metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
-    /// Additional instruction sections appended to the system prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
     /// Opaque application context passed to custom session builders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
@@ -146,71 +121,14 @@ fn default_structured_output_retries() -> u32 {
     2
 }
 
-fn canonical_skill_ids(
-    _runtime: &SessionRuntime,
-    skill_refs: Option<Vec<SkillRef>>,
-) -> Result<Option<Vec<SkillKey>>, meerkat_core::skills::SkillError> {
-    let params = SkillsParams {
-        preload_skills: None,
-        skill_refs,
-    };
-    Ok(params.canonical_skill_keys())
-}
-
-fn create_turn_additional_instructions(
-    requested: Option<Vec<String>>,
-) -> Option<Vec<TurnInstruction>> {
-    requested.map(|instructions| {
-        instructions
-            .into_iter()
-            .map(|body| TurnInstruction {
-                kind: TurnInstructionKind::User,
-                body,
-            })
-            .collect()
-    })
-}
-
-struct CreateTurnMetadataInput {
-    skill_references: Option<Vec<SkillKey>>,
-    additional_instructions: Option<Vec<String>>,
-    model: Option<String>,
-    provider: Option<Provider>,
-    provider_params: Option<serde_json::Value>,
-    provider_for_params: Provider,
-    connection_ref: Option<meerkat_core::ConnectionRef>,
-    keep_alive: bool,
-}
-
-fn create_turn_metadata(input: CreateTurnMetadataInput) -> Option<RuntimeTurnMetadata> {
-    let CreateTurnMetadataInput {
-        skill_references,
-        additional_instructions,
-        model,
-        provider,
-        provider_params,
-        provider_for_params,
-        connection_ref,
-        keep_alive,
-    } = input;
-    let metadata = RuntimeTurnMetadata {
-        skill_references,
-        additional_instructions: create_turn_additional_instructions(additional_instructions),
-        model: model.map(ModelId::new),
-        provider,
-        provider_params: provider_params.map(|params| {
-            TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
-                provider_for_params.as_str(),
-                &params,
-            ))
-        }),
-        connection_ref: connection_ref.map(TurnMetadataOverride::Set),
-        keep_alive: keep_alive.then_some(TurnMetadataOverride::Set(KeepAlivePolicy {
-            ttl: std::time::Duration::from_secs(30),
-            policy: KeepAliveMode::Pinned,
-        })),
-        ..Default::default()
-    };
+fn normalize_create_turn_metadata(
+    metadata: Option<WireRuntimeTurnMetadata>,
+    resolved_model: &str,
+) -> Option<RuntimeTurnMetadata> {
+    let mut metadata: RuntimeTurnMetadata = metadata.map(Into::into)?;
+    if metadata.provider.is_some() && metadata.model.is_none() {
+        metadata.model = Some(ModelId::new(resolved_model));
+    }
     (!metadata.is_empty()).then_some(metadata)
 }
 
@@ -237,23 +155,6 @@ fn create_turn_keep_alive_for_build(metadata: Option<&RuntimeTurnMetadata>) -> b
         metadata.and_then(|metadata| metadata.keep_alive.as_ref()),
         Some(TurnMetadataOverride::Set(_))
     )
-}
-
-fn create_turn_additional_instructions_for_deferred_build(
-    metadata: Option<&RuntimeTurnMetadata>,
-) -> Option<Vec<String>> {
-    metadata
-        .and_then(|metadata| metadata.additional_instructions.as_ref())
-        .map(|instructions| {
-            instructions
-                .iter()
-                .filter_map(|instruction| {
-                    let body = instruction.body.trim();
-                    (!body.is_empty()).then(|| body.to_string())
-                })
-                .collect::<Vec<_>>()
-        })
-        .filter(|instructions| !instructions.is_empty())
 }
 
 /// Parameters for `session/list` (all optional).
@@ -365,16 +266,15 @@ pub async fn handle_create(
     } else {
         None
     };
-    let requested_model = params.model.clone();
-    let model_name = requested_model
-        .clone()
-        .or(runtime_default_model)
-        .unwrap_or_else(|| {
-            meerkat_models::default_model("anthropic")
-                .unwrap_or("claude-sonnet-4-5")
-                .to_string()
-        });
-    let provider = params.provider.as_deref().map(Provider::from_name);
+    let metadata_model = params
+        .turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.model.clone());
+    let model_name = metadata_model.or(runtime_default_model).unwrap_or_else(|| {
+        meerkat_models::default_model("anthropic")
+            .unwrap_or("claude-sonnet-4-5")
+            .to_string()
+    });
 
     // Parse output schema if provided
     let output_schema = match params.output_schema {
@@ -391,39 +291,13 @@ pub async fn handle_create(
         None => None,
     };
 
-    // Validate and canonicalize skill refs before creating a pending session.
-    // This prevents invalid requests from consuming session slots.
-    let skill_refs = match canonical_skill_ids(&runtime, params.skill_refs.clone()) {
-        Ok(r) => r,
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Invalid skill_refs: {e}"),
-            );
-        }
-    };
-    let provider_for_params = provider
-        .or_else(|| Provider::infer_from_model(&model_name))
-        .unwrap_or(Provider::Other);
-    let metadata_model =
-        (requested_model.is_some() || provider.is_some()).then(|| model_name.clone());
-    let initial_turn_metadata = create_turn_metadata(CreateTurnMetadataInput {
-        skill_references: skill_refs.clone(),
-        additional_instructions: params.additional_instructions.clone(),
-        model: metadata_model,
-        provider,
-        provider_params: params.provider_params.clone(),
-        provider_for_params,
-        connection_ref: params.connection_ref.clone(),
-        keep_alive: params.keep_alive,
-    });
+    let initial_turn_metadata =
+        normalize_create_turn_metadata(params.turn_metadata.clone(), &model_name);
 
     let mut build_config = AgentBuildConfig::new(model_name);
     build_config.provider = initial_turn_metadata
         .as_ref()
-        .and_then(|metadata| metadata.provider)
-        .or(provider);
+        .and_then(|metadata| metadata.provider);
     build_config.max_tokens = params.max_tokens;
     build_config.system_prompt = params.system_prompt;
     build_config.output_schema = output_schema;
@@ -446,10 +320,8 @@ pub async fn handle_create(
         create_turn_provider_params_for_build(initial_turn_metadata.as_ref());
     build_config.connection_ref =
         create_turn_connection_ref_for_build(initial_turn_metadata.as_ref());
-    build_config.additional_instructions = defer_initial_turn
-        .then(|| {
-            create_turn_additional_instructions_for_deferred_build(initial_turn_metadata.as_ref())
-        })
+    build_config.initial_turn_metadata = defer_initial_turn
+        .then(|| initial_turn_metadata.clone())
         .flatten();
     build_config.app_context = params.app_context;
     build_config.shell_env = params.shell_env;
@@ -491,6 +363,7 @@ pub async fn handle_create(
     } else {
         None
     };
+    let create_keep_alive = build_config.keep_alive;
     let session_id = match runtime
         .create_session(build_config, params.labels, deferred_prompt)
         .await
@@ -574,7 +447,7 @@ pub async fn handle_create(
     });
 
     // Start the initial turn — route through runtime for V9 consistency
-    let result = if params.keep_alive {
+    let result = if create_keep_alive {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
         let event_tx_for_turn = mcp_event_tx.clone();
@@ -748,12 +621,8 @@ pub async fn handle_read(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::items_after_test_module)]
 mod tests {
-    use super::{
-        CreateSessionParams, CreateSessionResult, CreateTurnMetadataInput,
-        create_turn_additional_instructions_for_deferred_build, create_turn_metadata,
-    };
+    use super::{CreateSessionParams, CreateSessionResult};
     use meerkat_core::Provider;
-    use meerkat_core::skills::SkillKey;
     use std::collections::BTreeMap;
 
     #[test]
@@ -813,68 +682,56 @@ mod tests {
     }
 
     #[test]
-    fn create_session_params_rejects_stale_turn_metadata_field() {
-        let err = serde_json::from_value::<CreateSessionParams>(serde_json::json!({
+    fn create_session_params_accepts_turn_metadata_carrier() {
+        let params = serde_json::from_value::<CreateSessionParams>(serde_json::json!({
             "prompt": "hello",
             "turn_metadata": {
-                "model": "retired-create-model"
+                "model": "gpt-5.4",
+                "provider": "openai",
+                "provider_params": {
+                    "action": "set",
+                    "value": { "temperature": 0.2 }
+                },
+                "additional_instructions": [
+                    { "kind": "user", "body": "stay terse" }
+                ]
             }
         }))
-        .expect_err("session/create must reject stale top-level turn_metadata");
-        let message = err.to_string();
-        assert!(
-            message.contains("turn_metadata") || message.contains("unknown field"),
-            "unexpected error: {message}"
-        );
+        .expect("session/create must accept canonical turn_metadata");
+        let metadata = params
+            .turn_metadata
+            .expect("turn metadata should be present");
+        assert_eq!(metadata.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(metadata.provider, Some(Provider::OpenAI));
+        assert!(metadata.provider_params.is_some());
+        assert!(metadata.additional_instructions.is_some());
     }
 
     #[test]
-    fn create_turn_metadata_carries_first_turn_create_fields() {
-        use meerkat_core::connection::{BindingId, RealmId};
-        use meerkat_core::skills::{SkillName, SourceUuid};
-
-        let skill = SkillKey::new(
-            SourceUuid::parse("33333333-3333-4333-8333-333333333333").expect("source uuid"),
-            SkillName::parse("demo-skill").expect("skill name"),
-        );
-        let connection_ref = meerkat_core::ConnectionRef {
-            realm: RealmId::parse("test-realm").expect("realm"),
-            binding: BindingId::parse("primary").expect("binding"),
-            profile: None,
-        };
-        let metadata = create_turn_metadata(CreateTurnMetadataInput {
-            skill_references: Some(vec![skill.clone()]),
-            additional_instructions: Some(vec!["prefer terse answers".to_string()]),
-            model: Some("gpt-5.4".to_string()),
-            provider: Some(Provider::OpenAI),
-            provider_params: Some(serde_json::json!({ "temperature": 0.2 })),
-            provider_for_params: Provider::OpenAI,
-            connection_ref: Some(connection_ref),
-            keep_alive: true,
-        })
-        .expect("create metadata should be populated");
-
-        assert_eq!(metadata.skill_references, Some(vec![skill]));
-        assert_eq!(
-            metadata.model.as_ref().map(ToString::to_string),
-            Some("gpt-5.4".to_string())
-        );
-        assert_eq!(metadata.provider, Some(Provider::OpenAI));
-        assert_eq!(
-            metadata
-                .additional_instructions
-                .as_ref()
-                .and_then(|instructions| instructions.first())
-                .map(|instruction| instruction.body.as_str()),
-            Some("prefer terse answers")
-        );
-        assert!(metadata.provider_params.is_some());
-        assert!(metadata.connection_ref.is_some());
-        assert!(metadata.keep_alive.is_some());
-        assert_eq!(
-            create_turn_additional_instructions_for_deferred_build(Some(&metadata)),
-            Some(vec!["prefer terse answers".to_string()])
-        );
+    fn create_session_params_rejects_split_turn_metadata_fields() {
+        for field in [
+            "model",
+            "provider",
+            "provider_params",
+            "connection_ref",
+            "keep_alive",
+            "skill_refs",
+            "skill_references",
+            "additional_instructions",
+        ] {
+            let mut value = serde_json::json!({ "prompt": "hello" });
+            value
+                .as_object_mut()
+                .expect("object")
+                .insert(field.to_string(), serde_json::json!("stale"));
+            let err = serde_json::from_value::<CreateSessionParams>(value)
+                .expect_err("session/create must reject split turn metadata fields");
+            let message = err.to_string();
+            assert!(
+                message.contains(field) || message.contains("unknown field"),
+                "unexpected error for {field}: {message}"
+            );
+        }
     }
 
     #[test]

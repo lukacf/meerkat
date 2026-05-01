@@ -8522,13 +8522,8 @@
         "type": "object"
       },
       "RestCreateSessionRequest": {
+        "additionalProperties": false,
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "app_context": {
             "$ref": "#/components/schemas/JsonValue"
           },
@@ -8553,16 +8548,6 @@
           "hooks_override": {
             "$ref": "#/components/schemas/JsonValue"
           },
-          "keep_alive": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "labels": {
             "additionalProperties": {
               "type": "string"
@@ -8572,9 +8557,6 @@
           "max_tokens": {
             "minimum": 0,
             "type": "integer"
-          },
-          "model": {
-            "type": "string"
           },
           "output_schema": {
             "$ref": "#/components/schemas/JsonValue"
@@ -8598,23 +8580,11 @@
               }
             ]
           },
-          "provider": {
-            "type": "string"
-          },
-          "provider_params": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
           "shell_env": {
             "additionalProperties": {
               "type": "string"
             },
             "type": "object"
-          },
-          "skill_refs": {
-            "items": {
-              "$ref": "#/components/schemas/SkillRef"
-            },
-            "type": "array"
           },
           "structured_output_retries": {
             "minimum": 0,
@@ -8622,6 +8592,9 @@
           },
           "system_prompt": {
             "type": "string"
+          },
+          "turn_metadata": {
+            "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
           },
           "verbose": {
             "type": "boolean"
@@ -9815,6 +9788,7 @@
         "description": "Typed event envelope for the generic `session/external_event` and\n`/sessions/{id}/external-events` surfaces.\n\nNot `PartialEq`: the `GenericJson.payload` and\n`PeerResponseTerminal.result` bodies ride as `Box<RawValue>` — opaque\ncaller-supplied JSON that never gets pattern-matched at this layer.\nAllow-listed per `dogma-blind-spots` §7.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "description": "Generic external JSON event admitted as `Input::ExternalEvent`.",
             "properties": {
               "blocks": {
@@ -9843,6 +9817,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "description": "Reserved typed semantic. Callers must use the dedicated\n`session/peer_response_terminal` / `/peer-response-terminal` surface\ninstead of routing terminal peer responses through the generic event\ningress.",
             "properties": {
               "display_name": {

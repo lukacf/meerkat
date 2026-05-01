@@ -804,20 +804,21 @@ describe("Session wrappers", () => {
       params: {
         prompt: "Hello",
         labels: { team: "sdk" },
-        additional_instructions: ["be terse"],
         app_context: { tenant: "acme" },
         shell_env: { FOO: "bar" },
         external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
         preload_skills: [
           { source_uuid: "00000000-0000-4000-8000-000000000001", skill_name: "read" },
         ],
-        skill_refs: [
-          {
-            kind: "structured",
-            source_uuid: "00000000-0000-4000-8000-000000000001",
-            skill_name: "read",
-          },
-        ],
+        turn_metadata: {
+          additional_instructions: [{ kind: "user", body: "be terse" }],
+          skill_references: [
+            {
+              source_uuid: "00000000-0000-4000-8000-000000000001",
+              skill_name: "read",
+            },
+          ],
+        },
       },
     });
   });

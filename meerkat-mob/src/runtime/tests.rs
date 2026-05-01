@@ -7974,7 +7974,6 @@ async fn test_resume_reconciles_orphaned_sessions() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "orphan".to_string().into(),
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
@@ -7982,7 +7981,6 @@ async fn test_resume_reconciles_orphaned_sessions() {
                 comms_name: Some("test-mob/worker/orphan".to_string()),
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -8928,7 +8926,6 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
-            render_metadata: None,
             system_prompt: Some("Persisted resume prompt".to_string()),
             max_tokens: Some(4096),
             event_tx: None,
@@ -8936,7 +8933,6 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
                 comms_name: Some("test-mob/worker/w-resume".to_string()),
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,
@@ -9061,7 +9057,6 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
         .create_session(CreateSessionRequest {
             model: "claude-sonnet-4-5".to_string(),
             prompt: "seed".to_string().into(),
-            render_metadata: None,
             system_prompt: Some("Persisted resume prompt".to_string()),
             max_tokens: Some(4096),
             event_tx: None,
@@ -9069,7 +9064,6 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
                 comms_name: Some("test-mob/worker/w-resume".to_string()),
                 ..Default::default()
             }),
-            skill_references: None,
             initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             labels: None,

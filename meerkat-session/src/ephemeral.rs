@@ -3216,11 +3216,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("hello".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::RunImmediately,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions {
@@ -3264,11 +3262,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -3333,11 +3329,9 @@ mod runtime_turn_metadata_tests {
             .create_session(CreateSessionRequest {
                 model: "metadata-probe-model".to_string(),
                 prompt: ContentInput::Text("defer".to_string()),
-                render_metadata: None,
                 system_prompt: None,
                 max_tokens: None,
                 event_tx: None,
-                skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(SessionBuildOptions::default()),
@@ -3578,11 +3572,9 @@ mod inline_video_admission_tests {
         CreateSessionRequest {
             model: "providerless-video-alias".to_string(),
             prompt,
-            render_metadata: None,
             system_prompt: None,
             max_tokens: None,
             event_tx: None,
-            skill_references: None,
             initial_turn,
             deferred_prompt_policy: DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions::default()),

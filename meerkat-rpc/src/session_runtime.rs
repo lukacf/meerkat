@@ -791,6 +791,26 @@ impl SessionRuntime {
         meerkat_runtime::runtime_stamped_prompt_turn_metadata(metadata)
     }
 
+    fn merge_initial_turn_metadata(
+        initial_turn_metadata: Option<RuntimeTurnMetadata>,
+        service_turn_metadata: Option<RuntimeTurnMetadata>,
+    ) -> Result<Option<RuntimeTurnMetadata>, RpcError> {
+        match (initial_turn_metadata, service_turn_metadata) {
+            (None, None) => Ok(None),
+            (Some(metadata), None) | (None, Some(metadata)) => Ok(Some(metadata)),
+            (Some(mut initial_turn_metadata), Some(service_turn_metadata)) => {
+                initial_turn_metadata
+                    .merge(service_turn_metadata)
+                    .map_err(|error| RpcError {
+                        code: error::INVALID_PARAMS,
+                        message: format!("conflicting runtime turn metadata: {error}"),
+                        data: None,
+                    })?;
+                Ok(Some(initial_turn_metadata))
+            }
+        }
+    }
+
     fn turn_metadata_provider_params(metadata: &RuntimeTurnMetadata) -> Option<serde_json::Value> {
         match metadata.provider_params.as_ref() {
             Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
@@ -2350,9 +2370,9 @@ impl SessionRuntime {
             },
             event_type,
             payload,
+            render_metadata: None,
             blocks,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
-            render_metadata: None,
         });
 
         self.runtime_adapter
@@ -2559,7 +2579,30 @@ impl SessionRuntime {
                 runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
             }
 
-            if let Some(metadata) = turn_metadata {
+            let pending_turn_metadata = match Self::merge_initial_turn_metadata(
+                build_config.initial_turn_metadata.take(),
+                service_turn_metadata.clone(),
+            ) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    self.restore_pending_from_promoting(
+                        session_id,
+                        rollback_build_config.clone(),
+                        effective_llm_identity.clone(),
+                        labels,
+                        saved_deferred_prompt,
+                        created_at_secs,
+                        updated_at_secs,
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+            let pending_turn_metadata_ref = pending_turn_metadata.as_ref();
+            let pending_keep_alive_override =
+                Self::turn_metadata_keep_alive_override(pending_turn_metadata_ref);
+
+            if let Some(metadata) = pending_turn_metadata_ref {
                 if metadata.provider.is_some() && metadata.model.is_none() {
                     self.restore_pending_from_promoting(
                         session_id,
@@ -2616,7 +2659,7 @@ impl SessionRuntime {
                     };
                     Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 }
-                if let Some(keep_alive) = keep_alive_override {
+                if let Some(keep_alive) = pending_keep_alive_override {
                     build_config.keep_alive = keep_alive;
                 }
             }
@@ -2656,18 +2699,16 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
+            build.initial_turn_metadata = pending_turn_metadata.clone();
 
             match self
                 .service
                 .create_session(CreateSessionRequest {
                     model: build_config.model.clone(),
                     prompt: runtime_prompt.clone(),
-                    render_metadata: None,
                     system_prompt: build_config.system_prompt.clone(),
                     max_tokens: build_config.max_tokens,
                     event_tx: None,
-
-                    skill_references: None,
                     initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
                     build: Some(build),
@@ -2732,7 +2773,7 @@ impl SessionRuntime {
                         system_prompt: None,
                         event_tx: Some(event_tx),
                         pre_turn_context_appends: pre_turn_context_appends.clone(),
-                        turn_metadata: service_turn_metadata.clone(),
+                        turn_metadata: pending_turn_metadata.clone(),
                     },
                     match primitive {
                         RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -3020,8 +3061,31 @@ impl SessionRuntime {
             if let Some(deferred) = deferred_prompt {
                 turn_prompt = merge_content_inputs(deferred, turn_prompt);
             }
+            let pending_turn_metadata = match Self::merge_initial_turn_metadata(
+                build_config.initial_turn_metadata.take(),
+                service_turn_metadata.clone(),
+            ) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    self.restore_pending_from_promoting(
+                        session_id,
+                        rollback_build_config.clone(),
+                        effective_llm_identity.clone(),
+                        labels,
+                        saved_deferred_prompt,
+                        saved_created_at_secs,
+                        saved_updated_at_secs,
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
+            let pending_turn_metadata_ref = pending_turn_metadata.as_ref();
+            let pending_keep_alive_override =
+                Self::turn_metadata_keep_alive_override(pending_turn_metadata_ref);
+
             // Apply per-turn metadata to the pending build config.
-            if let Some(metadata) = turn_metadata_ref {
+            if let Some(metadata) = pending_turn_metadata_ref {
                 if metadata.provider.is_some() && metadata.model.is_none() {
                     self.restore_pending_from_promoting(
                         session_id,
@@ -3078,7 +3142,7 @@ impl SessionRuntime {
                     };
                     Self::apply_llm_identity_to_build_config(&mut build_config, &resolved_identity);
                 }
-                if let Some(keep_alive) = keep_alive_override {
+                if let Some(keep_alive) = pending_keep_alive_override {
                     build_config.keep_alive = keep_alive;
                 }
             }
@@ -3118,7 +3182,7 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
-            build.initial_turn_metadata = service_turn_metadata.clone();
+            build.initial_turn_metadata = pending_turn_metadata.clone();
 
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
@@ -3127,12 +3191,9 @@ impl SessionRuntime {
             let req = CreateSessionRequest {
                 model: build_config.model.clone(),
                 prompt: turn_prompt.clone(),
-                render_metadata: None,
                 system_prompt: build_config.system_prompt.clone(),
                 max_tokens: build_config.max_tokens,
                 event_tx: None,
-
-                skill_references: None,
                 initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
                 build: Some(build),
@@ -3150,7 +3211,7 @@ impl SessionRuntime {
                                 system_prompt: None,
                                 event_tx: Some(event_tx),
                                 pre_turn_context_appends: Vec::new(),
-                                turn_metadata: service_turn_metadata.clone(),
+                                turn_metadata: pending_turn_metadata.clone(),
                             },
                         )
                         .await;
@@ -4739,6 +4800,76 @@ mod tests {
                 .and_then(|instructions| instructions.first())
                 .map(|instruction| instruction.body.as_str()),
             Some("runtime note")
+        );
+    }
+
+    #[test]
+    fn pending_initial_turn_metadata_merge_preserves_create_and_turn_carriers() {
+        let skill = SkillKey::builtin(SkillName::parse("merge-probe").expect("valid skill name"));
+        let initial_turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-sonnet-4-5")),
+            skill_references: Some(vec![skill.clone()]),
+            ..Default::default()
+        };
+        let service_turn_metadata =
+            SessionRuntime::runtime_stamped_prompt_turn_metadata(Some(RuntimeTurnMetadata {
+                additional_instructions: Some(vec![
+                    meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                        body: "preserve turn instruction".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            }));
+
+        let merged = SessionRuntime::merge_initial_turn_metadata(
+            Some(initial_turn_metadata),
+            Some(service_turn_metadata),
+        )
+        .expect("compatible metadata should merge")
+        .expect("merged metadata should exist");
+
+        assert_eq!(
+            merged.model.as_ref().map(ToString::to_string).as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(merged.skill_references.as_deref(), Some([skill].as_slice()));
+        assert_eq!(
+            merged
+                .additional_instructions
+                .as_ref()
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("preserve turn instruction")
+        );
+        assert_eq!(
+            merged.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn pending_initial_turn_metadata_merge_rejects_divergent_scalars() {
+        let initial_turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("claude-sonnet-4-5")),
+            ..Default::default()
+        };
+        let service_turn_metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-5.4")),
+            ..Default::default()
+        };
+
+        let err = SessionRuntime::merge_initial_turn_metadata(
+            Some(initial_turn_metadata),
+            Some(service_turn_metadata),
+        )
+        .expect_err("divergent scalar metadata should be rejected");
+
+        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert!(
+            err.message.contains("model"),
+            "unexpected error message: {}",
+            err.message
         );
     }
 

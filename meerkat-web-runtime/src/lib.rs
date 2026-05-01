@@ -1220,12 +1220,9 @@ fn build_session_request_with_connection_ref(
     Ok(meerkat_core::service::CreateSessionRequest {
         model: config.model.clone(),
         prompt: "".into(),
-        render_metadata: None,
         system_prompt,
         max_tokens: Some(config.max_tokens),
         event_tx: None,
-
-        skill_references: None,
         initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
         deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
         build: Some(build_config.to_session_build_options()),

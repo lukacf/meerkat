@@ -120,22 +120,81 @@ class SkillsParams:
     turn_metadata: Optional[WireRuntimeTurnMetadata] = None
 
 
+Provider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
+WireReasoningMode = Literal['emit', 'silent', 'off']
+WireTurnInstructionKind = Literal['user', 'system', 'host']
+WireKeepAliveMode = Literal['pinned', 'policy_driven']
+
+
+class SkillKey(TypedDict):
+    source_uuid: str
+    skill_name: str
+
+
+class TurnToolOverlay(TypedDict, total=False):
+    allowed_tools: NotRequired[list[str] | None]
+    blocked_tools: NotRequired[list[str] | None]
+
+
+class WireTurnInstruction(TypedDict):
+    kind: WireTurnInstructionKind
+    body: str
+
+
+class WireProviderParamsOverride(TypedDict, total=False):
+    temperature: NotRequired[float | None]
+    top_p: NotRequired[float | None]
+    max_output_tokens: NotRequired[int | None]
+    reasoning: NotRequired[WireReasoningMode | None]
+    thinking_budget_tokens: NotRequired[int | None]
+    provider_tag: NotRequired[dict[str, object] | None]
+
+
+class WireKeepAlivePolicy(TypedDict):
+    ttl_secs: int
+    policy: WireKeepAliveMode
+
+
+class WireTurnMetadataClearOverride(TypedDict):
+    action: Literal['clear']
+
+
+class WireProviderParamsSetOverride(TypedDict):
+    action: Literal['set']
+    value: WireProviderParamsOverride
+
+
+class WireConnectionRefSetOverride(TypedDict):
+    action: Literal['set']
+    value: WireConnectionRef
+
+
+class WireKeepAliveSetOverride(TypedDict):
+    action: Literal['set']
+    value: WireKeepAlivePolicy
+
+
+WireTurnMetadataOverride = WireProviderParamsSetOverride | WireTurnMetadataClearOverride
+WireTurnMetadataOverride2 = WireConnectionRefSetOverride | WireTurnMetadataClearOverride
+WireTurnMetadataOverride3 = WireKeepAliveSetOverride | WireTurnMetadataClearOverride
+
+
 @dataclass
 class WireRuntimeTurnMetadata:
     """Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].
 
 The per-turn seam between control plane and core is fully typed —
 `serde_json::Value` does not appear here."""
-    additional_instructions: Optional[list[Any]] = None
-    connection_ref: Optional[Any] = None
-    flow_tool_overlay: Optional[Any] = None
-    handling_mode: Optional[Any] = None
-    keep_alive: Optional[Any] = None
+    additional_instructions: Optional[list[WireTurnInstruction]] = None
+    connection_ref: Optional[WireTurnMetadataOverride2] = None
+    flow_tool_overlay: Optional[TurnToolOverlay] = None
+    handling_mode: Optional[WireHandlingMode] = None
+    keep_alive: Optional[WireTurnMetadataOverride3] = None
     model: Optional[str] = None
-    provider: Optional[Any] = None
-    provider_params: Optional[Any] = None
-    render_metadata: Optional[Any] = None
-    skill_references: Optional[list[Any]] = None
+    provider: Optional[Provider] = None
+    provider_params: Optional[WireTurnMetadataOverride] = None
+    render_metadata: Optional[WireRenderMetadata] = None
+    skill_references: Optional[list[SkillKey]] = None
 
 
 @dataclass
@@ -454,15 +513,15 @@ class MobMemberSendParams:
     agent_identity: str
     content: WireContentInput
     mob_id: str
-    handling_mode: Optional[Literal['queue', 'steer']] = None
-    render_metadata: Optional[dict[str, Any]] = None
+    handling_mode: Optional[WireHandlingMode] = None
+    render_metadata: Optional[WireRenderMetadata] = None
 
 
 @dataclass
 class MobMemberSendResult:
     """Response payload for host-side mob member delivery."""
     agent_identity: str
-    handling_mode: Literal['queue', 'steer']
+    handling_mode: WireHandlingMode
     member_ref: WireMemberRef
     mob_id: str
 
@@ -477,8 +536,8 @@ semantics without introducing a separate thread/project runtime."""
     content: WireContentInput
     mob_id: str
     spec: MobMemberSpecWire
-    handling_mode: Optional[Literal['queue', 'steer']] = None
-    render_metadata: Optional[dict[str, Any]] = None
+    handling_mode: Optional[WireHandlingMode] = None
+    render_metadata: Optional[WireRenderMetadata] = None
 
 
 @dataclass
@@ -902,7 +961,7 @@ class MobProfileInput:
     max_inline_peer_notifications: Optional[int] = None
     output_schema: Optional[Any] = None
     peer_description: Optional[str] = None
-    provider_params: Optional[Any] = None
+    provider_params: Optional[WireProviderParamsOverride] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
     skills: Optional[list[str]] = None
     tools: Optional[MobToolConfigInput] = None
@@ -1202,8 +1261,8 @@ class McpLiveOpResponse:
 @dataclass
 class WireRenderMetadata:
     """Public render metadata contract for mob member delivery."""
-    class_: Literal['user_prompt', 'peer_message', 'peer_request', 'peer_response', 'external_event', 'flow_step', 'continuation', 'system_notice', 'tool_scope_notice', 'ops_progress']
-    salience: Optional[Literal['background', 'normal', 'important', 'urgent']] = None
+    class_: WireRenderClass
+    salience: Optional[WireRenderSalience] = None
 
 
 # Typed external peer identity for public mob wiring surfaces.

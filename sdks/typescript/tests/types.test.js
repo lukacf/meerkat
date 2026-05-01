@@ -788,7 +788,10 @@ describe("Session wrappers", () => {
     await client.createSession("Hello", {
       labels: { team: "sdk" },
       turnMetadata: {
-        additionalInstructions: ["be terse"],
+        additionalInstructions: [
+          "be terse",
+          { kind: "host", body: "preserve typed instruction kind" },
+        ],
         skillReferences: [
           { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "preload" },
           { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
@@ -808,7 +811,10 @@ describe("Session wrappers", () => {
         shell_env: { FOO: "bar" },
         external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
         turn_metadata: {
-          additional_instructions: [{ kind: "user", body: "be terse" }],
+          additional_instructions: [
+            { kind: "user", body: "be terse" },
+            { kind: "host", body: "preserve typed instruction kind" },
+          ],
           skill_references: [
             {
               source_uuid: "00000000-0000-4000-8000-000000000001",

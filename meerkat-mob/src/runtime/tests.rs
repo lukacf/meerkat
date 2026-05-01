@@ -550,6 +550,12 @@ struct MockSessionService {
     flow_turn_fail_sessions: RwLock<HashSet<SessionId>>,
     flow_turn_completed_result: RwLock<String>,
     flow_turn_overlays: RwLock<Vec<(SessionId, Option<meerkat_core::service::TurnToolOverlay>)>>,
+    start_turn_metadata: RwLock<
+        Vec<(
+            SessionId,
+            Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+        )>,
+    >,
     /// Session IDs for which `subscribe_session_events` must return an error.
     subscribe_fail_sessions: RwLock<HashSet<SessionId>>,
     /// Session IDs for which `read()`/`list()` should report `is_active=true`.
@@ -605,6 +611,7 @@ impl MockSessionService {
             flow_turn_fail_sessions: RwLock::new(HashSet::new()),
             flow_turn_completed_result: RwLock::new("\"Turn completed\"".to_string()),
             flow_turn_overlays: RwLock::new(Vec::new()),
+            start_turn_metadata: RwLock::new(Vec::new()),
             subscribe_fail_sessions: RwLock::new(HashSet::new()),
             active_sessions: RwLock::new(HashSet::new()),
         }
@@ -888,6 +895,15 @@ impl MockSessionService {
         &self,
     ) -> Vec<(SessionId, Option<meerkat_core::service::TurnToolOverlay>)> {
         self.flow_turn_overlays.read().await.clone()
+    }
+
+    async fn recorded_start_turn_metadata(
+        &self,
+    ) -> Vec<(
+        SessionId,
+        Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
+    )> {
+        self.start_turn_metadata.read().await.clone()
     }
 
     async fn trusted_peer_names(&self, session_id: &SessionId) -> Vec<String> {
@@ -1177,6 +1193,10 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .push((id.clone(), flow_tool_overlay));
+        self.start_turn_metadata
+            .write()
+            .await
+            .push((id.clone(), req.turn_metadata.clone()));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
@@ -14340,6 +14360,72 @@ async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
         baseline_start_turn_calls + 1,
         "turn-driven external dispatch should issue start_turn"
     );
+}
+
+#[tokio::test]
+async fn test_turn_driven_spawn_replays_turn_metadata_on_first_member_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        additional_instructions: Some(vec![
+            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                body: "preserve spawn metadata".to_string(),
+            },
+        ]),
+        flow_tool_overlay: Some(TurnToolOverlay {
+            allowed_tools: Some(vec!["read".to_string()]),
+            blocked_tools: Some(vec!["write".to_string()]),
+        }),
+        ..Default::default()
+    };
+
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("lead", AgentIdentity::from("l-turn-metadata"))
+                .with_runtime_mode(crate::MobRuntimeMode::TurnDriven)
+                .with_turn_metadata(turn_metadata),
+        )
+        .await
+        .expect("spawn turn-driven lead with metadata");
+    let baseline_start_turn_calls = service.start_turn_call_count();
+
+    handle
+        .member(&AgentIdentity::from("l-turn-metadata"))
+        .await
+        .expect("member handle")
+        .send("first real turn", meerkat_core::types::HandlingMode::Queue)
+        .await
+        .expect("first turn should execute");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn_calls + 1
+    );
+    let recorded = service.recorded_start_turn_metadata().await;
+    let (_, metadata) = recorded
+        .last()
+        .expect("turn-driven send should record start_turn metadata");
+    let metadata = metadata
+        .as_ref()
+        .expect("turn-driven first turn should carry turn_metadata");
+    let instruction = metadata
+        .additional_instructions
+        .as_ref()
+        .and_then(|instructions| instructions.first())
+        .expect("spawn instruction should be replayed");
+    assert_eq!(
+        instruction.kind,
+        meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host
+    );
+    assert_eq!(instruction.body, "preserve spawn metadata");
+    assert_eq!(
+        metadata.flow_tool_overlay,
+        Some(TurnToolOverlay {
+            allowed_tools: Some(vec!["read".to_string()]),
+            blocked_tools: Some(vec!["write".to_string()]),
+        })
+    );
+    assert_eq!(metadata.handling_mode, Some(HandlingMode::Queue));
 }
 
 #[tokio::test]

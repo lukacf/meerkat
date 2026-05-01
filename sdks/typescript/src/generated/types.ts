@@ -86,17 +86,66 @@ export interface SkillsParams {
   turn_metadata?: WireRuntimeTurnMetadata;
 }
 
+export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
+export type WireReasoningMode = "emit" | "silent" | "off";
+export type WireTurnInstructionKind = "user" | "system" | "host";
+export type WireKeepAliveMode = "pinned" | "policy_driven";
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export interface SkillKey {
+  source_uuid: string;
+  skill_name: string;
+}
+
+export interface TurnToolOverlay {
+  allowed_tools?: string[] | null;
+  blocked_tools?: string[] | null;
+}
+
+export interface WireTurnInstruction {
+  kind: WireTurnInstructionKind;
+  body: string;
+}
+
+export interface WireProviderParamsOverride {
+  temperature?: number | null;
+  top_p?: number | null;
+  max_output_tokens?: number | null;
+  reasoning?: WireReasoningMode | null;
+  thinking_budget_tokens?: number | null;
+  provider_tag?: Record<string, JsonValue> | null;
+}
+
+export interface WireKeepAlivePolicy {
+  ttl_secs: number;
+  policy: WireKeepAliveMode;
+}
+
+export type WireTurnMetadataOverrideFor<T> =
+  | { action: "set"; value: T }
+  | { action: "clear" };
+export type WireTurnMetadataOverride = WireTurnMetadataOverrideFor<WireProviderParamsOverride>;
+export type WireTurnMetadataOverride2 = WireTurnMetadataOverrideFor<WireConnectionRef>;
+export type WireTurnMetadataOverride3 = WireTurnMetadataOverrideFor<WireKeepAlivePolicy>;
+
+
 export interface WireRuntimeTurnMetadata {
-  additional_instructions?: unknown[];
-  connection_ref?: unknown;
-  flow_tool_overlay?: unknown;
-  handling_mode?: unknown;
-  keep_alive?: unknown;
+  additional_instructions?: WireTurnInstruction[];
+  connection_ref?: WireTurnMetadataOverride2;
+  flow_tool_overlay?: TurnToolOverlay;
+  handling_mode?: WireHandlingMode;
+  keep_alive?: WireTurnMetadataOverride3;
   model?: string;
-  provider?: unknown;
-  provider_params?: unknown;
-  render_metadata?: unknown;
-  skill_references?: unknown[];
+  provider?: Provider;
+  provider_params?: WireTurnMetadataOverride;
+  render_metadata?: WireRenderMetadata;
+  skill_references?: SkillKey[];
 }
 
 export interface McpAddParams {
@@ -334,23 +383,23 @@ export interface MobEventsResult {
 export interface MobMemberSendParams {
   agent_identity: string;
   content: WireContentInput;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: WireHandlingMode;
   mob_id: string;
-  render_metadata?: Record<string, unknown>;
+  render_metadata?: WireRenderMetadata;
 }
 
 export interface MobMemberSendResult {
   agent_identity: string;
-  handling_mode: "queue" | "steer";
+  handling_mode: WireHandlingMode;
   member_ref: WireMemberRef;
   mob_id: string;
 }
 
 export interface MobIngressInteractionParams {
   content: WireContentInput;
-  handling_mode?: "queue" | "steer";
+  handling_mode?: WireHandlingMode;
   mob_id: string;
-  render_metadata?: Record<string, unknown>;
+  render_metadata?: WireRenderMetadata;
   spec: MobMemberSpecWire;
 }
 
@@ -666,7 +715,7 @@ export interface MobProfileInput {
   model: string;
   output_schema?: unknown;
   peer_description?: string;
-  provider_params?: unknown;
+  provider_params?: WireProviderParamsOverride;
   runtime_mode?: WireMobRuntimeMode;
   skills?: string[];
   tools?: MobToolConfigInput;
@@ -1506,8 +1555,8 @@ export type PeerReachability = "unknown" | "reachable" | "unreachable";
 export type PeerReachabilityReason = "offline_or_no_ack" | "transport_error" | "admission_dropped";
 
 export interface WireRenderMetadata {
-  class: "user_prompt" | "peer_message" | "peer_request" | "peer_response" | "external_event" | "flow_step" | "continuation" | "system_notice" | "tool_scope_notice" | "ops_progress";
-  salience?: "background" | "normal" | "important" | "urgent";
+  class: WireRenderClass;
+  salience?: WireRenderSalience;
 }
 
 export interface WireTrustedPeerIdentityEd25519PublicKey {

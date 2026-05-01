@@ -123,7 +123,7 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | `options.turnMetadata.provider` | `string` | Resolved from the model registry | Force a specific provider (`"anthropic"`, `"openai"`, `"gemini"`). |
 | `options.turnMetadata.providerParams` | `TurnMetadataOverride<Record<string, unknown>>` | `undefined` | Provider-specific parameters (e.g. thinking config). |
 | `options.turnMetadata.skillReferences` | `SkillRef[]` | `undefined` | Canonical structured skill references for the first turn. |
-| `options.turnMetadata.additionalInstructions` | `string[]` | `undefined` | Extra instruction blocks appended to the system prompt. |
+| `options.turnMetadata.additionalInstructions` | `(string \| TurnInstruction)[]` | `undefined` | Extra typed instruction blocks appended to the system prompt. |
 | `options.turnMetadata.keepAlive` | `TurnMetadataOverride<KeepAlivePolicy>` | `undefined` | Run in keep-alive mode for inter-agent comms. |
 | `options.labels` | `Record<string, string>` | `undefined` | Session labels used for filtering and metadata. |
 | `options.appContext` | `unknown` | `undefined` | Opaque app context passed to custom builders. |

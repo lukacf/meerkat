@@ -54,6 +54,7 @@ import {
   type RuntimeResetResult,
   type RuntimeRetireResult,
   type RuntimeStateResult,
+  type WireTurnInstruction,
   type WireInputState,
   type McpAddParams,
   type McpLiveOpResponse,
@@ -107,6 +108,7 @@ import type {
   KeepAlivePolicy,
   RunResult,
   RuntimeTurnMetadata,
+  TurnInstructionInput,
   Schedule,
   ScheduleListOptions,
   ScheduleOccurrencesOptions,
@@ -208,7 +210,7 @@ type RuntimeTurnMetadataPayload = NonNullable<MobTurnStartParams["turn_metadata"
 
 function turnKeepAliveOverride(
   keepAlive: TurnMetadataOverride<KeepAlivePolicy> | undefined,
-): Record<string, unknown> | undefined {
+): RuntimeTurnMetadataPayload["keep_alive"] | undefined {
   if (keepAlive === undefined) return undefined;
   if (keepAlive.action === "clear") return { action: "clear" };
   return {
@@ -220,11 +222,20 @@ function turnKeepAliveOverride(
   };
 }
 
-function runtimeProviderPayload(provider: string | undefined): string | undefined {
+function turnInstructionPayload(instruction: TurnInstructionInput): WireTurnInstruction {
+  if (typeof instruction === "string") {
+    return { kind: "user", body: instruction };
+  }
+  return { kind: instruction.kind, body: instruction.body };
+}
+
+function runtimeProviderPayload(
+  provider: string | undefined,
+): RuntimeTurnMetadataPayload["provider"] | undefined {
   if (provider === undefined) return undefined;
   if (provider === "open_a_i" || provider === "open_ai") return "openai";
   if (["anthropic", "openai", "gemini", "self_hosted", "other"].includes(provider)) {
-    return provider;
+    return provider as RuntimeTurnMetadataPayload["provider"];
   }
   return "other";
 }
@@ -312,10 +323,7 @@ function runtimeTurnMetadataPayload(
     };
   }
   if (options.additionalInstructions != null) {
-    metadata.additional_instructions = options.additionalInstructions.map((body) => ({
-      kind: "user",
-      body,
-    }));
+    metadata.additional_instructions = options.additionalInstructions.map(turnInstructionPayload);
   }
   const keepAlive = turnKeepAliveOverride(options.keepAlive);
   if (keepAlive) metadata.keep_alive = keepAlive;

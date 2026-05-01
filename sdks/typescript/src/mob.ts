@@ -31,7 +31,7 @@ export type MobRenderClass =
   | "tool_scope_notice"
   | "ops_progress";
 
-export interface MobRenderMetadata extends Record<string, unknown> {
+export interface MobRenderMetadata {
   class: MobRenderClass;
   salience?: "background" | "normal" | "important" | "urgent";
 }

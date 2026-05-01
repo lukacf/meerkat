@@ -242,11 +242,20 @@ export interface KeepAlivePolicy {
   readonly ttlSecs: number;
 }
 
+export type TurnInstructionKind = "user" | "system" | "host";
+
+export interface TurnInstruction {
+  readonly kind: TurnInstructionKind;
+  readonly body: string;
+}
+
+export type TurnInstructionInput = string | TurnInstruction;
+
 /** Canonical runtime metadata carrier for session creation and turn starts. */
 export interface RuntimeTurnMetadata {
   readonly skillReferences?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
-  readonly additionalInstructions?: string[];
+  readonly additionalInstructions?: TurnInstructionInput[];
   readonly keepAlive?: TurnMetadataOverride<KeepAlivePolicy>;
   readonly model?: string;
   readonly provider?: string;

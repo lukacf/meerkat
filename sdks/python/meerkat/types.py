@@ -8,7 +8,7 @@ prefixed generated types which are now an internal implementation detail.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, NewType, TypedDict, Union
+from typing import Any, Literal, NewType, NotRequired, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
@@ -163,6 +163,19 @@ class KeepAliveSetOverride(TypedDict):
     value: KeepAlivePolicy | dict[str, Any]
 
 
+TurnInstructionKind = Literal["user", "system", "host"]
+
+
+class TurnInstruction(TypedDict):
+    kind: TurnInstructionKind
+    body: str
+
+
+class TurnToolOverlay(TypedDict, total=False):
+    allowed_tools: NotRequired[list[str] | None]
+    blocked_tools: NotRequired[list[str] | None]
+
+
 ProviderParamsOverride = ProviderParamsSetOverride | ClearTurnMetadataOverride
 ConnectionRefOverride = ConnectionRefSetOverride | ClearTurnMetadataOverride
 KeepAliveOverride = KeepAliveSetOverride | ClearTurnMetadataOverride
@@ -177,8 +190,8 @@ class RuntimeTurnMetadata(TypedDict, total=False):
     connection_ref: ConnectionRefOverride
     keep_alive: KeepAliveOverride
     skill_references: list[SkillRef]
-    flow_tool_overlay: dict[str, Any]
-    additional_instructions: list[str] | list[dict[str, str]]
+    flow_tool_overlay: TurnToolOverlay
+    additional_instructions: list[str | TurnInstruction]
 
 
 class TextBlock(TypedDict):

@@ -1,4 +1,5 @@
 import { MeerkatClient } from "../src/index.js";
+import type { MemberSendOptions } from "../src/mob.js";
 import type {
   MobCreateOptions,
   MobDefinition,
@@ -54,7 +55,10 @@ const publicRuntimeTurnMetadata: RuntimeTurnMetadata = {
   skillReferences: [
     { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
   ],
-  additionalInstructions: ["stay concise"],
+  additionalInstructions: [
+    "stay concise",
+    { kind: "host", body: "preserve typed instruction kind" },
+  ],
   keepAlive: {
     action: "set",
     value: { policy: "pinned", ttlSecs: 30 },
@@ -213,7 +217,7 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   turnMetadata: {
     skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
     flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
-    additionalInstructions: ["stay concise"],
+    additionalInstructions: [{ kind: "system", body: "stay concise" }],
     keepAlive: {
       action: "set",
       value: { policy: "pinned", ttlSecs: 30 },
@@ -251,6 +255,16 @@ void publicMobTurnStartClient.mobTurnStart(
 void publicMobTurnStartOptions;
 void publicMobTurnStartOptionsWithUnknown;
 void generatedMobTurnStartOptionCoverage;
+
+const memberSendOptionsWithUnknownRenderMetadata: MemberSendOptions = {
+  renderMetadata: {
+    class: "peer_message",
+    // @ts-expect-error render metadata only exposes typed render fields.
+    arbitrary: "not a render metadata field",
+  },
+};
+
+void memberSendOptionsWithUnknownRenderMetadata;
 
 const publicPeerResponsePeerId =
   "00000000-0000-4000-8000-000000000161" as PeerId;

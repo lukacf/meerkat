@@ -259,6 +259,22 @@ def _promote_nested_schema_def(name: str) -> bool:
     return name.startswith("Realtime") or name in {
         "AudioFormatMismatchContext",
         "ToolCallTimeoutContext",
+        "Provider",
+        "SkillKey",
+        "TurnToolOverlay",
+        "WireHandlingMode",
+        "WireKeepAliveMode",
+        "WireKeepAlivePolicy",
+        "WireProviderParamsOverride",
+        "WireReasoningMode",
+        "WireRenderClass",
+        "WireRenderMetadata",
+        "WireRenderSalience",
+        "WireTurnInstruction",
+        "WireTurnInstructionKind",
+        "WireTurnMetadataOverride",
+        "WireTurnMetadataOverride2",
+        "WireTurnMetadataOverride3",
         "WireTrustedPeerIdentity",
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
         *COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES,
@@ -744,6 +760,67 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
         types_content += f"\n{doc_block}\n{name} = {alias_type}\n"
 
+    types_content += '''
+Provider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
+WireReasoningMode = Literal['emit', 'silent', 'off']
+WireTurnInstructionKind = Literal['user', 'system', 'host']
+WireKeepAliveMode = Literal['pinned', 'policy_driven']
+
+
+class SkillKey(TypedDict):
+    source_uuid: str
+    skill_name: str
+
+
+class TurnToolOverlay(TypedDict, total=False):
+    allowed_tools: NotRequired[list[str] | None]
+    blocked_tools: NotRequired[list[str] | None]
+
+
+class WireTurnInstruction(TypedDict):
+    kind: WireTurnInstructionKind
+    body: str
+
+
+class WireProviderParamsOverride(TypedDict, total=False):
+    temperature: NotRequired[float | None]
+    top_p: NotRequired[float | None]
+    max_output_tokens: NotRequired[int | None]
+    reasoning: NotRequired[WireReasoningMode | None]
+    thinking_budget_tokens: NotRequired[int | None]
+    provider_tag: NotRequired[dict[str, object] | None]
+
+
+class WireKeepAlivePolicy(TypedDict):
+    ttl_secs: int
+    policy: WireKeepAliveMode
+
+
+class WireTurnMetadataClearOverride(TypedDict):
+    action: Literal['clear']
+
+
+class WireProviderParamsSetOverride(TypedDict):
+    action: Literal['set']
+    value: WireProviderParamsOverride
+
+
+class WireConnectionRefSetOverride(TypedDict):
+    action: Literal['set']
+    value: WireConnectionRef
+
+
+class WireKeepAliveSetOverride(TypedDict):
+    action: Literal['set']
+    value: WireKeepAlivePolicy
+
+
+WireTurnMetadataOverride = WireProviderParamsSetOverride | WireTurnMetadataClearOverride
+WireTurnMetadataOverride2 = WireConnectionRefSetOverride | WireTurnMetadataClearOverride
+WireTurnMetadataOverride3 = WireKeepAliveSetOverride | WireTurnMetadataClearOverride
+
+'''
+
     append_python_dataclass(
         "WireRuntimeTurnMetadata",
         params_schema,
@@ -1097,6 +1174,57 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
                 return
         alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         types_content += f"\nexport type {name} = {alias_type};\n"
+
+    types_content += '''
+export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
+export type WireReasoningMode = "emit" | "silent" | "off";
+export type WireTurnInstructionKind = "user" | "system" | "host";
+export type WireKeepAliveMode = "pinned" | "policy_driven";
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export interface SkillKey {
+  source_uuid: string;
+  skill_name: string;
+}
+
+export interface TurnToolOverlay {
+  allowed_tools?: string[] | null;
+  blocked_tools?: string[] | null;
+}
+
+export interface WireTurnInstruction {
+  kind: WireTurnInstructionKind;
+  body: string;
+}
+
+export interface WireProviderParamsOverride {
+  temperature?: number | null;
+  top_p?: number | null;
+  max_output_tokens?: number | null;
+  reasoning?: WireReasoningMode | null;
+  thinking_budget_tokens?: number | null;
+  provider_tag?: Record<string, JsonValue> | null;
+}
+
+export interface WireKeepAlivePolicy {
+  ttl_secs: number;
+  policy: WireKeepAliveMode;
+}
+
+export type WireTurnMetadataOverrideFor<T> =
+  | { action: "set"; value: T }
+  | { action: "clear" };
+export type WireTurnMetadataOverride = WireTurnMetadataOverrideFor<WireProviderParamsOverride>;
+export type WireTurnMetadataOverride2 = WireTurnMetadataOverrideFor<WireConnectionRef>;
+export type WireTurnMetadataOverride3 = WireTurnMetadataOverrideFor<WireKeepAlivePolicy>;
+
+'''
 
     append_typescript_interface("WireRuntimeTurnMetadata", params_schema)
     append_typescript_interface("McpAddParams", params_schema)

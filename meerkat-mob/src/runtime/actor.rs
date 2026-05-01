@@ -365,6 +365,8 @@ pub(super) struct MobActor {
     pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
     pub(super) autonomous_initial_turns:
         Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, InitialTurnHandle>>>,
+    pub(super) turn_driven_initial_turn_metadata:
+        Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, RuntimeTurnMetadata>>>,
     pub(super) next_spawn_ticket: u64,
     /// Monotonically increasing fence token counter.
     /// Each spawn/respawn/reset issues a strictly newer token.
@@ -2817,6 +2819,40 @@ impl MobActor {
             member_ref,
         )
         .await
+    }
+
+    async fn stage_turn_driven_initial_turn_metadata(
+        &self,
+        agent_identity: &MeerkatId,
+        runtime_mode: crate::MobRuntimeMode,
+        turn_metadata: Option<RuntimeTurnMetadata>,
+    ) {
+        let mut staged = self.turn_driven_initial_turn_metadata.lock().await;
+        if runtime_mode == crate::MobRuntimeMode::TurnDriven
+            && let Some(metadata) = turn_metadata.filter(|metadata| !metadata.is_empty())
+        {
+            staged.insert(agent_identity.clone(), metadata);
+        } else {
+            staged.remove(agent_identity);
+        }
+    }
+
+    async fn turn_driven_initial_turn_metadata(
+        &self,
+        agent_identity: &MeerkatId,
+    ) -> Option<RuntimeTurnMetadata> {
+        self.turn_driven_initial_turn_metadata
+            .lock()
+            .await
+            .get(agent_identity)
+            .cloned()
+    }
+
+    async fn consume_turn_driven_initial_turn_metadata(&self, agent_identity: &MeerkatId) {
+        self.turn_driven_initial_turn_metadata
+            .lock()
+            .await
+            .remove(agent_identity);
     }
 
     /// Stop an autonomous member: abort initial turn, interrupt, abort comms drain.
@@ -5301,7 +5337,7 @@ impl MobActor {
                 return Err(binding_error);
             }
             if let Err(start_error) = self
-                .start_autonomous_member(agent_identity, &member_ref, prompt, turn_metadata)
+                .start_autonomous_member(agent_identity, &member_ref, prompt, turn_metadata.clone())
                 .await
             {
                 self.clear_kickoff_state(agent_identity).await;
@@ -5406,6 +5442,13 @@ impl MobActor {
                 }
             }
         }
+
+        self.stage_turn_driven_initial_turn_metadata(
+            agent_identity,
+            runtime_mode,
+            turn_metadata.clone(),
+        )
+        .await;
 
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -7377,6 +7420,8 @@ impl MobActor {
 
         self.delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
             .await?;
+        self.consume_turn_driven_initial_turn_metadata(&entry.agent_identity)
+            .await;
 
         Ok(())
     }
@@ -9201,20 +9246,35 @@ impl MobActor {
                 Ok(())
             }
             crate::MobRuntimeMode::TurnDriven => {
+                let initial_turn_metadata = self
+                    .turn_driven_initial_turn_metadata(&entry.agent_identity)
+                    .await;
+                let mut turn_metadata =
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        handling_mode: Some(handling_mode),
+                        render_metadata,
+                        ..Default::default()
+                    };
+                if let Some(metadata) = initial_turn_metadata.clone() {
+                    turn_metadata.merge(metadata).map_err(|err| {
+                        MobError::Internal(format!(
+                            "turn-driven initial turn_metadata conflict on {}: {}",
+                            err.field, err.reason
+                        ))
+                    })?;
+                }
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt: content,
                     system_prompt: None,
                     event_tx: None,
                     pre_turn_context_appends: Vec::new(),
-                    turn_metadata: Some(
-                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                            handling_mode: Some(handling_mode),
-                            render_metadata,
-                            ..Default::default()
-                        },
-                    ),
+                    turn_metadata: (!turn_metadata.is_empty()).then_some(turn_metadata),
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
+                if initial_turn_metadata.is_some() {
+                    self.consume_turn_driven_initial_turn_metadata(&entry.agent_identity)
+                        .await;
+                }
                 Ok(())
             }
         }
@@ -10373,6 +10433,8 @@ impl MobActor {
             rollback_ctx.entry.generation,
         )
         .await?;
+        self.consume_turn_driven_initial_turn_metadata(&rollback_ctx.entry.agent_identity)
+            .await;
 
         Ok(())
     }

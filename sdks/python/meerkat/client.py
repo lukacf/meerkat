@@ -300,11 +300,12 @@ def _runtime_turn_metadata(
         metadata["flow_tool_overlay"] = source["flow_tool_overlay"]
 
     additional_instructions = source.get("additional_instructions")
-    if isinstance(additional_instructions, list) and all(
-        isinstance(body, str) for body in additional_instructions
-    ):
+    if isinstance(additional_instructions, list):
         metadata["additional_instructions"] = [
-            {"kind": "user", "body": body} for body in additional_instructions
+            {"kind": "user", "body": instruction}
+            if isinstance(instruction, str)
+            else instruction
+            for instruction in additional_instructions
         ]
     elif additional_instructions is not None:
         metadata["additional_instructions"] = additional_instructions

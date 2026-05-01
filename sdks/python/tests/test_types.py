@@ -79,6 +79,7 @@ from meerkat.events import (
     UnknownEvent,
     parse_event,
 )
+from meerkat.types import RuntimeTurnMetadata
 from meerkat.client import _runtime_turn_metadata
 from meerkat.generated.types import (
     RealtimeCapabilities as GeneratedRealtimeCapabilities,
@@ -317,6 +318,18 @@ def test_generated_mob_spawn_many_preserves_nested_contract_types():
     result_hints = get_type_hints(GeneratedMobSpawnManyResult)
     assert get_origin(result_hints["results"]) is list
     assert get_args(result_hints["results"]) == (GeneratedMobSpawnManyResultEntry,)
+
+    metadata_hints = get_type_hints(GeneratedRuntimeTurnMetadata)
+    assert "WireTurnInstruction" in str(metadata_hints["additional_instructions"])
+    assert "TurnToolOverlay" in str(metadata_hints["flow_tool_overlay"])
+    assert "WireRenderMetadata" in str(metadata_hints["render_metadata"])
+    assert "Any" not in str(metadata_hints["additional_instructions"])
+    assert "Any" not in str(metadata_hints["flow_tool_overlay"])
+    assert "Any" not in str(metadata_hints["render_metadata"])
+
+    public_metadata_hints = get_type_hints(RuntimeTurnMetadata)
+    assert "TurnInstruction" in str(public_metadata_hints["additional_instructions"])
+    assert "TurnToolOverlay" in str(public_metadata_hints["flow_tool_overlay"])
 
     spec = GeneratedMobSpawnSpecParams(
         profile="worker",
@@ -1861,7 +1874,10 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_turn_metadata():
                 )
             ],
             "flow_tool_overlay": {"allowed_tools": ["read"], "blocked_tools": []},
-            "additional_instructions": ["stay concise"],
+            "additional_instructions": [
+                "stay concise",
+                {"kind": "host", "body": "preserve typed instruction kind"},
+            ],
             "keep_alive": {
                 "action": "set",
                 "value": {"policy": "pinned", "ttl_secs": 30},
@@ -1898,7 +1914,10 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_turn_metadata():
                         "allowed_tools": ["read"],
                         "blocked_tools": [],
                     },
-                    "additional_instructions": [{"kind": "user", "body": "stay concise"}],
+                    "additional_instructions": [
+                        {"kind": "user", "body": "stay concise"},
+                        {"kind": "host", "body": "preserve typed instruction kind"},
+                    ],
                     "keep_alive": {
                         "action": "set",
                         "value": {"policy": "pinned", "ttl_secs": 30},

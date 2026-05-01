@@ -262,7 +262,7 @@ async fn mark_token_commit_lifecycle_published_unlocked(
 ) -> Result<(), (StatusCode, String)> {
     let committed_tokens = meerkat_core::mark_tokens_lifecycle_published(tokens);
     if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
-        let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
+        let message = match rollback_token_commit(token_store, auth_lease, commit).await {
             Ok(()) => {
                 format!("TokenStore lifecycle marker save failed: {e}; token commit rolled back")
             }

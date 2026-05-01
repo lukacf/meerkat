@@ -783,7 +783,13 @@ async fn openai_managed_chatgpt_oauth_refresh_restores_tokens_when_lifecycle_pub
         metadata: serde_json::Value::Null,
     };
     let key = TokenKey::parse("dev", "default_chatgpt").expect("valid slugs");
-    store.save(&key, &old_tokens).await.unwrap();
+    store
+        .save(
+            &key,
+            &meerkat_core::mark_tokens_lifecycle_published(&old_tokens),
+        )
+        .await
+        .unwrap();
 
     let refreshed = PersistedTokens {
         auth_mode: PersistedAuthMode::ChatgptOauth,

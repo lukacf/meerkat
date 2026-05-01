@@ -177,6 +177,9 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .ok_or_else(|| interactive_login_error(binding))?;
     let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile.auth_method)?;
     let is_oauth_login = crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode);
+    if is_oauth_login && !meerkat_core::tokens_lifecycle_published(&tokens) {
+        return Err(interactive_login_error(binding));
+    }
 
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
     let now = (env.now)();
@@ -339,23 +342,33 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
     let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
-    let current_tokens = previous
-        .store
-        .load(&previous.key)
-        .await
-        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-    if current_tokens.as_ref() != Some(&previous.tokens) {
-        return Err(ProviderAuthError::SourceResolutionFailed(
-            "managed_store tokens changed during OAuth refresh; discarding stale refresh result"
-                .into(),
-        ));
-    }
+    let committed = meerkat_core::mark_tokens_lifecycle_published(refreshed);
     let previous_snapshot = previous.lifecycle_snapshot.as_ref().ok_or_else(|| {
         ProviderAuthError::SourceResolutionFailed(
             "managed_store OAuth refresh missing AuthMachine lifecycle snapshot".into(),
         )
     })?;
+    let current_tokens = previous
+        .store
+        .load(&previous.key)
+        .await
+        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
     let current_snapshot = auth_lease.snapshot(&lease_key);
+    if current_tokens.as_ref() != Some(&previous.tokens) {
+        if let Some(current) = current_tokens.as_ref()
+            && current == &committed
+            && matches!(
+                AuthStatusPhase::from_lease_snapshot((env.now)(), &current_snapshot),
+                AuthStatusPhase::Valid | AuthStatusPhase::Expiring
+            )
+        {
+            return Ok(current.clone());
+        }
+        return Err(ProviderAuthError::SourceResolutionFailed(
+            "managed_store tokens changed during OAuth refresh; discarding stale refresh result"
+                .into(),
+        ));
+    }
     if &current_snapshot != previous_snapshot {
         return Err(ProviderAuthError::SourceResolutionFailed(
             "AuthMachine lifecycle changed during OAuth refresh; discarding stale refresh result"
@@ -364,7 +377,6 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
     }
 
     publish_managed_store_tokens_lifecycle(env, binding, refreshed)?;
-    let committed = meerkat_core::mark_tokens_lifecycle_published(refreshed);
     if let Err(save_error) = previous.store.save(&previous.key, &committed).await {
         let mut rollback_errors = Vec::new();
         if let Err(err) = auth_lease.release_credential_lifecycle(&lease_key) {
@@ -1103,6 +1115,31 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
+    async fn managed_store_oauth_source_rejects_unmarked_token_even_with_valid_lifecycle() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        store
+            .save(&key, &chatgpt_oauth_tokens("oauth-access"))
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(StaticAuthLeaseHandle::valid());
+
+        let err = resolve_simple_secret(&binding.auth_profile.source, &env, &binding)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderAuthError::Auth(AuthError::InteractiveLoginRequired | AuthError::MissingSecret)
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
     async fn managed_store_refresh_commit_rejects_stale_loaded_tokens() {
         let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
         let binding =
@@ -1141,6 +1178,43 @@ mod tests {
         );
         let stored = store.load(&key).await.unwrap().unwrap();
         assert_eq!(stored, newer_tokens);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_refresh_commit_accepts_already_committed_shared_refresh() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let auth_lease = StaticAuthLeaseHandle::valid();
+        let previous_tokens =
+            meerkat_core::mark_tokens_lifecycle_published(&chatgpt_oauth_tokens("expired-access"));
+        store.save(&key, &previous_tokens).await.unwrap();
+        let previous = ManagedStoreTokens {
+            store: Arc::clone(&store),
+            key: key.clone(),
+            tokens: previous_tokens,
+            lifecycle_snapshot: Some(auth_lease.snapshot(&lease_key)),
+            lifecycle: ManagedStoreLifecycle::RefreshRequired,
+        };
+        let refreshed = chatgpt_oauth_tokens("shared-refresh-access");
+        let env = ResolverEnvironment::testing()
+            .with_token_store(Arc::clone(&store))
+            .with_auth_lease_handle(auth_lease);
+
+        let first =
+            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
+                .await
+                .unwrap();
+        let second =
+            publish_managed_store_tokens_lifecycle_and_save(&env, &binding, &previous, &refreshed)
+                .await
+                .unwrap();
+
+        assert_eq!(second, first);
+        assert_eq!(second, store.load(&key).await.unwrap().unwrap());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

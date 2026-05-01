@@ -179,7 +179,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &persisted,
+            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
         )
         .await
         .unwrap();
@@ -462,7 +462,7 @@ async fn oauth_to_api_key_returns_persisted_api_key() {
     store
         .save(
             &TokenKey::parse("dev", "default_claude").expect("valid slugs"),
-            &persisted,
+            &meerkat_core::mark_tokens_lifecycle_published(&persisted),
         )
         .await
         .unwrap();

@@ -506,7 +506,7 @@ async fn save_tokens_and_consume_device_flow_unlocked(
         }
         None => {
             let auth_lease = runtime.auth_lease_handle();
-            match mark_token_commit_lifecycle_published_unlocked(
+            mark_token_commit_lifecycle_published_unlocked(
                 id,
                 store.as_ref(),
                 auth_lease.as_ref(),
@@ -514,10 +514,7 @@ async fn save_tokens_and_consume_device_flow_unlocked(
                 tokens,
             )
             .await
-            {
-                Ok(()) => None,
-                Err(resp) => Some(resp),
-            }
+            .err()
         }
     }
 }

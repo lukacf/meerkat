@@ -2783,6 +2783,7 @@ async fn handle_meerkat_run(
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+        initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
         override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(enable_shell_override),
         override_memory: ToolCategoryOverride::from_override(input.enable_memory),
@@ -3092,7 +3093,10 @@ async fn handle_meerkat_resume(
         prompt: prompt.clone().into(),
         system_prompt: None,
         event_tx: event_tx.clone(),
-        turn_metadata: turn_metadata.clone(),
+        pre_turn_context_appends: Vec::new(),
+        turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+            turn_metadata.clone(),
+        )),
     };
 
     let result = if needs_rebuild {

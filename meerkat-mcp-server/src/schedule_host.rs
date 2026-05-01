@@ -200,6 +200,7 @@ impl McpScheduleContext {
             blob_store_override: None,
             mob_tools: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings),
+            initial_turn_metadata: None,
         };
 
         let request = CreateSessionRequest {

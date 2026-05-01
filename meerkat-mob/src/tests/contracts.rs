@@ -1120,6 +1120,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
                 prompt: "follow up".to_string().into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )
@@ -1190,6 +1191,7 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
                 prompt: "should fail".to_string().into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )

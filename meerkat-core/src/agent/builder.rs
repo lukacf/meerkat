@@ -57,6 +57,8 @@ pub struct AgentBuilder {
     pub(super) epoch_cursor_state: Option<Arc<crate::runtime_epoch::EpochCursorState>>,
     pub(super) tool_visibility_owner: Option<Arc<dyn ToolVisibilityOwner>>,
     pub(super) turn_state_handle: Option<Arc<dyn crate::TurnStateHandle>>,
+    pub(super) runtime_execution_kind_required: bool,
+    pub(super) runtime_execution_kind: Option<crate::lifecycle::RuntimeExecutionKind>,
     pub(super) external_tool_surface_handle: Option<Arc<dyn crate::ExternalToolSurfaceHandle>>,
     pub(super) auth_lease_handle: Option<Arc<dyn crate::handles::AuthLeaseHandle>>,
     pub(super) mcp_server_lifecycle_handle:
@@ -94,6 +96,8 @@ impl AgentBuilder {
             epoch_cursor_state: None,
             tool_visibility_owner: None,
             turn_state_handle: None,
+            runtime_execution_kind_required: false,
+            runtime_execution_kind: None,
             external_tool_surface_handle: None,
             auth_lease_handle: None,
             mcp_server_lifecycle_handle: None,
@@ -331,21 +335,8 @@ impl AgentBuilder {
             epoch_cursor_state: self.epoch_cursor_state,
             completion_enrichment: self.completion_enrichment,
             mob_authority_handle: None,
-            // Default classification: a runtime-backed agent constructed with
-            // an attached `turn_state_handle` is an ordinary external content
-            // turn unless the runtime surface explicitly restages a different
-            // kind via `set_runtime_execution_kind`. This prevents tests and
-            // direct-call paths (e.g. `agent.run_loop` without going through
-            // `run_inner`) from panicking at `runtime_turn_authority_snapshot`
-            // when the DSL-owned runtime kind has not been stamped yet. Agents
-            // built without a handle (legacy standalone paths, WASM) keep the
-            // field `None`; the snapshot accessor only panics when a handle
-            // *is* attached. See #32 Class W2.
-            runtime_execution_kind: if self.turn_state_handle.is_some() {
-                Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn)
-            } else {
-                None
-            },
+            runtime_execution_kind_required: self.runtime_execution_kind_required,
+            runtime_execution_kind: self.runtime_execution_kind,
             turn_state_handle: self.turn_state_handle,
             external_tool_surface_handle: self.external_tool_surface_handle,
             auth_lease_handle: self.auth_lease_handle,
@@ -542,6 +533,21 @@ impl AgentBuilder {
     /// Set the runtime-backed turn-state diagnostic handle for this build.
     pub fn with_turn_state_handle(mut self, handle: Arc<dyn crate::TurnStateHandle>) -> Self {
         self.turn_state_handle = Some(handle);
+        self
+    }
+
+    /// Require runtime-stamped execution kind metadata before executing turns.
+    pub fn require_runtime_execution_kind_stamp(mut self) -> Self {
+        self.runtime_execution_kind_required = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_runtime_execution_kind_for_test(
+        mut self,
+        execution_kind: crate::lifecycle::RuntimeExecutionKind,
+    ) -> Self {
+        self.runtime_execution_kind = Some(execution_kind);
         self
     }
 
@@ -766,6 +772,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_backed_builder_does_not_seed_execution_kind() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .require_runtime_execution_kind_stamp()
+            .build(client, tools, store)
+            .await;
+
+        assert_eq!(agent.runtime_execution_kind, None);
+        assert!(agent.runtime_execution_kind_required);
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_run_rejects_missing_execution_kind() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .require_runtime_execution_kind_stamp()
+            .build(client, tools, store)
+            .await;
+
+        let err = agent
+            .run("hello".to_string().into())
+            .await
+            .expect_err("runtime-backed runs must be stamped before execution");
+
+        assert!(
+            err.to_string().contains("runtime_execution_kind not set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_run_pending_rejects_missing_execution_kind() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut session = Session::new();
+        session.push(Message::User(UserMessage::text("resume me".to_string())));
+
+        let mut agent = AgentBuilder::new()
+            .resume_session(session)
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .require_runtime_execution_kind_stamp()
+            .build(client, tools, store)
+            .await;
+
+        let err = agent
+            .run_pending()
+            .await
+            .expect_err("runtime-backed pending runs must be stamped before execution");
+
+        assert!(
+            err.to_string().contains("runtime_execution_kind not set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_run_consumes_execution_kind_stamp() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .require_runtime_execution_kind_stamp()
+            .build(client, tools, store)
+            .await;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        agent
+            .run("hello".to_string().into())
+            .await
+            .expect("stamped runtime-backed run should succeed");
+
+        let err = agent
+            .run("raw follow-up".to_string().into())
+            .await
+            .expect_err("runtime-backed follow-up run must require a fresh stamp");
+
+        assert!(
+            err.to_string().contains("runtime_execution_kind not set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_cancel_consumes_execution_kind_stamp() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(
+                crate::agent::test_turn_state_handle::TestTurnStateHandle::new(),
+            ))
+            .require_runtime_execution_kind_stamp()
+            .build(client, tools, store)
+            .await;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
+
+        agent.cancel();
+
+        let err = agent
+            .run("raw follow-up".to_string().into())
+            .await
+            .expect_err("runtime-backed follow-up run must require a fresh stamp after cancel");
+
+        assert!(
+            err.to_string().contains("runtime_execution_kind not set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_builder_event_tap_receives_turn_started_without_primary_event_tx() {
         let client = Arc::new(MockClient);
         let tools = Arc::new(MockTools);
@@ -788,6 +925,7 @@ mod tests {
             .with_event_tap(tap)
             .build(client, tools, store)
             .await;
+        agent.set_runtime_execution_kind(Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn));
 
         let result = agent.run("hello".to_string().into()).await;
         assert!(result.is_ok());

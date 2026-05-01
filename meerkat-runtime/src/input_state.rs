@@ -17,6 +17,7 @@ use meerkat_core::lifecycle::{InputId, RunId};
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::PolicyVersion;
+use crate::ingress_types::RuntimeInputSemantics;
 use crate::input::Input;
 use crate::policy::PolicyDecision;
 
@@ -191,6 +192,9 @@ pub struct InputState {
     pub history: Vec<InputStateHistoryEntry>,
     pub updated_at: DateTime<Utc>,
     pub policy: Option<PolicySnapshot>,
+    /// Runtime-stamped run semantics captured at admission and persisted so
+    /// recovery does not reclassify execution kind from payload shape.
+    pub runtime_semantics: Option<RuntimeInputSemantics>,
     pub durability: Option<crate::input::InputDurability>,
     pub idempotency_key: Option<crate::identifiers::IdempotencyKey>,
     pub recovery_count: u32,
@@ -212,6 +216,7 @@ impl InputState {
             history: Vec::new(),
             updated_at: now,
             policy: None,
+            runtime_semantics: None,
             durability: None,
             idempotency_key: None,
             recovery_count: 0,
@@ -260,6 +265,8 @@ struct InputStateSerde {
     current_state: InputLifecycleState,
     #[serde(skip_serializing_if = "Option::is_none")]
     policy: Option<PolicySnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_semantics: Option<RuntimeInputSemantics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_outcome: Option<InputTerminalOutcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -290,6 +297,7 @@ impl Serialize for StoredInputState {
             input_id: self.state.input_id.clone(),
             current_state: self.seed.phase,
             policy: self.state.policy.clone(),
+            runtime_semantics: self.state.runtime_semantics,
             terminal_outcome: self.seed.terminal_outcome.clone(),
             durability: self.state.durability,
             idempotency_key: self.state.idempotency_key.clone(),
@@ -317,6 +325,7 @@ impl<'de> Deserialize<'de> for StoredInputState {
             history: helper.history,
             updated_at: helper.updated_at,
             policy: helper.policy,
+            runtime_semantics: helper.runtime_semantics,
             durability: helper.durability,
             idempotency_key: helper.idempotency_key,
             recovery_count: helper.recovery_count,
@@ -398,20 +407,25 @@ mod tests {
     #[test]
     fn stored_input_state_serde_roundtrip_preserves_fields() {
         let mut state = InputState::new_accepted(InputId::new());
+        let policy = PolicyDecision {
+            apply_mode: ApplyMode::StageRunStart,
+            wake_mode: WakeMode::WakeIfIdle,
+            queue_mode: QueueMode::Fifo,
+            consume_point: ConsumePoint::OnRunComplete,
+            drain_policy: DrainPolicy::QueueNextTurn,
+            routing_disposition: RoutingDisposition::Queue,
+            record_transcript: true,
+            emit_operator_content: true,
+            policy_version: PolicyVersion(1),
+        };
         state.policy = Some(PolicySnapshot {
             version: PolicyVersion(1),
-            decision: PolicyDecision {
-                apply_mode: ApplyMode::StageRunStart,
-                wake_mode: WakeMode::WakeIfIdle,
-                queue_mode: QueueMode::Fifo,
-                consume_point: ConsumePoint::OnRunComplete,
-                drain_policy: DrainPolicy::QueueNextTurn,
-                routing_disposition: RoutingDisposition::Queue,
-                record_transcript: true,
-                emit_operator_content: true,
-                policy_version: PolicyVersion(1),
-            },
+            decision: policy.clone(),
         });
+        state.runtime_semantics = Some(RuntimeInputSemantics::from_policy_and_kind(
+            &policy,
+            crate::identifiers::InputKind::Prompt,
+        ));
         state.history.push(InputStateHistoryEntry {
             timestamp: state.updated_at,
             from: InputLifecycleState::Accepted,
@@ -433,6 +447,10 @@ mod tests {
         let parsed: StoredInputState = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.state.input_id, bundle.state.input_id);
         assert_eq!(parsed.seed.phase, bundle.seed.phase);
+        assert_eq!(
+            parsed.state.runtime_semantics,
+            bundle.state.runtime_semantics
+        );
         assert_eq!(parsed.state.history.len(), 1);
     }
 

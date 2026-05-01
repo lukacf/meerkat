@@ -192,6 +192,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
                     &self.session_id,
                     run_id,
                     pending_system_context_appends_from_primitive(&staged.context_appends),
+                    primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
@@ -286,30 +287,26 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             };
             return self
                 .session_service
-                .apply_runtime_context_appends(
+                .apply_runtime_context_appends_with_boundary(
                     &self.session_id,
                     run_id,
                     pending_system_context_appends_from_primitive(&staged.context_appends),
+                    primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
                 .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
 
-        if primitive.is_peer_response_terminal_context_and_run() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("terminal peer-response apply intent only matches staged primitives");
-            };
-            self.session_service
-                .apply_runtime_system_context_for_turn(
-                    &self.session_id,
-                    pending_system_context_appends_from_primitive(&staged.context_appends),
-                )
-                .await
-                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
-        }
-
         let prompt = primitive.extract_content_input();
+        let pre_turn_context_appends = match &primitive {
+            RunPrimitive::StagedInput(staged)
+                if primitive.is_peer_response_terminal_context_and_run() =>
+            {
+                pending_system_context_appends_from_primitive(&staged.context_appends)
+            }
+            _ => Vec::new(),
+        };
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();
         let sid = self.session_id.clone();
@@ -323,6 +320,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             prompt,
             system_prompt: None,
             event_tx: Some(event_tx),
+            pre_turn_context_appends,
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 

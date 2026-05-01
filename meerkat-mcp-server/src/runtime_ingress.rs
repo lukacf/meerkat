@@ -475,18 +475,8 @@ fn pending_system_context_appends(
         .collect()
 }
 
-async fn apply_turn_context_appends(
-    context: &McpRuntimeIngressContext,
-    session_id: &SessionId,
-    appends: Option<&Vec<PendingSystemContextAppend>>,
-) -> Result<(), SessionError> {
-    if let Some(appends) = appends {
-        context
-            .service
-            .apply_runtime_system_context_for_turn(session_id, appends.clone())
-            .await?;
-    }
-    Ok(())
+fn should_apply_context_without_turn(primitive: &RunPrimitive) -> bool {
+    primitive.is_context_only_apply_without_turn()
 }
 
 async fn apply_runtime_turn(
@@ -512,10 +502,11 @@ async fn apply_runtime_turn(
         let appends = pending_system_context_appends(&staged.context_appends);
         return match context
             .service
-            .apply_runtime_context_appends(
+            .apply_runtime_context_appends_with_boundary(
                 session_id,
                 run_id.clone(),
                 appends.clone(),
+                primitive.apply_boundary(),
                 staged.contributing_input_ids.clone(),
             )
             .await
@@ -543,18 +534,17 @@ async fn apply_runtime_turn(
         };
     }
 
-    let turn_context_appends = if primitive.is_peer_response_terminal_context_and_run() {
-        let RunPrimitive::StagedInput(staged) = primitive else {
-            unreachable!("terminal peer-response apply intent only matches staged primitives");
-        };
-        Some(pending_system_context_appends(&staged.context_appends))
-    } else {
-        None
-    };
-
     let prompt = primitive.extract_content_input();
     let boundary = primitive.apply_boundary();
     let contributing_input_ids = primitive.contributing_input_ids().to_vec();
+    let pre_turn_context_appends = match primitive {
+        RunPrimitive::StagedInput(staged)
+            if primitive.is_peer_response_terminal_context_and_run() =>
+        {
+            pending_system_context_appends(&staged.context_appends)
+        }
+        _ => Vec::new(),
+    };
     let queued_context = state
         .take_turn_context_for_inputs(&contributing_input_ids)
         .await;
@@ -566,30 +556,20 @@ async fn apply_runtime_turn(
         prompt: prompt.clone(),
         system_prompt: None,
         event_tx: event_tx.clone(),
+        pre_turn_context_appends: pre_turn_context_appends.clone(),
         turn_metadata: primitive.turn_metadata().cloned(),
     };
 
-    let live_result = match apply_turn_context_appends(
-        context,
-        session_id,
-        turn_context_appends.as_ref(),
-    )
-    .await
-    {
-        Ok(()) => {
-            context
-                .service
-                .apply_runtime_turn(
-                    session_id,
-                    run_id.clone(),
-                    turn_request,
-                    boundary,
-                    contributing_input_ids.clone(),
-                )
-                .await
-        }
-        Err(error) => Err(error),
-    };
+    let live_result = context
+        .service
+        .apply_runtime_turn(
+            session_id,
+            run_id.clone(),
+            turn_request,
+            boundary,
+            contributing_input_ids.clone(),
+        )
+        .await;
 
     match live_result {
         Ok(output) => Ok(output),
@@ -601,7 +581,6 @@ async fn apply_runtime_turn(
             ))
             .await
             .map(|_| ())?;
-            apply_turn_context_appends(context, session_id, turn_context_appends.as_ref()).await?;
             context
                 .service
                 .apply_runtime_turn_outcome(
@@ -611,6 +590,7 @@ async fn apply_runtime_turn(
                         prompt,
                         system_prompt: None,
                         event_tx,
+                        pre_turn_context_appends,
                         turn_metadata: primitive.turn_metadata().cloned(),
                     },
                     boundary,
@@ -707,6 +687,15 @@ mod tests {
         })
     }
 
+    fn context_append() -> ConversationContextAppend {
+        ConversationContextAppend {
+            key: "peer_response_terminal:analyst:req-1".to_string(),
+            content: CoreRenderable::Text {
+                text: "done".to_string(),
+            },
+        }
+    }
+
     #[tokio::test]
     async fn mcp_runtime_ingress_rejects_malformed_terminal_peer_response_intent() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -754,5 +743,43 @@ mod tests {
             source.contains("turn_metadata: turn_metadata.clone()"),
             "runtime rematerialization must pass primitive turn metadata into recovery"
         );
+    }
+
+    #[test]
+    fn mcp_context_only_shortcut_excludes_terminal_peer_response() {
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends: Vec::new(),
+            context_appends: vec![context_append()],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                peer_response_terminal_apply_intent: Some(
+                    PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                ),
+                ..Default::default()
+            }),
+        });
+
+        assert!(
+            !should_apply_context_without_turn(&primitive),
+            "terminal peer responses must append context and run a requester reaction turn"
+        );
+    }
+
+    #[test]
+    fn mcp_context_only_shortcut_keeps_plain_context_append() {
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![context_append()],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+        });
+
+        assert!(should_apply_context_without_turn(&primitive));
     }
 }

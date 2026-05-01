@@ -140,6 +140,19 @@ pub struct SessionBackend {
 }
 
 #[cfg(feature = "runtime-adapter")]
+fn stamp_eager_session_owned_initial_turn_metadata(req: &mut CreateSessionRequest) {
+    if req.initial_turn != meerkat_core::service::InitialTurnPolicy::RunImmediately {
+        return;
+    }
+    let build = req
+        .build
+        .get_or_insert_with(meerkat_core::service::SessionBuildOptions::default);
+    build.initial_turn_metadata = Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
+        build.initial_turn_metadata.take(),
+    ));
+}
+
+#[cfg(feature = "runtime-adapter")]
 impl SessionBackend {
     pub fn new(
         session_service: Arc<dyn MobSessionService>,
@@ -640,6 +653,48 @@ mod tests {
         assert_eq!(spec.peer_id.to_string(), peer_id_str);
         assert_eq!(spec.address.to_string(), "tcp://example.invalid/member-1");
     }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn session_owned_eager_member_create_gets_runtime_execution_kind_stamp() {
+        let mut req = meerkat_core::service::CreateSessionRequest {
+            model: "gpt-5.4".to_string(),
+            prompt: "hello".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                initial_turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }),
+            labels: None,
+        };
+
+        super::stamp_eager_session_owned_initial_turn_metadata(&mut req);
+
+        let metadata = req
+            .build
+            .as_ref()
+            .and_then(|build| build.initial_turn_metadata.as_ref())
+            .expect("eager runtime-owned member create should be stamped");
+        assert_eq!(
+            metadata.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+        assert_eq!(
+            metadata.handling_mode,
+            Some(meerkat_core::types::HandlingMode::Queue)
+        );
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -777,20 +832,15 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                 .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()));
         }
 
-        if primitive.is_peer_response_terminal_context_and_run() {
-            let RunPrimitive::StagedInput(staged) = &primitive else {
-                unreachable!("terminal peer-response apply intent only matches staged primitives");
-            };
-            self.session_service
-                .apply_runtime_system_context_for_turn(
-                    &self.bridge_session_id,
-                    pending_system_context_appends_for_runtime_executor(&staged.context_appends),
-                )
-                .await
-                .map_err(|err| CoreExecutorError::apply_failed_runtime_context(err.to_string()))?;
-        }
-
         let contributing_input_ids = primitive.contributing_input_ids().to_vec();
+        let pre_turn_context_appends = match &primitive {
+            RunPrimitive::StagedInput(staged)
+                if primitive.is_peer_response_terminal_context_and_run() =>
+            {
+                pending_system_context_appends_for_runtime_executor(&staged.context_appends)
+            }
+            _ => Vec::new(),
+        };
         let queued_context = self
             .state
             .take_turn_context_for_inputs(&contributing_input_ids)
@@ -799,6 +849,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
             event_tx: queued_context.map(|context| context.event_tx),
+            pre_turn_context_appends,
             turn_metadata: primitive.turn_metadata().cloned(),
         };
 
@@ -921,6 +972,7 @@ impl MobProvisioner for SessionBackend {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
             }
+            stamp_eager_session_owned_initial_turn_metadata(&mut req.create_session);
             Some(member_bridge_session_id)
         } else {
             None

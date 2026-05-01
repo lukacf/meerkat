@@ -841,12 +841,11 @@ pub(crate) fn machine_input_boundary(
 pub(crate) fn machine_input_execution_kind(
     driver: &DriverEntry,
     work_id: &InputId,
-) -> meerkat_core::lifecycle::RuntimeExecutionKind {
+) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
     driver
         .driver_ingress()
         .runtime_semantics(work_id)
         .map(|semantics| semantics.execution_kind)
-        .unwrap_or(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
 }
 
 pub(crate) fn machine_input_peer_response_terminal_apply_intent(
@@ -859,31 +858,29 @@ pub(crate) fn machine_input_peer_response_terminal_apply_intent(
         .and_then(|semantics| semantics.peer_response_terminal_apply_intent)
 }
 
+#[cfg(test)]
 pub(crate) fn machine_batch_execution_kind(
     driver: &DriverEntry,
     work_ids: &[InputId],
 ) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
-    if work_ids.is_empty() {
-        return None;
-    }
+    let mut semantics = machine_batch_runtime_semantics(driver, work_ids)?.into_iter();
+    let first = semantics.next()?.execution_kind;
 
-    if work_ids.iter().all(|id| {
-        machine_input_execution_kind(driver, id)
-            == meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
-    }) {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+    if semantics.all(|semantics| semantics.execution_kind == first) {
+        Some(first)
     } else {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        None
     }
 }
 
-pub(crate) fn machine_batch_peer_response_terminal_apply_intent(
+pub(crate) fn machine_batch_runtime_semantics(
     driver: &DriverEntry,
     work_ids: &[InputId],
-) -> Option<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent> {
+) -> Option<Vec<crate::ingress_types::RuntimeInputSemantics>> {
     work_ids
         .iter()
-        .find_map(|id| machine_input_peer_response_terminal_apply_intent(driver, id))
+        .map(|id| driver.driver_ingress().runtime_semantics(id))
+        .collect()
 }
 
 pub(crate) fn machine_batch_primitive_projections(
@@ -927,14 +924,16 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
             return Vec::new();
         }
         let target_boundary = machine_input_boundary(driver, first);
-        let target_execution_kind = machine_input_execution_kind(driver, first);
+        let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
+            return vec![first.clone()];
+        };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
         return steer
             .iter()
             .take_while(|id| {
                 machine_input_boundary(driver, id) == target_boundary
-                    && machine_input_execution_kind(driver, id) == target_execution_kind
+                    && machine_input_execution_kind(driver, id) == Some(target_execution_kind)
                     && machine_input_peer_response_terminal_apply_intent(driver, id)
                         == target_peer_response_terminal_apply_intent
             })
@@ -944,24 +943,35 @@ pub(crate) fn machine_select_runtime_loop_batch(driver: &DriverEntry) -> Vec<Inp
 
     let queue = ingress.queue();
     if let Some(driver_index) = queue.iter().position(should_drive_loop) {
-        let first = &queue[driver_index];
-        let prefix = &queue[..=driver_index];
-        if ingress.is_prompt(first) {
-            return prefix.to_vec();
-        }
+        let Some(first) = queue.first() else {
+            return Vec::new();
+        };
+        let Some(target_execution_kind) = machine_input_execution_kind(driver, first) else {
+            return vec![first.clone()];
+        };
         let target_peer_response_terminal_apply_intent =
             machine_input_peer_response_terminal_apply_intent(driver, first);
-        return queue[..]
-            .iter()
-            .take_while(|id| {
-                !ingress.is_prompt(id)
-                    && machine_input_execution_kind(driver, id)
-                        == meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn
-                    && machine_input_peer_response_terminal_apply_intent(driver, id)
-                        == target_peer_response_terminal_apply_intent
-            })
-            .cloned()
-            .collect();
+        let driver_is_prompt = ingress.is_prompt(&queue[driver_index]);
+        let mut selected = Vec::new();
+        for id in &queue {
+            if machine_input_execution_kind(driver, id) != Some(target_execution_kind)
+                || machine_input_peer_response_terminal_apply_intent(driver, id)
+                    != target_peer_response_terminal_apply_intent
+            {
+                break;
+            }
+            if !driver_is_prompt && ingress.is_prompt(id) {
+                break;
+            }
+            selected.push(id.clone());
+            if ingress.is_prompt(id) {
+                break;
+            }
+            if driver_is_prompt && selected.len() > driver_index {
+                break;
+            }
+        }
+        return selected;
     }
 
     Vec::new()
@@ -1352,23 +1362,35 @@ pub(crate) struct RecoveredIngressEntry {
     pub policy: crate::policy::PolicyDecision,
 }
 
+fn expected_recovered_runtime_semantics(
+    state: &InputState,
+) -> Option<crate::ingress_types::RuntimeInputSemantics> {
+    let persisted_input = state.persisted_input.as_ref()?;
+    let policy = &state.policy.as_ref()?.decision;
+    Some(
+        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            policy,
+            persisted_input.kind(),
+        ),
+    )
+}
+
 pub(crate) fn machine_build_recovered_ingress_entry(
     state: &InputState,
 ) -> Option<RecoveredIngressEntry> {
     let persisted_input = state.persisted_input.as_ref()?;
-    let handling_mode = state
-        .policy
-        .as_ref()
-        .map(|policy| crate::accept::handling_mode_from_policy(&policy.decision))
-        .unwrap_or(meerkat_core::types::HandlingMode::Queue);
+    let runtime_semantics = state.runtime_semantics?;
+    let policy = state.policy.as_ref()?.decision.clone();
+    if runtime_semantics
+        != crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            &policy,
+            persisted_input.kind(),
+        )
+    {
+        return None;
+    }
+    let handling_mode = crate::accept::handling_mode_from_policy(&policy);
     let content_shape = crate::ingress_types::ContentShape::from_kind(persisted_input.kind());
-    let policy = match state.policy.as_ref() {
-        Some(policy) => policy.decision.clone(),
-        None => crate::policy_table::DefaultPolicyTable::resolve(persisted_input, true),
-    };
-    let recovered_kind = persisted_input.kind();
-    let runtime_semantics =
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, recovered_kind);
     let primitive_projection = crate::input::runtime_input_projection(persisted_input);
 
     Some(RecoveredIngressEntry {
@@ -1379,6 +1401,39 @@ pub(crate) fn machine_build_recovered_ingress_entry(
         is_prompt: matches!(persisted_input, crate::input::Input::Prompt(_)),
         policy,
     })
+}
+
+fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
+    if state.persisted_input.is_none() {
+        return format!(
+            "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
+            state.input_id
+        );
+    }
+    if state.runtime_semantics.is_none() {
+        return format!(
+            "store corruption: recovered input '{}' missing runtime execution semantics stamp; cannot recover without runtime-stamped execution kind",
+            state.input_id
+        );
+    }
+    if state.policy.is_none() {
+        return format!(
+            "store corruption: recovered input '{}' missing runtime admission policy stamp; cannot recover without runtime-stamped policy and lane metadata",
+            state.input_id
+        );
+    }
+    if let Some(expected) = expected_recovered_runtime_semantics(state)
+        && state.runtime_semantics != Some(expected)
+    {
+        return format!(
+            "store corruption: recovered input '{}' has runtime execution semantics stamp that does not match persisted input kind and admission policy; cannot recover with contradictory runtime-stamped execution kind",
+            state.input_id
+        );
+    }
+    format!(
+        "store corruption: recovered input '{}' is missing required admitted-input metadata",
+        state.input_id
+    )
 }
 
 pub(crate) fn machine_realize_recovered_runtime_state(
@@ -1487,10 +1542,9 @@ pub(crate) fn machine_recover_ephemeral_driver(
         Vec::with_capacity(normalized.len());
     for (input_id, bundle) in normalized {
         let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
-            return Err(RuntimeDriverError::Internal(format!(
-                "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
-                bundle.state.input_id
-            )));
+            return Err(RuntimeDriverError::Internal(
+                missing_recovered_ingress_entry_reason(&bundle.state),
+            ));
         };
         recovered_entries.push((input_id, entry, bundle.state, bundle.seed));
     }
@@ -1546,11 +1600,19 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
 
         if driver.input_state(&bundle.state.input_id).is_none() {
+            if bundle.seed.phase.is_terminal() {
+                let inserted = driver.ledger_mut().recover(bundle.state.clone());
+                if !inserted {
+                    continue;
+                }
+                driver.recover_terminal_input_lifecycle(&bundle.state.input_id, &bundle.seed)?;
+                continue;
+            }
+
             let Some(entry) = machine_build_recovered_ingress_entry(&bundle.state) else {
-                return Err(RuntimeDriverError::Internal(format!(
-                    "store corruption: recovered input '{}' has no persisted input; cannot derive admitted-input content shape",
-                    bundle.state.input_id
-                )));
+                return Err(RuntimeDriverError::Internal(
+                    missing_recovered_ingress_entry_reason(&bundle.state),
+                ));
             };
 
             let inserted = driver.ledger_mut().recover(bundle.state.clone());
@@ -1679,6 +1741,490 @@ pub(crate) async fn machine_stop_runtime(
             Ok(())
         }
         DriverEntry::Persistent(d) => d.finalize_runtime_executor_exit().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queued_seed() -> InputStateSeed {
+        let mut seed = InputStateSeed::new_accepted();
+        seed.phase = InputLifecycleState::Queued;
+        seed
+    }
+
+    fn queue_policy(
+        wake_mode: crate::policy::WakeMode,
+        drain_policy: crate::policy::DrainPolicy,
+    ) -> crate::policy::PolicyDecision {
+        crate::policy::PolicyDecision {
+            apply_mode: crate::policy::ApplyMode::StageRunStart,
+            wake_mode,
+            queue_mode: crate::policy::QueueMode::Fifo,
+            consume_point: crate::policy::ConsumePoint::OnRunComplete,
+            drain_policy,
+            routing_disposition: crate::policy::RoutingDisposition::Queue,
+            record_transcript: true,
+            emit_operator_content: true,
+            policy_version: crate::policy_table::DEFAULT_POLICY_VERSION,
+        }
+    }
+
+    #[test]
+    fn machine_batch_execution_kind_requires_admitted_semantics() {
+        let driver = DriverEntry::Ephemeral(EphemeralRuntimeDriver::new(
+            crate::identifiers::LogicalRuntimeId::new("test"),
+        ));
+        let unstamped_input = InputId::new();
+
+        assert_eq!(
+            machine_batch_execution_kind(&driver, &[unstamped_input]),
+            None,
+            "missing runtime semantics must not locally default to ContentTurn"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_requires_persisted_input_payload() {
+        let mut state = InputState::new_accepted(InputId::new());
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::identifiers::PolicyVersion(1),
+            decision: queue_policy(
+                crate::policy::WakeMode::WakeIfIdle,
+                crate::policy::DrainPolicy::QueueNextTurn,
+            ),
+        });
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must not infer Prompt/ContentTurn when persisted input payload is missing"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_admission_rejects_mismatched_runtime_semantics() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "recovered-admission-mismatch",
+        ));
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let input_id = input.id().clone();
+        let policy = queue_policy(
+            crate::policy::WakeMode::WakeIfIdle,
+            crate::policy::DrainPolicy::QueueNextTurn,
+        );
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(state.clone()));
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &policy,
+                input.kind(),
+            );
+        runtime_semantics.execution_kind =
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending;
+
+        let err = driver
+            .admit_recovered_to_ingress(
+                input_id.clone(),
+                ContentShape::from_kind(input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                runtime_semantics,
+                crate::input::runtime_input_projection(&input),
+                true,
+                &state,
+                &seed,
+                policy,
+                None,
+                None,
+            )
+            .expect_err("lower-level recovered admission must reject contradictory stamps");
+
+        assert!(
+            err.to_string()
+                .contains("does not match persisted input kind and admission policy"),
+            "unexpected recovery error: {err}"
+        );
+        assert!(
+            driver.admitted_runtime_semantics(&input_id).is_none(),
+            "failed recovered admission must not record mismatched runtime semantics"
+        );
+    }
+
+    #[test]
+    fn prompt_batch_selection_drives_incompatible_prefix_before_prompt() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "mixed-prefix-test",
+        ));
+        let resume_input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let prompt_input = Input::Prompt(crate::input::PromptInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::Operator,
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text: "drive the queue".into(),
+            blocks: None,
+            turn_metadata: None,
+        });
+        let resume_id = resume_input.id().clone();
+        let prompt_id = prompt_input.id().clone();
+        let mut resume_state = InputState::new_accepted(resume_id.clone());
+        resume_state.persisted_input = Some(resume_input.clone());
+        let mut prompt_state = InputState::new_accepted(prompt_id.clone());
+        prompt_state.persisted_input = Some(prompt_input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(resume_state.clone()));
+        assert!(driver.ledger_mut().recover(prompt_state.clone()));
+        let mut resume_policy = queue_policy(
+            crate::policy::WakeMode::None,
+            crate::policy::DrainPolicy::QueueNextTurn,
+        );
+        resume_policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
+
+        driver
+            .admit_recovered_to_ingress(
+                resume_id.clone(),
+                ContentShape::from_kind(resume_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&resume_input),
+                false,
+                &resume_state,
+                &seed,
+                resume_policy,
+                None,
+                None,
+            )
+            .expect("recover queued resume input");
+        driver
+            .admit_recovered_to_ingress(
+                prompt_id.clone(),
+                ContentShape::from_kind(prompt_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prompt_input),
+                true,
+                &prompt_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+
+        let entry = DriverEntry::Ephemeral(driver);
+        let selected = machine_select_runtime_loop_batch(&entry);
+
+        assert_eq!(
+            selected,
+            vec![resume_id],
+            "a later prompt may drive the queue, but selection must preserve the staged queue prefix when an older input has a different execution kind"
+        );
+        machine_validate_stage_drain_snapshot(&entry, &selected)
+            .expect("selected incompatible prefix must satisfy staging invariants");
+    }
+
+    #[test]
+    fn batch_selection_surfaces_unstamped_no_wake_prefix_before_prompt() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "missing-prefix-before-prompt-selection",
+        ));
+        let prefix_input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let prompt_input = Input::Prompt(crate::input::PromptInput::new("drive the queue", None));
+        let prefix_id = prefix_input.id().clone();
+        let prompt_id = prompt_input.id().clone();
+        let mut prefix_state = InputState::new_accepted(prefix_id.clone());
+        prefix_state.persisted_input = Some(prefix_input.clone());
+        let mut prompt_state = InputState::new_accepted(prompt_id.clone());
+        prompt_state.persisted_input = Some(prompt_input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(prefix_state.clone()));
+        assert!(driver.ledger_mut().recover(prompt_state.clone()));
+        let mut prefix_policy = queue_policy(
+            crate::policy::WakeMode::None,
+            crate::policy::DrainPolicy::QueueNextTurn,
+        );
+        prefix_policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
+
+        driver
+            .admit_recovered_to_ingress(
+                prefix_id.clone(),
+                ContentShape::from_kind(prefix_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prefix_input),
+                false,
+                &prefix_state,
+                &seed,
+                prefix_policy,
+                None,
+                None,
+            )
+            .expect("recover queued prefix input");
+        driver
+            .admit_recovered_to_ingress(
+                prompt_id,
+                ContentShape::from_kind(prompt_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prompt_input),
+                true,
+                &prompt_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+        driver.clear_admitted_runtime_semantics_for_test(&prefix_id);
+
+        let entry = DriverEntry::Ephemeral(driver);
+        let selected = machine_select_runtime_loop_batch(&entry);
+
+        assert_eq!(
+            selected,
+            vec![prefix_id],
+            "an unstamped no-wake prefix entry must be selected before the later prompt so runtime-loop failure handling can consume the queue prefix"
+        );
+        machine_validate_stage_drain_snapshot(&entry, &selected)
+            .expect("selected unstamped prefix must satisfy staging invariants");
+        assert!(
+            machine_batch_runtime_semantics(&entry, &selected).is_none(),
+            "selected unstamped prefix must flow into the runtime-loop metadata conflict path"
+        );
+    }
+
+    #[test]
+    fn batch_selection_non_prompt_driver_stops_before_following_prompt() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "non-prompt-driver-before-prompt-selection",
+        ));
+        let event_input = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: crate::input::InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: crate::input::InputOrigin::External {
+                    source_name: "scheduler".into(),
+                },
+                durability: crate::input::InputDurability::Durable,
+                visibility: crate::input::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            event_type: "scheduler_tick".into(),
+            payload: serde_json::json!({"body": "tick"}),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+        });
+        let prompt_input = Input::Prompt(crate::input::PromptInput::new(
+            "operator prompt must wait",
+            None,
+        ));
+        let event_id = event_input.id().clone();
+        let prompt_id = prompt_input.id().clone();
+        let mut event_state = InputState::new_accepted(event_id.clone());
+        event_state.persisted_input = Some(event_input.clone());
+        let mut prompt_state = InputState::new_accepted(prompt_id.clone());
+        prompt_state.persisted_input = Some(prompt_input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(event_state.clone()));
+        assert!(driver.ledger_mut().recover(prompt_state.clone()));
+
+        driver
+            .admit_recovered_to_ingress(
+                event_id.clone(),
+                ContentShape::from_kind(event_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&event_input),
+                false,
+                &event_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued event input");
+        driver
+            .admit_recovered_to_ingress(
+                prompt_id,
+                ContentShape::from_kind(prompt_input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&prompt_input),
+                true,
+                &prompt_state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+
+        let entry = DriverEntry::Ephemeral(driver);
+        let selected = machine_select_runtime_loop_batch(&entry);
+
+        assert_eq!(
+            selected,
+            vec![event_id],
+            "a non-prompt-driven batch must not absorb a following prompt into the same run"
+        );
+        machine_validate_stage_drain_snapshot(&entry, &selected)
+            .expect("selected non-prompt batch must satisfy staging invariants");
+    }
+
+    #[test]
+    fn batch_selection_surfaces_queued_input_missing_runtime_semantics() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "missing-runtime-semantics-selection",
+        ));
+        let input = Input::Prompt(crate::input::PromptInput::new(
+            "unstamped queued prompt",
+            None,
+        ));
+        let input_id = input.id().clone();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input.clone());
+        let seed = queued_seed();
+        assert!(driver.ledger_mut().recover(state.clone()));
+        driver
+            .admit_recovered_to_ingress(
+                input_id.clone(),
+                ContentShape::from_kind(input.kind()),
+                meerkat_core::types::HandlingMode::Queue,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&input),
+                true,
+                &state,
+                &seed,
+                queue_policy(
+                    crate::policy::WakeMode::WakeIfIdle,
+                    crate::policy::DrainPolicy::QueueNextTurn,
+                ),
+                None,
+                None,
+            )
+            .expect("recover queued prompt input");
+        driver.rebuild_queue_projections_after_recovery();
+        driver.clear_admitted_runtime_semantics_for_test(&input_id);
+
+        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+
+        assert_eq!(
+            selected,
+            vec![input_id],
+            "missing runtime semantics must be selected so the runtime loop records a typed failure instead of treating the queue as empty"
+        );
+    }
+
+    #[test]
+    fn batch_selection_surfaces_steered_input_missing_runtime_semantics() {
+        let mut driver = EphemeralRuntimeDriver::new(crate::identifiers::LogicalRuntimeId::new(
+            "missing-steer-runtime-semantics-selection",
+        ));
+        let input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let input_id = input.id().clone();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input.clone());
+        let seed = queued_seed();
+        let mut policy = queue_policy(
+            crate::policy::WakeMode::WakeIfIdle,
+            crate::policy::DrainPolicy::SteerBatch,
+        );
+        policy.apply_mode = crate::policy::ApplyMode::StageRunBoundary;
+        policy.routing_disposition = crate::policy::RoutingDisposition::Steer;
+
+        assert!(driver.ledger_mut().recover(state.clone()));
+        driver
+            .admit_recovered_to_ingress(
+                input_id.clone(),
+                ContentShape::from_kind(input.kind()),
+                meerkat_core::types::HandlingMode::Steer,
+                crate::ingress_types::RuntimeInputSemantics {
+                    boundary:
+                        meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                    execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    peer_response_terminal_apply_intent: None,
+                },
+                crate::input::runtime_input_projection(&input),
+                false,
+                &state,
+                &seed,
+                policy,
+                None,
+                None,
+            )
+            .expect("recover steered continuation input");
+        driver.rebuild_queue_projections_after_recovery();
+        driver.clear_admitted_runtime_semantics_for_test(&input_id);
+
+        let selected = machine_select_runtime_loop_batch(&DriverEntry::Ephemeral(driver));
+
+        assert_eq!(
+            selected,
+            vec![input_id],
+            "missing runtime semantics in the steer lane must be selected so the runtime loop records a typed failure instead of treating the lane as empty"
+        );
     }
 }
 
@@ -2004,7 +2550,7 @@ async fn fail_runtime_loop_run_inner(
 }
 
 #[cfg(test)]
-mod tests {
+mod recovery_tests {
     use super::*;
     use crate::policy::{
         ApplyMode, ConsumePoint, DrainPolicy, QueueMode, RoutingDisposition, WakeMode,
@@ -2024,6 +2570,21 @@ mod tests {
         }
     }
 
+    fn state_with_runtime_semantics(
+        input: Input,
+        decision: crate::policy::PolicyDecision,
+        runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
+    ) -> crate::input_state::InputState {
+        let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
+        state.persisted_input = Some(input);
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::policy_table::DEFAULT_POLICY_VERSION,
+            decision,
+        });
+        state.runtime_semantics = Some(runtime_semantics);
+        state
+    }
+
     #[test]
     fn recovered_ingress_entry_requires_persisted_input_for_content_shape() {
         let mut state = crate::input_state::InputState::new_accepted(InputId::new());
@@ -2035,6 +2596,205 @@ mod tests {
         assert!(
             machine_build_recovered_ingress_entry(&state).is_none(),
             "recovery must not synthesize an unknown admitted-input content shape"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_requires_runtime_semantics_stamp() {
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
+        state.persisted_input = Some(input);
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::policy_table::DEFAULT_POLICY_VERSION,
+            decision: policy(ApplyMode::StageRunStart),
+        });
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must not derive execution kind from payload/policy when the durable runtime semantics stamp is missing"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_requires_policy_snapshot() {
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut state = crate::input_state::InputState::new_accepted(input.id().clone());
+        state.runtime_semantics = Some(
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            ),
+        );
+        state.persisted_input = Some(input);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must not derive policy or handling mode when the durable policy stamp is missing"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_prompt_stamped_as_resume_pending() {
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.execution_kind =
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a prompt row whose durable stamp says ResumePending"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_continuation_stamped_as_content_turn() {
+        let input = Input::Continuation(
+            crate::input::ContinuationInput::detached_background_op_completed(),
+        );
+        let decision = policy(ApplyMode::StageRunBoundary);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.execution_kind =
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a continuation row whose durable stamp says ContentTurn"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_boundary_mismatch() {
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.boundary =
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a durable stamp whose boundary disagrees with policy"
+        );
+    }
+
+    #[test]
+    fn recovered_ingress_entry_rejects_terminal_intent_mismatch() {
+        let input = crate::input::peer_response_terminal_input(
+            meerkat_core::comms::PeerId::new(),
+            Some(meerkat_core::comms::PeerName::new("reviewer").expect("peer name")),
+            meerkat_core::PeerCorrelationId::new(),
+            meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
+            serde_json::json!({"status": "complete"}),
+        );
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut runtime_semantics =
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            );
+        runtime_semantics.peer_response_terminal_apply_intent = None;
+        let state = state_with_runtime_semantics(input, decision, runtime_semantics);
+
+        assert!(
+            machine_build_recovered_ingress_entry(&state).is_none(),
+            "recovery must reject a terminal peer-response stamp with missing terminal apply intent"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_recovery_rejects_state_without_runtime_semantics_stamp() {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("missing-runtime-semantics-stamp");
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let input_id = input.id().clone();
+        let mut state = crate::input_state::InputState::new_accepted(input_id.clone());
+        state.persisted_input = Some(input);
+        state.policy = Some(crate::input_state::PolicySnapshot {
+            version: crate::policy_table::DEFAULT_POLICY_VERSION,
+            decision: policy(ApplyMode::StageRunStart),
+        });
+        let mut seed = InputStateSeed::new_accepted();
+        seed.phase = InputLifecycleState::Queued;
+        let bundle = crate::input_state::StoredInputState { state, seed };
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        store
+            .persist_input_state(&runtime_id, &bundle)
+            .await
+            .expect("persist corrupt recovered input state");
+
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
+        let err = machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+            .await
+            .expect_err("unstamped recovered input must not recover through local classification");
+
+        assert!(
+            err.to_string()
+                .contains("missing runtime execution semantics stamp"),
+            "unexpected recovery error: {err}"
+        );
+        assert!(
+            driver.input_state(&input_id).is_none(),
+            "failed recovery must not leave a ledger-only input row"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_recovery_rejects_state_without_policy_snapshot() {
+        use crate::store::RuntimeStore;
+
+        let runtime_id = LogicalRuntimeId::new("missing-policy-snapshot");
+        let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
+        let input_id = input.id().clone();
+        let decision = policy(ApplyMode::StageRunStart);
+        let mut state = crate::input_state::InputState::new_accepted(input_id.clone());
+        state.runtime_semantics = Some(
+            crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+                &decision,
+                input.kind(),
+            ),
+        );
+        state.persisted_input = Some(input);
+        let mut seed = InputStateSeed::new_accepted();
+        seed.phase = InputLifecycleState::Queued;
+        let bundle = crate::input_state::StoredInputState { state, seed };
+        let store = crate::store::memory::InMemoryRuntimeStore::new();
+        store
+            .persist_input_state(&runtime_id, &bundle)
+            .await
+            .expect("persist corrupt recovered input state");
+
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(runtime_id.clone());
+        let err = machine_recover_persistent_driver(&store, &runtime_id, &mut driver)
+            .await
+            .expect_err(
+                "policy-less recovered input must not recover through local classification",
+            );
+
+        assert!(
+            err.to_string()
+                .contains("missing runtime admission policy stamp"),
+            "unexpected recovery error: {err}"
+        );
+        assert!(
+            driver.input_state(&input_id).is_none(),
+            "failed recovery must not leave a ledger-only input row"
         );
     }
 

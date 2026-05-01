@@ -363,6 +363,7 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                             prompt: message,
                             system_prompt: None,
                             event_tx: Some(event_tx),
+                            pre_turn_context_appends: Vec::new(),
                             turn_metadata: flow_tool_overlay.map(|overlay| {
                                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                                     flow_tool_overlay: Some(overlay),

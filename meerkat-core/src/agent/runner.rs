@@ -226,6 +226,21 @@ where
         self.runtime_execution_kind = execution_kind;
     }
 
+    fn clear_runtime_execution_kind(&mut self) {
+        self.runtime_execution_kind = None;
+    }
+
+    fn require_runtime_execution_kind(&self) -> Result<(), AgentError> {
+        if self.runtime_execution_kind_required && self.runtime_execution_kind.is_none() {
+            return Err(AgentError::InternalError(
+                "runtime_execution_kind not set: turn-state handle is attached but \
+                 the runtime did not stamp RuntimeTurnMetadata.execution_kind"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply accumulated session effects from tool dispatch.
     ///
     /// Called by the agent loop after each parallel tool batch completes.
@@ -894,22 +909,9 @@ where
     ) -> Result<RunResult, AgentError> {
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
+        self.require_runtime_execution_kind()?;
+
         // Reset state for new run (allows multi-turn on same agent).
-        //
-        // `run_inner` is the entry point for an ordinary content turn. Default
-        // the classification to `ContentTurn` unless the caller staged an
-        // explicit kind via `set_runtime_execution_kind` (e.g. a runtime-backed
-        // surface that propagates `RuntimeTurnMetadata.execution_kind` from a
-        // `StagedRunInput`). Preserving a previously-staged classification
-        // prevents the reset from silently wiping the caller's typed intent.
-        //
-        // `None` is no longer a valid post-reset state: `turn_state_handle`
-        // attaches pair `runtime_execution_kind` with every live-run path,
-        // and `runtime_turn_authority_snapshot` (state.rs) panics on an
-        // unclassified handle. See #32 W2 / PR #299 follow-up.
-        if self.runtime_execution_kind.is_none() {
-            self.runtime_execution_kind = Some(crate::lifecycle::RuntimeExecutionKind::ContentTurn);
-        }
         self.extraction_state.reset();
         self.run_completed_hooks_applied = false;
 
@@ -952,6 +954,7 @@ where
         {
             self.pending_turn_system_context.clear();
             self.handle_run_failure(&err, event_tx.as_ref()).await;
+            self.clear_runtime_execution_kind();
             return Err(err);
         }
 
@@ -965,16 +968,19 @@ where
                 {
                     self.pending_turn_system_context.clear();
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
                     return Err(err);
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
                 self.checkpoint_current_session().await;
+                self.clear_runtime_execution_kind();
                 Ok(result)
             }
             Err(err) => {
                 self.pending_turn_system_context.clear();
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
+                self.clear_runtime_execution_kind();
                 Err(err)
             }
         }
@@ -1002,21 +1008,15 @@ where
         let Some(prompt) = pending_prompt else {
             self.pending_skill_references = None;
             self.pending_turn_system_context.clear();
+            self.clear_runtime_execution_kind();
             return Err(AgentError::ConfigError(
                 "run_pending requires a pending user or tool-results continuation boundary in the session".to_string(),
             ));
         };
 
+        self.require_runtime_execution_kind()?;
+
         // Reset state for new run (allows multi-turn on same agent).
-        //
-        // `run_pending_inner` is the entry point for an explicit continuation
-        // that resumes pending work at a boundary. Default the classification
-        // to `ResumePending` unless the caller staged an explicit kind via
-        // `set_runtime_execution_kind`. See #32 W2 / PR #299 follow-up.
-        if self.runtime_execution_kind.is_none() {
-            self.runtime_execution_kind =
-                Some(crate::lifecycle::RuntimeExecutionKind::ResumePending);
-        }
         self.extraction_state.reset();
         self.run_completed_hooks_applied = false;
 
@@ -1039,6 +1039,7 @@ where
         {
             self.pending_turn_system_context.clear();
             self.handle_run_failure(&err, event_tx.as_ref()).await;
+            self.clear_runtime_execution_kind();
             return Err(err);
         }
 
@@ -1052,16 +1053,19 @@ where
                 {
                     self.pending_turn_system_context.clear();
                     self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
                     return Err(err);
                 }
                 self.emit_run_completed_event(&result, event_tx.as_ref())
                     .await;
                 self.checkpoint_current_session().await;
+                self.clear_runtime_execution_kind();
                 Ok(result)
             }
             Err(err) => {
                 self.pending_turn_system_context.clear();
                 self.handle_run_failure(&err, event_tx.as_ref()).await;
+                self.clear_runtime_execution_kind();
                 Err(err)
             }
         }
@@ -1072,7 +1076,7 @@ where
         use crate::turn_execution_authority::TurnExecutionInput;
 
         self.clear_turn_system_context();
-
+        self.clear_runtime_execution_kind();
         let snapshot = self
             .turn_state_handle
             .as_deref()

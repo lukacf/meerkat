@@ -3716,6 +3716,7 @@ mod tests {
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
                     event_tx: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )
@@ -3898,6 +3899,7 @@ mod tests {
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
                     event_tx: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )
@@ -5365,6 +5367,7 @@ mod tests {
                 prompt: "test".into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,

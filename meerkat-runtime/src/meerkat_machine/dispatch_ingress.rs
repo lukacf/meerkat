@@ -451,10 +451,35 @@ impl MeerkatMachine {
                         )));
                     }
 
-                    let primitive = match crate::runtime_loop::input_to_primitive(
-                        &dequeued_input,
-                        dequeued_id.clone(),
-                    ) {
+                    let primitive_result =
+                        match crate::meerkat_machine::machine_batch_runtime_semantics(
+                            &driver,
+                            std::slice::from_ref(&dequeued_id),
+                        ) {
+                            Some(mut semantics) if semantics.len() == 1 => {
+                                let projection_inputs =
+                                    [(dequeued_id.clone(), dequeued_input.clone())];
+                                let projections =
+                                    crate::meerkat_machine::machine_batch_primitive_projections(
+                                        &driver,
+                                        &projection_inputs,
+                                    );
+                                crate::runtime_loop::admitted_input_to_primitive(
+                                    &dequeued_input,
+                                    dequeued_id.clone(),
+                                    projections.into_iter().next().unwrap_or_default(),
+                                    semantics.remove(0),
+                                )
+                            }
+                            _ => Err(
+                                meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                                    field: "execution_kind",
+                                    reason: "runtime-stamped execution kind missing for one or more inputs",
+                                },
+                            ),
+                        };
+
+                    let primitive = match primitive_result {
                         Ok(primitive) => primitive,
                         Err(err) => {
                             let _ = driver.rollback_staged(std::slice::from_ref(&dequeued_id));

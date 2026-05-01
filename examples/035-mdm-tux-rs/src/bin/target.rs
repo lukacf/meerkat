@@ -41,7 +41,10 @@ use meerkat_comms::{CommsRuntime, PeerMeta, ResolvedCommsConfig, TrustedPeer};
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
-use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
+use meerkat_core::PendingSystemContextAppend;
+use meerkat_core::lifecycle::run_primitive::{
+    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
+};
 use meerkat_core::mcp_config::McpConfig;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
@@ -352,6 +355,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 provider_params: None,
                 render_metadata: dispatch.render_metadata.clone(),
                 execution_kind: None,
+                peer_response_terminal_apply_intent: None,
                 connection_ref: None,
             },
         );
@@ -1073,47 +1077,58 @@ impl TargetCoreExecutor {
     }
 }
 
-/// Extract prompt content from a `RunPrimitive`, preserving multimodal blocks.
-fn extract_prompt(primitive: &RunPrimitive) -> ContentInput {
-    match primitive {
-        RunPrimitive::StagedInput(staged) => {
-            let mut all_blocks = Vec::new();
-            for append in &staged.appends {
-                match &append.content {
-                    CoreRenderable::Text { text } => {
-                        all_blocks
-                            .push(meerkat_core::types::ContentBlock::Text { text: text.clone() });
-                    }
-                    CoreRenderable::Blocks { blocks } => {
-                        all_blocks.extend(blocks.iter().cloned());
-                    }
-                    _ => {}
-                }
-            }
-            if all_blocks.is_empty() {
-                ContentInput::Text(String::new())
-            } else if all_blocks.len() == 1 {
-                if let meerkat_core::types::ContentBlock::Text { text } = &all_blocks[0] {
-                    ContentInput::Text(text.clone())
-                } else {
-                    ContentInput::Blocks(all_blocks)
-                }
-            } else {
-                ContentInput::Blocks(all_blocks)
-            }
+fn render_runtime_context_append_text(content: &CoreRenderable) -> String {
+    match content {
+        CoreRenderable::Text { text } => text.clone(),
+        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
+        CoreRenderable::Json { value } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         }
-        RunPrimitive::ImmediateAppend(append) => match &append.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
+        CoreRenderable::Reference { uri, label } => match label {
+            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
+            _ => format!("[Reference] {uri}"),
         },
-        RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
-            CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-            CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-            _ => ContentInput::Text(String::new()),
-        },
-        _ => ContentInput::Text(String::new()),
+        _ => String::new(),
     }
+}
+
+fn pending_system_context_appends(
+    appends: &[ConversationContextAppend],
+) -> Vec<PendingSystemContextAppend> {
+    let accepted_at = meerkat_core::time_compat::SystemTime::now();
+    appends
+        .iter()
+        .map(|append| PendingSystemContextAppend {
+            text: render_runtime_context_append_text(&append.content),
+            source: Some(append.key.clone()),
+            idempotency_key: Some(append.key.clone()),
+            accepted_at,
+        })
+        .collect()
+}
+
+fn start_turn_request_from_primitive(
+    primitive: &RunPrimitive,
+) -> Result<StartTurnRequest, CoreExecutorError> {
+    if let Some(reason) = primitive.peer_response_terminal_apply_intent_violation() {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            reason.to_string(),
+        ));
+    }
+    let metadata = primitive.turn_metadata();
+    let pre_turn_context_appends = match primitive {
+        RunPrimitive::StagedInput(staged) if primitive.is_peer_response_terminal_context_and_run() => {
+            pending_system_context_appends(&staged.context_appends)
+        }
+        _ => Vec::new(),
+    };
+    Ok(StartTurnRequest {
+        prompt: primitive.extract_content_input(),
+        system_prompt: None,
+        event_tx: None,
+        pre_turn_context_appends,
+        turn_metadata: metadata.cloned(),
+    })
 }
 
 #[async_trait::async_trait]
@@ -1123,14 +1138,7 @@ impl CoreExecutor for TargetCoreExecutor {
         run_id: RunId,
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError> {
-        let prompt = extract_prompt(&primitive);
-
-        let req = StartTurnRequest {
-            prompt,
-            system_prompt: None,
-            event_tx: None,
-            turn_metadata: primitive.turn_metadata().cloned(),
-        };
+        let req = start_turn_request_from_primitive(&primitive)?;
 
         let boundary = match &primitive {
             RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -2047,6 +2055,7 @@ mod tests {
     use meerkat_core::service::{
         CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, StartTurnRequest,
     };
+    use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
     use meerkat_core::types::{ContentInput, HandlingMode};
     use meerkat_mob::MobSessionService;
     use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
@@ -2225,6 +2234,50 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(provider, Some(ProviderKind::Openai));
+    }
+
+    #[test]
+    fn target_executor_carries_terminal_peer_response_context_into_turn_request() {
+        let primitive = RunPrimitive::StagedInput(
+            meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                appends: Vec::new(),
+                context_appends: vec![
+                    meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
+                        key: "peer_response_terminal:analyst:req-1".to_string(),
+                        content: CoreRenderable::Text {
+                            text: "terminal answer from analyst".to_string(),
+                        },
+                    },
+                ],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                        ),
+                        peer_response_terminal_apply_intent: Some(
+                            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            },
+        );
+
+        let request =
+            super::start_turn_request_from_primitive(&primitive).expect("primitive should convert");
+
+        assert_eq!(request.prompt.text_content(), "");
+        assert_eq!(request.pre_turn_context_appends.len(), 1);
+        assert_eq!(
+            request.pre_turn_context_appends[0].idempotency_key.as_deref(),
+            Some("peer_response_terminal:analyst:req-1")
+        );
+        assert_eq!(
+            request.pre_turn_context_appends[0].text,
+            "terminal answer from analyst"
+        );
     }
 
     #[tokio::test]
@@ -2578,6 +2631,7 @@ mod tests {
                     prompt: ContentInput::Text("run shell".to_string()),
                     system_prompt: None,
                     event_tx: None,
+                    pre_turn_context_appends: Vec::new(),
                     turn_metadata: None,
                 },
             )

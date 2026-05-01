@@ -1533,6 +1533,7 @@ impl MobBuilder {
                                 prompt: resume_message.into(),
                                 system_prompt: None,
                                 event_tx: None,
+                                pre_turn_context_appends: Vec::new(),
                                 turn_metadata: None,
                             },
                         )

@@ -1218,6 +1218,7 @@ mod scenario_09_session_service {
             prompt: "What did I just say to you?".to_string().into(),
             system_prompt: None,
             event_tx: None,
+            pre_turn_context_appends: Vec::new(),
             turn_metadata: None,
         };
 
@@ -1686,6 +1687,7 @@ mod scenario_22_runtime_host_comms {
                 prompt: prompt.into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             };
 

@@ -8,7 +8,7 @@ pub mod transport;
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
 use crate::lifecycle::run_primitive::RuntimeTurnMetadata;
-use crate::session::SystemContextStageError;
+use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -286,6 +286,11 @@ pub struct SessionBuildOptions {
     /// - `StandaloneEphemeral`: factory creates local-only ephemeral bindings.
     ///   Suitable for WASM, tests, embedded, and standalone surfaces.
     pub runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode,
+    /// Runtime-stamped metadata for an eager first turn.
+    ///
+    /// Session services only forward this carrier. They must not infer an
+    /// execution kind from runtime build mode.
+    pub initial_turn_metadata: Option<RuntimeTurnMetadata>,
     /// Runtime-injected mob operator authority context.
     ///
     /// This is the only source of mob operator tool authority. Tool visibility
@@ -664,6 +669,7 @@ impl Default for SessionBuildOptions {
             resume_override_mask: ResumeOverrideMask::default(),
             mob_tools: None,
             runtime_build_mode: crate::runtime_epoch::RuntimeBuildMode::StandaloneEphemeral,
+            initial_turn_metadata: None,
             mob_tool_authority_context: None,
         }
     }
@@ -710,6 +716,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("mob_tools", &self.mob_tools.is_some())
             .field("runtime_build_mode", &self.runtime_build_mode)
             .field(
+                "initial_turn_metadata",
+                &self.initial_turn_metadata.is_some(),
+            )
+            .field(
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
             )
@@ -732,6 +742,7 @@ impl std::fmt::Debug for SessionBuildOptions {
 ///     prompt: ContentInput::Text("hello".to_string()),
 ///     system_prompt: None,
 ///     event_tx: None,
+///     pre_turn_context_appends: Vec::new(),
 ///     skill_references: None,
 ///     flow_tool_overlay: None,
 ///     turn_metadata: Some(RuntimeTurnMetadata::default()),
@@ -748,6 +759,9 @@ pub struct StartTurnRequest {
     pub system_prompt: Option<String>,
     /// Channel for streaming events during the turn.
     pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
+    /// Runtime-owned system-context appends that must be applied at this
+    /// turn boundary before the model run starts.
+    pub pre_turn_context_appends: Vec<PendingSystemContextAppend>,
     /// Canonical runtime-authored metadata for this turn.
     ///
     /// Runtime-backed callers populate this once at the machine boundary and

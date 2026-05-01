@@ -11,6 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
     ConversationAppend, ConversationContextAppend, PeerResponseTerminalApplyIntent,
     RunApplyBoundary,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{InputKind, KindId};
 use crate::policy::{ApplyMode, PolicyDecision};
@@ -72,7 +73,7 @@ pub struct RequestId(pub String);
 /// or handling-mode hints to decide how a dequeued input runs. Admission has
 /// already resolved the typed policy/kind tuple; this record is the canonical
 /// carrier from that decision point to `RunPrimitive` construction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeInputSemantics {
     pub boundary: RunApplyBoundary,
     pub execution_kind: RuntimeExecutionKind,
@@ -92,12 +93,27 @@ pub struct RuntimeInputProjection {
 }
 
 impl RuntimeInputSemantics {
-    pub fn from_policy_and_kind(policy: &PolicyDecision, kind: InputKind) -> Self {
-        let boundary = match policy.apply_mode {
+    fn boundary_from_policy(policy: &PolicyDecision) -> RunApplyBoundary {
+        match policy.apply_mode {
             ApplyMode::StageRunBoundary => RunApplyBoundary::RunCheckpoint,
             ApplyMode::InjectNow => RunApplyBoundary::Immediate,
             ApplyMode::StageRunStart | ApplyMode::Ignore => RunApplyBoundary::RunStart,
-        };
+        }
+    }
+
+    pub fn from_policy_and_execution_kind(
+        policy: &PolicyDecision,
+        execution_kind: RuntimeExecutionKind,
+        peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+    ) -> Self {
+        Self {
+            boundary: Self::boundary_from_policy(policy),
+            execution_kind,
+            peer_response_terminal_apply_intent,
+        }
+    }
+
+    pub fn from_policy_and_kind(policy: &PolicyDecision, kind: InputKind) -> Self {
         let execution_kind = match kind {
             InputKind::Continuation => RuntimeExecutionKind::ResumePending,
             InputKind::Prompt
@@ -122,11 +138,11 @@ impl RuntimeInputSemantics {
             | InputKind::Continuation
             | InputKind::Operation => None,
         };
-        Self {
-            boundary,
+        Self::from_policy_and_execution_kind(
+            policy,
             execution_kind,
             peer_response_terminal_apply_intent,
-        }
+        )
     }
 }
 

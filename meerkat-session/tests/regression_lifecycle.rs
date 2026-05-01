@@ -620,6 +620,7 @@ async fn start_turn_applies_runtime_turn_metadata_additional_instructions() {
                 prompt: "base prompt".into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         additional_instructions: Some(vec![
@@ -696,6 +697,7 @@ async fn start_turn_applies_runtime_turn_metadata_additional_instructions_to_pen
                 prompt: "".into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         additional_instructions: Some(vec![
@@ -758,6 +760,7 @@ async fn start_turn_applies_runtime_turn_metadata_keep_alive() {
                 prompt: "keep this session alive".into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: Some(
@@ -801,6 +804,7 @@ async fn start_turn_applies_runtime_turn_metadata_keep_alive() {
                 prompt: "do not keep this session alive".into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         keep_alive: Some(
@@ -915,6 +919,7 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
         prompt: prompt.to_string().into(),
         system_prompt: None,
         event_tx: None,
+        pre_turn_context_appends: Vec::new(),
         turn_metadata: None,
     }
 }
@@ -1486,6 +1491,7 @@ async fn start_turn_uses_runtime_turn_metadata_for_handling_and_rendering() {
                 prompt: "steer me".into(),
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         handling_mode: Some(HandlingMode::Steer),

@@ -109,41 +109,6 @@ fn temp_factory(temp: &tempfile::TempDir) -> AgentFactory {
     AgentFactory::new(temp.path().join("sessions"))
 }
 
-// Attach `RuntimeBuildMode::SessionOwned(bindings)` to a `build_config` so the
-// factory's `build_agent` path wires a runtime-backed `turn_state_handle`.
-// Returns the adapter so the caller keeps it alive for the duration of the
-// agent (the bindings hold handles that reference shared state owned by the
-// adapter).
-//
-// Wave-A deleted the standalone `turn_state_handle` fallback
-// (`meerkat-core/src/agent/state.rs:99-108`); the `AgentBuildConfig::new`
-// default is `StandaloneEphemeral`, which does NOT attach the handle (see
-// `meerkat/src/factory.rs:2741-2751`), and any `agent.run(...)` call then
-// panics with "runtime turn-state handle missing". Tests that exercise the
-// live-run path must switch to `SessionOwned` via this helper.
-//
-// The helper also seeds `build_config.resume_session` with a `Session` whose
-// id matches the bindings' session_id, so the factory's internal check at
-// build-commit time doesn't reject the bindings as "prepared for a different
-// session" (see `meerkat/src/factory.rs` resume-session handling).
-async fn with_runtime_bindings(
-    mut build_config: AgentBuildConfig,
-) -> (AgentBuildConfig, Arc<meerkat_runtime::MeerkatMachine>) {
-    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
-    let session = Session::new();
-    let session_id = session.id().clone();
-    adapter.register_session(session_id.clone()).await;
-    let bindings = adapter
-        .prepare_bindings(session_id)
-        .await
-        .expect("prepare_bindings");
-    build_config.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
-    if build_config.resume_session.is_none() {
-        build_config.resume_session = Some(session);
-    }
-    (build_config, adapter)
-}
-
 struct EmptyDispatcher;
 
 #[async_trait]
@@ -231,7 +196,6 @@ async fn run_and_capture_tool_names(
 ) -> Vec<String> {
     let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
     build_config.llm_client_override = Some(capture.clone());
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
     let mut agent = factory
         .build_agent(build_config, &Config::default())
         .await
@@ -268,7 +232,6 @@ async fn build_agent_with_mock_client_produces_runnable_agent() {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
 
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
 
@@ -1518,7 +1481,6 @@ async fn build_agent_with_custom_session_store() {
         llm_client_override: Some(Arc::new(MockLlmClient)),
         ..AgentBuildConfig::new("claude-sonnet-4-5")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
 
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
 
@@ -2114,7 +2076,6 @@ async fn web_search_default_injected_for_anthropic() {
         llm_client_override: Some(client.clone()),
         ..AgentBuildConfig::new("claude-sonnet-4-6")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let params = client
@@ -2137,7 +2098,6 @@ async fn web_search_not_injected_when_config_disabled() {
         llm_client_override: Some(client.clone()),
         ..AgentBuildConfig::new("claude-sonnet-4-6")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let params = client.captured_params();
@@ -2159,7 +2119,6 @@ async fn web_search_opt_out_via_null() {
         provider_params: Some(json!({"web_search": null})),
         ..AgentBuildConfig::new("claude-sonnet-4-6")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let params = client.captured_params();
@@ -2181,7 +2140,6 @@ async fn web_search_explicit_params_merged_with_defaults() {
         provider_params: Some(json!({"thinking_budget": 5000})),
         ..AgentBuildConfig::new("claude-sonnet-4-6")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let params = client
@@ -2208,7 +2166,6 @@ async fn explicit_meerkat_tool_policy_suppresses_ambient_provider_search_default
         override_builtins: ToolCategoryOverride::Disable,
         ..AgentBuildConfig::new("gpt-5.4")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let params = client.captured_params();
@@ -2231,7 +2188,6 @@ async fn explicit_provider_search_param_can_reenable_search_under_tool_policy() 
         provider_params: Some(json!({"web_search": {"type": "web_search"}})),
         ..AgentBuildConfig::new("gpt-5.4")
     };
-    let (build_config, _adapter) = with_runtime_bindings(build_config).await;
     let mut agent = factory.build_agent(build_config, &config).await.unwrap();
     let _ = agent.run("test".to_string().into()).await.unwrap();
     let params = client

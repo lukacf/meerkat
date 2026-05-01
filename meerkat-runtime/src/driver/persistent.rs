@@ -745,12 +745,19 @@ impl RuntimeDriver for PersistentRuntimeDriver {
 
     async fn recover(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        let report = crate::meerkat_machine::machine_recover_persistent_driver(
+        let report = match crate::meerkat_machine::machine_recover_persistent_driver(
             self.store.as_ref(),
             &self.runtime_id,
             &mut self.inner,
         )
-        .await?;
+        .await
+        {
+            Ok(report) => report,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint.clone());
+                return Err(err);
+            }
+        };
 
         // Persist recovered state atomically
         self.commit_lifecycle_with_rollback(

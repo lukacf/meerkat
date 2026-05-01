@@ -655,7 +655,7 @@ impl EphemeralRuntimeDriver {
     /// into the ledger before this call, so we must not rebuild physical queue
     /// projections until the full recovery batch has entered the DSL.
     #[allow(clippy::too_many_arguments)]
-    pub fn admit_recovered_to_ingress(
+    pub(crate) fn admit_recovered_to_ingress(
         &mut self,
         work_id: InputId,
         content_shape: ContentShape,
@@ -669,6 +669,18 @@ impl EphemeralRuntimeDriver {
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
     ) -> Result<(), RuntimeDriverError> {
+        let persisted_input =
+            recovered_state.persisted_input.as_ref().ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "store corruption: recovered input '{work_id}' has no persisted input; cannot validate recovered runtime semantics"
+                ))
+            })?;
+        let expected = RuntimeInputSemantics::from_policy_and_kind(&policy, persisted_input.kind());
+        if runtime_semantics != expected {
+            return Err(RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{work_id}' has runtime execution semantics stamp that does not match persisted input kind and admission policy; cannot recover with contradictory runtime-stamped execution kind"
+            )));
+        }
         self.recover_input_lifecycle(
             &work_id,
             &content_shape,
@@ -682,6 +694,18 @@ impl EphemeralRuntimeDriver {
             request_id.as_ref(),
             reservation_key.as_ref(),
         )
+    }
+
+    pub(crate) fn recover_terminal_input_lifecycle(
+        &mut self,
+        work_id: &InputId,
+        recovered_seed: &InputStateSeed,
+    ) -> Result<(), RuntimeDriverError> {
+        debug_assert!(
+            recovered_seed.phase.is_terminal(),
+            "terminal recovery path must only be used for terminal input phases"
+        );
+        self.apply_recovered_lifecycle(work_id, recovered_seed, None)
     }
 
     fn lifecycle_to_input_phase(lifecycle: InputLifecycleState) -> mm_dsl::InputPhase {
@@ -722,8 +746,6 @@ impl EphemeralRuntimeDriver {
         request_id: Option<&RequestId>,
         reservation_key: Option<&ReservationKey>,
     ) -> Result<(), RuntimeDriverError> {
-        let key = Self::dsl_key(work_id);
-        let lifecycle_state = recovered_seed.phase;
         self.record_admission_metadata(
             work_id,
             content_shape,
@@ -735,6 +757,17 @@ impl EphemeralRuntimeDriver {
             request_id,
             reservation_key,
         );
+        self.apply_recovered_lifecycle(work_id, recovered_seed, Some(handling_mode))
+    }
+
+    fn apply_recovered_lifecycle(
+        &mut self,
+        work_id: &InputId,
+        recovered_seed: &InputStateSeed,
+        handling_mode: Option<HandlingMode>,
+    ) -> Result<(), RuntimeDriverError> {
+        let key = Self::dsl_key(work_id);
+        let lifecycle_state = recovered_seed.phase;
         let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
             match recovered_seed.terminal_outcome.clone() {
                 Some(InputTerminalOutcome::Consumed) => (
@@ -768,7 +801,8 @@ impl EphemeralRuntimeDriver {
                 None => (None, None, None, None, 0),
             };
         let lane = matches!(lifecycle_state, InputLifecycleState::Queued)
-            .then(|| mm_dsl::InputLane::from(handling_mode));
+            .then(|| handling_mode.map(mm_dsl::InputLane::from))
+            .flatten();
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RecoverInputLifecycle {
                 input_id: key,
@@ -810,6 +844,9 @@ impl EphemeralRuntimeDriver {
         self.handling_mode.insert(work_id.clone(), handling_mode);
         self.runtime_semantics
             .insert(work_id.clone(), runtime_semantics);
+        if let Some(state) = self.ledger.get_mut(work_id) {
+            state.runtime_semantics = Some(runtime_semantics);
+        }
         self.primitive_projection
             .insert(work_id.clone(), primitive_projection);
         if is_prompt {
@@ -1213,6 +1250,14 @@ impl EphemeralRuntimeDriver {
         &mut self.steer_queue
     }
 
+    #[cfg(test)]
+    pub(crate) fn clear_admitted_runtime_semantics_for_test(&mut self, input_id: &InputId) {
+        self.runtime_semantics.remove(input_id);
+        if let Some(state) = self.ledger.get_mut(input_id) {
+            state.runtime_semantics = None;
+        }
+    }
+
     pub fn has_queued_input(&self, input_id: &InputId) -> bool {
         let key = Self::dsl_key(input_id);
         self.with_dsl_state(|state| state.input_lane.contains_key(&key))
@@ -1281,7 +1326,10 @@ impl EphemeralRuntimeDriver {
     /// ledger-side shell with the DSL-owned seed (phase / run association /
     /// boundary sequence). Used by persistence callsites and test helpers.
     pub fn stored_input_state(&self, input_id: &InputId) -> Option<StoredInputState> {
-        let state = self.ledger.get(input_id)?.clone();
+        let mut state = self.ledger.get(input_id)?.clone();
+        if state.runtime_semantics.is_none() {
+            state.runtime_semantics = self.admitted_runtime_semantics(input_id);
+        }
         let phase = self
             .input_phase(input_id)
             .unwrap_or(InputLifecycleState::Accepted);
@@ -1300,6 +1348,10 @@ impl EphemeralRuntimeDriver {
         self.ledger
             .iter()
             .map(|(input_id, state)| {
+                let mut state = state.clone();
+                if state.runtime_semantics.is_none() {
+                    state.runtime_semantics = self.admitted_runtime_semantics(input_id);
+                }
                 let phase = self
                     .input_phase(input_id)
                     .unwrap_or(InputLifecycleState::Accepted);
@@ -1310,10 +1362,7 @@ impl EphemeralRuntimeDriver {
                     terminal_outcome: self.input_terminal_outcome(input_id),
                     attempt_count: self.input_attempt_count(input_id),
                 };
-                StoredInputState {
-                    state: state.clone(),
-                    seed,
-                }
+                StoredInputState { state, seed }
             })
             .collect()
     }

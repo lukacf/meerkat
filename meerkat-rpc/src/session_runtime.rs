@@ -785,6 +785,12 @@ impl SessionRuntime {
         }
     }
 
+    fn runtime_stamped_prompt_turn_metadata(
+        metadata: Option<RuntimeTurnMetadata>,
+    ) -> RuntimeTurnMetadata {
+        meerkat_runtime::runtime_stamped_prompt_turn_metadata(metadata)
+    }
+
     fn turn_metadata_provider_params(metadata: &RuntimeTurnMetadata) -> Option<serde_json::Value> {
         match metadata.provider_params.as_ref() {
             Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
@@ -1824,13 +1830,20 @@ impl SessionRuntime {
         session_id: &SessionId,
         run_id: meerkat_core::lifecycle::RunId,
         appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        boundary: RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::lifecycle::InputId>,
     ) -> Result<
         meerkat_core::lifecycle::core_executor::CoreApplyOutput,
         meerkat_core::service::SessionError,
     > {
         self.service
-            .apply_runtime_context_appends(session_id, run_id, appends, contributing_input_ids)
+            .apply_runtime_context_appends_with_boundary(
+                session_id,
+                run_id,
+                appends,
+                boundary,
+                contributing_input_ids,
+            )
             .await
     }
 
@@ -2413,28 +2426,25 @@ impl SessionRuntime {
             };
             return self
                 .service
-                .apply_runtime_context_appends(
+                .apply_runtime_context_appends_with_boundary(
                     session_id,
                     run_id,
                     pending_system_context_appends(&staged.context_appends),
+                    primitive.apply_boundary(),
                     staged.contributing_input_ids.clone(),
                 )
                 .await
                 .map_err(session_error_to_rpc);
         }
 
-        if primitive.is_peer_response_terminal_context_and_run() {
-            let RunPrimitive::StagedInput(staged) = primitive else {
-                unreachable!("terminal peer-response apply intent only matches staged primitives");
-            };
-            self.service
-                .apply_runtime_system_context_for_turn(
-                    session_id,
-                    pending_system_context_appends(&staged.context_appends),
-                )
-                .await
-                .map_err(session_error_to_rpc)?;
-        }
+        let pre_turn_context_appends = match primitive {
+            RunPrimitive::StagedInput(staged)
+                if primitive.is_peer_response_terminal_context_and_run() =>
+            {
+                pending_system_context_appends(&staged.context_appends)
+            }
+            _ => Vec::new(),
+        };
 
         let turn_metadata = primitive.turn_metadata();
         let service_turn_metadata = turn_metadata.cloned();
@@ -2509,6 +2519,7 @@ impl SessionRuntime {
                 prompt: prompt.clone(),
                 system_prompt: None,
                 event_tx: Some(event_tx.clone()),
+                pre_turn_context_appends: pre_turn_context_appends.clone(),
                 turn_metadata: service_turn_metadata.clone(),
             };
 
@@ -2720,6 +2731,7 @@ impl SessionRuntime {
                         prompt: runtime_prompt,
                         system_prompt: None,
                         event_tx: Some(event_tx),
+                        pre_turn_context_appends: pre_turn_context_appends.clone(),
                         turn_metadata: service_turn_metadata.clone(),
                     },
                     match primitive {
@@ -2798,6 +2810,7 @@ impl SessionRuntime {
                     prompt,
                     system_prompt: None,
                     event_tx: Some(event_tx),
+                    pre_turn_context_appends,
                     turn_metadata: service_turn_metadata,
                 },
                 match primitive {
@@ -2943,8 +2956,8 @@ impl SessionRuntime {
     ) -> Result<RunResult, RpcError> {
         #[allow(unused_mut)]
         let mut turn_prompt = prompt;
-        let turn_metadata_ref = turn_metadata.as_ref();
-        let service_turn_metadata = turn_metadata.clone();
+        let service_turn_metadata = Some(Self::runtime_stamped_prompt_turn_metadata(turn_metadata));
+        let turn_metadata_ref = service_turn_metadata.as_ref();
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata_ref);
         #[cfg(feature = "mcp")]
         {
@@ -3105,6 +3118,7 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
             build.backend = build.backend.or_else(|| self.backend.clone());
             build.config_generation = build.config_generation.or(runtime_generation);
+            build.initial_turn_metadata = service_turn_metadata.clone();
 
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
@@ -3135,6 +3149,7 @@ impl SessionRuntime {
                                 prompt: first_turn_prompt,
                                 system_prompt: None,
                                 event_tx: Some(event_tx),
+                                pre_turn_context_appends: Vec::new(),
                                 turn_metadata: service_turn_metadata.clone(),
                             },
                         )
@@ -3186,11 +3201,11 @@ impl SessionRuntime {
                 .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
                 .unwrap_or(false),
         };
-
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
             system_prompt: None,
             event_tx: Some(event_tx.clone()),
+            pre_turn_context_appends: Vec::new(),
             turn_metadata: service_turn_metadata.clone(),
         };
 
@@ -3199,7 +3214,7 @@ impl SessionRuntime {
                 session_id,
                 turn_prompt,
                 event_tx,
-                turn_metadata,
+                service_turn_metadata,
             ))
             .await;
         }
@@ -3253,7 +3268,7 @@ impl SessionRuntime {
                     session_id,
                     turn_prompt,
                     event_tx,
-                    turn_metadata,
+                    service_turn_metadata,
                 ))
                 .await
             }
@@ -4701,6 +4716,33 @@ mod tests {
     }
 
     #[test]
+    fn runtime_prompt_metadata_helper_stamps_and_preserves_metadata() {
+        let metadata =
+            SessionRuntime::runtime_stamped_prompt_turn_metadata(Some(RuntimeTurnMetadata {
+                additional_instructions: Some(vec![
+                    meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User,
+                        body: "runtime note".to_string(),
+                    },
+                ]),
+                ..Default::default()
+            }));
+
+        assert_eq!(
+            metadata.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+        assert_eq!(
+            metadata
+                .additional_instructions
+                .as_ref()
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("runtime note")
+        );
+    }
+
+    #[test]
     fn realtime_open_config_context_comes_from_typed_system_context_state() {
         let mut state = SessionSystemContextState::default();
         state
@@ -4845,6 +4887,64 @@ mod tests {
             llm_client_override: Some(Arc::new(SlowMockLlmClient::new(delay_ms))),
             ..AgentBuildConfig::new("claude-sonnet-4-5")
         }
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_apply_preserves_run_checkpoint_boundary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (initial_event_tx, _initial_event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize runtime session".into(),
+                initial_event_tx,
+                None,
+            )
+            .await
+            .expect("start_turn");
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-checkpoint-boundary".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "checkpoint-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![input_id.clone()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let output = runtime
+            .apply_runtime_turn(
+                &session_id,
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect("context-only apply should succeed");
+
+        assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
+        assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
     }
 
     #[tokio::test]
@@ -5491,45 +5591,42 @@ mod tests {
             let _ = handle.wait().await;
         }
 
-        let started = tokio::time::timeout(std::time::Duration::from_secs(3), events.next())
-            .await
-            .expect("run_started timeout")
-            .expect("run_started event should exist");
-        match started.payload {
-            AgentEvent::RunStarted { prompt, .. } => {
-                let normalized = prompt.text_content().to_lowercase();
-                assert!(
-                    normalized.contains(
-                        "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1"
-                    ),
-                    "run_started prompt should expose runtime system-context source: {normalized}"
-                );
-                assert!(
-                    normalized.contains("birch seventeen"),
-                    "run_started prompt should expose authoritative terminal peer payload: {normalized}"
-                );
+        let (result, usage) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut saw_context_started = false;
+            while let Some(event) = events.next().await {
+                match event.payload {
+                    AgentEvent::RunStarted { prompt, .. } => {
+                        let normalized = prompt.text_content().to_lowercase();
+                        if normalized.contains(
+                            "peer_response_terminal:analyst-rt:018f6f79-7a82-7c4e-a552-a3b86f9630f1",
+                        ) {
+                            assert!(
+                                normalized.contains("birch seventeen"),
+                                "run_started prompt should expose authoritative terminal peer payload: {normalized}"
+                            );
+                            saw_context_started = true;
+                        }
+                    }
+                    AgentEvent::RunCompleted { result, usage, .. } if saw_context_started => {
+                        return (result, usage);
+                    }
+                    _ => {}
+                }
             }
-            other => panic!("expected run_started, got {other:?}"),
-        }
+            panic!("committed runtime context lifecycle events did not arrive");
+        })
+        .await
+        .expect("runtime context lifecycle timeout");
 
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(3), events.next())
-            .await
-            .expect("run_completed timeout")
-            .expect("run_completed event should exist");
-        match completed.payload {
-            AgentEvent::RunCompleted { result, usage, .. } => {
-                assert!(
-                    result.is_empty(),
-                    "context-only runtime apply should not synthesize assistant output: {result:?}"
-                );
-                assert_eq!(
-                    usage,
-                    meerkat_core::types::Usage::default(),
-                    "context-only runtime apply should not report model usage"
-                );
-            }
-            other => panic!("expected run_completed, got {other:?}"),
-        }
+        assert!(
+            result.is_empty(),
+            "context-only runtime apply should not synthesize assistant output: {result:?}"
+        );
+        assert_eq!(
+            usage,
+            meerkat_core::types::Usage::default(),
+            "context-only runtime apply should not report model usage"
+        );
     }
 
     #[cfg(feature = "comms")]
@@ -5642,26 +5739,38 @@ mod tests {
         .await
         .expect("send terminal peer response");
 
-        let started = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
-            .await
-            .expect("run_started timeout")
-            .expect("run_started event should exist");
-        assert!(matches!(started.payload, AgentEvent::RunStarted { .. }));
-
-        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), events.next())
-            .await
-            .expect("run_completed timeout")
-            .expect("run_completed event should exist");
-        match completed.payload {
-            AgentEvent::RunCompleted { result, usage, .. } => {
-                assert!(
-                    result.is_empty(),
-                    "context-only drain apply should not synthesize assistant output"
-                );
-                assert_eq!(usage, meerkat_core::types::Usage::default());
+        let (result, usage) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut saw_context_started = false;
+            while let Some(event) = events.next().await {
+                match event.payload {
+                    AgentEvent::RunStarted { prompt, .. } => {
+                        let normalized = prompt.text_content().to_lowercase();
+                        if normalized.contains("peer_response_terminal:")
+                            && normalized.contains("birch seventeen")
+                        {
+                            assert!(
+                                normalized.contains("checksum_token"),
+                                "run_started prompt should expose authoritative terminal peer payload: {normalized}"
+                            );
+                            saw_context_started = true;
+                        }
+                    }
+                    AgentEvent::RunCompleted { result, usage, .. } if saw_context_started => {
+                        return (result, usage);
+                    }
+                    _ => {}
+                }
             }
-            other => panic!("expected run_completed, got {other:?}"),
-        }
+            panic!("committed drain context lifecycle events did not arrive");
+        })
+        .await
+        .expect("runtime context lifecycle timeout");
+
+        assert!(
+            result.is_empty(),
+            "context-only drain apply should not synthesize assistant output"
+        );
+        assert_eq!(usage, meerkat_core::types::Usage::default());
     }
 
     #[tokio::test]

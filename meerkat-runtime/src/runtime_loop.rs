@@ -7,15 +7,15 @@
 //! under the hood).
 
 use meerkat_core::lifecycle::core_executor::{CoreApplyFailureCause, CoreApplyTerminal};
-use meerkat_core::lifecycle::run_primitive::{
-    PeerResponseTerminalApplyIntent, RunApplyBoundary, RunPrimitive, StagedRunInput,
-};
+use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive, StagedRunInput};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::turn_execution_authority::ContentShape as TurnContentShape;
 
+use crate::input::Input;
 #[cfg(test)]
 use crate::input::input_prompt_text;
-use crate::input::{Input, runtime_input_projection_for_machine_batch};
+#[cfg(test)]
+use crate::input::runtime_input_projection_for_machine_batch;
 use crate::runtime_state::RuntimeState;
 use crate::tokio;
 
@@ -33,22 +33,26 @@ pub(crate) fn input_to_prompt(input: &Input) -> String {
 /// integration test greps for that invariant at build time.
 pub(crate) fn for_input(
     input: &Input,
-) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
-    match input {
-        Input::Prompt(prompt) => prompt.turn_metadata.clone(),
-        Input::FlowStep(flow_step) => flow_step.turn_metadata.clone(),
-        Input::ExternalEvent(event) => Some(RuntimeTurnMetadata {
+    let mut metadata = match input {
+        Input::Prompt(prompt) => prompt.turn_metadata.clone().unwrap_or_default(),
+        Input::FlowStep(flow_step) => flow_step.turn_metadata.clone().unwrap_or_default(),
+        Input::ExternalEvent(event) => RuntimeTurnMetadata {
             handling_mode: Some(event.handling_mode),
             render_metadata: event.render_metadata.clone(),
             ..Default::default()
-        }),
-        Input::Continuation(continuation) => Some(RuntimeTurnMetadata {
+        },
+        Input::Continuation(continuation) => RuntimeTurnMetadata {
             handling_mode: Some(continuation.handling_mode),
             ..Default::default()
-        }),
-        _ => None,
-    }
+        },
+        _ => RuntimeTurnMetadata::default(),
+    };
+    metadata.execution_kind = Some(semantics.execution_kind);
+    metadata.peer_response_terminal_apply_intent = semantics.peer_response_terminal_apply_intent;
+    metadata
 }
 
 /// Merge the per-input turn metadata carried by a staged batch into a single
@@ -57,16 +61,24 @@ pub(crate) fn for_input(
 /// shell defaults.
 pub(crate) fn merge_batch_turn_metadata(
     inputs: &[(meerkat_core::lifecycle::InputId, Input)],
+    semantics: &[crate::ingress_types::RuntimeInputSemantics],
 ) -> Result<
     Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
     meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
 > {
     use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
+    if inputs.len() != semantics.len() {
+        return Err(
+            meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                field: "execution_kind",
+                reason: "runtime-stamped execution kind missing for one or more inputs",
+            },
+        );
+    }
+
     let mut acc: Option<RuntimeTurnMetadata> = None;
-    for (_, input) in inputs {
-        let Some(meta) = for_input(input) else {
-            continue;
-        };
+    for ((_, input), semantics) in inputs.iter().zip(semantics.iter()) {
+        let meta = for_input(input, *semantics);
         match acc.as_mut() {
             None => acc = Some(meta),
             Some(existing) => {
@@ -223,32 +235,24 @@ async fn prepare_turn_state_for_primitive(
         })
 }
 
+#[cfg(test)]
 pub(crate) fn try_inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,
-    execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+    semantics: &[crate::ingress_types::RuntimeInputSemantics],
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let projections = inputs
         .iter()
         .map(|(_, input)| runtime_input_projection_for_machine_batch(input))
         .collect::<Vec<_>>();
-    let peer_response_terminal_apply_intent =
-        fallback_batch_peer_response_terminal_apply_intent(inputs, boundary);
-    try_projected_inputs_to_primitive_with_boundary(
-        inputs,
-        &projections,
-        boundary,
-        execution_kind,
-        peer_response_terminal_apply_intent,
-    )
+    try_projected_inputs_to_primitive_with_boundary(inputs, &projections, boundary, semantics)
 }
 
 pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     projections: &[crate::ingress_types::RuntimeInputProjection],
     boundary: RunApplyBoundary,
-    execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
-    peer_response_terminal_apply_intent: Option<PeerResponseTerminalApplyIntent>,
+    semantics: &[crate::ingress_types::RuntimeInputSemantics],
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let appends = projections
         .iter()
@@ -264,14 +268,7 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
         .collect::<Vec<_>>();
     // Merge turn metadata from ALL inputs in the batch, not just the first.
     // Scalar conflicts are typed errors; collection fields accumulate.
-    let turn_metadata = merge_batch_turn_metadata(inputs)?;
-
-    let turn_metadata = {
-        let mut meta = turn_metadata.unwrap_or_default();
-        meta.execution_kind = execution_kind;
-        meta.peer_response_terminal_apply_intent = peer_response_terminal_apply_intent;
-        Some(meta)
-    };
+    let turn_metadata = merge_batch_turn_metadata(inputs, semantics)?;
 
     Ok(RunPrimitive::StagedInput(StagedRunInput {
         boundary,
@@ -282,14 +279,16 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn inputs_to_primitive_with_boundary(
     inputs: &[(InputId, Input)],
     boundary: RunApplyBoundary,
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
-    let execution_kind = fallback_batch_execution_kind(inputs);
-    try_inputs_to_primitive_with_boundary(inputs, boundary, execution_kind)
+    let semantics = fallback_batch_semantics(inputs);
+    try_inputs_to_primitive_with_boundary(inputs, boundary, &semantics)
 }
 
+#[cfg(test)]
 pub(crate) fn inputs_to_primitive(
     inputs: &[(InputId, Input)],
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
@@ -300,42 +299,43 @@ pub(crate) fn inputs_to_primitive(
     inputs_to_primitive_with_boundary(inputs, boundary)
 }
 
+#[cfg(test)]
 fn fallback_unadmitted_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
     let policy = crate::policy_table::DefaultPolicyTable::resolve(input, true);
     crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind())
 }
 
-fn fallback_batch_execution_kind(
+#[cfg(test)]
+fn fallback_batch_semantics(
     inputs: &[(InputId, Input)],
-) -> Option<meerkat_core::lifecycle::RuntimeExecutionKind> {
-    if inputs.is_empty() {
-        return None;
-    }
-    if inputs.iter().all(|(_, input)| {
-        fallback_unadmitted_semantics(input).execution_kind
-            == meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending
-    }) {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
-    } else {
-        Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
-    }
-}
-
-fn fallback_batch_peer_response_terminal_apply_intent(
-    inputs: &[(InputId, Input)],
-    _boundary: RunApplyBoundary,
-) -> Option<PeerResponseTerminalApplyIntent> {
-    inputs.iter().find_map(|(_, input)| {
-        fallback_unadmitted_semantics(input).peer_response_terminal_apply_intent
-    })
+) -> Vec<crate::ingress_types::RuntimeInputSemantics> {
+    inputs
+        .iter()
+        .map(|(_, input)| fallback_unadmitted_semantics(input))
+        .collect()
 }
 
 /// Convert an `Input` + its ID to a `RunPrimitive` for `CoreExecutor::apply()`.
+#[cfg(test)]
 pub(crate) fn input_to_primitive(
     input: &Input,
     input_id: InputId,
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     inputs_to_primitive(&[(input_id, input.clone())])
+}
+
+pub(crate) fn admitted_input_to_primitive(
+    input: &Input,
+    input_id: InputId,
+    projection: crate::ingress_types::RuntimeInputProjection,
+    semantics: crate::ingress_types::RuntimeInputSemantics,
+) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
+    try_projected_inputs_to_primitive_with_boundary(
+        &[(input_id, input.clone())],
+        &[projection],
+        semantics.boundary,
+        &[semantics],
+    )
 }
 
 /// Spawn the per-session runtime loop with optional completion registry.
@@ -662,22 +662,24 @@ async fn process_queue(
                 .iter()
                 .map(|(staged_input_id, _)| staged_input_id.clone())
                 .collect::<Vec<_>>();
-            let execution_kind =
-                crate::meerkat_machine::machine_batch_execution_kind(&d, &staged_ids);
-            let peer_response_terminal_apply_intent =
-                crate::meerkat_machine::machine_batch_peer_response_terminal_apply_intent(
-                    &d,
-                    &staged_ids,
-                );
+            let semantics =
+                crate::meerkat_machine::machine_batch_runtime_semantics(&d, &staged_ids);
             let projections =
                 crate::meerkat_machine::machine_batch_primitive_projections(&d, &staged_inputs);
-            let primitive = try_projected_inputs_to_primitive_with_boundary(
-                &staged_inputs,
-                &projections,
-                boundary,
-                execution_kind,
-                peer_response_terminal_apply_intent,
-            );
+            let primitive = match semantics {
+                Some(semantics) => try_projected_inputs_to_primitive_with_boundary(
+                    &staged_inputs,
+                    &projections,
+                    boundary,
+                    &semantics,
+                ),
+                None => Err(
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict {
+                        field: "execution_kind",
+                        reason: "runtime-stamped execution kind missing for one or more inputs",
+                    },
+                ),
+            };
             Some((contributing_input_ids, staged_ids, run_id, primitive))
         };
 
@@ -828,7 +830,9 @@ mod tests {
     use super::*;
     use crate::input::*;
     use chrono::Utc;
-    use meerkat_core::lifecycle::run_primitive::{ConversationAppendRole, CoreRenderable};
+    use meerkat_core::lifecycle::run_primitive::{
+        ConversationAppendRole, CoreRenderable, PeerResponseTerminalApplyIntent,
+    };
     use std::sync::Arc;
 
     use meerkat_core::ops_lifecycle::{
@@ -1379,7 +1383,7 @@ mod tests {
         let primitive = try_inputs_to_primitive_with_boundary(
             &[(input.id().clone(), input)],
             semantics.boundary,
-            Some(semantics.execution_kind),
+            &[semantics],
         )
         .expect("single input metadata cannot conflict");
         let metadata = primitive
@@ -1492,8 +1496,12 @@ mod tests {
                 "terminal response batch must not absorb later normal peer messages"
             );
             assert_eq!(
-                crate::meerkat_machine::machine_batch_peer_response_terminal_apply_intent(
-                    &guard, &batch,
+                crate::meerkat_machine::machine_batch_runtime_semantics(&guard, &batch).and_then(
+                    |semantics| {
+                        semantics
+                            .into_iter()
+                            .find_map(|semantics| semantics.peer_response_terminal_apply_intent)
+                    }
                 ),
                 Some(PeerResponseTerminalApplyIntent::AppendContextAndRun)
             );
@@ -1519,8 +1527,12 @@ mod tests {
             "normal peer message batch must not absorb later terminal responses"
         );
         assert_eq!(
-            crate::meerkat_machine::machine_batch_peer_response_terminal_apply_intent(
-                &guard, &batch,
+            crate::meerkat_machine::machine_batch_runtime_semantics(&guard, &batch).and_then(
+                |semantics| {
+                    semantics
+                        .into_iter()
+                        .find_map(|semantics| semantics.peer_response_terminal_apply_intent)
+                }
             ),
             None
         );
@@ -2157,6 +2169,31 @@ mod tests {
     }
 
     #[test]
+    fn admitted_input_primitive_uses_runtime_stamped_execution_kind() {
+        let input = make_prompt("test prompt");
+        let id = input.id().clone();
+        let primitive = admitted_input_to_primitive(
+            &input,
+            id,
+            crate::input::runtime_input_projection(&input),
+            crate::ingress_types::RuntimeInputSemantics {
+                boundary: RunApplyBoundary::RunStart,
+                execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                peer_response_terminal_apply_intent: None,
+            },
+        )
+        .expect("single input metadata cannot conflict");
+        let meta = primitive
+            .turn_metadata()
+            .expect("should have turn_metadata");
+        assert_eq!(
+            meta.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending),
+            "primitive construction must use the runtime-stamped execution kind, not the local input kind"
+        );
+    }
+
+    #[test]
     fn primitive_from_peer_terminal_has_content_turn() {
         let input = Input::Peer(PeerInput {
             header: InputHeader {
@@ -2195,9 +2232,10 @@ mod tests {
     }
 
     #[test]
-    fn mixed_batch_defaults_to_content_turn() {
-        // If a batch contains both ContentTurn and ResumePending inputs,
-        // the whole batch must be ContentTurn (safe default).
+    fn mixed_batch_execution_kind_conflict_is_rejected() {
+        // Admission batches are already grouped by execution kind. A direct
+        // helper batch that mixes kinds must fail instead of inventing a local
+        // ContentTurn default.
         let peer = Input::Peer(PeerInput {
             header: InputHeader {
                 id: InputId::new(),
@@ -2225,16 +2263,10 @@ mod tests {
             (peer.id().clone(), peer),
             (continuation.id().clone(), continuation),
         ];
-        let primitive = inputs_to_primitive_with_boundary(&inputs, RunApplyBoundary::RunCheckpoint)
-            .expect("mixed test batch metadata should not conflict");
-        let meta = primitive
-            .turn_metadata()
-            .expect("should have turn_metadata");
-        assert_eq!(
-            meta.execution_kind,
-            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
-            "mixed batch must default to ContentTurn"
-        );
+        let err = inputs_to_primitive_with_boundary(&inputs, RunApplyBoundary::RunCheckpoint)
+            .expect_err("mixed execution kinds should be rejected");
+
+        assert_eq!(err.field, "execution_kind");
     }
 
     #[test]
@@ -2262,13 +2294,11 @@ mod tests {
             );
         }
         let inputs = vec![(first.id().clone(), first), (second.id().clone(), second)];
+        let semantics = fallback_batch_semantics(&inputs);
 
-        let err = try_inputs_to_primitive_with_boundary(
-            &inputs,
-            RunApplyBoundary::RunStart,
-            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
-        )
-        .expect_err("conflicting batch metadata should be rejected");
+        let err =
+            try_inputs_to_primitive_with_boundary(&inputs, RunApplyBoundary::RunStart, &semantics)
+                .expect_err("conflicting batch metadata should be rejected");
 
         assert_eq!(err.field, "model");
     }

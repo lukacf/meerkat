@@ -1413,6 +1413,7 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
                 prompt: content_input,
                 system_prompt: None,
                 event_tx: None,
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )

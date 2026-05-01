@@ -10,7 +10,7 @@ use meerkat_core::lifecycle::{
     InputId, RunId, run_primitive::RunApplyBoundary, run_receipt::RunBoundaryReceipt,
 };
 use meerkat_core::types::{ContentBlock, ImageData, SessionId};
-use meerkat_runtime::input_state::{InputStateSeed, StoredInputState};
+use meerkat_runtime::input_state::{InputStateSeed, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::RuntimeStoreError;
 use meerkat_runtime::{
     InMemoryRuntimeStore, Input, InputDurability, InputHeader, InputOrigin, InputState,
@@ -23,7 +23,26 @@ fn memory_blob_store() -> Arc<dyn BlobStore> {
     Arc::new(MemoryBlobStore::new())
 }
 
-fn stored_accepted(state: InputState) -> StoredInputState {
+fn stamp_runtime_semantics(state: &mut InputState) {
+    let Some(input) = state.persisted_input.as_ref() else {
+        return;
+    };
+    let policy = meerkat_runtime::DefaultPolicyTable::resolve(input, true);
+    let policy_version = policy.policy_version;
+    state.runtime_semantics = Some(
+        meerkat_runtime::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
+            &policy,
+            input.kind(),
+        ),
+    );
+    state.policy = Some(meerkat_runtime::input_state::PolicySnapshot {
+        version: policy_version,
+        decision: policy,
+    });
+}
+
+fn stored_accepted(mut state: InputState) -> StoredInputState {
+    stamp_runtime_semantics(&mut state);
     StoredInputState {
         seed: InputStateSeed::new_accepted(),
         state,
@@ -1083,6 +1102,124 @@ async fn reset_persists_abandoned_inputs() {
 }
 
 #[tokio::test]
+async fn recovery_rejecting_later_row_restores_partial_recovered_projection() {
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let rid = LogicalRuntimeId::new("test");
+
+    let valid_input = make_prompt("valid recovered row");
+    let valid_id = valid_input.id().clone();
+    let mut valid_state = InputState::new_accepted(valid_id.clone());
+    valid_state.persisted_input = Some(valid_input);
+    valid_state.durability = Some(InputDurability::Durable);
+    store
+        .persist_input_state(&rid, &stored_accepted(valid_state))
+        .await
+        .unwrap();
+
+    let invalid_input = make_prompt("unstamped recovered row");
+    let invalid_id = invalid_input.id().clone();
+    let mut invalid_state = InputState::new_accepted(invalid_id.clone());
+    invalid_state.persisted_input = Some(invalid_input);
+    invalid_state.durability = Some(InputDurability::Durable);
+    store
+        .persist_input_state(
+            &rid,
+            &StoredInputState {
+                state: invalid_state,
+                seed: InputStateSeed::new_accepted(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut driver = PersistentRuntimeDriver::new(rid, store, memory_blob_store());
+    let err = driver
+        .recover()
+        .await
+        .expect_err("unstamped later row should fail recovery");
+
+    assert!(
+        err.to_string()
+            .contains("missing runtime execution semantics stamp"),
+        "unexpected error: {err}",
+    );
+    assert!(
+        driver.input_state(&valid_id).is_none(),
+        "failed recovery must roll back already admitted recovered rows",
+    );
+    assert!(
+        driver.input_state(&invalid_id).is_none(),
+        "failed recovery must not retain the rejected row",
+    );
+    assert!(
+        driver.dequeue_next().is_none(),
+        "failed recovery must not leave recovered queue projection",
+    );
+}
+
+#[tokio::test]
+async fn recover_allows_legacy_unstamped_terminal_rows() {
+    use meerkat_runtime::input_state::InputLifecycleState;
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let rid = LogicalRuntimeId::new("test");
+
+    let input = make_prompt("legacy terminal row");
+    let input_id = input.id().clone();
+    let mut state = InputState::new_accepted(input_id.clone());
+    state.persisted_input = Some(input);
+    state.durability = Some(InputDurability::Durable);
+    state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+    store
+        .persist_input_state(
+            &rid,
+            &StoredInputState {
+                state,
+                seed: InputStateSeed {
+                    phase: InputLifecycleState::Consumed,
+                    last_run_id: None,
+                    last_boundary_sequence: None,
+                    terminal_outcome: Some(InputTerminalOutcome::Consumed),
+                    attempt_count: 0,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut driver = PersistentRuntimeDriver::new(rid.clone(), store.clone(), memory_blob_store());
+    driver
+        .recover()
+        .await
+        .expect("legacy unstamped terminal row should not block recovery");
+
+    assert!(
+        driver.input_state(&input_id).is_some(),
+        "terminal history should remain queryable after recovery"
+    );
+    assert_eq!(
+        driver.input_phase(&input_id),
+        Some(InputLifecycleState::Consumed)
+    );
+    assert!(
+        driver.active_input_ids().is_empty(),
+        "terminal rows must not become active"
+    );
+    assert!(
+        driver.dequeue_next().is_none(),
+        "terminal rows must not enter runtime queues"
+    );
+
+    let stored = store
+        .load_input_state(&rid, &input_id)
+        .await
+        .unwrap()
+        .expect("terminal row should remain persisted");
+    assert_eq!(stored.seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(stored.state.runtime_semantics, None);
+}
+
+#[tokio::test]
 async fn recover_consumes_committed_applied_pending_inputs() {
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
@@ -1101,6 +1238,7 @@ async fn recover_consumes_committed_applied_pending_inputs() {
     // by seeding the DSL-owned phase + run association alongside the shell.
     use meerkat_runtime::input_state::InputLifecycleState;
     state.attempt_count = 1;
+    stamp_runtime_semantics(&mut state);
     let stored = StoredInputState {
         state,
         seed: InputStateSeed {
@@ -1171,6 +1309,7 @@ async fn recover_duplicate_legacy_input_row_keeps_canonical_boundary_receipt() {
     canonical_state.persisted_input = Some(input.clone());
     canonical_state.durability = Some(InputDurability::Durable);
     canonical_state.attempt_count = 1;
+    stamp_runtime_semantics(&mut canonical_state);
     let canonical_stored = StoredInputState {
         state: canonical_state.clone(),
         seed: InputStateSeed {
@@ -1243,6 +1382,7 @@ async fn recover_prefers_canonical_duplicate_over_newer_stale_legacy_row() {
     canonical_state.persisted_input = Some(input.clone());
     canonical_state.durability = Some(InputDurability::Durable);
     canonical_state.attempt_count = 1;
+    stamp_runtime_semantics(&mut canonical_state);
     let canonical_stored = StoredInputState {
         state: canonical_state.clone(),
         seed: InputStateSeed {
@@ -1309,6 +1449,7 @@ async fn recover_ignores_legacy_boundary_receipt_load_error_after_canonical_miss
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
     state.attempt_count = 1;
+    stamp_runtime_semantics(&mut state);
     inner
         .persist_input_state(
             &canonical_rid,
@@ -1368,6 +1509,7 @@ async fn recover_treats_canonical_boundary_receipt_miss_as_authoritative() {
     state.persisted_input = Some(input);
     state.durability = Some(InputDurability::Durable);
     state.attempt_count = 1;
+    stamp_runtime_semantics(&mut state);
     store
         .persist_input_state(
             &canonical_rid,

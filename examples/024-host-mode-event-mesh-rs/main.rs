@@ -149,6 +149,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                     .into(),
                 system_prompt: None,
                 event_tx: Some(event_tx),
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )
@@ -182,6 +183,7 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                     .into(),
                 system_prompt: None,
                 event_tx: Some(event_tx),
+                pre_turn_context_appends: Vec::new(),
                 turn_metadata: None,
             },
         )

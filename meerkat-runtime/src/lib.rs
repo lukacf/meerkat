@@ -78,6 +78,8 @@ pub mod silent_intent;
 pub mod store;
 pub mod traits;
 
+use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata as RuntimeStampedTurnMetadata;
+
 // Re-exports for convenience
 pub use accept::{AcceptOutcome, RejectReason, post_admission_signal_from_accept_outcome};
 pub use coalescing::{
@@ -137,6 +139,24 @@ pub use ops_lifecycle::{
     OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,
     RuntimeOpsLifecycleRegistry,
 };
+
+/// Stamp prompt turn metadata with the runtime-owned input semantics.
+///
+/// This helper exists for runtime-backed surfaces that must run an eager first
+/// turn through `SessionService::create_session` before the normal queued
+/// runtime loop can observe an `Input::Prompt`.
+pub fn runtime_stamped_prompt_turn_metadata(
+    metadata: Option<RuntimeStampedTurnMetadata>,
+) -> RuntimeStampedTurnMetadata {
+    let input = Input::Prompt(PromptInput::from_content_input(
+        meerkat_core::ContentInput::Text(String::new()),
+        metadata,
+    ));
+    let policy = policy_table::DefaultPolicyTable::resolve(&input, true);
+    let semantics =
+        ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind());
+    runtime_loop::for_input(&input, semantics)
+}
 
 #[doc(hidden)]
 pub mod machine_schema_exports {

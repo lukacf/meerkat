@@ -202,11 +202,6 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
-type RuntimeTurnMetadataOptions = RuntimeTurnMetadata & {
-  readonly skillRefs?: readonly SkillRef[];
-  readonly skillReferences?: readonly SkillRef[];
-};
-
 type RuntimeTurnMetadataPayload = NonNullable<MobTurnStartParams["turn_metadata"]>;
 
 function turnKeepAliveOverride(
@@ -296,11 +291,11 @@ function runtimeProviderParamsPayload(
 }
 
 function runtimeTurnMetadataPayload(
-  options?: RuntimeTurnMetadataOptions,
+  options?: RuntimeTurnMetadata,
 ): RuntimeTurnMetadataPayload | undefined {
   if (!options) return undefined;
   const metadata: RuntimeTurnMetadataPayload = {};
-  const wireRefs = skillKeysToWire(options.skillReferences ?? options.skillRefs);
+  const wireRefs = skillKeysToWire(options.skillReferences);
   if (wireRefs) {
     metadata.skill_references = wireRefs;
   }
@@ -392,7 +387,7 @@ function mobTurnStartPayload(
       ? prompt
       : prompt.map((block) => ({ ...block })) as MobTurnStartParams["prompt"],
   };
-  const turnMetadata = runtimeTurnMetadataPayload(options);
+  const turnMetadata = runtimeTurnMetadataPayload(options?.turnMetadata);
   if (turnMetadata) {
     payload.turn_metadata = turnMetadata;
   }
@@ -1950,7 +1945,7 @@ export class MeerkatClient {
     options?: TurnOptions,
   ): Promise<RunResult> {
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
-    const turnMetadata = runtimeTurnMetadataPayload(options);
+    const turnMetadata = runtimeTurnMetadataPayload(options?.turnMetadata);
     if (turnMetadata) params.turn_metadata = turnMetadata;
     const raw = await this.request("turn/start", params);
     return MeerkatClient.parseRunResult(raw);
@@ -1975,7 +1970,7 @@ export class MeerkatClient {
 
     const responsePromise = this.registerRequest(requestId);
     const params: Record<string, unknown> = { session_id: sessionId, prompt };
-    const turnMetadata = runtimeTurnMetadataPayload(options);
+    const turnMetadata = runtimeTurnMetadataPayload(options?.turnMetadata);
     if (turnMetadata) params.turn_metadata = turnMetadata;
 
     const rpcRequest = { jsonrpc: "2.0", id: requestId, method: "turn/start", params };

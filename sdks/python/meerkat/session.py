@@ -31,6 +31,7 @@ from .types import (
     PeerCorrelationId,
     PeerId,
     RunResult,
+    RuntimeTurnMetadata,
     SessionHistory,
     SkillKey,
     SkillRef,
@@ -122,16 +123,7 @@ class Session:
         self,
         prompt: str | list[ContentBlock],
         *,
-        skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
-        keep_alive: bool | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-        provider_params: dict[str, Any] | None = None,
-        clear_provider_params: bool | None = None,
-        connection_ref: dict[str, str] | None = None,
-        clear_connection_ref: bool | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> RunResult:
         """Run another turn on this session (non-streaming).
 
@@ -141,16 +133,7 @@ class Session:
         result = await self._client._start_turn(  # noqa: SLF001
             self._id,
             prompt,
-            skill_refs=skill_refs,
-            flow_tool_overlay=flow_tool_overlay,
-            additional_instructions=additional_instructions,
-            keep_alive=keep_alive,
-            model=model,
-            provider=provider,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            connection_ref=connection_ref,
-            clear_connection_ref=clear_connection_ref,
+            turn_metadata=turn_metadata,
         )
         self._last_result = result
         return result
@@ -159,16 +142,7 @@ class Session:
         self,
         prompt: str | list[ContentBlock],
         *,
-        skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
-        keep_alive: bool | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-        provider_params: dict[str, Any] | None = None,
-        clear_provider_params: bool | None = None,
-        connection_ref: dict[str, str] | None = None,
-        clear_connection_ref: bool | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> EventStream:
         """Run another turn on this session with streaming events.
 
@@ -184,16 +158,7 @@ class Session:
         return self._client._start_turn_streaming(  # noqa: SLF001
             self._id,
             prompt,
-            skill_refs=skill_refs,
-            flow_tool_overlay=flow_tool_overlay,
-            additional_instructions=additional_instructions,
-            keep_alive=keep_alive,
-            model=model,
-            provider=provider,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            connection_ref=connection_ref,
-            clear_connection_ref=clear_connection_ref,
+            turn_metadata=turn_metadata,
             _session=self,
         )
 
@@ -283,13 +248,13 @@ class Session:
     ) -> RunResult:
         """Invoke a skill in this session.
 
-        Sends the structured ``skill_refs`` parameter to the runtime.
+        Sends the structured skill reference inside the canonical turn metadata.
         """
         self._client.require_capability("skills")
         canonical = _normalize_skill_ref(skill_ref)
         return await self.turn(
             prompt,
-            skill_refs=[canonical],
+            turn_metadata={"skill_references": [canonical]},
         )
 
     # -- Comms convenience -------------------------------------------------
@@ -353,35 +318,17 @@ class DeferredSession:
         self,
         prompt: str | list[ContentBlock],
         *,
-        skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
-        keep_alive: bool | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-        provider_params: dict[str, Any] | None = None,
-        clear_provider_params: bool | None = None,
-        connection_ref: dict[str, str] | None = None,
-        clear_connection_ref: bool | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> RunResult:
         """Run the first turn on this deferred session.
 
-        Accepts per-turn overrides (model, provider, etc.) that are applied
+        Accepts ``turn_metadata`` that is applied
         before the session is materialized. Returns a :class:`~meerkat.RunResult`.
         """
         return await self._client._start_turn(  # noqa: SLF001
             self._id,
             prompt,
-            skill_refs=skill_refs,
-            flow_tool_overlay=flow_tool_overlay,
-            additional_instructions=additional_instructions,
-            keep_alive=keep_alive,
-            model=model,
-            provider=provider,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            connection_ref=connection_ref,
-            clear_connection_ref=clear_connection_ref,
+            turn_metadata=turn_metadata,
         )
 
     async def interrupt(self) -> None:

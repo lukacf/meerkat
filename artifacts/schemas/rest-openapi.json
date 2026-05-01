@@ -13487,13 +13487,6 @@
           }
         ]
       },
-      "WirePeerResponseTerminalApplyIntent": {
-        "description": "Typed wire projection of\n[`meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent`].",
-        "enum": [
-          "append_context_and_run"
-        ],
-        "type": "string"
-      },
       "WirePersistedInput": {
         "description": "Typed wire projection of the persisted input carrier.\n\nThe carrier is a structural discriminator. Untypeable provider-specific\nbody bytes should be projected via `StructuredProviderExtension` — a\ntyped opaque-bag newtype explicitly marked non-semantic.",
         "oneOf": [
@@ -14373,14 +14366,6 @@
           }
         ]
       },
-      "WireRuntimeExecutionKind": {
-        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].",
-        "enum": [
-          "content_turn",
-          "resume_pending"
-        ],
-        "type": "string"
-      },
       "WireRuntimeState": {
         "description": "Public runtime state projection used by RPC surfaces.",
         "enum": [
@@ -14411,16 +14396,6 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WireTurnMetadataOverride2"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "execution_kind": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WireRuntimeExecutionKind"
               },
               {
                 "type": "null"
@@ -14461,16 +14436,6 @@
             "type": [
               "string",
               "null"
-            ]
-          },
-          "peer_response_terminal_apply_intent": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WirePeerResponseTerminalApplyIntent"
-              },
-              {
-                "type": "null"
-              }
             ]
           },
           "provider": {

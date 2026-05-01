@@ -55,38 +55,12 @@ class _MockClient:
         session_id,
         prompt,
         *,
-        skill_refs=None,
-        flow_tool_overlay=None,
-        additional_instructions=None,
-        keep_alive=None,
-        model=None,
-        provider=None,
-        max_tokens=None,
-        system_prompt=None,
-        output_schema=None,
-        structured_output_retries=None,
-        provider_params=None,
-        clear_provider_params=None,
-        connection_ref=None,
-        clear_connection_ref=None,
+        turn_metadata=None,
     ):
         self._calls.append({
             "session_id": session_id,
             "prompt": prompt,
-            "skill_refs": skill_refs,
-            "flow_tool_overlay": flow_tool_overlay,
-            "additional_instructions": additional_instructions,
-            "keep_alive": keep_alive,
-            "model": model,
-            "provider": provider,
-            "max_tokens": max_tokens,
-            "system_prompt": system_prompt,
-            "output_schema": output_schema,
-            "structured_output_retries": structured_output_retries,
-            "provider_params": provider_params,
-            "clear_provider_params": clear_provider_params,
-            "connection_ref": connection_ref,
-            "clear_connection_ref": clear_connection_ref,
+            "turn_metadata": turn_metadata,
         })
         return RunResult(
             session_id=session_id,
@@ -142,7 +116,7 @@ async def test_invoke_skill_with_skill_key():
     assert len(client._calls) == 1
     call = client._calls[0]
     assert call["prompt"] == "run the extractor"
-    assert call["skill_refs"] == [key]
+    assert call["turn_metadata"] == {"skill_references": [key]}
 
 
 @pytest.mark.asyncio

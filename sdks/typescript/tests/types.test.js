@@ -935,7 +935,7 @@ describe("Session wrappers", () => {
     assert.equal("peer_name" in calls[0].params, false);
   });
 
-  it("turn/start wrappers include per-turn overrides on streaming and non-streaming calls", async () => {
+  it("turn/start wrappers include single turn metadata on streaming and non-streaming calls", async () => {
     const client = new MeerkatClient();
     const calls = [];
     client.request = async (method, params) => {
@@ -958,21 +958,25 @@ describe("Session wrappers", () => {
     });
 
     await client._startTurn("s1", "hello", {
-      skillRefs: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
-      additionalInstructions: ["a"],
-      keepAlive: true,
-      model: "m",
-      provider: "openai",
-      providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
-      connectionRef: { realm: "dev", binding: "default_openai" },
+      turnMetadata: {
+        skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
+        additionalInstructions: ["a"],
+        keepAlive: true,
+        model: "m",
+        provider: "openai",
+        providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
+        connectionRef: { realm: "dev", binding: "default_openai" },
+      },
     });
     client._startTurnStreaming("s1", "hello", {
-      additionalInstructions: ["a"],
-      keepAlive: true,
-      model: "m",
-      provider: "openai-compatible",
-      providerParams: { foo: "bar" },
-      connectionRef: { realm: "dev", binding: "default_openai" },
+      turnMetadata: {
+        additionalInstructions: ["a"],
+        keepAlive: true,
+        model: "m",
+        provider: "openai-compatible",
+        providerParams: { foo: "bar" },
+        connectionRef: { realm: "dev", binding: "default_openai" },
+      },
     });
 
     assert.equal(calls[0].method, "turn/start");
@@ -1578,15 +1582,17 @@ describe("Parity wrappers", () => {
       "worker-1",
       [{ type: "text", text: "continue" }],
       {
-        skillRefs: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
-        flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
-        additionalInstructions: ["stay concise"],
-        keepAlive: true,
-        model: "gpt-test",
-        provider: "openai",
-        providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
-        connectionRef: { realm: "dev", binding: "default_openai" },
-        clearConnectionRef: true,
+        turnMetadata: {
+          skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
+          flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
+          additionalInstructions: ["stay concise"],
+          keepAlive: true,
+          model: "gpt-test",
+          provider: "openai",
+          providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
+          connectionRef: { realm: "dev", binding: "default_openai" },
+          clearConnectionRef: true,
+        },
       },
     );
     const append = await client.appendMobSystemContext("mob-1", "worker-1", "remember this");

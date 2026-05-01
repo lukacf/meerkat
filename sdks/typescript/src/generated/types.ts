@@ -83,7 +83,20 @@ export interface CommsParams {
 }
 
 export interface SkillsParams {
-  turn_metadata?: Record<string, unknown>;
+  turn_metadata?: WireRuntimeTurnMetadata;
+}
+
+export interface WireRuntimeTurnMetadata {
+  additional_instructions?: unknown[];
+  connection_ref?: unknown;
+  flow_tool_overlay?: unknown;
+  handling_mode?: unknown;
+  keep_alive?: unknown;
+  model?: string;
+  provider?: unknown;
+  provider_params?: unknown;
+  render_metadata?: unknown;
+  skill_references?: unknown[];
 }
 
 export interface McpAddParams {
@@ -435,7 +448,7 @@ export interface MobTurnStartParams {
   agent_identity: string;
   mob_id: string;
   prompt: WireContentInput;
-  turn_metadata?: Record<string, unknown>;
+  turn_metadata?: WireRuntimeTurnMetadata;
 }
 
 export interface MobMemberStatusResult {

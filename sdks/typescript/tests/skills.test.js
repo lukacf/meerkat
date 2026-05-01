@@ -8,7 +8,7 @@ import { DeferredSession, Session } from "../dist/session.js";
 import { MeerkatClient } from "../dist/client.js";
 
 describe("Skills v2.1", () => {
-  it("Session.invokeSkill sends structured skillRefs to _startTurn", async () => {
+  it("Session.invokeSkill sends structured skill references through turnMetadata", async () => {
     const calls = [];
     const mockClient = {
       hasCapability(name) {
@@ -48,7 +48,7 @@ describe("Skills v2.1", () => {
     assert.equal(result.text, "ok");
     assert.equal(calls.length, 1);
     assert.equal(calls[0].prompt, "run the extractor");
-    assert.deepEqual(calls[0].options.skillRefs, [
+    assert.deepEqual(calls[0].options.turnMetadata.skillReferences, [
       { sourceUuid: "abc-123", skillName: "email-extractor" },
     ]);
   });

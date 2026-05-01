@@ -117,7 +117,25 @@ class CommsParams:
 @dataclass
 class SkillsParams:
     """Skills parameters (available because skills capability is compiled)."""
-    turn_metadata: Optional[dict[str, Any]] = None
+    turn_metadata: Optional[WireRuntimeTurnMetadata] = None
+
+
+@dataclass
+class WireRuntimeTurnMetadata:
+    """Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].
+
+The per-turn seam between control plane and core is fully typed —
+`serde_json::Value` does not appear here."""
+    additional_instructions: Optional[list[Any]] = None
+    connection_ref: Optional[Any] = None
+    flow_tool_overlay: Optional[Any] = None
+    handling_mode: Optional[Any] = None
+    keep_alive: Optional[Any] = None
+    model: Optional[str] = None
+    provider: Optional[Any] = None
+    provider_params: Optional[Any] = None
+    render_metadata: Optional[Any] = None
+    skill_references: Optional[list[Any]] = None
 
 
 @dataclass
@@ -587,7 +605,7 @@ class MobTurnStartParams:
     agent_identity: str
     mob_id: str
     prompt: WireContentInput
-    turn_metadata: Optional[dict[str, Any]] = None
+    turn_metadata: Optional[WireRuntimeTurnMetadata] = None
 
 
 @dataclass

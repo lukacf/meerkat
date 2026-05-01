@@ -115,9 +115,7 @@ from .types import (
     SessionMessage,
     SessionToolCall,
     SessionToolResult,
-    SkillKey,
     SkillQuarantineDiagnostic,
-    SkillRef,
     SkillRuntimeDiagnostics,
     SourceHealthSnapshot,
     StoredMobProfile,
@@ -168,29 +166,22 @@ def _wire_params(value: Any) -> dict[str, Any]:
     return converted if isinstance(converted, dict) else dict(converted)
 
 
-def _skill_keys_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
+def _skill_keys_to_wire(refs: Any | None) -> list[dict[str, str]] | None:
     """Convert SkillKey-compatible refs to the plain SkillKey wire shape."""
     if refs is None:
         return None
-    return [
-        {
-            "source_uuid": _normalize_skill_ref(r).source_uuid,
-            "skill_name": _normalize_skill_ref(r).skill_name,
-        }
-        for r in refs
-    ]
-
-
-def _skill_refs_to_wire(refs: list[SkillRef] | None) -> list[dict[str, str]] | None:
-    """Convert SkillRef values to the tagged create-session wire shape."""
-    if refs is None:
-        return None
-    wire_refs = []
+    wire_refs: list[dict[str, str]] = []
     for ref in refs:
+        if isinstance(ref, dict):
+            source_uuid = ref.get("source_uuid") or ref.get("sourceUuid")
+            skill_name = ref.get("skill_name") or ref.get("skillName")
+            if not isinstance(source_uuid, str) or not isinstance(skill_name, str):
+                raise TypeError("Skill references must be SkillKey objects")
+            wire_refs.append({"source_uuid": source_uuid, "skill_name": skill_name})
+            continue
         normalized = _normalize_skill_ref(ref)
         wire_refs.append(
             {
-                "kind": "structured",
                 "source_uuid": normalized.source_uuid,
                 "skill_name": normalized.skill_name,
             }
@@ -290,46 +281,65 @@ def _runtime_provider_params_override(
 
 
 def _runtime_turn_metadata(
-    *,
-    skill_refs: list[SkillRef] | None = None,
-    flow_tool_overlay: dict[str, Any] | None = None,
-    additional_instructions: list[str] | None = None,
-    keep_alive: bool | None = None,
-    model: str | None = None,
-    provider: str | None = None,
-    provider_params: Any | None = None,
-    clear_provider_params: bool | None = None,
-    connection_ref: WireConnectionRef | dict[str, str] | None = None,
-    clear_connection_ref: bool | None = None,
+    turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    if turn_metadata is None:
+        return None
+
+    source = _wire_value(turn_metadata)
+    if not isinstance(source, dict):
+        return None
+
     metadata: dict[str, Any] = {}
-    wire_refs = _skill_keys_to_wire(skill_refs)
+    wire_refs = _skill_keys_to_wire(source.get("skill_references"))
     if wire_refs is not None:
         metadata["skill_references"] = wire_refs
-    if flow_tool_overlay is not None:
-        metadata["flow_tool_overlay"] = flow_tool_overlay
-    if additional_instructions is not None:
+    if source.get("flow_tool_overlay") is not None:
+        metadata["flow_tool_overlay"] = source["flow_tool_overlay"]
+
+    additional_instructions = source.get("additional_instructions")
+    if isinstance(additional_instructions, list) and all(
+        isinstance(body, str) for body in additional_instructions
+    ):
         metadata["additional_instructions"] = [
             {"kind": "user", "body": body} for body in additional_instructions
         ]
-    keep_alive_override = _turn_keep_alive_override(keep_alive)
-    if keep_alive_override is not None:
-        metadata["keep_alive"] = keep_alive_override
-    if model is not None:
-        metadata["model"] = model
-    if provider is not None:
+    elif additional_instructions is not None:
+        metadata["additional_instructions"] = additional_instructions
+
+    keep_alive = source.get("keep_alive")
+    if isinstance(keep_alive, bool):
+        metadata["keep_alive"] = _turn_keep_alive_override(keep_alive)
+    elif keep_alive is not None:
+        metadata["keep_alive"] = keep_alive
+
+    if source.get("model") is not None:
+        metadata["model"] = source["model"]
+    provider = source.get("provider")
+    if isinstance(provider, str):
         metadata["provider"] = _runtime_provider_wire(provider)
-    if clear_provider_params:
+
+    if source.get("clear_provider_params"):
         metadata["provider_params"] = {"action": "clear"}
-    elif provider_params is not None:
-        metadata["provider_params"] = {
-            "action": "set",
-            "value": _runtime_provider_params_override(provider_params, provider),
-        }
-    if clear_connection_ref:
+    elif source.get("provider_params") is not None:
+        provider_params = source["provider_params"]
+        if isinstance(provider_params, dict) and "action" in provider_params:
+            metadata["provider_params"] = provider_params
+        else:
+            metadata["provider_params"] = {
+                "action": "set",
+                "value": _runtime_provider_params_override(provider_params, provider),
+            }
+
+    if source.get("clear_connection_ref"):
         metadata["connection_ref"] = {"action": "clear"}
-    elif connection_ref is not None:
-        metadata["connection_ref"] = {"action": "set", "value": _wire_value(connection_ref)}
+    elif source.get("connection_ref") is not None:
+        connection_ref = source["connection_ref"]
+        if isinstance(connection_ref, dict) and "action" in connection_ref:
+            metadata["connection_ref"] = connection_ref
+        else:
+            metadata["connection_ref"] = {"action": "set", "value": connection_ref}
+
     return metadata or None
 
 
@@ -1575,33 +1585,13 @@ class MeerkatClient:
         agent_identity: str,
         prompt: WireContentInput,
         *,
-        skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
-        keep_alive: bool | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-        provider_params: Any | None = None,
-        clear_provider_params: bool | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
-        clear_connection_ref: bool | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         params = MobTurnStartParams(
             mob_id=mob_id,
             agent_identity=agent_identity,
             prompt=prompt,
-            turn_metadata=_runtime_turn_metadata(
-                skill_refs=skill_refs,
-                flow_tool_overlay=flow_tool_overlay,
-                additional_instructions=additional_instructions,
-                keep_alive=keep_alive,
-                model=model,
-                provider=provider,
-                provider_params=provider_params,
-                clear_provider_params=clear_provider_params,
-                connection_ref=connection_ref,
-                clear_connection_ref=clear_connection_ref,
-            ),
+            turn_metadata=_runtime_turn_metadata(turn_metadata),
         )
         return await self._request("mob/turn_start", _wire_value(params))
 
@@ -2135,32 +2125,12 @@ class MeerkatClient:
         session_id: str,
         prompt: str | list[ContentBlock],
         *,
-        skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
-        keep_alive: bool | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-        provider_params: Any | None = None,
-        clear_provider_params: bool | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
-        clear_connection_ref: bool | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> RunResult:
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
-        turn_metadata = _runtime_turn_metadata(
-            skill_refs=skill_refs,
-            flow_tool_overlay=flow_tool_overlay,
-            additional_instructions=additional_instructions,
-            keep_alive=keep_alive,
-            model=model,
-            provider=provider,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            connection_ref=connection_ref,
-            clear_connection_ref=clear_connection_ref,
-        )
-        if turn_metadata is not None:
-            params["turn_metadata"] = turn_metadata
+        metadata = _runtime_turn_metadata(turn_metadata)
+        if metadata is not None:
+            params["turn_metadata"] = metadata
         raw = await self._request("turn/start", params)
         return self._parse_run_result(raw)
 
@@ -2169,16 +2139,7 @@ class MeerkatClient:
         session_id: str,
         prompt: str | list[ContentBlock],
         *,
-        skill_refs: list[SkillRef] | None = None,
-        flow_tool_overlay: dict[str, Any] | None = None,
-        additional_instructions: list[str] | None = None,
-        keep_alive: bool | None = None,
-        model: str | None = None,
-        provider: str | None = None,
-        provider_params: Any | None = None,
-        clear_provider_params: bool | None = None,
-        connection_ref: WireConnectionRef | dict[str, str] | None = None,
-        clear_connection_ref: bool | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
         _session: Session | None = None,
     ) -> EventStream:
         if not self._dispatcher or not self._process or not self._process.stdin:
@@ -2188,20 +2149,9 @@ class MeerkatClient:
         event_queue = self._dispatcher.subscribe_events(session_id)
         response_future = self._dispatcher.expect_response(request_id)
         params: dict[str, Any] = {"session_id": session_id, "prompt": prompt}
-        turn_metadata = _runtime_turn_metadata(
-            skill_refs=skill_refs,
-            flow_tool_overlay=flow_tool_overlay,
-            additional_instructions=additional_instructions,
-            keep_alive=keep_alive,
-            model=model,
-            provider=provider,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            connection_ref=connection_ref,
-            clear_connection_ref=clear_connection_ref,
-        )
-        if turn_metadata is not None:
-            params["turn_metadata"] = turn_metadata
+        metadata = _runtime_turn_metadata(turn_metadata)
+        if metadata is not None:
+            params["turn_metadata"] = metadata
         request = {"jsonrpc": "2.0", "id": request_id, "method": "turn/start", "params": params}
         data = (json.dumps(request) + "\n").encode()
         return EventStream(
@@ -2674,8 +2624,9 @@ class MeerkatClient:
             params["budget_limits"] = budget_limits
         if labels is not None:
             params["labels"] = labels
-        if turn_metadata is not None:
-            params["turn_metadata"] = _wire_value(turn_metadata)
+        metadata = _runtime_turn_metadata(turn_metadata)
+        if metadata is not None:
+            params["turn_metadata"] = metadata
         if app_context is not None:
             params["app_context"] = app_context
         if shell_env is not None:

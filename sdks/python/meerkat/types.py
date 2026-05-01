@@ -140,16 +140,18 @@ SkillRef = SkillKey
 
 
 class RuntimeTurnMetadata(TypedDict, total=False):
-    """Canonical runtime metadata carrier for session creation."""
+    """Canonical runtime metadata carrier for session creation and turn starts."""
 
     model: str
     provider: str
-    provider_params: dict[str, Any]
-    connection_ref: dict[str, str]
-    keep_alive: dict[str, Any]
+    provider_params: Any
+    clear_provider_params: bool
+    connection_ref: WireConnectionRef | dict[str, str]
+    clear_connection_ref: bool
+    keep_alive: bool | dict[str, Any]
     skill_references: list[SkillRef]
     flow_tool_overlay: dict[str, Any]
-    additional_instructions: list[dict[str, str]]
+    additional_instructions: list[str] | list[dict[str, str]]
 
 
 class TextBlock(TypedDict):

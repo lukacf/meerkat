@@ -894,13 +894,6 @@
         ],
         "type": "object"
       },
-      "WirePeerResponseTerminalApplyIntent": {
-        "description": "Typed wire projection of\n[`meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent`].",
-        "enum": [
-          "append_context_and_run"
-        ],
-        "type": "string"
-      },
       "WireProviderParamsOverride": {
         "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
@@ -1289,14 +1282,6 @@
         ],
         "type": "string"
       },
-      "WireRuntimeExecutionKind": {
-        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].",
-        "enum": [
-          "content_turn",
-          "resume_pending"
-        ],
-        "type": "string"
-      },
       "WireRuntimeTurnMetadata": {
         "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].\n\nThe per-turn seam between control plane and core is fully typed —\n`serde_json::Value` does not appear here.",
@@ -1314,16 +1299,6 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/WireTurnMetadataOverride2"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "execution_kind": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WireRuntimeExecutionKind"
               },
               {
                 "type": "null"
@@ -1364,16 +1339,6 @@
             "type": [
               "string",
               "null"
-            ]
-          },
-          "peer_response_terminal_apply_intent": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WirePeerResponseTerminalApplyIntent"
-              },
-              {
-                "type": "null"
-              }
             ]
           },
           "provider": {
@@ -8895,13 +8860,6 @@
         ],
         "type": "object"
       },
-      "WirePeerResponseTerminalApplyIntent": {
-        "description": "Typed wire projection of\n[`meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent`].",
-        "enum": [
-          "append_context_and_run"
-        ],
-        "type": "string"
-      },
       "WireProviderParamsOverride": {
         "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
@@ -9290,14 +9248,6 @@
         ],
         "type": "string"
       },
-      "WireRuntimeExecutionKind": {
-        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].",
-        "enum": [
-          "content_turn",
-          "resume_pending"
-        ],
-        "type": "string"
-      },
       "WireRuntimeTurnMetadata": {
         "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].\n\nThe per-turn seam between control plane and core is fully typed —\n`serde_json::Value` does not appear here.",
@@ -9315,16 +9265,6 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/WireTurnMetadataOverride2"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "execution_kind": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WireRuntimeExecutionKind"
               },
               {
                 "type": "null"
@@ -9365,16 +9305,6 @@
             "type": [
               "string",
               "null"
-            ]
-          },
-          "peer_response_terminal_apply_intent": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WirePeerResponseTerminalApplyIntent"
-              },
-              {
-                "type": "null"
-              }
             ]
           },
           "provider": {
@@ -10706,13 +10636,6 @@
         ],
         "type": "object"
       },
-      "WirePeerResponseTerminalApplyIntent": {
-        "description": "Typed wire projection of\n[`meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent`].",
-        "enum": [
-          "append_context_and_run"
-        ],
-        "type": "string"
-      },
       "WireProviderParamsOverride": {
         "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
@@ -11101,14 +11024,6 @@
         ],
         "type": "string"
       },
-      "WireRuntimeExecutionKind": {
-        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind`].",
-        "enum": [
-          "content_turn",
-          "resume_pending"
-        ],
-        "type": "string"
-      },
       "WireRuntimeTurnMetadata": {
         "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].\n\nThe per-turn seam between control plane and core is fully typed —\n`serde_json::Value` does not appear here.",
@@ -11126,16 +11041,6 @@
             "anyOf": [
               {
                 "$ref": "#/$defs/WireTurnMetadataOverride2"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "execution_kind": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WireRuntimeExecutionKind"
               },
               {
                 "type": "null"
@@ -11176,16 +11081,6 @@
             "type": [
               "string",
               "null"
-            ]
-          },
-          "peer_response_terminal_apply_intent": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WirePeerResponseTerminalApplyIntent"
-              },
-              {
-                "type": "null"
-              }
             ]
           },
           "provider": {

@@ -90,12 +90,14 @@ from meerkat.generated.types import (
 
 def test_runtime_turn_metadata_provider_params_are_schema_valid():
     openai_meta = _runtime_turn_metadata(
-        provider="openai",
-        provider_params={
-            "temperature": 0.2,
-            "reasoning": {"effort": "medium"},
-            "foo": "bar",
-        },
+        {
+            "provider": "openai",
+            "provider_params": {
+                "temperature": 0.2,
+                "reasoning": {"effort": "medium"},
+                "foo": "bar",
+            },
+        }
     )
     assert openai_meta is not None
     assert openai_meta["provider"] == "openai"
@@ -115,8 +117,10 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
     }
 
     custom_meta = _runtime_turn_metadata(
-        provider="openai-compatible",
-        provider_params={"foo": "bar"},
+        {
+            "provider": "openai-compatible",
+            "provider_params": {"foo": "bar"},
+        }
     )
     assert custom_meta is not None
     assert custom_meta["provider"] == "other"
@@ -129,12 +133,14 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
 
 def test_runtime_turn_metadata_skill_refs_use_plain_skill_keys():
     metadata = _runtime_turn_metadata(
-        skill_refs=[
-            SkillKey(
-                source_uuid="00000000-0000-4000-8000-000000000001",
-                skill_name="read",
-            )
-        ]
+        {
+            "skill_references": [
+                SkillKey(
+                    source_uuid="00000000-0000-4000-8000-000000000001",
+                    skill_name="read",
+                )
+            ]
+        }
     )
 
     assert metadata == {
@@ -846,7 +852,7 @@ async def test_create_session_skill_refs_use_turn_metadata_carrier() -> None:
     ]
 
 
-def test_create_session_signature_exposes_single_turn_metadata_carrier() -> None:
+def test_session_signatures_expose_single_turn_metadata_carrier() -> None:
     import inspect
 
     retired = [
@@ -858,11 +864,18 @@ def test_create_session_signature_exposes_single_turn_metadata_carrier() -> None
         "preload_skills",
         "skill_refs",
         "additional_instructions",
+        "flow_tool_overlay",
+        "clear_provider_params",
+        "clear_connection_ref",
     ]
     for method in [
         MeerkatClient.create_session,
         MeerkatClient.create_session_streaming,
         MeerkatClient.create_deferred_session,
+        MeerkatClient.mob_turn_start,
+        Session.turn,
+        Session.stream,
+        DeferredSession.start_turn,
     ]:
         parameters = inspect.signature(method).parameters
         assert "turn_metadata" in parameters
@@ -1616,7 +1629,7 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
 
 
 @pytest.mark.asyncio
-async def test_session_turn_and_stream_support_full_turn_overrides():
+async def test_session_turn_and_stream_use_single_turn_metadata_carrier():
     session_calls = []
 
     class StubClient:
@@ -1635,31 +1648,35 @@ async def test_session_turn_and_stream_support_full_turn_overrides():
 
     result = await session.turn(
         "next",
-        additional_instructions=["Follow policy A."],
-        keep_alive=True,
-        model="claude-sonnet-4-6",
-        provider="anthropic",
-        provider_params={"reasoning_effort": "low"},
-        connection_ref={"realm": "dev", "binding": "default_anthropic"},
+        turn_metadata={
+            "additional_instructions": ["Follow policy A."],
+            "keep_alive": True,
+            "model": "claude-sonnet-4-6",
+            "provider": "anthropic",
+            "provider_params": {"reasoning_effort": "low"},
+            "connection_ref": {"realm": "dev", "binding": "default_anthropic"},
+        },
     )
     assert result.text == "ok"
 
     stream_handle = session.stream(
         "stream it",
-        additional_instructions=["Follow policy B."],
-        keep_alive=False,
-        model="gpt-5.4",
-        provider="openai",
-        provider_params={"foo": "bar"},
-        clear_provider_params=True,
+        turn_metadata={
+            "additional_instructions": ["Follow policy B."],
+            "keep_alive": False,
+            "model": "gpt-5.4",
+            "provider": "openai",
+            "provider_params": {"foo": "bar"},
+            "clear_provider_params": True,
+        },
     )
     assert stream_handle == "stream-handle"
     assert session_calls[0][0] == "turn"
-    assert session_calls[0][3]["additional_instructions"] == ["Follow policy A."]
-    assert session_calls[0][3]["keep_alive"] is True
+    assert session_calls[0][3]["turn_metadata"]["additional_instructions"] == ["Follow policy A."]
+    assert session_calls[0][3]["turn_metadata"]["keep_alive"] is True
     assert session_calls[1][0] == "stream"
-    assert session_calls[1][3]["additional_instructions"] == ["Follow policy B."]
-    assert session_calls[1][3]["model"] == "gpt-5.4"
+    assert session_calls[1][3]["turn_metadata"]["additional_instructions"] == ["Follow policy B."]
+    assert session_calls[1][3]["turn_metadata"]["model"] == "gpt-5.4"
 
 
 @pytest.mark.asyncio
@@ -1726,7 +1743,7 @@ async def test_client_mcp_methods_reject_malformed_response():
 
 
 @pytest.mark.asyncio
-async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
+async def test_mob_turn_start_wrapper_uses_typed_prompt_and_turn_metadata():
     client = MeerkatClient()
     calls = []
 
@@ -1740,24 +1757,26 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         "mob-1",
         "worker-1",
         [{"type": "text", "text": "continue"}],
-        skill_refs=[
-            SkillKey(
-                source_uuid="00000000-0000-4000-8000-000000000001",
-                skill_name="read",
-            )
-        ],
-        flow_tool_overlay={"allowed_tools": ["read"], "blocked_tools": []},
-        additional_instructions=["stay concise"],
-        keep_alive=True,
-        model="gpt-test",
-        provider="openai",
-        provider_params={
-            "temperature": 0.2,
-            "reasoning": {"effort": "medium"},
-            "foo": "bar",
+        turn_metadata={
+            "skill_references": [
+                SkillKey(
+                    source_uuid="00000000-0000-4000-8000-000000000001",
+                    skill_name="read",
+                )
+            ],
+            "flow_tool_overlay": {"allowed_tools": ["read"], "blocked_tools": []},
+            "additional_instructions": ["stay concise"],
+            "keep_alive": True,
+            "model": "gpt-test",
+            "provider": "openai",
+            "provider_params": {
+                "temperature": 0.2,
+                "reasoning": {"effort": "medium"},
+                "foo": "bar",
+            },
+            "connection_ref": {"realm": "dev", "binding": "default_openai"},
+            "clear_connection_ref": True,
         },
-        connection_ref={"realm": "dev", "binding": "default_openai"},
-        clear_connection_ref=True,
     )
 
     assert calls == [

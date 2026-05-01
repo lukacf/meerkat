@@ -814,8 +814,7 @@ if include_scenario(64):
                 mob.id,
                 "lead-rt-switch",
                 "Reply with PY-MEMBER-SWITCH-64 and birch.",
-                model=openai_model(),
-                provider="openai",
+                turn_metadata={"model": openai_model(), "provider": "openai"},
             )
             switched_text = str(switched.get("text") or "").lower()
             assert "py-member-switch-64" in switched_text
@@ -829,7 +828,7 @@ if include_scenario(64):
                 timeout_secs=120.0,
             )
             assert "birch" in (switched_state.get("output_preview") or "").lower()
-            # `mob_turn_start(..., model=...)` is still a real semantic turn.
+            # `mob_turn_start(..., turn_metadata=...)` is still a real semantic turn.
             # When the member already has an attached realtime channel, the
             # switch-turn reply can continue flowing on that channel after the
             # RPC result is back. Quiesce it explicitly before the next

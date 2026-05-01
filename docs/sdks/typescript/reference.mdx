@@ -565,8 +565,7 @@ class SkillNotFoundError extends MeerkatError {}
 
 ## Skills
 
-`createSession()` accepts first-turn skills inside `turnMetadata.skillReferences`.
-`session.turn()` keeps the `skillRefs` convenience option for per-turn injection.
+`createSession()` and `session.turn()` accept skills inside `turnMetadata.skillReferences`.
 
 ```typescript
 // Preload skills into the system prompt at session creation
@@ -581,7 +580,9 @@ const session = await client.createSession("Hello!", {
 
 // Inject a skill for a specific turn via session.turn()
 const result = await session.turn("Extract emails from this text", {
-  skillRefs: [{ sourceUuid: "abc123", skillName: "extraction-email" }],
+  turnMetadata: {
+    skillReferences: [{ sourceUuid: "abc123", skillName: "extraction-email" }],
+  },
 });
 
 // Convenience method on Session — wraps turn() with requireCapability check

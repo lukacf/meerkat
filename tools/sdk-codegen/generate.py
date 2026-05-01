@@ -176,6 +176,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "WireContentBlock",
         "WireContentInput",
         "WireConnectionRef",
+        "WireRuntimeTurnMetadata",
         "WireMobProfile",
         "WireMobToolConfig",
     ]
@@ -648,7 +649,7 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     if has_skills:
         types_content += "\n@dataclass\nclass SkillsParams:\n"
         types_content += '    """Skills parameters (available because skills capability is compiled)."""\n'
-        types_content += "    turn_metadata: Optional[dict[str, Any]] = None\n\n"
+        types_content += "    turn_metadata: Optional[WireRuntimeTurnMetadata] = None\n\n"
 
     params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))
     wire_schema = _schema_root_with_nested_defs(schemas.get("wire-types", {}))
@@ -743,6 +744,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         doc_block = "\n".join(f"# {line}" if line else "#" for line in doc_lines)
         types_content += f"\n{doc_block}\n{name} = {alias_type}\n"
 
+    append_python_dataclass(
+        "WireRuntimeTurnMetadata",
+        params_schema,
+        "Runtime turn metadata carrier.",
+    )
     append_python_dataclass("McpAddParams", params_schema, "Request payload for mcp/add.")
     append_python_dataclass("McpRemoveParams", params_schema, "Request payload for mcp/remove.")
     append_python_dataclass("McpReloadParams", params_schema, "Request payload for mcp/reload.")
@@ -1020,7 +1026,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
 
     if has_skills:
         types_content += "\nexport interface SkillsParams {\n"
-        types_content += "  turn_metadata?: Record<string, unknown>;\n"
+        types_content += "  turn_metadata?: WireRuntimeTurnMetadata;\n"
         types_content += "}\n"
 
     params_schema = _schema_root_with_nested_defs(schemas.get("params", {}))
@@ -1092,6 +1098,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         alias_type, _ = _typescript_type_from_schema(schema_root, schema, local_defs)
         types_content += f"\nexport type {name} = {alias_type};\n"
 
+    append_typescript_interface("WireRuntimeTurnMetadata", params_schema)
     append_typescript_interface("McpAddParams", params_schema)
     append_typescript_interface("McpRemoveParams", params_schema)
     append_typescript_interface("McpReloadParams", params_schema)

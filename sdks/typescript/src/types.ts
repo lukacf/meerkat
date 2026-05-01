@@ -16,7 +16,6 @@ import type {
   MobSupervisorSpecInput,
   MobToolConfigInput,
   MobTopologySpecInput,
-  MobTurnStartParams,
   MobWiringRulesInput,
   WireBudgetSplitPolicy,
   WireConnectionRef,
@@ -231,19 +230,10 @@ export interface SessionIngressOptions {
 
 /** Per-turn options for normal turns and deferred first turns. */
 export interface TurnOptions {
-  readonly skillRefs?: SkillRef[];
-  readonly flowToolOverlay?: TurnToolOverlay;
-  readonly additionalInstructions?: string[];
-  readonly keepAlive?: boolean;
-  readonly model?: string;
-  readonly provider?: string;
-  readonly providerParams?: Record<string, unknown>;
-  readonly clearProviderParams?: boolean;
-  readonly connectionRef?: WireConnectionRef;
-  readonly clearConnectionRef?: boolean;
+  readonly turnMetadata?: RuntimeTurnMetadata;
 }
 
-/** Canonical runtime metadata carrier for session creation. */
+/** Canonical runtime metadata carrier for session creation and turn starts. */
 export interface RuntimeTurnMetadata {
   readonly skillReferences?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
@@ -382,16 +372,7 @@ export interface MobSpawnManyResultEntry {
   readonly error?: string;
 }
 
-type MobTurnStartMetadata = NonNullable<MobTurnStartParams["turn_metadata"]>;
-
-export interface MobTurnStartOptions extends TurnOptions {
-  readonly additionalInstructions?: string[];
-  readonly keepAlive?: boolean;
-  readonly model?: string;
-  readonly provider?: string;
-  readonly providerParams?: Record<string, unknown>;
-  readonly connectionRef?: WireConnectionRef;
-}
+export interface MobTurnStartOptions extends TurnOptions {}
 
 export interface MobEventsOptions {
   readonly afterCursor?: number;

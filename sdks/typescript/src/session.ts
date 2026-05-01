@@ -161,7 +161,7 @@ export class Session {
     ) {
       throw new Error("Skill references must be SkillKey objects");
     }
-    return this.turn(prompt, { skillRefs: [skillRef] });
+    return this.turn(prompt, { turnMetadata: { skillReferences: [skillRef] } });
   }
 
   async send(command: CommsCommand): Promise<CommsSendReceipt> {
@@ -179,25 +179,14 @@ export class Session {
   }
 }
 
-/** Turn-time override options for deferred sessions. */
-export interface DeferredTurnOptions {
-  skillRefs?: SkillRef[];
-  flowToolOverlay?: TurnOptions["flowToolOverlay"];
-  additionalInstructions?: TurnOptions["additionalInstructions"];
-  keepAlive?: TurnOptions["keepAlive"];
-  model?: TurnOptions["model"];
-  provider?: TurnOptions["provider"];
-  providerParams?: TurnOptions["providerParams"];
-  clearProviderParams?: TurnOptions["clearProviderParams"];
-  connectionRef?: TurnOptions["connectionRef"];
-  clearConnectionRef?: TurnOptions["clearConnectionRef"];
-}
+/** Turn-time metadata options for deferred sessions. */
+export interface DeferredTurnOptions extends TurnOptions {}
 
 /**
  * A session created with `initial_turn: "deferred"`.
  *
  * No first turn has been executed yet. Use {@link startTurn} to run the first
- * turn with optional per-turn overrides.
+ * turn with optional turn metadata.
  */
 export class DeferredSession {
   private readonly _client: MeerkatClient;
@@ -226,8 +215,7 @@ export class DeferredSession {
   /**
    * Run the first turn on this deferred session.
    *
-   * Accepts per-turn overrides (model, provider, etc.) that are applied
-   * before the session is materialized.
+   * Accepts `turnMetadata` that is applied before the session is materialized.
    */
   async startTurn(
     prompt: string | ContentBlock[],

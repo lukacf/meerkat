@@ -306,13 +306,7 @@ session.lastResult      // the full RunResult object
 async turn(
   prompt: string | ContentBlock[],
   options?: {
-    skillRefs?: SkillRef[];
-    flowToolOverlay?: TurnToolOverlay;
-    additionalInstructions?: string[];
-    keepAlive?: boolean;
-    model?: string;
-    provider?: string;
-    providerParams?: Record<string, unknown>;
+    turnMetadata?: RuntimeTurnMetadata;
   },
 ): Promise<RunResult>
 ```
@@ -330,13 +324,7 @@ console.log(result.text);
 stream(
   prompt: string | ContentBlock[],
   options?: {
-    skillRefs?: SkillRef[];
-    flowToolOverlay?: TurnToolOverlay;
-    additionalInstructions?: string[];
-    keepAlive?: boolean;
-    model?: string;
-    provider?: string;
-    providerParams?: Record<string, unknown>;
+    turnMetadata?: RuntimeTurnMetadata;
   },
 ): EventStream
 ```

@@ -68,14 +68,9 @@ asyncio.run(main())
 
 ### Turn APIs
 
-`Session.turn(...)`, `Session.stream(...)`, and `DeferredSession.start_turn(...)` support:
-
-- `skill_refs`, `flow_tool_overlay`
-- `additional_instructions`
-- `keep_alive`, `model`, `provider`, `provider_params`
-
-Session creation uses the canonical `turn_metadata` carrier for first-turn
-runtime metadata such as `model`, `provider`, `provider_params`,
+`Session.turn(...)`, `Session.stream(...)`, and `DeferredSession.start_turn(...)`
+use the same canonical `turn_metadata` carrier as session creation for runtime
+metadata such as `model`, `provider`, `provider_params`,
 `skill_references`, `additional_instructions`, and `keep_alive`.
 
 ### Config APIs

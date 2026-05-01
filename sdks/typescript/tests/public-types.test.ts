@@ -9,6 +9,7 @@ import type {
   SessionOptions,
   SpawnManySpec,
   SpawnSpec,
+  TurnOptions,
 } from "../src/index.js";
 import type {
   MobSpawnParams as PublicMobSpawnParams,
@@ -70,6 +71,19 @@ const publicSessionOptionsWithSplitMetadata: SessionOptions = {
 };
 
 void publicSessionOptionsWithSplitMetadata;
+
+const publicTurnOptions: TurnOptions = {
+  turnMetadata: publicRuntimeTurnMetadata,
+};
+
+void publicTurnOptions;
+
+const publicTurnOptionsWithSplitMetadata: TurnOptions = {
+  // @ts-expect-error turn metadata belongs inside turnMetadata.
+  model: "claude-sonnet-4-6",
+};
+
+void publicTurnOptionsWithSplitMetadata;
 
 const spawnSpec: SpawnSpec = {
   profile: "worker",
@@ -189,22 +203,23 @@ const publicSpawnManySpecWithSingleSpawnOnlyField: SpawnManySpec = {
 void publicSpawnManySpecWithSingleSpawnOnlyField;
 
 const publicMobTurnStartOptions: MobTurnStartOptions = {
-  skillRefs: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
-  flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
-  additionalInstructions: ["stay concise"],
-  keepAlive: true,
-  model: "gpt-test",
-  provider: "openai",
-  providerParams: { temperature: 0.2 },
-  clearProviderParams: true,
-  connectionRef: { realm: "dev", binding: "default_openai" },
-  clearConnectionRef: true,
+  turnMetadata: {
+    skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
+    flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
+    additionalInstructions: ["stay concise"],
+    keepAlive: true,
+    model: "gpt-test",
+    provider: "openai",
+    providerParams: { temperature: 0.2 },
+    clearProviderParams: true,
+    connectionRef: { realm: "dev", binding: "default_openai" },
+    clearConnectionRef: true,
+  },
 };
 
 const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
+  // @ts-expect-error mob turn metadata belongs inside turnMetadata.
   model: "gpt-test",
-  // @ts-expect-error turn_start overrides are explicit and must fail closed.
-  unexpectedOverride: true,
 };
 
 type MobTurnStartSupportedWireOptionKeys = "turn_metadata";

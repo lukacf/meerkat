@@ -3687,7 +3687,6 @@ impl SessionRuntime {
 
         match self.service.cancel_after_boundary(session_id).await {
             Ok(()) | Err(SessionError::NotRunning { .. }) => Ok(()),
-            Err(SessionError::Unsupported(_)) => Ok(()),
             Err(e) => Err(session_error_to_rpc(e)),
         }
     }

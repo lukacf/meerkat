@@ -443,7 +443,7 @@ impl CoreExecutorBoundaryHandle for McpSessionRuntimeBoundaryHandle {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|err| match err {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
@@ -664,7 +664,7 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|err| match err {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))

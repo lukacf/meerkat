@@ -217,7 +217,7 @@ impl CoreExecutorBoundaryHandle for RestSessionRuntimeBoundaryHandle {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|err| match err {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
@@ -856,7 +856,7 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|err| match err {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))

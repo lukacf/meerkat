@@ -1091,7 +1091,7 @@ impl CoreExecutorBoundaryHandle for TargetCoreBoundaryHandle {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|error| match error {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 error => Err(error),
             })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
@@ -1217,7 +1217,7 @@ impl CoreExecutor for TargetCoreExecutor {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|error| match error {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 error => Err(error),
             })
             .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))

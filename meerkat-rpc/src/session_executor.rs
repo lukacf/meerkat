@@ -122,7 +122,7 @@ impl CoreExecutorBoundaryHandle for MobRpcRuntimeBoundaryHandle {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|err| match err {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
@@ -392,7 +392,7 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|err| match err {
-                SessionError::NotRunning { .. } | SessionError::Unsupported(_) => Ok(()),
+                SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })
             .map_err(|e| CoreExecutorError::control_failed_runtime(e.to_string()))
@@ -410,5 +410,157 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
             Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
             Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
         }
+    }
+}
+
+#[cfg(all(test, feature = "mob"))]
+mod tests {
+    use super::*;
+    use meerkat_core::RunResult;
+    use meerkat_core::service::{
+        AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+        SessionControlError, SessionHistoryPage, SessionHistoryQuery, SessionQuery,
+        SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
+        SessionView, StartTurnRequest,
+    };
+
+    enum BoundaryCancelOutcome {
+        Unsupported,
+        NotRunning,
+    }
+
+    struct BoundaryCancelSessionService {
+        outcome: BoundaryCancelOutcome,
+    }
+
+    impl BoundaryCancelSessionService {
+        fn unsupported() -> Self {
+            Self {
+                outcome: BoundaryCancelOutcome::Unsupported,
+            }
+        }
+
+        fn not_running() -> Self {
+            Self {
+                outcome: BoundaryCancelOutcome::NotRunning,
+            }
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl SessionService for BoundaryCancelSessionService {
+        async fn create_session(
+            &self,
+            _req: CreateSessionRequest,
+        ) -> Result<RunResult, SessionError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+
+        async fn start_turn(
+            &self,
+            _id: &SessionId,
+            _req: StartTurnRequest,
+        ) -> Result<RunResult, SessionError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+
+        async fn interrupt(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+
+        async fn cancel_after_boundary(&self, id: &SessionId) -> Result<(), SessionError> {
+            match self.outcome {
+                BoundaryCancelOutcome::Unsupported => Err(SessionError::Unsupported(
+                    "cancel_after_boundary".to_string(),
+                )),
+                BoundaryCancelOutcome::NotRunning => {
+                    Err(SessionError::NotRunning { id: id.clone() })
+                }
+            }
+        }
+
+        async fn read(&self, _id: &SessionId) -> Result<SessionView, SessionError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+
+        async fn list(&self, _query: SessionQuery) -> Result<Vec<SessionSummary>, SessionError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+
+        async fn archive(&self, _id: &SessionId) -> Result<(), SessionError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl SessionServiceCommsExt for BoundaryCancelSessionService {}
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl SessionServiceControlExt for BoundaryCancelSessionService {
+        async fn append_system_context(
+            &self,
+            _id: &SessionId,
+            _req: AppendSystemContextRequest,
+        ) -> Result<AppendSystemContextResult, SessionControlError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl SessionServiceHistoryExt for BoundaryCancelSessionService {
+        async fn read_history(
+            &self,
+            _id: &SessionId,
+            _query: SessionHistoryQuery,
+        ) -> Result<SessionHistoryPage, SessionError> {
+            unreachable!("boundary-handle tests only call cancel_after_boundary")
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl MobSessionService for BoundaryCancelSessionService {}
+
+    #[tokio::test]
+    async fn mob_rpc_boundary_handle_propagates_unsupported_boundary_cancel() {
+        let session_id = SessionId::new();
+        let session_service: Arc<dyn MobSessionService> =
+            Arc::new(BoundaryCancelSessionService::unsupported());
+        let handle = MobRpcRuntimeBoundaryHandle {
+            session_service,
+            session_id,
+        };
+
+        let error = handle
+            .cancel_after_boundary("test boundary cancel".to_string())
+            .await
+            .expect_err("unsupported boundary cancel must not be masked as success");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported: cancel_after_boundary"),
+            "unexpected boundary cancel error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mob_rpc_boundary_handle_keeps_not_running_as_noop() {
+        let session_id = SessionId::new();
+        let session_service: Arc<dyn MobSessionService> =
+            Arc::new(BoundaryCancelSessionService::not_running());
+        let handle = MobRpcRuntimeBoundaryHandle {
+            session_service,
+            session_id,
+        };
+
+        handle
+            .cancel_after_boundary("test boundary cancel".to_string())
+            .await
+            .expect("not-running boundary cancel remains an idempotent no-op");
     }
 }

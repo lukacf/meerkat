@@ -4940,8 +4940,7 @@ impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryH
             .cancel_after_boundary(&self.session_id)
             .await
             .or_else(|err| match err {
-                meerkat::SessionError::NotRunning { .. }
-                | meerkat::SessionError::Unsupported(_) => Ok(()),
+                meerkat::SessionError::NotRunning { .. } => Ok(()),
                 err => Err(err),
             })
             .map_err(|err| {

@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::lifecycle::run_primitive::{
-    RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
+    KeepAliveMode, KeepAlivePolicy, RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind,
+    TurnMetadataOverride,
 };
 use crate::runtime_epoch::RuntimeBuildMode;
 use crate::service::{
@@ -45,6 +46,9 @@ pub struct SurfaceSessionRecoveryContext {
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
     pub runtime_build_mode: Option<RuntimeBuildMode>,
+    /// The recovered build will be materialized by a runtime-owned surface
+    /// after recovery, even if concrete runtime bindings are prepared later.
+    pub runtime_owned_recovery: bool,
     pub require_runtime_build_mode: bool,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
@@ -160,6 +164,7 @@ fn recovery_initial_turn_metadata(
     turn_metadata: Option<RuntimeTurnMetadata>,
     preload_skills: Option<Vec<SkillKey>>,
     additional_instructions: Option<Vec<String>>,
+    keep_alive: bool,
     runtime_owned_recovery: bool,
 ) -> Option<RuntimeTurnMetadata> {
     if !runtime_owned_recovery {
@@ -190,6 +195,12 @@ fn recovery_initial_turn_metadata(
                 .get_or_insert_with(Vec::new)
                 .extend(instructions);
         }
+    }
+    if keep_alive && metadata.keep_alive.is_none() {
+        metadata.keep_alive = Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+            ttl: std::time::Duration::from_secs(30),
+            policy: KeepAliveMode::Pinned,
+        }));
     }
 
     (!metadata.is_empty()).then_some(metadata)
@@ -237,7 +248,7 @@ pub fn build_recovered_session(
     let runtime_owned_recovery = matches!(
         context.runtime_build_mode.as_ref(),
         Some(RuntimeBuildMode::SessionOwned(_))
-    );
+    ) || context.runtime_owned_recovery;
 
     let build_state = session.build_state().unwrap_or_default();
     let llm_binding = resolve_resume_llm_binding(
@@ -291,6 +302,7 @@ pub fn build_recovered_session(
         overrides.turn_metadata.clone(),
         recovered_preload_skills.clone(),
         recovered_additional_instructions.clone(),
+        keep_alive,
         runtime_owned_recovery,
     );
 
@@ -906,12 +918,20 @@ mod tests {
             Some(vec![skill.clone()]),
             Some(vec!["persisted instruction".to_string(), " ".to_string()]),
             true,
+            true,
         )
         .expect("runtime-owned recovery metadata");
 
         assert_eq!(
             metadata.skill_references,
             Some(vec![skill_key("metadata-skill"), skill])
+        );
+        assert_eq!(
+            metadata.keep_alive,
+            Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(30),
+                policy: KeepAliveMode::Pinned,
+            }))
         );
         let instructions = metadata
             .additional_instructions
@@ -926,11 +946,38 @@ mod tests {
                 None,
                 Some(vec![skill_key("standalone-skill")]),
                 Some(vec!["standalone instruction".to_string()]),
+                true,
                 false,
             )
             .is_none(),
             "standalone recovery should keep split build fields local"
         );
+
+        let recovered = build_recovered_session(
+            sample_session(),
+            &SurfaceSessionRecoveryOverrides::default(),
+            SurfaceSessionRecoveryContext {
+                runtime_owned_recovery: true,
+                ..Default::default()
+            },
+        )
+        .expect("runtime-owned recovery without prepared bindings");
+        assert_eq!(recovered.build.preload_skills, None);
+        assert_eq!(recovered.build.additional_instructions, None);
+        let metadata = recovered
+            .build
+            .initial_turn_metadata
+            .expect("runtime-owned recovery metadata");
+        assert_eq!(
+            metadata.skill_references,
+            Some(vec![skill_key("persisted-skill")])
+        );
+        let instructions = metadata
+            .additional_instructions
+            .expect("persisted instructions should move to metadata");
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].kind, TurnInstructionKind::Host);
+        assert_eq!(instructions[0].body, "be precise");
     }
 
     #[test]

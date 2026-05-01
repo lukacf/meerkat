@@ -3072,11 +3072,14 @@ export class MeerkatClient {
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
     if (options.budgetLimits != null) params.budget_limits = options.budgetLimits;
-    if (options.preloadSkills != null) {
-      params.preload_skills = skillKeysToWire(options.preloadSkills);
-    }
     if (options.labels != null) params.labels = options.labels;
-    const turnMetadata = runtimeTurnMetadataPayload(options);
+    const turnMetadata = runtimeTurnMetadataPayload({
+      ...options,
+      skillRefs:
+        options.preloadSkills != null || options.skillRefs != null
+          ? [...(options.preloadSkills ?? []), ...(options.skillRefs ?? [])]
+          : undefined,
+    });
     if (turnMetadata) params.turn_metadata = turnMetadata;
     if (options.appContext !== undefined) params.app_context = options.appContext;
     if (options.shellEnv != null) params.shell_env = options.shellEnv;

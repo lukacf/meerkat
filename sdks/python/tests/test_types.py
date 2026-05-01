@@ -802,6 +802,10 @@ async def test_create_session_skill_refs_use_turn_metadata_carrier() -> None:
         source_uuid="00000000-0000-4000-8000-000000000001",
         skill_name="read",
     )
+    preload_key = SkillKey(
+        source_uuid="00000000-0000-4000-8000-000000000001",
+        skill_name="preload",
+    )
 
     async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
         seen.append((method, params))
@@ -815,21 +819,19 @@ async def test_create_session_skill_refs_use_turn_metadata_carrier() -> None:
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    await client.create_session("Use skills", preload_skills=[key], skill_refs=[key])
+    await client.create_session("Use skills", preload_skills=[preload_key], skill_refs=[key])
 
     assert seen == [
         (
             "session/create",
             {
                 "prompt": "Use skills",
-                "preload_skills": [
-                    {
-                        "source_uuid": "00000000-0000-4000-8000-000000000001",
-                        "skill_name": "read",
-                    }
-                ],
                 "turn_metadata": {
                     "skill_references": [
+                        {
+                            "source_uuid": "00000000-0000-4000-8000-000000000001",
+                            "skill_name": "preload",
+                        },
                         {
                             "source_uuid": "00000000-0000-4000-8000-000000000001",
                             "skill_name": "read",

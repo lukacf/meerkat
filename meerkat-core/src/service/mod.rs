@@ -7,7 +7,10 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::lifecycle::run_primitive::RuntimeTurnMetadata;
+use crate::lifecycle::run_primitive::{
+    KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
+    TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
+};
 use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -176,6 +179,153 @@ impl CreateSessionRequest {
                 .as_ref()
                 .and_then(|build| build.app_context.clone()),
         )
+    }
+
+    /// Normalize internal build-config first-turn fields before crossing the
+    /// runtime-owned service seam.
+    ///
+    /// Public service implementations still reject split fields. This helper is
+    /// for surfaces that own an agent build config first and only attach
+    /// concrete runtime bindings after converting it into a service request.
+    pub fn fold_runtime_owned_build_metadata_into_initial_turn_metadata(
+        &mut self,
+    ) -> Result<(), String> {
+        let Some(build) = self.build.as_mut() else {
+            return Ok(());
+        };
+        if !matches!(
+            build.runtime_build_mode,
+            crate::runtime_epoch::RuntimeBuildMode::SessionOwned(_)
+        ) {
+            return Ok(());
+        }
+        if build.split_runtime_turn_metadata_fields().is_empty() {
+            return Ok(());
+        }
+
+        let mut metadata = build.initial_turn_metadata.take().unwrap_or_default();
+        let split_provider = build.provider.take();
+        let split_provider_params = build.provider_params.take();
+        let split_preload_skills = build.preload_skills.take().filter(|refs| !refs.is_empty());
+        let split_connection_ref = build.connection_ref.take();
+        let split_keep_alive = std::mem::replace(&mut build.keep_alive, false);
+        let split_additional_instructions = build.additional_instructions.take();
+
+        if let Some(provider) = split_provider {
+            match metadata.provider {
+                Some(existing) if existing != provider => {
+                    return Err(
+                        "split provider diverges from initial_turn_metadata.provider".to_string(),
+                    );
+                }
+                Some(_) => {}
+                None => metadata.provider = Some(provider),
+            }
+        }
+
+        let needs_model = metadata.model.is_none()
+            && (split_provider.is_some()
+                || split_provider_params.is_some()
+                || split_connection_ref.is_some()
+                || split_keep_alive);
+        if needs_model {
+            metadata.model = Some(ModelId::new(self.model.clone()));
+        }
+
+        if let Some(provider_params) = split_provider_params {
+            let provider = metadata
+                .provider
+                .or(split_provider)
+                .or_else(|| Provider::infer_from_model(&self.model))
+                .unwrap_or(Provider::Other);
+            let provider_params =
+                TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
+                    provider.as_str(),
+                    &provider_params,
+                ));
+            match metadata.provider_params.as_ref() {
+                Some(existing) if existing != &provider_params => {
+                    return Err(
+                        "split provider_params diverges from initial_turn_metadata.provider_params"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {}
+                None => metadata.provider_params = Some(provider_params),
+            }
+        }
+
+        if let Some(connection_ref) = split_connection_ref {
+            let connection_ref = TurnMetadataOverride::Set(connection_ref);
+            match metadata.connection_ref.as_ref() {
+                Some(existing) if existing != &connection_ref => {
+                    return Err(
+                        "split connection_ref diverges from initial_turn_metadata.connection_ref"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {}
+                None => metadata.connection_ref = Some(connection_ref),
+            }
+        }
+
+        if split_keep_alive {
+            let keep_alive = TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: std::time::Duration::from_secs(30),
+                policy: KeepAliveMode::Pinned,
+            });
+            match metadata.keep_alive.as_ref() {
+                Some(existing) if existing != &keep_alive => {
+                    return Err(
+                        "split keep_alive diverges from initial_turn_metadata.keep_alive"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {}
+                None => metadata.keep_alive = Some(keep_alive),
+            }
+        }
+
+        if let Some(preload_skills) = split_preload_skills {
+            match metadata.skill_references.as_ref() {
+                Some(existing) if existing != &preload_skills => {
+                    return Err(
+                        "split preload_skills diverges from initial_turn_metadata.skill_references"
+                            .to_string(),
+                    );
+                }
+                Some(_) => {}
+                None => metadata.skill_references = Some(preload_skills),
+            }
+        }
+
+        if let Some(additional_instructions) = split_additional_instructions {
+            let instructions = additional_instructions
+                .into_iter()
+                .filter_map(|body| {
+                    let body = body.trim();
+                    (!body.is_empty()).then(|| TurnInstruction {
+                        kind: TurnInstructionKind::Host,
+                        body: body.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !instructions.is_empty() {
+                match metadata.additional_instructions.as_ref() {
+                    Some(existing) if existing != &instructions => {
+                        return Err(
+                            "split additional_instructions diverges from initial_turn_metadata.additional_instructions"
+                                .to_string(),
+                        );
+                    }
+                    Some(_) => {}
+                    None => metadata.additional_instructions = Some(instructions),
+                }
+            }
+        }
+
+        build.initial_turn_metadata = (!metadata.is_empty()).then_some(metadata);
+        Ok(())
     }
 }
 

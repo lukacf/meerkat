@@ -693,6 +693,68 @@ mod tests {
             Some(meerkat_core::types::HandlingMode::Queue)
         );
     }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn session_owned_member_create_folds_split_build_metadata_before_service() {
+        let session_id = SessionId::new();
+        let bindings = meerkat_runtime::MeerkatMachine::ephemeral()
+            .prepare_local_session_bindings(session_id.clone())
+            .await
+            .expect("runtime bindings");
+        let skill = meerkat_core::skills::SkillKey::builtin(
+            meerkat_core::skills::SkillName::parse("mob-communication")
+                .expect("valid builtin skill"),
+        );
+
+        let mut req = meerkat_core::service::CreateSessionRequest {
+            model: "gpt-5.4".to_string(),
+            prompt: "hello".to_string().into(),
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(meerkat_core::Session::with_id(session_id)),
+                provider_params: Some(json!({ "temperature": 0.2 })),
+                preload_skills: Some(vec![skill.clone()]),
+                additional_instructions: Some(vec!["follow mob protocol".to_string()]),
+                runtime_build_mode: meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(
+                    bindings,
+                ),
+                ..Default::default()
+            }),
+            labels: None,
+        };
+
+        req.fold_runtime_owned_build_metadata_into_initial_turn_metadata()
+            .expect("split build metadata should fold into the canonical carrier");
+        let build = req.build.as_ref().expect("build options");
+        build
+            .validate_runtime_owned_turn_metadata_carrier()
+            .expect("folded request should pass the runtime-owned service seam");
+        assert_eq!(build.provider_params, None);
+        assert_eq!(build.preload_skills, None);
+        assert_eq!(build.additional_instructions, None);
+
+        let metadata = build
+            .initial_turn_metadata
+            .as_ref()
+            .expect("canonical metadata");
+        assert_eq!(metadata.skill_references, Some(vec![skill]));
+        assert!(metadata.provider_params.is_some());
+        let instructions = metadata
+            .additional_instructions
+            .as_ref()
+            .expect("additional instructions");
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(
+            instructions[0].kind,
+            meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host
+        );
+        assert_eq!(instructions[0].body, "follow mob protocol");
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -970,6 +1032,13 @@ impl MobProvisioner for SessionBackend {
                 build.runtime_build_mode =
                     meerkat_core::runtime_epoch::RuntimeBuildMode::SessionOwned(bindings);
             }
+            req.create_session
+                .fold_runtime_owned_build_metadata_into_initial_turn_metadata()
+                .map_err(|e| {
+                    MobError::Internal(format!(
+                        "failed to normalize runtime-owned member create metadata: {e}"
+                    ))
+                })?;
             stamp_eager_session_owned_initial_turn_metadata(&mut req.create_session);
             Some(member_bridge_session_id)
         } else {

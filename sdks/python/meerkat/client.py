@@ -2711,12 +2711,15 @@ class MeerkatClient:
             params["peer_meta"] = peer_meta
         if budget_limits is not None:
             params["budget_limits"] = budget_limits
-        if preload_skills is not None:
-            params["preload_skills"] = _skill_keys_to_wire(preload_skills)
         if labels is not None:
             params["labels"] = labels
+        combined_skill_refs = (
+            [*(preload_skills or []), *(skill_refs or [])]
+            if preload_skills is not None or skill_refs is not None
+            else None
+        )
         turn_metadata = _runtime_turn_metadata(
-            skill_refs=skill_refs,
+            skill_refs=combined_skill_refs,
             additional_instructions=additional_instructions,
             keep_alive=keep_alive,
             model=model,

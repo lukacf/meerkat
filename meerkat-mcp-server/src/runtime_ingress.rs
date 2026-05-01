@@ -301,6 +301,7 @@ impl McpRuntimeIngressContext {
                 instance_id: self.instance_id.clone(),
                 backend: Some(self.backend.clone()),
                 config_generation: current_generation,
+                runtime_owned_recovery: true,
                 ..Default::default()
             },
         )

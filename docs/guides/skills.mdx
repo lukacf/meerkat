@@ -17,7 +17,7 @@ Use this guide when you want to:
 - create or configure skill sources
 - preload or inject skills into sessions
 - understand `SkillKey` identity and source provenance
-- understand when to use `preload_skills` vs `skill_refs`
+- understand how `turn_metadata.skill_references` carries skill injection
 
 ## Skill sources
 
@@ -286,30 +286,33 @@ Pass `turn_metadata.skill_references` in raw API requests to resolve and inject 
 
 Legacy top-level per-turn `skill_refs` and `skill_references` strings are retired and rejected; use typed keys in `turn_metadata.skill_references`.
 
-### 3. Preloading at session creation
+### 3. Skill injection at session creation
 
-Pass `preload_skills` to inject skills into the system prompt at session creation:
+Pass typed keys in `turn_metadata.skill_references` to inject skills at session
+creation:
 
 ```json
 {
   "method": "session/create",
   "params": {
     "prompt": "Hello!",
-    "preload_skills": [
-      {
-        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-        "skill_name": "extraction-email"
-      },
-      {
-        "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-        "skill_name": "formatting-markdown"
-      }
-    ]
+    "turn_metadata": {
+      "skill_references": [
+        {
+          "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+          "skill_name": "extraction-email"
+        },
+        {
+          "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+          "skill_name": "formatting-markdown"
+        }
+      ]
+    }
   }
 }
 ```
 
-See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers. CLI `--skill` is the preload-oriented path for runtime-local skill loading; it is not the same surface as typed per-turn `skill_refs`.
+See the [Python SDK](/sdks/python/reference#skills-parameters) and [TypeScript SDK](/sdks/typescript/reference#skills-parameters) for SDK wrappers. CLI `--skill` and SDK `preload_skills` / `preloadSkills` are convenience options that serialize into the canonical metadata carrier.
 
 ## Skill introspection
 

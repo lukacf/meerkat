@@ -792,7 +792,7 @@ describe("Session wrappers", () => {
       shellEnv: { FOO: "bar" },
       externalTools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
       preloadSkills: [
-        { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
+        { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "preload" },
       ],
       skillRefs: [
         { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
@@ -807,12 +807,13 @@ describe("Session wrappers", () => {
         app_context: { tenant: "acme" },
         shell_env: { FOO: "bar" },
         external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
-        preload_skills: [
-          { source_uuid: "00000000-0000-4000-8000-000000000001", skill_name: "read" },
-        ],
         turn_metadata: {
           additional_instructions: [{ kind: "user", body: "be terse" }],
           skill_references: [
+            {
+              source_uuid: "00000000-0000-4000-8000-000000000001",
+              skill_name: "preload",
+            },
             {
               source_uuid: "00000000-0000-4000-8000-000000000001",
               skill_name: "read",

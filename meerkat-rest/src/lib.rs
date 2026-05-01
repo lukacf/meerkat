@@ -729,6 +729,7 @@ async fn apply_runtime_turn(
                     runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
                         bindings,
                     )),
+                    runtime_owned_recovery: false,
                     require_runtime_build_mode: true,
                     realm_id: Some(context.realm.to_string()),
                     instance_id: context.instance_id.clone(),
@@ -3535,6 +3536,7 @@ async fn continue_session_inner(
                 external_tools: None,
                 checkpointer: None,
                 runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                runtime_owned_recovery: false,
                 require_runtime_build_mode: true,
                 realm_id: Some(state.realm.to_string()),
                 instance_id: state.instance_id.clone(),

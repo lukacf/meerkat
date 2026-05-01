@@ -665,6 +665,14 @@ impl AgentBuildConfig {
         (!metadata.is_empty()).then_some(metadata)
     }
 
+    /// Return the canonical service-level first-turn metadata carrier,
+    /// including runtime-owned facts still held in this internal build config.
+    pub fn initial_turn_metadata_for_service(
+        &self,
+    ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+        self.initial_turn_metadata_from_internal_build_fields()
+    }
+
     /// Apply the shared host/runtime default for explicit mob operator
     /// enablement.
     ///

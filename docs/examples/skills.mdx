@@ -130,7 +130,8 @@ View the full body and metadata of a specific skill by canonical key.
 
 Use this when the skill should shape the whole session from the start.
 
-`CLI --skill` is the preload-oriented local path. `preload_skills` is the explicit session-build surface on the APIs.
+`CLI --skill` is the preload-oriented local path. Raw APIs carry create-time
+skill injection through `turn_metadata.skill_references`.
 
 <Tabs>
   <Tab title="CLI">
@@ -147,16 +148,18 @@ Use this when the skill should shape the whole session from the start.
       "method": "session/create",
       "params": {
         "prompt": "Extract emails",
-        "preload_skills": [
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "email-extractor"
-          },
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "email-extractor"
+            },
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }
     }
     ```
@@ -167,16 +170,18 @@ Use this when the skill should shape the whole session from the start.
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Extract emails",
-        "preload_skills": [
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "email-extractor"
-          },
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "email-extractor"
+            },
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }'
     ```
   </Tab>
@@ -186,16 +191,18 @@ Use this when the skill should shape the whole session from the start.
       "name": "meerkat_run",
       "arguments": {
         "prompt": "Extract emails",
-        "preload_skills": [
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "email-extractor"
-          },
-          {
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "email-extractor"
+            },
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }
     }
     ```
@@ -238,16 +245,19 @@ Use this when the skill should shape the whole session from the start.
   <Tab title="Rust">
     ```rust
     let build_opts = SessionBuildOptions {
-        preload_skills: Some(vec![
-            SkillKey::new(
-                SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-                SkillName::parse("email-extractor")?,
-            ),
-            SkillKey::new(
-                SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-                SkillName::parse("markdown-formatter")?,
-            ),
-        ]),
+        initial_turn_metadata: Some(RuntimeTurnMetadata {
+            skill_references: Some(vec![
+                SkillKey::new(
+                    SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                    SkillName::parse("email-extractor")?,
+                ),
+                SkillKey::new(
+                    SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                    SkillName::parse("markdown-formatter")?,
+                ),
+            ]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     ```
@@ -256,7 +266,9 @@ Use this when the skill should shape the whole session from the start.
 
 ## First-turn skill injection
 
-Use `skill_refs` when the skill should be injected for the first turn rather than preloaded into the session system prompt.
+Use `turn_metadata.skill_references` when the skill should be injected for the
+first turn rather than preloaded into the session system prompt. SDKs keep
+`skill_refs` as a convenience option and serialize it into that carrier.
 
 <Tabs>
   <Tab title="JSON-RPC">
@@ -266,18 +278,18 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
       "method": "session/create",
       "params": {
         "prompt": "Extract emails",
-        "skill_refs": [
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "email-extractor"
-          },
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "email-extractor"
+            },
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }
     }
     ```
@@ -288,18 +300,18 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
       -H "Content-Type: application/json" \
       -d '{
         "prompt": "Extract emails",
-        "skill_refs": [
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "email-extractor"
-          },
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "email-extractor"
+            },
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }'
     ```
   </Tab>
@@ -309,18 +321,18 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
       "name": "meerkat_run",
       "arguments": {
         "prompt": "Extract emails",
-        "skill_refs": [
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "email-extractor"
-          },
-          {
-            "kind": "structured",
-            "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
-            "skill_name": "markdown-formatter"
-          }
-        ]
+        "turn_metadata": {
+          "skill_references": [
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "email-extractor"
+            },
+            {
+              "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+              "skill_name": "markdown-formatter"
+            }
+          ]
+        }
       }
     }
     ```
@@ -368,20 +380,24 @@ Use `skill_refs` when the skill should be injected for the first turn rather tha
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        render_metadata: None,
-        skill_references: Some(vec![
-            SkillKey {
-                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-                skill_name: SkillName::parse("email-extractor")?,
-            },
-            SkillKey {
-                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-                skill_name: SkillName::parse("markdown-formatter")?,
-            },
-        ]),
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
-        build: None,
+        build: Some(SessionBuildOptions {
+            initial_turn_metadata: Some(RuntimeTurnMetadata {
+                skill_references: Some(vec![
+                    SkillKey {
+                        source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                        skill_name: SkillName::parse("email-extractor")?,
+                    },
+                    SkillKey {
+                        source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                        skill_name: SkillName::parse("markdown-formatter")?,
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         labels: None,
     };
     let result = service.create_session(request).await?;

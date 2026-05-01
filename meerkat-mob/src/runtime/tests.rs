@@ -965,6 +965,17 @@ impl SessionService for MockSessionService {
         }
         if session.session_metadata().is_none() {
             let build = req.build.as_ref();
+            let initial_turn_metadata = build.and_then(|b| b.initial_turn_metadata.as_ref());
+            let keep_alive = match initial_turn_metadata
+                .and_then(|metadata| metadata.keep_alive.as_ref())
+            {
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)) => true,
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => false,
+                None => build.map(|b| b.keep_alive).unwrap_or(false),
+            };
+            let active_skills = initial_turn_metadata
+                .and_then(|metadata| metadata.skill_references.clone())
+                .or_else(|| build.and_then(|b| b.preload_skills.clone()));
             let metadata = SessionMetadata {
                 schema_version: meerkat_core::SESSION_METADATA_SCHEMA_VERSION,
                 model: req.model.clone(),
@@ -991,9 +1002,9 @@ impl SessionService for MockSessionService {
                     memory: build
                         .map(|b| b.override_memory)
                         .unwrap_or(ToolCategoryOverride::from_effective(false)),
-                    active_skills: build.and_then(|b| b.preload_skills.clone()),
+                    active_skills,
                 },
-                keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
+                keep_alive,
                 comms_name: build.and_then(|b| b.comms_name.clone()),
                 peer_meta: build.and_then(|b| b.peer_meta.clone()),
                 realm_id: build.and_then(|b| b.realm_id.clone()),
@@ -1014,7 +1025,23 @@ impl SessionService for MockSessionService {
             .write()
             .await
             .insert(session_id.clone(), session);
-        let is_keep_alive = req.build.as_ref().map(|b| b.keep_alive).unwrap_or(false);
+        let is_keep_alive = req
+            .build
+            .as_ref()
+            .and_then(|build| {
+                build
+                    .initial_turn_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.keep_alive.as_ref())
+                    .map(|keep_alive| {
+                        matches!(
+                            keep_alive,
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)
+                        )
+                    })
+                    .or(Some(build.keep_alive))
+            })
+            .unwrap_or(false);
         if is_keep_alive {
             self.keep_alive_notifiers
                 .write()

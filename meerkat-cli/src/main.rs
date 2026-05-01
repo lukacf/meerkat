@@ -6554,6 +6554,7 @@ async fn resume_session_with_llm_override(
                 instance_id: scope.instance_id.clone(),
                 backend: Some(manifest.backend.as_str().to_string()),
                 config_generation: stored_metadata.config_generation,
+                runtime_owned_recovery: true,
                 ..Default::default()
             },
         )

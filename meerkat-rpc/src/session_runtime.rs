@@ -1326,6 +1326,7 @@ impl SessionRuntime {
                 external_tools: self.recovery_external_tools(),
                 checkpointer: None,
                 runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                runtime_owned_recovery: false,
                 require_runtime_build_mode: true,
                 realm_id: self.realm_id.as_ref().map(ToString::to_string),
                 instance_id: self.instance_id.clone(),
@@ -2580,7 +2581,7 @@ impl SessionRuntime {
             }
 
             let pending_turn_metadata = match Self::merge_initial_turn_metadata(
-                build_config.initial_turn_metadata.take(),
+                build_config.initial_turn_metadata_for_service(),
                 service_turn_metadata.clone(),
             ) {
                 Ok(metadata) => metadata,
@@ -3063,7 +3064,7 @@ impl SessionRuntime {
                 turn_prompt = merge_content_inputs(deferred, turn_prompt);
             }
             let pending_turn_metadata = match Self::merge_initial_turn_metadata(
-                build_config.initial_turn_metadata.take(),
+                build_config.initial_turn_metadata_for_service(),
                 service_turn_metadata.clone(),
             ) {
                 Ok(metadata) => metadata,
@@ -5145,8 +5146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realtime_open_config_projects_build_state_additional_instructions_into_root_system_message()
-     {
+    async fn realtime_open_config_does_not_mirror_runtime_owned_instructions_into_seed_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -5189,22 +5189,21 @@ mod tests {
 
         assert!(
             root_system.contains("You are the realtime operator."),
-            "expected root system prompt to preserve canonical build-state system prompt: {root_system}"
+            "expected root system prompt to preserve canonical system prompt: {root_system}"
         );
         assert!(
-            root_system.contains("[Session Build Instructions]"),
-            "expected root system prompt to render durable build-state instructions: {root_system}"
+            !root_system.contains("[Session Build Instructions]"),
+            "runtime-owned additional instructions must not be mirrored into split build-state prompt text: {root_system}"
         );
         assert!(
-            root_system.contains("Remember user-provided codewords verbatim.")
-                && root_system
-                    .contains("Use the most recent authoritative terminal peer response."),
-            "expected root system prompt to include all durable additional instructions: {root_system}"
+            open_config.runtime_system_context.is_empty(),
+            "turn-scoped runtime instructions must not become durable realtime context: {:?}",
+            open_config.runtime_system_context
         );
     }
 
     #[tokio::test]
-    async fn recovery_restores_build_state_additional_instructions_into_realtime_projection() {
+    async fn recovery_does_not_mirror_runtime_owned_instructions_into_realtime_seed_prompt() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mut runtime = make_runtime(temp_factory(&temp), 10);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
@@ -5264,14 +5263,13 @@ mod tests {
             "expected recovered realtime projection to preserve canonical system prompt: {root_system}"
         );
         assert!(
-            root_system.contains("[Session Build Instructions]"),
-            "expected recovered realtime projection to render durable build-state instructions: {root_system}"
+            !root_system.contains("[Session Build Instructions]"),
+            "runtime-owned recovery must not mirror additional instructions into split build-state prompt text: {root_system}"
         );
         assert!(
-            root_system.contains("Remember user-provided codewords verbatim.")
-                && root_system
-                    .contains("Prefer the latest authoritative peer response over stale memory."),
-            "expected recovered realtime projection to include all durable additional instructions: {root_system}"
+            open_config.runtime_system_context.is_empty(),
+            "turn-scoped runtime instructions must not become durable recovered realtime context: {:?}",
+            open_config.runtime_system_context
         );
     }
 

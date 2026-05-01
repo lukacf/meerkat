@@ -9,7 +9,7 @@
 //! E2E smoke tests for the Meerkat native Rust SDK.
 //!
 //! These tests verify compound, realistic scenario-based workflows through
-//! the AgentFactory path (and CoreAgentBuilder where low-level injection is needed).
+//! the AgentFactory path.
 //!
 //! Each test requires API keys and makes real API calls. When keys are missing,
 //! tests skip gracefully with an informational message.
@@ -1276,18 +1276,12 @@ mod scenario_09_session_service {
 // SCENARIO 10: Memory compaction + semantic recall
 // ============================================================================
 
-#[cfg(all(
-    feature = "memory-store-session",
-    feature = "session-compaction",
-    feature = "standalone-agent-builder"
-))]
+#[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
 mod scenario_10_memory {
     use super::*;
 
-    use meerkat_core::AgentBuilder as CoreAgentBuilder;
     use meerkat_core::CompactionConfig;
     use meerkat_memory::SimpleMemoryStore;
-    use meerkat_session::DefaultCompactor;
 
     #[tokio::test]
     #[ignore = "lane:e2e-smoke"]
@@ -1308,8 +1302,12 @@ mod scenario_10_memory {
             max_summary_tokens: 256,
             min_turns_between_compactions: 1,
         };
-        let compactor = Arc::new(DefaultCompactor::new(compactor_config))
-            as Arc<dyn meerkat_core::compact::Compactor>;
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold = compactor_config.auto_compact_threshold;
+        config.compaction.recent_turn_budget = compactor_config.recent_turn_budget;
+        config.compaction.max_summary_tokens = compactor_config.max_summary_tokens;
+        config.compaction.min_turns_between_compactions =
+            compactor_config.min_turns_between_compactions;
         let mut memory_session = meerkat_core::Session::new();
         let memory_session_id = memory_session.id().clone();
         memory_session
@@ -1343,12 +1341,16 @@ mod scenario_10_memory {
         );
         let memory_tools: Arc<dyn AgentToolDispatcher> = Arc::new(memory_dispatcher);
 
-        // Build a low-level core agent with memory store + compactor + memory_search tool
+        // Build through the facade factory with memory_search tool override
+        // plus low-threshold compaction config.
         let llm_client = Arc::new(AnthropicClient::new(api_key_val).unwrap());
         let llm_adapter = Arc::new(self::LlmClientAdapter::new(llm_client, smoke_model()));
-        let (_store, store_adapter, _temp_dir) = create_temp_store().await;
+        let (_store, store_adapter, temp_dir) = create_temp_store().await;
+        let factory = AgentFactory::new(temp_dir.path().to_path_buf());
 
-        let builder = CoreAgentBuilder::new()
+        let mut agent = AgentBuilder::new()
+            .with_factory(factory)
+            .with_config(config)
             .model(smoke_model())
             .max_tokens_per_turn(512)
             .system_prompt(
@@ -1357,14 +1359,9 @@ mod scenario_10_memory {
                  Keep responses brief.",
             )
             .resume_session(memory_session)
-            .memory_store(Arc::clone(&memory_store))
-            .compactor(compactor)
-            .with_turn_state_handle(Arc::new(
-                meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-            ));
-        let mut agent = builder
-            .build_standalone(llm_adapter, memory_tools, store_adapter)
-            .await;
+            .build(llm_adapter, memory_tools, store_adapter)
+            .await
+            .expect("facade memory compaction agent should build");
 
         // Turn 1: Distinctive content
         let r1 = agent

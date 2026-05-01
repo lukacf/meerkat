@@ -169,8 +169,10 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
         && source.contains("guard_type: TypeId")
         && source.contains("source_type: TypeId")
-        && source.contains("inventory::collect!(AgentFactoryBuildAuthorityRegistration)")
-        && source.contains("registrations.next().is_some()")
+        && source.contains("__meerkat_agent_factory_build_authority_validate")
+        && !source.contains("AgentFactoryBuildAuthorityRegistration")
+        && !source.contains("inventory::collect!")
+        && !source.contains("inventory::iter")
 }
 
 fn agent_mod_reexport_is_doc_hidden(source: &str) -> bool {
@@ -515,7 +517,10 @@ inventory = "0.3"
         stderr.contains("assertion failed")
             || stderr.contains("InvalidBuildAuthority")
             || stderr.contains("is_canonical_factory_authority")
-            || stderr.contains("cannot transmute between types of different sizes"),
+            || stderr.contains("cannot transmute between types of different sizes")
+            || stderr.contains("cannot find type")
+            || stderr.contains("not found in")
+            || stderr.contains("private"),
         "downstream direct-authority mirror fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -583,7 +588,8 @@ inventory = "0.3"
         stderr.contains("assertion failed")
             || stderr.contains("InvalidBuildAuthority")
             || stderr.contains("is_canonical_factory_authority")
-            || stderr.contains("cannot transmute")
+            || stderr.contains("cannot find type")
+            || stderr.contains("not found in")
             || stderr.contains("private"),
         "downstream inventory-steal fixture failed for the wrong reason:\n{stderr}"
     );
@@ -650,7 +656,8 @@ inventory = "0.3"
         stderr.contains("assertion failed")
             || stderr.contains("InvalidBuildAuthority")
             || stderr.contains("is_canonical_factory_authority")
-            || stderr.contains("cannot transmute")
+            || stderr.contains("cannot find type")
+            || stderr.contains("not found in")
             || stderr.contains("private"),
         "downstream no-facade fixture failed for the wrong reason:\n{stderr}"
     );
@@ -831,14 +838,19 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
 fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
     let cargo = repo_file("meerkat/Cargo.toml");
 
+    assert!(
+        !cargo.contains("meerkat-core/standalone-agent-builder"),
+        "the facade Cargo manifest must not expose any public feature that \
+         enables meerkat-core/standalone-agent-builder through feature \
+         unification"
+    );
     for line in cargo.lines() {
         if line.trim_start().starts_with("meerkat-core") {
             assert!(
                 !line.contains("standalone-agent-builder"),
                 "the facade Cargo graph must not enable \
                  meerkat-core/standalone-agent-builder through its normal or \
-                 dev meerkat-core dependency; standalone use must remain an \
-                 explicit facade feature"
+                 dev meerkat-core dependency"
             );
         }
     }

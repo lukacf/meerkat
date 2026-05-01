@@ -8,29 +8,45 @@ use meerkat_core::{
 
 #[derive(Clone, Copy)]
 struct AgentFactoryBuildAuthorityRepr {
+    guard_type: TypeId,
     source_type: TypeId,
 }
 
+struct ForgedAuthorityGuard;
 struct ForgedAuthoritySource;
+
+fn forged_authority_guard_type() -> TypeId {
+    TypeId::of::<ForgedAuthorityGuard>()
+}
 
 fn forged_authority_source_type() -> TypeId {
     TypeId::of::<ForgedAuthoritySource>()
 }
 
+#[derive(Clone, Copy)]
+struct AgentFactoryBuildAuthorityRegistrationRepr {
+    guard_type: fn() -> TypeId,
+    source_type: fn() -> TypeId,
+}
+
 #[allow(unsafe_code)]
 const fn forged_authority_registration(
+    guard_type: fn() -> TypeId,
     source_type: fn() -> TypeId,
 ) -> meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration {
     unsafe {
         std::mem::transmute::<
-            fn() -> TypeId,
+            AgentFactoryBuildAuthorityRegistrationRepr,
             meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration,
-        >(source_type)
+        >(AgentFactoryBuildAuthorityRegistrationRepr {
+            guard_type,
+            source_type,
+        })
     }
 }
 
 inventory::submit! {
-    forged_authority_registration(forged_authority_source_type)
+    forged_authority_registration(forged_authority_guard_type, forged_authority_source_type)
 }
 
 fn fabricated<T>() -> T {
@@ -39,6 +55,7 @@ fn fabricated<T>() -> T {
 
 fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
     let authority = AgentFactoryBuildAuthorityRepr {
+        guard_type: forged_authority_guard_type(),
         source_type: forged_authority_source_type(),
     };
 

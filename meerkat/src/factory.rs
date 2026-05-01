@@ -31,39 +31,6 @@ fn agent_factory_build_authority_source_type() -> TypeId {
 }
 
 #[allow(unsafe_code)]
-const fn agent_factory_build_authority_registration(
-    guard_type: fn() -> TypeId,
-    source_type: fn() -> TypeId,
-) -> meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration {
-    #[allow(dead_code)]
-    #[derive(Clone, Copy)]
-    struct RegistrationRepr {
-        guard_type: fn() -> TypeId,
-        source_type: fn() -> TypeId,
-    }
-
-    // SAFETY: the facade owns both marker providers, and both markers are
-    // private to this factory module. The authority crate intentionally keeps
-    // the registration representation opaque to downstream dependents.
-    unsafe {
-        std::mem::transmute::<
-            RegistrationRepr,
-            meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration,
-        >(RegistrationRepr {
-            guard_type,
-            source_type,
-        })
-    }
-}
-
-inventory::submit! {
-    agent_factory_build_authority_registration(
-        agent_factory_build_authority_guard_type,
-        agent_factory_build_authority_source_type,
-    )
-}
-
-#[allow(unsafe_code)]
 fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
     #[allow(dead_code)]
     #[derive(Clone, Copy)]
@@ -88,6 +55,30 @@ fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactor
             meerkat_agent_build_authority::AgentFactoryBuildAuthority,
         >(authority)
     }
+}
+
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "C" fn __meerkat_agent_factory_build_authority_validate(
+    authority: *const std::ffi::c_void,
+) -> bool {
+    #[allow(dead_code)]
+    #[derive(Clone, Copy)]
+    struct AuthorityRepr {
+        guard_type: TypeId,
+        source_type: TypeId,
+    }
+
+    let Some(authority) = ({
+        // SAFETY: core passes a reference-derived pointer when validating the
+        // typed factory authority. Null or invalid pointers fail closed.
+        unsafe { authority.cast::<AuthorityRepr>().as_ref() }
+    }) else {
+        return false;
+    };
+
+    authority.guard_type == agent_factory_build_authority_guard_type()
+        && authority.source_type == agent_factory_build_authority_source_type()
 }
 
 /// Default system prompt for wasm32 builds.

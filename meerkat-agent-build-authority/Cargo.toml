@@ -13,8 +13,5 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-[dependencies]
-inventory = { workspace = true }
-
 [lints]
 workspace = true

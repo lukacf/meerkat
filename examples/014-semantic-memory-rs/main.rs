@@ -8,7 +8,6 @@
 //! - Creates a `SimpleMemoryStore` (in-memory keyword-matching implementation)
 //! - Wraps it in a `MemorySearchDispatcher` to expose the `memory_search` tool
 //! - Composes the memory tool into the agent's tool dispatcher via `ToolGatewayBuilder`
-//! - Wires the memory store into the `CoreAgentBuilder` so compaction can index into it
 //! - Pre-seeds the memory store with facts (simulating prior compaction indexing)
 //! - Asks the agent to recall those facts using the `memory_search` tool
 //!
@@ -20,13 +19,12 @@
 //!
 //! ## Run
 //! ```bash
-//! ANTHROPIC_API_KEY=... cargo run --example 014-semantic-memory --features jsonl-store,memory-store-session,standalone-agent-builder
+//! ANTHROPIC_API_KEY=... cargo run --example 014-semantic-memory --features jsonl-store,memory-store-session
 //! ```
 
 use std::sync::Arc;
 
-use meerkat::{AgentFactory, AnthropicClient, ToolGatewayBuilder};
-use meerkat_core::AgentBuilder as CoreAgentBuilder;
+use meerkat::{AgentBuilder, AgentFactory, AnthropicClient, ToolGatewayBuilder};
 use meerkat_core::memory::{
     MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryStore as _,
 };
@@ -137,15 +135,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_dispatcher(Arc::new(memory_dispatcher))
         .build()?;
 
-    // ── Step 5: Build the agent with memory wired in ─────────────────────────
+    // ── Step 5: Build the agent with memory search wired in ─────────────────
     //
-    // Two things are wired:
-    //   1. `.memory_store()` on CoreAgentBuilder -- so the agent loop can index
-    //      discarded messages during compaction
-    //   2. The ToolGateway containing MemorySearchDispatcher -- so the agent
-    //      can call `memory_search` to retrieve indexed content
+    // The ToolGateway contains MemorySearchDispatcher, so the agent can call
+    // `memory_search` to retrieve indexed content while construction still
+    // runs through the facade factory pipeline.
 
-    let mut agent = CoreAgentBuilder::new()
+    let mut agent = AgentBuilder::new()
+        .with_factory(factory)
         .model("claude-sonnet-4-6")
         .system_prompt(
             "You are a helpful assistant with access to a semantic memory store.\n\n\
@@ -158,12 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .max_tokens_per_turn(1024)
         .resume_session(memory_session)
-        .memory_store(Arc::clone(&memory_store) as Arc<dyn meerkat_core::memory::MemoryStore>)
-        .with_turn_state_handle(Arc::new(
-            meerkat_runtime::RuntimeTurnStateHandle::ephemeral(),
-        ))
-        .build_standalone(Arc::new(llm), Arc::new(gateway), store)
-        .await;
+        .build(Arc::new(llm), Arc::new(gateway), store)
+        .await?;
 
     // ── Step 6: Ask the agent to recall from memory ──────────────────────────
 
@@ -204,7 +197,7 @@ Two implementations:
 
 Wiring in the factory (AgentFactory::build_agent):
   1. Creates HnswMemoryStore from .rkat/memory/ directory
-  2. Passes it to CoreAgentBuilder::memory_store() for compaction indexing
+  2. Passes it into the core agent loop for compaction indexing
   3. Wraps it in MemorySearchDispatcher for the memory_search tool
   4. Composes into ToolGateway alongside other dispatchers
 

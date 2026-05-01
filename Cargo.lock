@@ -2419,9 +2419,6 @@ dependencies = [
 [[package]]
 name = "meerkat-agent-build-authority"
 version = "0.6.0"
-dependencies = [
- "inventory",
-]
 
 [[package]]
 name = "meerkat-anthropic"

@@ -8,6 +8,7 @@ use meerkat_core::{
 
 #[derive(Clone, Copy)]
 struct AgentFactoryBuildAuthorityRepr {
+    guard_type: TypeId,
     source_type: TypeId,
 }
 
@@ -16,7 +17,7 @@ fn fabricated<T>() -> T {
 }
 
 #[allow(unsafe_code)]
-fn stolen_facade_source_type() -> TypeId {
+fn stolen_facade_marker_types() -> (TypeId, TypeId) {
     let _facade_type_check = std::mem::size_of::<meerkat::AgentBuilder>();
     let registration =
         inventory::iter::<meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration>
@@ -25,20 +26,23 @@ fn stolen_facade_source_type() -> TypeId {
             .expect("facade authority registration must be linked");
 
     // SAFETY: this fixture reproduces the reviewed bypass: the public
-    // registration is a transparent wrapper over a source-type function, so
-    // downstream unsafe code can read the existing canonical source oracle.
-    let source_type = unsafe { *(registration as *const _ as *const fn() -> TypeId) };
-    source_type()
+    // registration exposes the two factory marker functions, so downstream
+    // unsafe code can read the existing canonical guard/source oracle.
+    let marker_types = unsafe { *(registration as *const _ as *const [fn() -> TypeId; 2]) };
+    let [guard_type, source_type] = marker_types;
+    (guard_type(), source_type())
 }
 
 #[allow(unsafe_code)]
 fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
+    let (guard_type, source_type) = stolen_facade_marker_types();
     let authority = AgentFactoryBuildAuthorityRepr {
-        source_type: stolen_facade_source_type(),
+        guard_type,
+        source_type,
     };
 
-    // SAFETY: this fixture mirrors the current transparent authority layout
-    // after stealing the canonical source TypeId from inventory.
+    // SAFETY: this fixture mirrors the current two-TypeId authority layout
+    // after stealing both canonical marker TypeIds from inventory.
     unsafe {
         std::mem::transmute::<
             AgentFactoryBuildAuthorityRepr,

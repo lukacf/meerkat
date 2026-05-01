@@ -1165,6 +1165,294 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbandonInputStopped`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `BeginSurfaceRequestInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `BeginSurfaceRequestIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `BeginSurfaceRequestAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `model_routing_and_image_operation`
+- `BeginSurfaceRequestRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `BeginSurfaceRequestRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `BeginSurfaceRequestStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `model_routing_and_image_operation`
+- `AuthorizeSurfaceRequestPublishOnSuccessInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+- `AuthorizeSurfaceRequestPublishOnSuccessIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+- `AuthorizeSurfaceRequestPublishOnSuccessAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`, `live_topology_and_supervision`
+- `AuthorizeSurfaceRequestPublishOnSuccessRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+- `AuthorizeSurfaceRequestPublishOnSuccessRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+- `AuthorizeSurfaceRequestPublishOnSuccessStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `live_topology_and_supervision`
+- `AuthorizeSurfaceRequestCancellableObservationInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `AuthorizeSurfaceRequestCancellableObservationIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `AuthorizeSurfaceRequestCancellableObservationAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `AuthorizeSurfaceRequestCancellableObservationRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `AuthorizeSurfaceRequestCancellableObservationRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `AuthorizeSurfaceRequestCancellableObservationStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `ClassifySurfaceRequestTerminalStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPendingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPendingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPendingAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPendingRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPendingRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPendingStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPublishedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPublishedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPublishedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPublishedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPublishedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestPublishedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCancelledInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCancelledIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCancelledAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCancelledRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCancelledRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCancelledStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCompletedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCompletedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCompletedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCompletedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCompletedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestCompletedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestMissingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestMissingAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestMissingRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestMissingRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `CancelSurfaceRequestMissingStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `DecideSurfaceRequestCancelActionInstallInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `DecideSurfaceRequestCancelActionInstallIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `DecideSurfaceRequestCancelActionInstallAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `DecideSurfaceRequestCancelActionInstallRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `DecideSurfaceRequestCancelActionInstallRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `DecideSurfaceRequestCancelActionInstallStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `PublishSurfaceRequestInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `PublishSurfaceRequestIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `PublishSurfaceRequestAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`, `realtime_connection_projection`
+- `PublishSurfaceRequestRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `PublishSurfaceRequestRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `PublishSurfaceRequestStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedPendingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedPendingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedPendingAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedPendingRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedPendingRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedPendingStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedCancelledInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedCancelledIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedCancelledAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedCancelledRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedCancelledRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedCancelledStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedTerminalInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedTerminalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedTerminalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedTerminalRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedTerminalStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedMissingInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedMissingIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedMissingAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedMissingRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedMissingRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `FinishSurfaceRequestUnpublishedMissingStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `RemoveSurfaceRequestInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `RemoveSurfaceRequestIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `RemoveSurfaceRequestAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `RemoveSurfaceRequestRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `RemoveSurfaceRequestRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `RemoveSurfaceRequestStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `RegisterOpIdle`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
@@ -2634,6 +2922,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecordBoundarySequence`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+- `SurfaceRequestTerminalClassified`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestCancelDecision`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestCancelActionInstallDecision`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `SurfaceRequestUnpublishedFinished`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
 - `SubmitOpEvent`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`, `ops_completion_and_waiters`, `product_turn_streaming`

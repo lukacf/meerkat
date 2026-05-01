@@ -3524,6 +3524,346 @@ impl std::fmt::Display for SurfacePhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum SurfaceRequestCancelOutcome {
+    #[default]
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "AlreadyPublished")]
+    AlreadyPublished,
+    #[serde(rename = "AlreadyCancelled")]
+    AlreadyCancelled,
+    #[serde(rename = "AlreadyCompleted")]
+    AlreadyCompleted,
+    #[serde(rename = "NotFound")]
+    NotFound,
+}
+impl SurfaceRequestCancelOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cancelled => "Cancelled",
+            Self::AlreadyPublished => "AlreadyPublished",
+            Self::AlreadyCancelled => "AlreadyCancelled",
+            Self::AlreadyCompleted => "AlreadyCompleted",
+            Self::NotFound => "NotFound",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestCancelOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Cancelled" => Ok(Self::Cancelled),
+            "AlreadyPublished" => Ok(Self::AlreadyPublished),
+            "AlreadyCancelled" => Ok(Self::AlreadyCancelled),
+            "AlreadyCompleted" => Ok(Self::AlreadyCompleted),
+            "NotFound" => Ok(Self::NotFound),
+            other => Err(format!(
+                "invalid SurfaceRequestCancelOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestCancelOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestCancelOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestCompleteOutcome {
+    #[default]
+    #[serde(rename = "Completed")]
+    Completed,
+    #[serde(rename = "SupersededByCancel")]
+    SupersededByCancel,
+}
+impl SurfaceRequestCompleteOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "Completed",
+            Self::SupersededByCancel => "SupersededByCancel",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestCompleteOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Completed" => Ok(Self::Completed),
+            "SupersededByCancel" => Ok(Self::SupersededByCancel),
+            other => Err(format!(
+                "invalid SurfaceRequestCompleteOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestCompleteOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestCompleteOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestLifecyclePhase {
+    #[default]
+    #[serde(rename = "Pending")]
+    Pending,
+    #[serde(rename = "Published")]
+    Published,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "Completed")]
+    Completed,
+}
+impl SurfaceRequestLifecyclePhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Published => "Published",
+            Self::Cancelled => "Cancelled",
+            Self::Completed => "Completed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestLifecyclePhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Published" => Ok(Self::Published),
+            "Cancelled" => Ok(Self::Cancelled),
+            "Completed" => Ok(Self::Completed),
+            other => Err(format!(
+                "invalid SurfaceRequestLifecyclePhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestLifecyclePhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestLifecyclePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalDisposition {
+    #[default]
+    #[serde(rename = "Inline")]
+    Inline,
+    #[serde(rename = "Publish")]
+    Publish,
+    #[serde(rename = "RespondWithoutPublish")]
+    RespondWithoutPublish,
+}
+impl SurfaceRequestTerminalDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inline => "Inline",
+            Self::Publish => "Publish",
+            Self::RespondWithoutPublish => "RespondWithoutPublish",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestTerminalDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Inline" => Ok(Self::Inline),
+            "Publish" => Ok(Self::Publish),
+            "RespondWithoutPublish" => Ok(Self::RespondWithoutPublish),
+            other => Err(format!(
+                "invalid SurfaceRequestTerminalDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestTerminalDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestTerminalDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalOutcome {
+    #[default]
+    #[serde(rename = "Succeeded")]
+    Succeeded,
+    #[serde(rename = "Failed")]
+    Failed,
+}
+impl SurfaceRequestTerminalOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Succeeded => "Succeeded",
+            Self::Failed => "Failed",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestTerminalOutcome {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Succeeded" => Ok(Self::Succeeded),
+            "Failed" => Ok(Self::Failed),
+            other => Err(format!(
+                "invalid SurfaceRequestTerminalOutcome value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestTerminalOutcome {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestTerminalOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum SurfaceRequestTerminalPolicy {
+    #[default]
+    #[serde(rename = "InlineObservation")]
+    InlineObservation,
+    #[serde(rename = "CancellableObservation")]
+    CancellableObservation,
+    #[serde(rename = "PublishOnSuccess")]
+    PublishOnSuccess,
+}
+impl SurfaceRequestTerminalPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::InlineObservation => "InlineObservation",
+            Self::CancellableObservation => "CancellableObservation",
+            Self::PublishOnSuccess => "PublishOnSuccess",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for SurfaceRequestTerminalPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "InlineObservation" => Ok(Self::InlineObservation),
+            "CancellableObservation" => Ok(Self::CancellableObservation),
+            "PublishOnSuccess" => Ok(Self::PublishOnSuccess),
+            other => Err(format!(
+                "invalid SurfaceRequestTerminalPolicy value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for SurfaceRequestTerminalPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for SurfaceRequestTerminalPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SurfaceStagedOp {
     #[default]
     #[serde(rename = "None")]
@@ -4043,6 +4383,9 @@ pub struct State {
     pub next_admission_seq: u64,
     pub input_admission_seq: std::collections::BTreeMap<String, u64>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
+    pub surface_request_phases: std::collections::BTreeMap<String, SurfaceRequestLifecyclePhase>,
+    pub surface_request_terminal_policy:
+        std::collections::BTreeMap<String, SurfaceRequestTerminalPolicy>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
     pub op_terminal_outcomes: std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
@@ -4541,6 +4884,43 @@ pub mod inputs {
         pub seq: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BeginSurfaceRequest {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSurfaceRequestPublishOnSuccess {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeSurfaceRequestCancellableObservation {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifySurfaceRequestTerminal {
+        pub request_id: String,
+        pub outcome: SurfaceRequestTerminalOutcome,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DecideSurfaceRequestCancelActionInstall {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelSurfaceRequest {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PublishSurfaceRequest {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FinishSurfaceRequestUnpublished {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RemoveSurfaceRequest {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterOp {
         pub operation_id: String,
         pub kind: OperationKind,
@@ -5024,6 +5404,17 @@ pub enum Input {
     CoalesceInput(inputs::CoalesceInput),
     AbandonInput(inputs::AbandonInput),
     RecordBoundarySeq(inputs::RecordBoundarySeq),
+    BeginSurfaceRequest(inputs::BeginSurfaceRequest),
+    AuthorizeSurfaceRequestPublishOnSuccess(inputs::AuthorizeSurfaceRequestPublishOnSuccess),
+    AuthorizeSurfaceRequestCancellableObservation(
+        inputs::AuthorizeSurfaceRequestCancellableObservation,
+    ),
+    ClassifySurfaceRequestTerminal(inputs::ClassifySurfaceRequestTerminal),
+    DecideSurfaceRequestCancelActionInstall(inputs::DecideSurfaceRequestCancelActionInstall),
+    CancelSurfaceRequest(inputs::CancelSurfaceRequest),
+    PublishSurfaceRequest(inputs::PublishSurfaceRequest),
+    FinishSurfaceRequestUnpublished(inputs::FinishSurfaceRequestUnpublished),
+    RemoveSurfaceRequest(inputs::RemoveSurfaceRequest),
     RegisterOp(inputs::RegisterOp),
     StartOp(inputs::StartOp),
     CompleteOp(inputs::CompleteOp),
@@ -5220,6 +5611,21 @@ impl Input {
             Self::CoalesceInput(_) => InputKind::CoalesceInput,
             Self::AbandonInput(_) => InputKind::AbandonInput,
             Self::RecordBoundarySeq(_) => InputKind::RecordBoundarySeq,
+            Self::BeginSurfaceRequest(_) => InputKind::BeginSurfaceRequest,
+            Self::AuthorizeSurfaceRequestPublishOnSuccess(_) => {
+                InputKind::AuthorizeSurfaceRequestPublishOnSuccess
+            }
+            Self::AuthorizeSurfaceRequestCancellableObservation(_) => {
+                InputKind::AuthorizeSurfaceRequestCancellableObservation
+            }
+            Self::ClassifySurfaceRequestTerminal(_) => InputKind::ClassifySurfaceRequestTerminal,
+            Self::DecideSurfaceRequestCancelActionInstall(_) => {
+                InputKind::DecideSurfaceRequestCancelActionInstall
+            }
+            Self::CancelSurfaceRequest(_) => InputKind::CancelSurfaceRequest,
+            Self::PublishSurfaceRequest(_) => InputKind::PublishSurfaceRequest,
+            Self::FinishSurfaceRequestUnpublished(_) => InputKind::FinishSurfaceRequestUnpublished,
+            Self::RemoveSurfaceRequest(_) => InputKind::RemoveSurfaceRequest,
             Self::RegisterOp(_) => InputKind::RegisterOp,
             Self::StartOp(_) => InputKind::StartOp,
             Self::CompleteOp(_) => InputKind::CompleteOp,
@@ -5423,6 +5829,15 @@ pub enum InputKind {
     CoalesceInput,
     AbandonInput,
     RecordBoundarySeq,
+    BeginSurfaceRequest,
+    AuthorizeSurfaceRequestPublishOnSuccess,
+    AuthorizeSurfaceRequestCancellableObservation,
+    ClassifySurfaceRequestTerminal,
+    DecideSurfaceRequestCancelActionInstall,
+    CancelSurfaceRequest,
+    PublishSurfaceRequest,
+    FinishSurfaceRequestUnpublished,
+    RemoveSurfaceRequest,
     RegisterOp,
     StartOp,
     CompleteOp,
@@ -5723,6 +6138,29 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecordBoundarySequence {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestTerminalClassified {
+        pub request_id: String,
+        pub disposition: SurfaceRequestTerminalDisposition,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCancelDecision {
+        pub request_id: String,
+        pub outcome: SurfaceRequestCancelOutcome,
+        pub fire_cancel_action: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestCancelActionInstallDecision {
+        pub request_id: String,
+        pub phase: Option<SurfaceRequestLifecyclePhase>,
+        pub fire_cancel_action: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceRequestUnpublishedFinished {
+        pub request_id: String,
+        pub outcome: SurfaceRequestCompleteOutcome,
+        pub run_unpublished_cleanup: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SubmitOpEvent {
         pub operation_id: String,
     }
@@ -5930,6 +6368,10 @@ pub enum Effect {
     RecordTerminalOutcome(effects::RecordTerminalOutcome),
     RecordRunAssociation(effects::RecordRunAssociation),
     RecordBoundarySequence(effects::RecordBoundarySequence),
+    SurfaceRequestTerminalClassified(effects::SurfaceRequestTerminalClassified),
+    SurfaceRequestCancelDecision(effects::SurfaceRequestCancelDecision),
+    SurfaceRequestCancelActionInstallDecision(effects::SurfaceRequestCancelActionInstallDecision),
+    SurfaceRequestUnpublishedFinished(effects::SurfaceRequestUnpublishedFinished),
     SubmitOpEvent(effects::SubmitOpEvent),
     NotifyOpWatcher(effects::NotifyOpWatcher),
     ExposeOperationPeer(effects::ExposeOperationPeer),
@@ -6008,6 +6450,10 @@ pub enum EffectKind {
     RecordTerminalOutcome,
     RecordRunAssociation,
     RecordBoundarySequence,
+    SurfaceRequestTerminalClassified,
+    SurfaceRequestCancelDecision,
+    SurfaceRequestCancelActionInstallDecision,
+    SurfaceRequestUnpublishedFinished,
     SubmitOpEvent,
     NotifyOpWatcher,
     ExposeOperationPeer,
@@ -6428,6 +6874,102 @@ pub enum TransitionId {
     AbandonInputRunning,
     AbandonInputRetired,
     AbandonInputStopped,
+    BeginSurfaceRequestInitializing,
+    BeginSurfaceRequestIdle,
+    BeginSurfaceRequestAttached,
+    BeginSurfaceRequestRunning,
+    BeginSurfaceRequestRetired,
+    BeginSurfaceRequestStopped,
+    AuthorizeSurfaceRequestPublishOnSuccessInitializing,
+    AuthorizeSurfaceRequestPublishOnSuccessIdle,
+    AuthorizeSurfaceRequestPublishOnSuccessAttached,
+    AuthorizeSurfaceRequestPublishOnSuccessRunning,
+    AuthorizeSurfaceRequestPublishOnSuccessRetired,
+    AuthorizeSurfaceRequestPublishOnSuccessStopped,
+    AuthorizeSurfaceRequestCancellableObservationInitializing,
+    AuthorizeSurfaceRequestCancellableObservationIdle,
+    AuthorizeSurfaceRequestCancellableObservationAttached,
+    AuthorizeSurfaceRequestCancellableObservationRunning,
+    AuthorizeSurfaceRequestCancellableObservationRetired,
+    AuthorizeSurfaceRequestCancellableObservationStopped,
+    ClassifySurfaceRequestTerminalInitializing,
+    ClassifySurfaceRequestTerminalIdle,
+    ClassifySurfaceRequestTerminalAttached,
+    ClassifySurfaceRequestTerminalRunning,
+    ClassifySurfaceRequestTerminalRetired,
+    ClassifySurfaceRequestTerminalStopped,
+    CancelSurfaceRequestPendingInitializing,
+    CancelSurfaceRequestPendingIdle,
+    CancelSurfaceRequestPendingAttached,
+    CancelSurfaceRequestPendingRunning,
+    CancelSurfaceRequestPendingRetired,
+    CancelSurfaceRequestPendingStopped,
+    CancelSurfaceRequestPublishedInitializing,
+    CancelSurfaceRequestPublishedIdle,
+    CancelSurfaceRequestPublishedAttached,
+    CancelSurfaceRequestPublishedRunning,
+    CancelSurfaceRequestPublishedRetired,
+    CancelSurfaceRequestPublishedStopped,
+    CancelSurfaceRequestCancelledInitializing,
+    CancelSurfaceRequestCancelledIdle,
+    CancelSurfaceRequestCancelledAttached,
+    CancelSurfaceRequestCancelledRunning,
+    CancelSurfaceRequestCancelledRetired,
+    CancelSurfaceRequestCancelledStopped,
+    CancelSurfaceRequestCompletedInitializing,
+    CancelSurfaceRequestCompletedIdle,
+    CancelSurfaceRequestCompletedAttached,
+    CancelSurfaceRequestCompletedRunning,
+    CancelSurfaceRequestCompletedRetired,
+    CancelSurfaceRequestCompletedStopped,
+    CancelSurfaceRequestMissingInitializing,
+    CancelSurfaceRequestMissingIdle,
+    CancelSurfaceRequestMissingAttached,
+    CancelSurfaceRequestMissingRunning,
+    CancelSurfaceRequestMissingRetired,
+    CancelSurfaceRequestMissingStopped,
+    DecideSurfaceRequestCancelActionInstallInitializing,
+    DecideSurfaceRequestCancelActionInstallIdle,
+    DecideSurfaceRequestCancelActionInstallAttached,
+    DecideSurfaceRequestCancelActionInstallRunning,
+    DecideSurfaceRequestCancelActionInstallRetired,
+    DecideSurfaceRequestCancelActionInstallStopped,
+    PublishSurfaceRequestInitializing,
+    PublishSurfaceRequestIdle,
+    PublishSurfaceRequestAttached,
+    PublishSurfaceRequestRunning,
+    PublishSurfaceRequestRetired,
+    PublishSurfaceRequestStopped,
+    FinishSurfaceRequestUnpublishedPendingInitializing,
+    FinishSurfaceRequestUnpublishedPendingIdle,
+    FinishSurfaceRequestUnpublishedPendingAttached,
+    FinishSurfaceRequestUnpublishedPendingRunning,
+    FinishSurfaceRequestUnpublishedPendingRetired,
+    FinishSurfaceRequestUnpublishedPendingStopped,
+    FinishSurfaceRequestUnpublishedCancelledInitializing,
+    FinishSurfaceRequestUnpublishedCancelledIdle,
+    FinishSurfaceRequestUnpublishedCancelledAttached,
+    FinishSurfaceRequestUnpublishedCancelledRunning,
+    FinishSurfaceRequestUnpublishedCancelledRetired,
+    FinishSurfaceRequestUnpublishedCancelledStopped,
+    FinishSurfaceRequestUnpublishedTerminalInitializing,
+    FinishSurfaceRequestUnpublishedTerminalIdle,
+    FinishSurfaceRequestUnpublishedTerminalAttached,
+    FinishSurfaceRequestUnpublishedTerminalRunning,
+    FinishSurfaceRequestUnpublishedTerminalRetired,
+    FinishSurfaceRequestUnpublishedTerminalStopped,
+    FinishSurfaceRequestUnpublishedMissingInitializing,
+    FinishSurfaceRequestUnpublishedMissingIdle,
+    FinishSurfaceRequestUnpublishedMissingAttached,
+    FinishSurfaceRequestUnpublishedMissingRunning,
+    FinishSurfaceRequestUnpublishedMissingRetired,
+    FinishSurfaceRequestUnpublishedMissingStopped,
+    RemoveSurfaceRequestInitializing,
+    RemoveSurfaceRequestIdle,
+    RemoveSurfaceRequestAttached,
+    RemoveSurfaceRequestRunning,
+    RemoveSurfaceRequestRetired,
+    RemoveSurfaceRequestStopped,
     RegisterOpIdle,
     RegisterOpAttached,
     RegisterOpRunning,
@@ -7029,6 +7571,8 @@ pub fn initial_state() -> State {
         next_admission_seq: 0,
         input_admission_seq: Default::default(),
         input_lane: Default::default(),
+        surface_request_phases: Default::default(),
+        surface_request_terminal_policy: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),
         op_terminal_outcomes: Default::default(),

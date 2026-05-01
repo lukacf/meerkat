@@ -85,6 +85,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `next_admission_seq`: `u64`
 - `input_admission_seq`: `Map<String, u64>`
 - `input_lane`: `Map<String, InputLane>`
+- `surface_request_phases`: `Map<String, SurfaceRequestLifecyclePhase>`
+- `surface_request_terminal_policy`: `Map<String, SurfaceRequestTerminalPolicy>`
 - `op_statuses`: `Map<String, OperationStatus>`
 - `op_completion_seq`: `Map<String, u64>`
 - `op_terminal_outcomes`: `Map<String, OperationTerminalOutcomeKind>`
@@ -248,6 +250,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `CoalesceInput`(input_id: String, aggregate_id: String)
 - `AbandonInput`(input_id: String, reason: InputAbandonReason, attempt_count: u64)
 - `RecordBoundarySeq`(input_id: String, seq: u64)
+- `BeginSurfaceRequest`(request_id: String)
+- `AuthorizeSurfaceRequestPublishOnSuccess`(request_id: String)
+- `AuthorizeSurfaceRequestCancellableObservation`(request_id: String)
+- `ClassifySurfaceRequestTerminal`(request_id: String, outcome: SurfaceRequestTerminalOutcome)
+- `DecideSurfaceRequestCancelActionInstall`(request_id: String)
+- `CancelSurfaceRequest`(request_id: String)
+- `PublishSurfaceRequest`(request_id: String)
+- `FinishSurfaceRequestUnpublished`(request_id: String)
+- `RemoveSurfaceRequest`(request_id: String)
 - `RegisterOp`(operation_id: String, kind: OperationKind)
 - `StartOp`(operation_id: String)
 - `CompleteOp`(operation_id: String, outcome: OperationTerminalOutcomeKind, payload: String)
@@ -406,6 +417,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordTerminalOutcome`
 - `RecordRunAssociation`
 - `RecordBoundarySequence`
+- `SurfaceRequestTerminalClassified`(request_id: String, disposition: SurfaceRequestTerminalDisposition)
+- `SurfaceRequestCancelDecision`(request_id: String, outcome: SurfaceRequestCancelOutcome, fire_cancel_action: Bool)
+- `SurfaceRequestCancelActionInstallDecision`(request_id: String, phase: Option<SurfaceRequestLifecyclePhase>, fire_cancel_action: Bool)
+- `SurfaceRequestUnpublishedFinished`(request_id: String, outcome: SurfaceRequestCompleteOutcome, run_unpublished_cleanup: Bool)
 - `SubmitOpEvent`(operation_id: String)
 - `NotifyOpWatcher`(operation_id: String)
 - `ExposeOperationPeer`(operation_id: String)
@@ -3489,6 +3504,696 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `input_tracked`
 - Emits: `RecordTerminalOutcome`
+- To: `Stopped`
+
+### `BeginSurfaceRequestInitializing`
+- From: `Initializing`
+- On: `BeginSurfaceRequest`(request_id)
+- Guards:
+  - `not_already_tracked`
+- To: `Initializing`
+
+### `BeginSurfaceRequestIdle`
+- From: `Idle`
+- On: `BeginSurfaceRequest`(request_id)
+- Guards:
+  - `not_already_tracked`
+- To: `Idle`
+
+### `BeginSurfaceRequestAttached`
+- From: `Attached`
+- On: `BeginSurfaceRequest`(request_id)
+- Guards:
+  - `not_already_tracked`
+- To: `Attached`
+
+### `BeginSurfaceRequestRunning`
+- From: `Running`
+- On: `BeginSurfaceRequest`(request_id)
+- Guards:
+  - `not_already_tracked`
+- To: `Running`
+
+### `BeginSurfaceRequestRetired`
+- From: `Retired`
+- On: `BeginSurfaceRequest`(request_id)
+- Guards:
+  - `not_already_tracked`
+- To: `Retired`
+
+### `BeginSurfaceRequestStopped`
+- From: `Stopped`
+- On: `BeginSurfaceRequest`(request_id)
+- Guards:
+  - `not_already_tracked`
+- To: `Stopped`
+
+### `AuthorizeSurfaceRequestPublishOnSuccessInitializing`
+- From: `Initializing`
+- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Initializing`
+
+### `AuthorizeSurfaceRequestPublishOnSuccessIdle`
+- From: `Idle`
+- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Idle`
+
+### `AuthorizeSurfaceRequestPublishOnSuccessAttached`
+- From: `Attached`
+- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Attached`
+
+### `AuthorizeSurfaceRequestPublishOnSuccessRunning`
+- From: `Running`
+- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Running`
+
+### `AuthorizeSurfaceRequestPublishOnSuccessRetired`
+- From: `Retired`
+- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Retired`
+
+### `AuthorizeSurfaceRequestPublishOnSuccessStopped`
+- From: `Stopped`
+- On: `AuthorizeSurfaceRequestPublishOnSuccess`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Stopped`
+
+### `AuthorizeSurfaceRequestCancellableObservationInitializing`
+- From: `Initializing`
+- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Initializing`
+
+### `AuthorizeSurfaceRequestCancellableObservationIdle`
+- From: `Idle`
+- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Idle`
+
+### `AuthorizeSurfaceRequestCancellableObservationAttached`
+- From: `Attached`
+- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Attached`
+
+### `AuthorizeSurfaceRequestCancellableObservationRunning`
+- From: `Running`
+- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Running`
+
+### `AuthorizeSurfaceRequestCancellableObservationRetired`
+- From: `Retired`
+- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Retired`
+
+### `AuthorizeSurfaceRequestCancellableObservationStopped`
+- From: `Stopped`
+- On: `AuthorizeSurfaceRequestCancellableObservation`(request_id)
+- Guards:
+  - `request_tracked`
+  - `non_terminal`
+- To: `Stopped`
+
+### `ClassifySurfaceRequestTerminalInitializing`
+- From: `Initializing`
+- On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Emits: `SurfaceRequestTerminalClassified`
+- To: `Initializing`
+
+### `ClassifySurfaceRequestTerminalIdle`
+- From: `Idle`
+- On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Emits: `SurfaceRequestTerminalClassified`
+- To: `Idle`
+
+### `ClassifySurfaceRequestTerminalAttached`
+- From: `Attached`
+- On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Emits: `SurfaceRequestTerminalClassified`
+- To: `Attached`
+
+### `ClassifySurfaceRequestTerminalRunning`
+- From: `Running`
+- On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Emits: `SurfaceRequestTerminalClassified`
+- To: `Running`
+
+### `ClassifySurfaceRequestTerminalRetired`
+- From: `Retired`
+- On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Emits: `SurfaceRequestTerminalClassified`
+- To: `Retired`
+
+### `ClassifySurfaceRequestTerminalStopped`
+- From: `Stopped`
+- On: `ClassifySurfaceRequestTerminal`(request_id, outcome)
+- Emits: `SurfaceRequestTerminalClassified`
+- To: `Stopped`
+
+### `CancelSurfaceRequestPendingInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Initializing`
+
+### `CancelSurfaceRequestPendingIdle`
+- From: `Idle`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Idle`
+
+### `CancelSurfaceRequestPendingAttached`
+- From: `Attached`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Attached`
+
+### `CancelSurfaceRequestPendingRunning`
+- From: `Running`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Running`
+
+### `CancelSurfaceRequestPendingRetired`
+- From: `Retired`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Retired`
+
+### `CancelSurfaceRequestPendingStopped`
+- From: `Stopped`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Stopped`
+
+### `CancelSurfaceRequestPublishedInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_published`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Initializing`
+
+### `CancelSurfaceRequestPublishedIdle`
+- From: `Idle`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_published`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Idle`
+
+### `CancelSurfaceRequestPublishedAttached`
+- From: `Attached`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_published`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Attached`
+
+### `CancelSurfaceRequestPublishedRunning`
+- From: `Running`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_published`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Running`
+
+### `CancelSurfaceRequestPublishedRetired`
+- From: `Retired`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_published`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Retired`
+
+### `CancelSurfaceRequestPublishedStopped`
+- From: `Stopped`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_published`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Stopped`
+
+### `CancelSurfaceRequestCancelledInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Initializing`
+
+### `CancelSurfaceRequestCancelledIdle`
+- From: `Idle`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Idle`
+
+### `CancelSurfaceRequestCancelledAttached`
+- From: `Attached`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Attached`
+
+### `CancelSurfaceRequestCancelledRunning`
+- From: `Running`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Running`
+
+### `CancelSurfaceRequestCancelledRetired`
+- From: `Retired`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Retired`
+
+### `CancelSurfaceRequestCancelledStopped`
+- From: `Stopped`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Stopped`
+
+### `CancelSurfaceRequestCompletedInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_completed`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Initializing`
+
+### `CancelSurfaceRequestCompletedIdle`
+- From: `Idle`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_completed`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Idle`
+
+### `CancelSurfaceRequestCompletedAttached`
+- From: `Attached`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_completed`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Attached`
+
+### `CancelSurfaceRequestCompletedRunning`
+- From: `Running`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_completed`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Running`
+
+### `CancelSurfaceRequestCompletedRetired`
+- From: `Retired`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_completed`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Retired`
+
+### `CancelSurfaceRequestCompletedStopped`
+- From: `Stopped`
+- On: `CancelSurfaceRequest`(request_id)
+- Guards:
+  - `request_completed`
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Stopped`
+
+### `CancelSurfaceRequestMissingInitializing`
+- From: `Initializing`
+- On: `CancelSurfaceRequest`(request_id)
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Initializing`
+
+### `CancelSurfaceRequestMissingIdle`
+- From: `Idle`
+- On: `CancelSurfaceRequest`(request_id)
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Idle`
+
+### `CancelSurfaceRequestMissingAttached`
+- From: `Attached`
+- On: `CancelSurfaceRequest`(request_id)
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Attached`
+
+### `CancelSurfaceRequestMissingRunning`
+- From: `Running`
+- On: `CancelSurfaceRequest`(request_id)
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Running`
+
+### `CancelSurfaceRequestMissingRetired`
+- From: `Retired`
+- On: `CancelSurfaceRequest`(request_id)
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Retired`
+
+### `CancelSurfaceRequestMissingStopped`
+- From: `Stopped`
+- On: `CancelSurfaceRequest`(request_id)
+- Emits: `SurfaceRequestCancelDecision`
+- To: `Stopped`
+
+### `DecideSurfaceRequestCancelActionInstallInitializing`
+- From: `Initializing`
+- On: `DecideSurfaceRequestCancelActionInstall`(request_id)
+- Emits: `SurfaceRequestCancelActionInstallDecision`
+- To: `Initializing`
+
+### `DecideSurfaceRequestCancelActionInstallIdle`
+- From: `Idle`
+- On: `DecideSurfaceRequestCancelActionInstall`(request_id)
+- Emits: `SurfaceRequestCancelActionInstallDecision`
+- To: `Idle`
+
+### `DecideSurfaceRequestCancelActionInstallAttached`
+- From: `Attached`
+- On: `DecideSurfaceRequestCancelActionInstall`(request_id)
+- Emits: `SurfaceRequestCancelActionInstallDecision`
+- To: `Attached`
+
+### `DecideSurfaceRequestCancelActionInstallRunning`
+- From: `Running`
+- On: `DecideSurfaceRequestCancelActionInstall`(request_id)
+- Emits: `SurfaceRequestCancelActionInstallDecision`
+- To: `Running`
+
+### `DecideSurfaceRequestCancelActionInstallRetired`
+- From: `Retired`
+- On: `DecideSurfaceRequestCancelActionInstall`(request_id)
+- Emits: `SurfaceRequestCancelActionInstallDecision`
+- To: `Retired`
+
+### `DecideSurfaceRequestCancelActionInstallStopped`
+- From: `Stopped`
+- On: `DecideSurfaceRequestCancelActionInstall`(request_id)
+- Emits: `SurfaceRequestCancelActionInstallDecision`
+- To: `Stopped`
+
+### `PublishSurfaceRequestInitializing`
+- From: `Initializing`
+- On: `PublishSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- To: `Initializing`
+
+### `PublishSurfaceRequestIdle`
+- From: `Idle`
+- On: `PublishSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- To: `Idle`
+
+### `PublishSurfaceRequestAttached`
+- From: `Attached`
+- On: `PublishSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- To: `Attached`
+
+### `PublishSurfaceRequestRunning`
+- From: `Running`
+- On: `PublishSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- To: `Running`
+
+### `PublishSurfaceRequestRetired`
+- From: `Retired`
+- On: `PublishSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- To: `Retired`
+
+### `PublishSurfaceRequestStopped`
+- From: `Stopped`
+- On: `PublishSurfaceRequest`(request_id)
+- Guards:
+  - `request_pending`
+- To: `Stopped`
+
+### `FinishSurfaceRequestUnpublishedPendingInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedPendingIdle`
+- From: `Idle`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Idle`
+
+### `FinishSurfaceRequestUnpublishedPendingAttached`
+- From: `Attached`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Attached`
+
+### `FinishSurfaceRequestUnpublishedPendingRunning`
+- From: `Running`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Running`
+
+### `FinishSurfaceRequestUnpublishedPendingRetired`
+- From: `Retired`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Retired`
+
+### `FinishSurfaceRequestUnpublishedPendingStopped`
+- From: `Stopped`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_pending`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Stopped`
+
+### `FinishSurfaceRequestUnpublishedCancelledInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedCancelledIdle`
+- From: `Idle`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Idle`
+
+### `FinishSurfaceRequestUnpublishedCancelledAttached`
+- From: `Attached`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Attached`
+
+### `FinishSurfaceRequestUnpublishedCancelledRunning`
+- From: `Running`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Running`
+
+### `FinishSurfaceRequestUnpublishedCancelledRetired`
+- From: `Retired`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Retired`
+
+### `FinishSurfaceRequestUnpublishedCancelledStopped`
+- From: `Stopped`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_cancelled`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Stopped`
+
+### `FinishSurfaceRequestUnpublishedTerminalInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedTerminalIdle`
+- From: `Idle`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Idle`
+
+### `FinishSurfaceRequestUnpublishedTerminalAttached`
+- From: `Attached`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Attached`
+
+### `FinishSurfaceRequestUnpublishedTerminalRunning`
+- From: `Running`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Running`
+
+### `FinishSurfaceRequestUnpublishedTerminalRetired`
+- From: `Retired`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Retired`
+
+### `FinishSurfaceRequestUnpublishedTerminalStopped`
+- From: `Stopped`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Guards:
+  - `request_terminal`
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Stopped`
+
+### `FinishSurfaceRequestUnpublishedMissingInitializing`
+- From: `Initializing`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Initializing`
+
+### `FinishSurfaceRequestUnpublishedMissingIdle`
+- From: `Idle`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Idle`
+
+### `FinishSurfaceRequestUnpublishedMissingAttached`
+- From: `Attached`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Attached`
+
+### `FinishSurfaceRequestUnpublishedMissingRunning`
+- From: `Running`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Running`
+
+### `FinishSurfaceRequestUnpublishedMissingRetired`
+- From: `Retired`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Retired`
+
+### `FinishSurfaceRequestUnpublishedMissingStopped`
+- From: `Stopped`
+- On: `FinishSurfaceRequestUnpublished`(request_id)
+- Emits: `SurfaceRequestUnpublishedFinished`
+- To: `Stopped`
+
+### `RemoveSurfaceRequestInitializing`
+- From: `Initializing`
+- On: `RemoveSurfaceRequest`(request_id)
+- To: `Initializing`
+
+### `RemoveSurfaceRequestIdle`
+- From: `Idle`
+- On: `RemoveSurfaceRequest`(request_id)
+- To: `Idle`
+
+### `RemoveSurfaceRequestAttached`
+- From: `Attached`
+- On: `RemoveSurfaceRequest`(request_id)
+- To: `Attached`
+
+### `RemoveSurfaceRequestRunning`
+- From: `Running`
+- On: `RemoveSurfaceRequest`(request_id)
+- To: `Running`
+
+### `RemoveSurfaceRequestRetired`
+- From: `Retired`
+- On: `RemoveSurfaceRequest`(request_id)
+- To: `Retired`
+
+### `RemoveSurfaceRequestStopped`
+- From: `Stopped`
+- On: `RemoveSurfaceRequest`(request_id)
 - To: `Stopped`
 
 ### `RegisterOpIdle`

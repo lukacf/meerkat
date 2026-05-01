@@ -230,6 +230,30 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "SurfaceRequestTerminalClassified",
+            SeamClassification::NoOwnerRealization,
+            "Local surface-request terminal classification consumed synchronously by the runtime surface request lifecycle handle",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestCancelDecision",
+            SeamClassification::NoOwnerRealization,
+            "Local surface-request cancel decision consumed synchronously by the runtime surface request lifecycle handle",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestCancelActionInstallDecision",
+            SeamClassification::NoOwnerRealization,
+            "Local surface-request cancel-action install decision consumed synchronously by the runtime surface request lifecycle handle",
+        ),
+        (
+            "MeerkatMachine",
+            "SurfaceRequestUnpublishedFinished",
+            SeamClassification::NoOwnerRealization,
+            "Local surface-request unpublished-finish decision consumed synchronously by the runtime surface request lifecycle handle",
+        ),
+        (
+            "MeerkatMachine",
             "SubmitOpEvent",
             SeamClassification::NoOwnerRealization,
             "Local op-event submission to the ops lifecycle registry",

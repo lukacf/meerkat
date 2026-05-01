@@ -272,7 +272,10 @@ fn malformed_tagged_override_payloads_fail_at_boundary() {
         },
     }))
     .expect_err("clear override with value must fail");
-    assert!(err.to_string().contains("clear"), "unexpected error: {err}");
+    assert!(
+        err.to_string().contains("clear") || err.to_string().contains("value"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -319,6 +322,25 @@ fn untagged_overrides_fail_closed() {
 fn nested_runtime_turn_metadata_fields_fail_closed() {
     for (field, value, unknown) in [
         (
+            "skill_references",
+            serde_json::json!([
+                {
+                    "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                    "skill_name": "email-extractor",
+                    "source": "legacy",
+                }
+            ]),
+            "source",
+        ),
+        (
+            "flow_tool_overlay",
+            serde_json::json!({
+                "allowed_tools": ["shell"],
+                "allow_tools": ["legacy-shell"],
+            }),
+            "allow_tools",
+        ),
+        (
             "additional_instructions",
             serde_json::json!([
                 {
@@ -364,6 +386,15 @@ fn nested_runtime_turn_metadata_fields_fail_closed() {
             }),
             "ttl_secs",
         ),
+        (
+            "render_metadata",
+            serde_json::json!({
+                "class": "user_prompt",
+                "salience": "normal",
+                "style": "legacy",
+            }),
+            "style",
+        ),
     ] {
         let result = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
             field: value,
@@ -371,6 +402,55 @@ fn nested_runtime_turn_metadata_fields_fail_closed() {
         assert!(
             result.is_err(),
             "unknown nested field {unknown} must fail closed for turn_metadata.{field}"
+        );
+        let err = result.expect_err("result checked as error");
+        let message = err.to_string();
+        assert!(
+            message.contains(unknown) || message.contains("unknown field"),
+            "unexpected error for {field}: {message}"
+        );
+    }
+}
+
+#[test]
+fn turn_metadata_override_wrapper_unknown_fields_fail_closed() {
+    for (field, value, unknown) in [
+        (
+            "provider_params",
+            serde_json::json!({
+                "action": "set",
+                "value": { "temperature": 0.2 },
+                "clear_provider_params": true,
+            }),
+            "clear_provider_params",
+        ),
+        (
+            "connection_ref",
+            serde_json::json!({
+                "action": "clear",
+                "binding_id": "legacy-default",
+            }),
+            "binding_id",
+        ),
+        (
+            "keep_alive",
+            serde_json::json!({
+                "action": "set",
+                "value": {
+                    "ttl": 30,
+                    "policy": "pinned",
+                },
+                "ttl_secs": 30,
+            }),
+            "ttl_secs",
+        ),
+    ] {
+        let result = serde_json::from_value::<RuntimeTurnMetadata>(serde_json::json!({
+            field: value,
+        }));
+        assert!(
+            result.is_err(),
+            "unknown override wrapper field {unknown} must fail closed for turn_metadata.{field}"
         );
         let err = result.expect_err("result checked as error");
         let message = err.to_string();

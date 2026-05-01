@@ -146,6 +146,7 @@ impl std::fmt::Display for SkillName {
 /// this struct. There is no slash-delimited string path form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SkillKey {
     pub source_uuid: SourceUuid,
     pub skill_name: SkillName,

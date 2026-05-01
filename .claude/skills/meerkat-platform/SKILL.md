@@ -566,7 +566,7 @@ Model and provider can be changed on a live session without rebuilding the agent
 
 - **RPC**: `turn/start` with `turn_metadata.model`, `turn_metadata.provider`, and `turn_metadata.provider_params`. Works on both pending (deferred) and materialized sessions.
 - **REST**: `POST /sessions/{id}/messages` with `turn_metadata.model`, `turn_metadata.provider`, and `turn_metadata.provider_params`.
-- **MCP**: `meerkat_resume` with `model`, `provider`, and `provider_params` fields.
+- **MCP**: `meerkat_resume` normalizes resume overrides into the same runtime turn metadata path; do not add split `turn/start` carriers.
 - **Rust SDK**: `Agent::replace_client()` for direct library usage.
 
 On materialized sessions, the LLM client is hot-swapped for the remainder of the session. Ephemeral sessions return `SessionError::Unsupported`.

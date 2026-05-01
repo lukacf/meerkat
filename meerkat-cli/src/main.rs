@@ -6440,6 +6440,11 @@ async fn resume_session_with_llm_override(
                         ),
                     )
                 }),
+                connection_ref: connection_ref.clone().map(|connection_ref| {
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        connection_ref,
+                    )
+                }),
                 keep_alive: keep_alive_override.map(|enabled| {
                     if enabled {
                         meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
@@ -6457,7 +6462,7 @@ async fn resume_session_with_llm_override(
             };
         let turn_metadata = (!turn_metadata.is_empty()).then_some(turn_metadata);
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
-            turn_metadata,
+            turn_metadata: turn_metadata.clone(),
             max_tokens,
             system_prompt,
             output_schema: parsed_output_schema,
@@ -6492,9 +6497,6 @@ async fn resume_session_with_llm_override(
         build.llm_client_override =
             llm_override.map(meerkat::encode_llm_client_override_for_service);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings);
-        if let Some(connection_ref) = connection_ref {
-            build.connection_ref = Some(connection_ref);
-        }
         build.mob_tools = mob_tools_factory;
 
         let parsed_labels = if labels.is_empty() {
@@ -6574,9 +6576,8 @@ async fn resume_session_with_llm_override(
 
             // Post-wave-a: `keep_alive` is typed `KeepAlivePolicy`, and
             // `additional_instructions` is typed `Vec<TurnInstruction>`.
-            // Session-level keep-alive is still carried via
-            // `update_peer_ingress_context` below. Per-turn overlay atoms for
-            // both remain unset until the CLI exposes the typed surface.
+            // Peer ingress still receives the effective keep-alive boolean
+            // below, but runtime turn execution carries the canonical metadata.
             let _ = keep_alive;
             let additional_instructions = additional_instructions.map(|texts| {
                 texts
@@ -6589,17 +6590,14 @@ async fn resume_session_with_llm_override(
                     )
                     .collect::<Vec<_>>()
             });
+            let mut runtime_turn_metadata = turn_metadata.clone().unwrap_or_default();
+            runtime_turn_metadata.flow_tool_overlay = flow_tool_overlay;
+            runtime_turn_metadata.additional_instructions = additional_instructions;
+            let runtime_turn_metadata =
+                (!runtime_turn_metadata.is_empty()).then_some(runtime_turn_metadata);
             let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
                 prompt.to_string(),
-                Some(
-                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        keep_alive: None,
-                        skill_references: None,
-                        flow_tool_overlay,
-                        additional_instructions,
-                        ..Default::default()
-                    },
-                ),
+                runtime_turn_metadata,
             ));
             let (_outcome, handle) = resume_adapter
                 .accept_input_with_completion(&session_id, input)
@@ -11053,6 +11051,30 @@ default_model = "gemma"
             !connection_ref_err.contains("create-only")
                 && !connection_ref_err.contains("--connection-ref"),
             "`--connection-ref` should be allowed through run --resume; got: {connection_ref_err}"
+        );
+    }
+
+    #[test]
+    fn test_run_resume_connection_ref_uses_canonical_turn_metadata() {
+        let source = include_str!("main.rs");
+        let bypass_assignment = concat!("build.", "connection_ref = Some(connection_ref);");
+        let canonical_connection_ref = concat!("connection_ref: connection_ref.", "clone().map");
+        let runtime_reuse = concat!(
+            "let mut runtime_turn_metadata = turn_metadata.",
+            "clone().unwrap_or_default();"
+        );
+
+        assert!(
+            !source.contains(bypass_assignment),
+            "`run --resume --connection-ref` must not bypass RuntimeTurnMetadata"
+        );
+        assert!(
+            source.contains(canonical_connection_ref),
+            "`run --resume --connection-ref` must enter recovery through RuntimeTurnMetadata"
+        );
+        assert!(
+            source.contains(runtime_reuse),
+            "runtime submission must extend the same canonical turn metadata used for recovery"
         );
     }
 

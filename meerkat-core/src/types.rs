@@ -397,6 +397,7 @@ pub enum RenderSalience {
 /// Optional rendering metadata carried alongside ordinary work content.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenderMetadata {
     pub class: RenderClass,
     #[serde(default)]

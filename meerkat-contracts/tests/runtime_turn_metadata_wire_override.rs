@@ -157,7 +157,10 @@ fn wire_metadata_malformed_tagged_override_payloads_fail_at_boundary() {
         },
     }))
     .expect_err("clear override with value must fail");
-    assert!(err.to_string().contains("clear"), "unexpected error: {err}");
+    assert!(
+        err.to_string().contains("clear") || err.to_string().contains("value"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -201,8 +204,76 @@ fn wire_metadata_untagged_overrides_fail_closed() {
 }
 
 #[test]
+fn wire_metadata_override_wrapper_unknown_fields_fail_closed() {
+    for (field, value, unknown) in [
+        (
+            "provider_params",
+            serde_json::json!({
+                "action": "set",
+                "value": { "temperature": 0.2 },
+                "clear_provider_params": true,
+            }),
+            "clear_provider_params",
+        ),
+        (
+            "connection_ref",
+            serde_json::json!({
+                "action": "clear",
+                "binding_id": "legacy-default",
+            }),
+            "binding_id",
+        ),
+        (
+            "keep_alive",
+            serde_json::json!({
+                "action": "set",
+                "value": {
+                    "ttl_secs": 30,
+                    "policy": "pinned",
+                },
+                "ttl": 30,
+            }),
+            "ttl",
+        ),
+    ] {
+        let result = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            field: value,
+        }));
+        assert!(
+            result.is_err(),
+            "unknown override wrapper field {unknown} must fail closed for turn_metadata.{field}"
+        );
+        let err = result.expect_err("result checked as error");
+        let message = err.to_string();
+        assert!(
+            message.contains(unknown) || message.contains("unknown field"),
+            "unexpected error for {field}: {message}"
+        );
+    }
+}
+
+#[test]
 fn wire_metadata_nested_unknown_fields_fail_closed() {
     for (field, value, unknown) in [
+        (
+            "skill_references",
+            serde_json::json!([
+                {
+                    "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f",
+                    "skill_name": "email-extractor",
+                    "source": "legacy",
+                }
+            ]),
+            "source",
+        ),
+        (
+            "flow_tool_overlay",
+            serde_json::json!({
+                "allowed_tools": ["shell"],
+                "allow_tools": ["legacy-shell"],
+            }),
+            "allow_tools",
+        ),
         (
             "additional_instructions",
             serde_json::json!([
@@ -249,6 +320,15 @@ fn wire_metadata_nested_unknown_fields_fail_closed() {
             }),
             "ttl",
         ),
+        (
+            "render_metadata",
+            serde_json::json!({
+                "class": "user_prompt",
+                "salience": "normal",
+                "style": "legacy",
+            }),
+            "style",
+        ),
     ] {
         let result = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
             field: value,
@@ -274,6 +354,14 @@ mod schema_emission {
         serde_json::to_value(schemars::schema_for!(T)).unwrap()
     }
 
+    fn assert_schema_closed(name: &str, schema: &serde_json::Value) {
+        assert_eq!(
+            schema.pointer("/additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "{name} schema must be closed"
+        );
+    }
+
     #[test]
     fn nested_runtime_metadata_schemas_reject_additional_properties() {
         for (name, schema) in [
@@ -282,12 +370,31 @@ mod schema_emission {
                 schema_json::<WireProviderParamsOverride>(),
             ),
             ("WireConnectionRef", schema_json::<WireConnectionRef>()),
+            (
+                "TurnToolOverlay",
+                schema_json::<meerkat_core::TurnToolOverlay>(),
+            ),
+            ("SkillKey", schema_json::<meerkat_core::skills::SkillKey>()),
+            (
+                "WireRenderMetadata",
+                schema_json::<meerkat_contracts::wire::WireRenderMetadata>(),
+            ),
         ] {
-            assert_eq!(
-                schema.pointer("/additionalProperties"),
-                Some(&serde_json::Value::Bool(false)),
-                "{name} schema must be closed"
-            );
+            assert_schema_closed(name, &schema);
+        }
+    }
+
+    #[test]
+    fn turn_metadata_override_schema_variants_reject_additional_properties() {
+        let schema = schema_json::<WireTurnMetadataOverride<WireProviderParamsOverride>>();
+        let variants = schema
+            .pointer("/oneOf")
+            .or_else(|| schema.pointer("/anyOf"))
+            .and_then(serde_json::Value::as_array)
+            .expect("override schema should expose variants");
+
+        for variant in variants {
+            assert_schema_closed("WireTurnMetadataOverride variant", variant);
         }
     }
 }

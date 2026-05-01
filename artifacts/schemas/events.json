@@ -851,6 +851,7 @@
         "type": "string"
       },
       "SkillKey": {
+        "additionalProperties": false,
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
           "skill_name": {
@@ -3939,6 +3940,7 @@
         "type": "string"
       },
       "SkillKey": {
+        "additionalProperties": false,
         "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
         "properties": {
           "skill_name": {

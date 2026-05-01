@@ -8391,6 +8391,7 @@
         "type": "string"
       },
       "RenderMetadata": {
+        "additionalProperties": false,
         "description": "Optional rendering metadata carried alongside ordinary work content.",
         "properties": {
           "class": {
@@ -11229,6 +11230,7 @@
         ]
       },
       "TurnToolOverlay": {
+        "additionalProperties": false,
         "description": "Ephemeral per-turn tool overlay for flow-dispatched turns.",
         "properties": {
           "allowed_tools": {
@@ -14333,6 +14335,7 @@
         "type": "string"
       },
       "WireRenderMetadata": {
+        "additionalProperties": false,
         "description": "Public render metadata contract for mob member delivery.",
         "properties": {
           "class": {
@@ -15462,6 +15465,7 @@
         "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "action": {
                 "const": "set",
@@ -15478,6 +15482,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "action": {
                 "const": "clear",
@@ -15495,6 +15500,7 @@
         "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "action": {
                 "const": "set",
@@ -15511,6 +15517,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "action": {
                 "const": "clear",
@@ -15528,6 +15535,7 @@
         "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "action": {
                 "const": "set",
@@ -15544,6 +15552,7 @@
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "action": {
                 "const": "clear",

@@ -1072,6 +1072,7 @@ impl From<RenderSalience> for WireRenderSalience {
 /// Public render metadata contract for mob member delivery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireRenderMetadata {
     pub class: WireRenderClass,
     #[serde(default, skip_serializing_if = "Option::is_none")]

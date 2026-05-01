@@ -1234,10 +1234,30 @@ impl std::error::Error for TurnMetadataMergeConflict {}
 /// `None` on the containing field means preserve the durable session value.
 /// `Some(Set(value))` overrides it for this turn, and `Some(Clear)` removes it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "action", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "action",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum TurnMetadataOverride<T> {
     Set(T),
     Clear,
+}
+
+fn reject_unknown_turn_metadata_override_fields<E>(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &'static [&'static str],
+) -> Result<(), E>
+where
+    E: de::Error,
+{
+    for field in object.keys() {
+        if !allowed.contains(&field.as_str()) {
+            return Err(E::unknown_field(field, allowed));
+        }
+    }
+    Ok(())
 }
 
 impl<T> TurnMetadataOverride<T> {
@@ -1288,12 +1308,17 @@ where
             })?;
             return match action {
                 "clear" => {
+                    reject_unknown_turn_metadata_override_fields::<D::Error>(object, &["action"])?;
                     if object.contains_key("value") {
                         return Err(de::Error::custom("clear override cannot include value"));
                     }
                     Ok(Self::Clear)
                 }
                 "set" => {
+                    reject_unknown_turn_metadata_override_fields::<D::Error>(
+                        object,
+                        &["action", "value"],
+                    )?;
                     let value = object
                         .get("value")
                         .ok_or_else(|| de::Error::custom("set override is missing value"))?;

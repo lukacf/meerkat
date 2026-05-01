@@ -1164,10 +1164,30 @@ impl From<WireProviderParamsOverride>
 /// and `Clear` removes the durable value for this turn.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "action", content = "value", rename_all = "snake_case")]
+#[serde(
+    tag = "action",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum WireTurnMetadataOverride<T> {
     Set(T),
     Clear,
+}
+
+fn reject_unknown_wire_turn_metadata_override_fields<E>(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &'static [&'static str],
+) -> Result<(), E>
+where
+    E: de::Error,
+{
+    for field in object.keys() {
+        if !allowed.contains(&field.as_str()) {
+            return Err(E::unknown_field(field, allowed));
+        }
+    }
+    Ok(())
 }
 
 impl<'de, T> Deserialize<'de> for WireTurnMetadataOverride<T>
@@ -1190,12 +1210,20 @@ where
             })?;
             return match action {
                 "clear" => {
+                    reject_unknown_wire_turn_metadata_override_fields::<D::Error>(
+                        object,
+                        &["action"],
+                    )?;
                     if object.contains_key("value") {
                         return Err(de::Error::custom("clear override cannot include value"));
                     }
                     Ok(Self::Clear)
                 }
                 "set" => {
+                    reject_unknown_wire_turn_metadata_override_fields::<D::Error>(
+                        object,
+                        &["action", "value"],
+                    )?;
                     let value = object
                         .get("value")
                         .ok_or_else(|| de::Error::custom("set override is missing value"))?;

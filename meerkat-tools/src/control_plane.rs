@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::{SessionEffect, ToolDispatchOutcome};
-use meerkat_core::session::{SessionToolVisibilityState, ToolVisibilityWitness};
+use meerkat_core::session::{
+    DeferredToolLoadAuthority, SessionToolVisibilityState, ToolVisibilityWitness,
+};
 use meerkat_core::tool_catalog::stable_owner_key_from_provenance;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use meerkat_core::{
@@ -345,6 +347,10 @@ impl CatalogControlDispatcher {
         }
 
         let accepted_names_vec = accepted_authorities.keys().cloned().collect::<Vec<_>>();
+        let accepted_authorities = accepted_authorities
+            .into_iter()
+            .map(|(name, witness)| DeferredToolLoadAuthority::new(name, witness))
+            .collect::<Vec<_>>();
         let effect =
             (!accepted_authorities.is_empty()).then_some(SessionEffect::RequestDeferredTools {
                 authorities: accepted_authorities,
@@ -524,10 +530,18 @@ fn load_tool_def() -> ToolDef {
 mod tests {
     use super::*;
     use meerkat_core::ToolFilter;
+    use meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle;
+    use meerkat_core::error::AgentError;
     use meerkat_core::types::ToolProvenance;
+    use meerkat_core::types::{AssistantBlock, StopReason, Usage};
+    use meerkat_core::{
+        AgentBuilder, AgentLlmClient, AgentSessionStore, DynamicToolComposite, LlmStreamResult,
+        Session,
+    };
     use serde_json::json;
     use serde_json::value::RawValue;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
 
     struct ExactCatalogDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -562,6 +576,95 @@ mod tests {
             Err(ToolError::NotFound {
                 name: call.name.into(),
             })
+        }
+    }
+
+    struct NoopAgentStore;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentSessionStore for NoopAgentStore {
+        async fn save(&self, _session: &Session) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        async fn load(&self, _id: &str) -> Result<Option<Session>, AgentError> {
+            Ok(None)
+        }
+    }
+
+    struct CatalogLoadRouteClient {
+        calls: Mutex<u32>,
+        seen_tools: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl CatalogLoadRouteClient {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(0),
+                seen_tools: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_tools(&self) -> Vec<Vec<String>> {
+            self.seen_tools.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for CatalogLoadRouteClient {
+        async fn stream_response(
+            &self,
+            _messages: &[meerkat_core::Message],
+            tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<
+                &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+            >,
+        ) -> Result<LlmStreamResult, AgentError> {
+            self.seen_tools.lock().unwrap().push(
+                tools
+                    .iter()
+                    .map(|tool| tool.name.to_string())
+                    .collect::<Vec<_>>(),
+            );
+            let mut calls = self.calls.lock().unwrap();
+            let response = if *calls == 0 {
+                LlmStreamResult::new(
+                    vec![AssistantBlock::ToolUse {
+                        id: "load-deferred".to_string(),
+                        name: LOAD_TOOL_NAME.into(),
+                        args: RawValue::from_string(
+                            json!({ "names": ["deferred_mcp_tool"] }).to_string(),
+                        )
+                        .unwrap(),
+                        meta: None,
+                    }],
+                    StopReason::ToolUse,
+                    Usage::default(),
+                )
+            } else {
+                LlmStreamResult::new(
+                    vec![AssistantBlock::Text {
+                        text: "done".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                )
+            };
+            *calls += 1;
+            Ok(response)
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-model"
         }
     }
 
@@ -605,7 +708,7 @@ mod tests {
 
         fn request_deferred_tools(
             &self,
-            _authorities: BTreeMap<String, ToolVisibilityWitness>,
+            _authorities: Vec<DeferredToolLoadAuthority>,
         ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
             Err(meerkat_core::ToolScopeStageError::Owner {
                 message: "legacy visibility fixture is read-only".to_string(),
@@ -931,11 +1034,140 @@ mod tests {
             panic!("expected RequestDeferredTools session effect");
         };
         assert_eq!(
-            authorities.get("deferred_mcp_tool"),
-            Some(&ToolVisibilityWitness {
-                stable_owner_key: Some("callback:test".to_string()),
-                last_seen_provenance: deferred.provenance.clone(),
-            })
+            authorities.as_slice(),
+            &[DeferredToolLoadAuthority::new(
+                "deferred_mcp_tool",
+                ToolVisibilityWitness {
+                    stable_owner_key: Some("callback:test".to_string()),
+                    last_seen_provenance: deferred.provenance.clone(),
+                }
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn load_effect_carries_deferred_authority_values_not_name_keyed_witnesses() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                "callback:test".to_string(),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(ToolScope::new_with_projection_names(
+            vec![Arc::clone(&deferred)].into(),
+            std::collections::HashSet::new(),
+            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+        ));
+
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.session_effects.len(), 1);
+        let effect = serde_json::to_value(&outcome.session_effects[0]).unwrap();
+        assert_eq!(effect["effect_type"], "request_deferred_tools");
+        assert!(
+            effect["authorities"].is_array(),
+            "deferred load authority should serialize as typed authority values, not a name-keyed witness map: {effect}"
+        );
+        assert_eq!(effect["authorities"][0]["name"], "deferred_mcp_tool");
+        assert_eq!(
+            effect["authorities"][0]["witness"]["stable_owner_key"],
+            "callback:test"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_boundary_routes_tool_catalog_load_authority_from_control_plane() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let deferred_two = session_tool("deferred_mcp_tool_two", "Second deferred MCP tool");
+        let session_dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred), Arc::clone(&deferred_two)].into(),
+            catalog: vec![
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&deferred),
+                    true,
+                    "callback:test".to_string(),
+                ),
+                ToolCatalogEntry::session_deferred(
+                    Arc::clone(&deferred_two),
+                    true,
+                    "callback:test".to_string(),
+                ),
+            ]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        let control_dispatcher: Arc<dyn AgentToolDispatcher> =
+            Arc::new(CatalogControlDispatcher::new(
+                Arc::clone(&session_dispatcher),
+                Arc::clone(&visibility_provider),
+            ));
+        let tools = Arc::new(DynamicToolComposite::new(vec![
+            session_dispatcher,
+            control_dispatcher,
+        ]));
+        let client = Arc::new(CatalogLoadRouteClient::new());
+        let mut agent = AgentBuilder::new()
+            .with_turn_state_handle(Arc::new(TestTurnStateHandle::new()))
+            .build(client.clone(), tools, Arc::new(NoopAgentStore))
+            .await;
+        visibility_provider.set_scope(agent.tool_scope().clone());
+
+        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        assert_eq!(result.text, "done");
+
+        let seen_tools = client.seen_tools();
+        assert!(
+            seen_tools.len() >= 2,
+            "expected load route to continue into a post-boundary LLM request, saw {seen_tools:?}"
+        );
+        assert!(
+            seen_tools[0].iter().any(|name| name == LOAD_TOOL_NAME),
+            "control load tool must be visible before deferred tools are loaded: {seen_tools:?}"
+        );
+        assert!(
+            !seen_tools[0].iter().any(|name| name == "deferred_mcp_tool"),
+            "deferred tool must stay hidden until the real catalog-load route is accepted"
+        );
+        assert!(
+            seen_tools[1].iter().any(|name| name == "deferred_mcp_tool"),
+            "real catalog-load route should reveal the requested deferred tool on the next boundary"
+        );
+
+        let visibility_state = agent
+            .session()
+            .tool_visibility_state()
+            .expect("agent boundary should persist canonical visibility state");
+        assert!(
+            visibility_state
+                .active_requested_deferred_names
+                .contains("deferred_mcp_tool"),
+            "catalog-load route should commit the requested deferred name at the boundary"
+        );
+        let witness = visibility_state
+            .requested_witnesses
+            .get("deferred_mcp_tool")
+            .expect("catalog-load route should persist the provenance witness");
+        assert_eq!(witness.stable_owner_key.as_deref(), Some("callback:test"));
+        assert_eq!(
+            witness.last_seen_provenance.as_ref(),
+            deferred.provenance.as_ref(),
+            "authority must come from the catalog entry provenance, not only the requested name"
         );
     }
 
@@ -998,11 +1230,14 @@ mod tests {
             panic!("expected RequestDeferredTools session effect");
         };
         assert_eq!(
-            authorities.get("deferred_mcp_tool"),
-            Some(&ToolVisibilityWitness {
-                stable_owner_key: Some("callback:test".to_string()),
-                last_seen_provenance: deferred.provenance.clone(),
-            })
+            authorities.as_slice(),
+            &[DeferredToolLoadAuthority::new(
+                "deferred_mcp_tool",
+                ToolVisibilityWitness {
+                    stable_owner_key: Some("callback:test".to_string()),
+                    last_seen_provenance: deferred.provenance.clone(),
+                }
+            )]
         );
     }
 

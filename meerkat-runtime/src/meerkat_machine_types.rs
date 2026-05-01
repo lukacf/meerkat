@@ -404,7 +404,7 @@ pub(crate) enum MeerkatMachineCommand {
     },
     RequestDeferredTools {
         session_id: SessionId,
-        authorities: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        authorities: Vec<meerkat_core::DeferredToolLoadAuthority>,
     },
     /// Publish the committed visible tool set through the machine dispatch.
     ///

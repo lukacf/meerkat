@@ -3495,6 +3495,16 @@ mod tests {
         system_context_state: Arc<std::sync::Mutex<meerkat_core::SessionSystemContextState>>,
     }
 
+    fn expected_tool_dispatch_witness(tool_name: &str) -> meerkat_core::ToolVisibilityWitness {
+        meerkat_core::ToolVisibilityWitness {
+            stable_owner_key: Some(format!("callback:{tool_name}")),
+            last_seen_provenance: Some(meerkat_core::ToolProvenance {
+                kind: meerkat_core::ToolSourceKind::Callback,
+                source_id: tool_name.to_string().into(),
+            }),
+        }
+    }
+
     #[async_trait::async_trait]
     impl SessionAgent for ToolDispatchAgent {
         async fn run_with_events(
@@ -3549,9 +3559,13 @@ mod tests {
                 Err(poisoned) => poisoned.into_inner(),
             };
             let mut state = session.tool_visibility_state().unwrap_or_default();
+            let requested_name = format!("requested:{}", call.name);
             state
                 .staged_requested_deferred_names
-                .insert(format!("requested:{}", call.name));
+                .insert(requested_name.clone());
+            state
+                .requested_witnesses
+                .insert(requested_name, expected_tool_dispatch_witness(&call.name));
             session.set_tool_visibility_state(state).map_err(|err| {
                 meerkat_core::error::AgentError::InternalError(format!(
                     "failed to persist tool dispatch state: {err}"
@@ -7260,14 +7274,14 @@ mod tests {
                 &id,
                 ToolCall::new(
                     "call-1".to_string(),
-                    "tool_catalog_load".to_string(),
+                    "callback_probe_tool".to_string(),
                     serde_json::json!({}),
                 ),
             )
             .await
             .expect("dispatch external tool call");
 
-        assert_eq!(outcome.result.text_content(), "handled tool_catalog_load");
+        assert_eq!(outcome.result.text_content(), "handled callback_probe_tool");
 
         let persisted = store
             .load(&id)
@@ -7280,7 +7294,7 @@ mod tests {
         assert!(
             visibility_state
                 .staged_requested_deferred_names
-                .contains("requested:tool_catalog_load"),
+                .contains("requested:callback_probe_tool"),
             "expected persisted tool-dispatch state to include the requested tool"
         );
     }
@@ -7308,7 +7322,7 @@ mod tests {
                 &id,
                 ToolCall::new(
                     "call-2".to_string(),
-                    "tool_catalog_load".to_string(),
+                    "callback_probe_tool".to_string(),
                     serde_json::json!({}),
                 ),
             )

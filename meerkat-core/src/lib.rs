@@ -242,15 +242,15 @@ pub use service::{
     StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
 };
 pub use session::{
-    DeferredFirstTurnPhase, PendingDeferredPrompt, PendingSystemContextAppend,
-    PendingToolResultsMessage, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
-    SESSION_METADATA_SCHEMA_VERSION, SESSION_SYSTEM_CONTEXT_STATE_KEY,
-    SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_VERSION, SYSTEM_CONTEXT_SEPARATOR,
-    SeenSystemContextKey, SeenSystemContextState, Session, SessionBuildState,
-    SessionDeferredTurnState, SessionLlmIdentity, SessionLlmRequestPolicy, SessionMeta,
-    SessionMetadata, SessionSystemContextState, SessionToolVisibilityState, SessionTooling,
-    SystemContextStageError, ToolCategoryOverride, ToolVisibilityWitness, VIEW_IMAGE_TOOL_NAME,
-    capability_base_filter_for_image_tool_results,
+    DeferredFirstTurnPhase, DeferredToolLoadAuthority, PendingDeferredPrompt,
+    PendingSystemContextAppend, PendingToolResultsMessage, SESSION_BUILD_STATE_KEY,
+    SESSION_DEFERRED_TURN_STATE_KEY, SESSION_METADATA_SCHEMA_VERSION,
+    SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_VERSION,
+    SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
+    SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionLlmRequestPolicy,
+    SessionMeta, SessionMetadata, SessionSystemContextState, SessionToolVisibilityState,
+    SessionTooling, SystemContextStageError, ToolCategoryOverride, ToolVisibilityWitness,
+    VIEW_IMAGE_TOOL_NAME, capability_base_filter_for_image_tool_results,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,

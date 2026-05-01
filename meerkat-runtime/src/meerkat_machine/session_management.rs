@@ -751,7 +751,7 @@ impl MeerkatMachine {
     pub async fn request_deferred_tools(
         &self,
         session_id: &SessionId,
-        authorities: std::collections::BTreeMap<String, meerkat_core::ToolVisibilityWitness>,
+        authorities: Vec<meerkat_core::DeferredToolLoadAuthority>,
     ) -> Result<meerkat_core::ToolScopeRevision, RuntimeDriverError> {
         match self
             .execute_meerkat_machine_command(

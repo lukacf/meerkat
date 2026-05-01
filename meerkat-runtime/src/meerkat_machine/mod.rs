@@ -27,8 +27,8 @@ use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 use meerkat_core::{
-    SessionToolVisibilityState, ToolFilter, ToolScopeApplyError, ToolScopeRevision,
-    ToolScopeStageError, ToolVisibilityOwner, ToolVisibilityWitness,
+    DeferredToolLoadAuthority, SessionToolVisibilityState, ToolFilter, ToolScopeApplyError,
+    ToolScopeRevision, ToolScopeStageError, ToolVisibilityOwner, ToolVisibilityWitness,
 };
 
 use crate::accept::AcceptOutcome;

@@ -32,6 +32,7 @@ pub struct RuntimeStateParams {
 /// authority over the `input` discriminator and variant body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeAcceptParams {
     pub session_id: String,
     pub input: serde_json::Value,
@@ -418,6 +419,7 @@ pub struct WireConversationContextAppend {
 /// Typed wire projection of a batched staged input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireStagedRunInput {
     #[serde(default)]
     pub contributing_input_ids: Vec<String>,
@@ -448,6 +450,7 @@ pub enum WireRunPrimitive {
 /// pre-wave-b. Every field is a typed projection of a core type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SessionAcceptInputParams {
     pub session_id: String,
     pub primitive: WireRunPrimitive,
@@ -494,6 +497,7 @@ impl From<WireKeepAliveMode> for meerkat_core::lifecycle::run_primitive::KeepAli
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::KeepAlivePolicy`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireKeepAlivePolicy {
     pub ttl_secs: u64,
     pub policy: WireKeepAliveMode,
@@ -551,6 +555,7 @@ impl From<WireTurnInstructionKind> for meerkat_core::lifecycle::run_primitive::T
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstruction`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireTurnInstruction {
     pub kind: WireTurnInstructionKind,
     pub body: String,
@@ -1107,6 +1112,7 @@ impl From<WireProviderTag> for meerkat_core::lifecycle::run_primitive::ProviderT
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireProviderParamsOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -1175,9 +1181,9 @@ where
         let raw = serde_json::Value::deserialize(deserializer)?;
         if let Some(object) = raw.as_object() {
             let Some(action_value) = object.get("action") else {
-                return serde_json::from_value(raw)
-                    .map(Self::Set)
-                    .map_err(de::Error::custom);
+                return Err(de::Error::custom(
+                    "turn metadata override is missing action",
+                ));
             };
             let action = action_value.as_str().ok_or_else(|| {
                 de::Error::custom("turn metadata override action must be a string")
@@ -1203,9 +1209,9 @@ where
             };
         }
 
-        serde_json::from_value(raw)
-            .map(Self::Set)
-            .map_err(de::Error::custom)
+        Err(de::Error::custom(
+            "turn metadata override must be an object tagged with action",
+        ))
     }
 }
 

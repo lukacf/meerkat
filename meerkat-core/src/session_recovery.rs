@@ -2,14 +2,15 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
 use crate::runtime_epoch::RuntimeBuildMode;
 use crate::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
     SessionBuildOptions,
 };
 use crate::{
-    AgentToolDispatcher, BudgetLimits, ConnectionRef, ContentInput, HookRunOverrides, OutputSchema,
-    PeerMeta, Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef,
+    AgentToolDispatcher, BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, PeerMeta,
+    Provider, Session, SessionDeferredTurnState, ToolCategoryOverride, ToolDef,
     checkpoint::SessionCheckpointer, skills::SkillKey,
 };
 
@@ -17,17 +18,11 @@ pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens
 
 #[derive(Debug, Clone, Default)]
 pub struct SurfaceSessionRecoveryOverrides {
-    pub model: Option<String>,
-    pub provider: Option<Provider>,
-    pub provider_params: Option<serde_json::Value>,
-    pub clear_provider_params: bool,
-    pub connection_ref: Option<ConnectionRef>,
-    pub clear_connection_ref: bool,
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
     pub output_schema: Option<OutputSchema>,
     pub structured_output_retries: Option<u32>,
-    pub keep_alive: Option<bool>,
     pub hooks_override: Option<HookRunOverrides>,
     pub comms_name: Option<String>,
     pub peer_meta: Option<PeerMeta>,
@@ -108,13 +103,12 @@ pub fn has_build_only_turn_overrides(overrides: &SurfaceSessionRecoveryOverrides
 }
 
 pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides) -> bool {
-    overrides.model.is_some()
-        || overrides.provider.is_some()
-        || overrides.provider_params.is_some()
-        || overrides.clear_provider_params
-        || overrides.connection_ref.is_some()
-        || overrides.clear_connection_ref
-        || has_build_only_turn_overrides(overrides)
+    overrides.turn_metadata.as_ref().is_some_and(|metadata| {
+        metadata.model.is_some()
+            || metadata.provider.is_some()
+            || metadata.provider_params.is_some()
+            || metadata.connection_ref.is_some()
+    }) || has_build_only_turn_overrides(overrides)
         || overrides.hooks_override.is_some()
         || overrides.comms_name.is_some()
         || overrides.peer_meta.is_some()
@@ -170,19 +164,23 @@ pub fn build_recovered_session(
     let metadata = session.session_metadata().ok_or_else(|| {
         SurfaceSessionRecoveryError::MissingSessionMetadata(session.id().to_string())
     })?;
-    if overrides.provider.is_some() && overrides.model.is_none() {
+    let turn_metadata = overrides.turn_metadata.as_ref();
+    let turn_model = turn_metadata.and_then(|metadata| {
+        metadata
+            .model
+            .as_ref()
+            .map(std::string::ToString::to_string)
+    });
+    let turn_provider = turn_metadata.and_then(|metadata| metadata.provider);
+    let provider_params_override =
+        turn_metadata.and_then(|metadata| metadata.provider_params.as_ref());
+    let connection_ref_override =
+        turn_metadata.and_then(|metadata| metadata.connection_ref.as_ref());
+    let keep_alive_override = turn_metadata.and_then(|metadata| metadata.keep_alive.as_ref());
+
+    if turn_provider.is_some() && turn_model.is_none() {
         return Err(SurfaceSessionRecoveryError::InvalidOverride(
             "provider override requires model on a session turn".to_string(),
-        ));
-    }
-    if overrides.clear_provider_params && overrides.provider_params.is_some() {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "clear_provider_params cannot be combined with provider_params".to_string(),
-        ));
-    }
-    if overrides.clear_connection_ref && overrides.connection_ref.is_some() {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "clear_connection_ref cannot be combined with connection_ref".to_string(),
         ));
     }
     if has_build_only_turn_overrides(overrides)
@@ -202,30 +200,27 @@ pub fn build_recovered_session(
     let llm_binding = resolve_resume_llm_binding(
         metadata.provider,
         metadata.self_hosted_server_id.clone(),
-        overrides.model.as_deref(),
-        overrides.provider,
+        turn_model.as_deref(),
+        turn_provider,
     );
     let resume_override_mask = ResumeOverrideMask {
-        model: overrides.model.is_some(),
+        model: turn_model.is_some(),
         provider: llm_binding.provider_overridden,
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
-        provider_params: overrides.provider_params.is_some() || overrides.clear_provider_params,
-        connection_ref: overrides.connection_ref.is_some() || overrides.clear_connection_ref,
+        provider_params: provider_params_override.is_some(),
+        connection_ref: connection_ref_override.is_some(),
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
         override_memory: overrides.override_memory.is_some(),
         override_mob: overrides.override_mob.is_some(),
         preload_skills: overrides.preload_skills.is_some(),
-        keep_alive: overrides.keep_alive.is_some(),
+        keep_alive: keep_alive_override.is_some(),
         comms_name: overrides.comms_name.is_some(),
         peer_meta: overrides.peer_meta.is_some(),
     };
 
-    let model = overrides
-        .model
-        .clone()
-        .unwrap_or_else(|| metadata.model.clone());
+    let model = turn_model.unwrap_or_else(|| metadata.model.clone());
     let system_prompt = if session_allows_first_turn_build_overrides(&session) {
         overrides
             .system_prompt
@@ -235,11 +230,25 @@ pub fn build_recovered_session(
         None
     };
     let max_tokens = overrides.max_tokens.or(Some(metadata.max_tokens));
-    let keep_alive = overrides.keep_alive.unwrap_or(metadata.keep_alive);
+    let keep_alive = match keep_alive_override {
+        Some(TurnMetadataOverride::Set(_)) => true,
+        Some(TurnMetadataOverride::Clear) => false,
+        None => metadata.keep_alive,
+    };
     let recoverable_tool_defs = overrides
         .recoverable_tool_defs
         .clone()
         .unwrap_or_else(|| build_state.recoverable_tool_defs.clone());
+    let provider_params = match provider_params_override {
+        Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
+        Some(TurnMetadataOverride::Clear) => None,
+        None => metadata.provider_params.clone(),
+    };
+    let connection_ref = match connection_ref_override {
+        Some(TurnMetadataOverride::Set(connection_ref)) => Some(connection_ref.clone()),
+        Some(TurnMetadataOverride::Clear) => None,
+        None => metadata.connection_ref.clone(),
+    };
 
     let mut build = SessionBuildOptions {
         provider: llm_binding.provider,
@@ -268,14 +277,7 @@ pub fn build_recovered_session(
             .budget_limits
             .clone()
             .or_else(|| build_state.budget_limits.clone()),
-        provider_params: if overrides.clear_provider_params {
-            None
-        } else {
-            overrides
-                .provider_params
-                .clone()
-                .or_else(|| metadata.provider_params.clone())
-        },
+        provider_params,
         external_tools: context.external_tools,
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
         blob_store_override: None,
@@ -306,17 +308,9 @@ pub fn build_recovered_session(
         instance_id: metadata.instance_id.clone().or(context.instance_id),
         backend: metadata.backend.clone().or(context.backend),
         config_generation: metadata.config_generation.or(context.config_generation),
-        // Phase 3: persisted connection_ref re-entered at resume time so
-        // the binding re-resolves through the same realm entry unless this
-        // recovery request explicitly sets or clears it.
-        connection_ref: if overrides.clear_connection_ref {
-            None
-        } else {
-            overrides
-                .connection_ref
-                .clone()
-                .or_else(|| metadata.connection_ref.clone())
-        },
+        // Phase 3: persisted connection_ref re-enters at resume time unless
+        // this turn's canonical metadata explicitly sets or clears it.
+        connection_ref,
         keep_alive,
         checkpointer: context.checkpointer,
         silent_comms_intents: build_state.silent_comms_intents.clone(),
@@ -361,11 +355,15 @@ pub fn build_recovered_session(
 mod tests {
     use super::*;
 
+    use crate::lifecycle::run_primitive::{
+        KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
+        TurnMetadataOverride,
+    };
     use crate::skills::{SkillName, SourceUuid};
     use crate::time_compat::Duration;
     use crate::{
-        CallTimeoutOverride, HookEntryConfig, HookId, SessionBuildState, SessionDeferredTurnState,
-        SessionMetadata, SessionTooling, ToolCategoryOverride,
+        CallTimeoutOverride, ConnectionRef, HookEntryConfig, HookId, SessionBuildState,
+        SessionDeferredTurnState, SessionMetadata, SessionTooling, ToolCategoryOverride,
     };
     use serde_json::json;
 
@@ -478,14 +476,23 @@ mod tests {
         let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides {
-                model: Some("gpt-5.2".to_string()),
-                provider: Some(Provider::OpenAI),
-                provider_params: Some(json!({ "reasoning": { "effort": "medium" } })),
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("gpt-5.2")),
+                    provider: Some(Provider::OpenAI),
+                    provider_params: Some(TurnMetadataOverride::Set(ProviderParamsOverride {
+                        temperature: Some(0.25),
+                        ..Default::default()
+                    })),
+                    keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                        ttl: Duration::from_secs(60),
+                        policy: KeepAliveMode::Pinned,
+                    })),
+                    ..Default::default()
+                }),
                 max_tokens: Some(2048),
                 system_prompt: Some("override system prompt".to_string()),
                 output_schema: Some(override_schema.clone()),
                 structured_output_retries: Some(9),
-                keep_alive: Some(true),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -504,10 +511,7 @@ mod tests {
 
         let build = recovered.build;
         assert_eq!(build.provider, Some(Provider::OpenAI));
-        assert_eq!(
-            build.provider_params,
-            Some(json!({ "reasoning": { "effort": "medium" } }))
-        );
+        assert_eq!(build.provider_params, Some(json!({ "temperature": 0.25 })));
         assert_eq!(build.structured_output_retries, 9);
         assert_eq!(build.comms_name.as_deref(), Some("peer-a"));
         assert_eq!(build.realm_id.as_deref(), Some("realm-a"));
@@ -570,11 +574,14 @@ mod tests {
     }
 
     #[test]
-    fn build_recovered_session_clear_provider_params_stays_explicit_through_resume_mask() {
+    fn build_recovered_session_provider_params_clear_stays_explicit_through_resume_mask() {
         let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides {
-                clear_provider_params: true,
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    provider_params: Some(TurnMetadataOverride::Clear),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -601,7 +608,10 @@ mod tests {
         let recovered = build_recovered_session(
             session.clone(),
             &SurfaceSessionRecoveryOverrides {
-                connection_ref: Some(override_ref.clone()),
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    connection_ref: Some(TurnMetadataOverride::Set(override_ref.clone())),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -617,7 +627,10 @@ mod tests {
         let recovered = build_recovered_session(
             session,
             &SurfaceSessionRecoveryOverrides {
-                clear_connection_ref: true,
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    connection_ref: Some(TurnMetadataOverride::Clear),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -628,41 +641,6 @@ mod tests {
         assert!(
             recovered.build.resume_override_mask.connection_ref,
             "clear connection_ref must prevent factory metadata rehydration"
-        );
-    }
-
-    #[test]
-    fn build_recovered_session_rejects_invalid_set_and_clear_recovery_overrides() {
-        let provider_error = build_recovered_session(
-            sample_session(),
-            &SurfaceSessionRecoveryOverrides {
-                provider_params: Some(json!({ "temperature": 0.2 })),
-                clear_provider_params: true,
-                ..Default::default()
-            },
-            SurfaceSessionRecoveryContext::default(),
-        )
-        .expect_err("set plus clear provider params must be rejected");
-        assert!(
-            provider_error.to_string().contains("clear_provider_params"),
-            "unexpected error: {provider_error}"
-        );
-
-        let connection_error = build_recovered_session(
-            sample_session(),
-            &SurfaceSessionRecoveryOverrides {
-                connection_ref: Some(connection_ref("override", "default")),
-                clear_connection_ref: true,
-                ..Default::default()
-            },
-            SurfaceSessionRecoveryContext::default(),
-        )
-        .expect_err("set plus clear connection_ref must be rejected");
-        assert!(
-            connection_error
-                .to_string()
-                .contains("clear_connection_ref"),
-            "unexpected error: {connection_error}"
         );
     }
 
@@ -790,7 +768,10 @@ mod tests {
         let error = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides {
-                provider: Some(Provider::OpenAI),
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    provider: Some(Provider::OpenAI),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -838,7 +819,10 @@ mod tests {
         let recovered = build_recovered_session(
             session,
             &SurfaceSessionRecoveryOverrides {
-                model: Some("gemma-4-31b".to_string()),
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    model: Some(ModelId::new("gemma-4-31b")),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -926,18 +910,51 @@ mod tests {
             "empty overrides should stay on the live path"
         );
 
-        overrides.keep_alive = Some(true);
+        overrides.turn_metadata = Some(RuntimeTurnMetadata {
+            keep_alive: Some(TurnMetadataOverride::Set(KeepAlivePolicy {
+                ttl: Duration::from_secs(60),
+                policy: KeepAliveMode::Pinned,
+            })),
+            ..Default::default()
+        });
         assert!(
             !has_materialization_overrides(&overrides),
             "keep_alive can be updated through the live path"
         );
 
-        overrides.keep_alive = None;
+        overrides.turn_metadata = None;
         overrides.override_builtins = Some(false);
         assert!(
             has_materialization_overrides(&overrides),
             "tooling overrides require recovery/materialization"
         );
+    }
+
+    #[test]
+    fn recovery_overrides_exposes_single_turn_metadata_carrier() {
+        let source = include_str!("session_recovery.rs");
+        let split_provider_params = concat!("pub ", "provider", "_params:");
+        let split_provider_clear = concat!("clear_", "provider", "_params");
+        let split_connection_ref = concat!("pub ", "connection", "_ref:");
+        let split_connection_clear = concat!("clear_", "connection", "_ref");
+        let canonical_turn_metadata =
+            concat!("pub ", "turn", "_metadata: Option<RuntimeTurnMetadata>");
+
+        assert!(
+            source.contains(canonical_turn_metadata),
+            "surface recovery overrides must carry runtime turn metadata as one field"
+        );
+        for split_field in [
+            split_provider_params,
+            split_provider_clear,
+            split_connection_ref,
+            split_connection_clear,
+        ] {
+            assert!(
+                !source.contains(split_field),
+                "surface recovery overrides must not expose split turn metadata carrier {split_field}"
+            );
+        }
     }
 
     #[test]

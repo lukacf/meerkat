@@ -267,6 +267,7 @@ pub async fn hydrate_input_images(
 
 /// User/operator prompt input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PromptInput {
     pub header: InputHeader,
     /// The prompt text.
@@ -444,6 +445,7 @@ pub fn peer_response_terminal_input(
 
 /// Flow step input from mob orchestration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowStepInput {
     pub header: InputHeader,
     /// Flow step identifier.
@@ -883,6 +885,43 @@ mod tests {
         assert_eq!(json["input_type"], "prompt");
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::Prompt(_)));
+    }
+
+    #[test]
+    fn prompt_input_rejects_split_turn_metadata_fields() {
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: "hello".into(),
+            blocks: None,
+            turn_metadata: Some(RuntimeTurnMetadata {
+                model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                    "metadata-model",
+                )),
+                ..Default::default()
+            }),
+        });
+        let mut json = serde_json::to_value(&input).unwrap();
+        let object = json
+            .as_object_mut()
+            .expect("prompt input serializes as an object");
+        object.insert(
+            "model".to_string(),
+            serde_json::Value::String("retired-split-model".to_string()),
+        );
+        object.insert(
+            "provider_params".to_string(),
+            serde_json::json!({ "temperature": 0.9 }),
+        );
+
+        let err = serde_json::from_value::<Input>(json)
+            .expect_err("runtime prompt input must reject split metadata fields");
+        let message = err.to_string();
+        assert!(
+            message.contains("model")
+                || message.contains("provider_params")
+                || message.contains("unknown field"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

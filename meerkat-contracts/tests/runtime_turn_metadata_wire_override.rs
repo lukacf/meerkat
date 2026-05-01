@@ -91,7 +91,10 @@ fn wire_metadata_legacy_split_clear_payloads_fail_closed() {
     );
 
     let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
-        "provider_params": { "temperature": 0.2 },
+        "provider_params": {
+            "action": "set",
+            "value": { "temperature": 0.2 }
+        },
         "clear_provider_params": true,
     }))
     .expect_err("provider_params set plus legacy clear must fail");
@@ -102,8 +105,11 @@ fn wire_metadata_legacy_split_clear_payloads_fail_closed() {
 
     let err = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
         "connection_ref": {
-            "realm": "dev",
-            "binding": "default",
+            "action": "set",
+            "value": {
+                "realm": "dev",
+                "binding": "default",
+            }
         },
         "clear_connection_ref": true,
     }))
@@ -152,6 +158,138 @@ fn wire_metadata_malformed_tagged_override_payloads_fail_at_boundary() {
     }))
     .expect_err("clear override with value must fail");
     assert!(err.to_string().contains("clear"), "unexpected error: {err}");
+}
+
+#[test]
+fn wire_metadata_untagged_overrides_fail_closed() {
+    for (field, value) in [
+        (
+            "provider_params",
+            serde_json::json!({
+                "temperature": 0.2,
+            }),
+        ),
+        (
+            "connection_ref",
+            serde_json::json!({
+                "realm": "dev",
+                "binding": "default",
+            }),
+        ),
+        (
+            "keep_alive",
+            serde_json::json!({
+                "ttl_secs": 30,
+                "policy": "pinned",
+            }),
+        ),
+    ] {
+        let result = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            field: value,
+        }));
+        assert!(
+            result.is_err(),
+            "missing action must fail closed for turn_metadata.{field}"
+        );
+        let err = result.expect_err("result checked as error");
+        let message = err.to_string();
+        assert!(
+            message.contains("action") || message.contains("tag"),
+            "unexpected error for {field}: {message}"
+        );
+    }
+}
+
+#[test]
+fn wire_metadata_nested_unknown_fields_fail_closed() {
+    for (field, value, unknown) in [
+        (
+            "additional_instructions",
+            serde_json::json!([
+                {
+                    "kind": "user",
+                    "body": "stay concise",
+                    "role": "legacy-user",
+                }
+            ]),
+            "role",
+        ),
+        (
+            "provider_params",
+            serde_json::json!({
+                "action": "set",
+                "value": {
+                    "temperature": 0.2,
+                    "temperatre": 0.7,
+                }
+            }),
+            "temperatre",
+        ),
+        (
+            "connection_ref",
+            serde_json::json!({
+                "action": "set",
+                "value": {
+                    "realm": "dev",
+                    "binding": "default",
+                    "binding_id": "legacy-default",
+                }
+            }),
+            "binding_id",
+        ),
+        (
+            "keep_alive",
+            serde_json::json!({
+                "action": "set",
+                "value": {
+                    "ttl_secs": 30,
+                    "policy": "pinned",
+                    "ttl": 30,
+                }
+            }),
+            "ttl",
+        ),
+    ] {
+        let result = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            field: value,
+        }));
+        assert!(
+            result.is_err(),
+            "unknown nested field {unknown} must fail closed for turn_metadata.{field}"
+        );
+        let err = result.expect_err("result checked as error");
+        let message = err.to_string();
+        assert!(
+            message.contains(unknown) || message.contains("unknown field"),
+            "unexpected error for {field}: {message}"
+        );
+    }
+}
+
+#[cfg(feature = "schema")]
+mod schema_emission {
+    use super::*;
+
+    fn schema_json<T: schemars::JsonSchema>() -> serde_json::Value {
+        serde_json::to_value(schemars::schema_for!(T)).unwrap()
+    }
+
+    #[test]
+    fn nested_runtime_metadata_schemas_reject_additional_properties() {
+        for (name, schema) in [
+            (
+                "WireProviderParamsOverride",
+                schema_json::<WireProviderParamsOverride>(),
+            ),
+            ("WireConnectionRef", schema_json::<WireConnectionRef>()),
+        ] {
+            assert_eq!(
+                schema.pointer("/additionalProperties"),
+                Some(&serde_json::Value::Bool(false)),
+                "{name} schema must be closed"
+            );
+        }
+    }
 }
 
 #[test]

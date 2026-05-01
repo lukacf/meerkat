@@ -132,6 +132,7 @@ impl std::fmt::Display for ModelId {
 
 /// Keep-alive policy for a materialized session during a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KeepAlivePolicy {
     #[serde(with = "duration_seconds")]
     pub ttl: std::time::Duration,
@@ -148,6 +149,7 @@ pub enum KeepAliveMode {
 
 /// Single additional instruction attached to a turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TurnInstruction {
     pub kind: TurnInstructionKind,
     pub body: String,
@@ -878,6 +880,7 @@ pub enum ReasoningMode {
 /// that is fundamentally per-binding (not per-turn) lives on the auth /
 /// backend profile and never traverses this seam.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderParamsOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -1276,9 +1279,9 @@ where
         let raw = serde_json::Value::deserialize(deserializer)?;
         if let Some(object) = raw.as_object() {
             let Some(action_value) = object.get("action") else {
-                return serde_json::from_value(raw)
-                    .map(Self::Set)
-                    .map_err(de::Error::custom);
+                return Err(de::Error::custom(
+                    "turn metadata override is missing action",
+                ));
             };
             let action = action_value.as_str().ok_or_else(|| {
                 de::Error::custom("turn metadata override action must be a string")
@@ -1304,9 +1307,9 @@ where
             };
         }
 
-        serde_json::from_value(raw)
-            .map(Self::Set)
-            .map_err(de::Error::custom)
+        Err(de::Error::custom(
+            "turn metadata override must be an object tagged with action",
+        ))
     }
 }
 

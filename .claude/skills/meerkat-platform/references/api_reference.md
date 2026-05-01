@@ -194,7 +194,7 @@ Core methods:
 - `session/history`
 - `blob/get` — fetch generated image and artifact payload bytes by blob id
 - `session/archive`
-- `turn/start` — accepts `model`, `provider`, `provider_params`, `max_tokens` for mid-session hot-swap
+- `turn/start` — accepts per-turn hot-swap fields through `turn_metadata.model`, `turn_metadata.provider`, and tagged `turn_metadata.provider_params`
 - `turn/interrupt`
 - `config/get`
 - `config/set`

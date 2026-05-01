@@ -44,8 +44,8 @@ use chrono::{DateTime, Utc};
 use futures::stream::Stream;
 use meerkat::surface::{
     RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
-    SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
-    build_recovered_session, noop_request_action, request_action,
+    SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
+    SurfaceSessionRecoveryOverrides, build_recovered_session, noop_request_action, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -718,7 +718,7 @@ async fn apply_runtime_turn(
             let recovered = build_recovered_session(
                 session,
                 &SurfaceSessionRecoveryOverrides {
-                    keep_alive: Some(keep_alive),
+                    turn_metadata: primitive.turn_metadata().cloned(),
                     ..Default::default()
                 },
                 SurfaceSessionRecoveryContext {
@@ -1011,6 +1011,13 @@ fn rest_continue_requires_rebuild(
     })
 }
 
+fn surface_recovery_error_to_api(error: SurfaceSessionRecoveryError) -> ApiError {
+    match error {
+        SurfaceSessionRecoveryError::InvalidOverride(message) => ApiError::BadRequest(message),
+        other => ApiError::Internal(other.to_string()),
+    }
+}
+
 fn rest_turn_keep_alive_override(
     turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
 ) -> Result<Option<bool>, ApiError> {
@@ -1020,28 +1027,6 @@ fn rest_turn_keep_alive_override(
         Some(TurnMetadataOverride::Set(_)) => resolve_keep_alive(Some(true)),
         Some(TurnMetadataOverride::Clear) => resolve_keep_alive(Some(false)),
         None => Ok(None),
-    }
-}
-
-fn rest_turn_provider_params(
-    turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-) -> Option<Value> {
-    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
-
-    match turn_metadata.and_then(|metadata| metadata.provider_params.as_ref()) {
-        Some(TurnMetadataOverride::Set(params)) => Some(params.to_legacy_provider_value()),
-        Some(TurnMetadataOverride::Clear) | None => None,
-    }
-}
-
-fn rest_turn_connection_ref(
-    turn_metadata: Option<&meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata>,
-) -> Option<meerkat_core::ConnectionRef> {
-    use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
-
-    match turn_metadata.and_then(|metadata| metadata.connection_ref.as_ref()) {
-        Some(TurnMetadataOverride::Set(connection_ref)) => Some(connection_ref.clone()),
-        Some(TurnMetadataOverride::Clear) | None => None,
     }
 }
 
@@ -3585,98 +3570,40 @@ async fn continue_session_inner(
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message)));
             }
         };
-        let turn_model = turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.model.as_ref())
-            .map(ToString::to_string);
-        let turn_provider = turn_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.provider);
-        let turn_provider_params = rest_turn_provider_params(turn_metadata.as_ref());
-        let turn_connection_ref = rest_turn_connection_ref(turn_metadata.as_ref());
-        let provider_params_overridden = turn_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.provider_params.is_some());
-        let connection_ref_overridden = turn_metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.connection_ref.is_some());
-        let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
-            session
-                .session_metadata()
-                .map(|meta| meta.provider)
-                .unwrap_or(Provider::Other),
-            session
-                .session_metadata()
-                .and_then(|meta| meta.self_hosted_server_id),
-            turn_model.as_deref(),
-            turn_provider,
-        );
-        let mut build = SessionBuildOptions {
-            provider: llm_binding.provider,
-            self_hosted_server_id: llm_binding.self_hosted_server_id,
-            output_schema: None,
-            structured_output_retries: default_structured_output_retries(),
-            hooks_override: HookRunOverrides::default(),
-            comms_name: None,
-            peer_meta: None,
-            resume_session: Some(session),
-            budget_limits: None,
-            provider_params: turn_provider_params,
-            external_tools: None,
-            recoverable_tool_defs: None,
-            llm_client_override: state
-                .llm_client_override
-                .clone()
-                .map(encode_llm_client_override_for_service),
-            override_builtins: ToolCategoryOverride::Inherit,
-            override_shell: ToolCategoryOverride::Inherit,
-            override_memory: ToolCategoryOverride::Inherit,
-            override_schedule: ToolCategoryOverride::Inherit,
-            override_mob: ToolCategoryOverride::Inherit,
-            schedule_tools: None,
-            mob_tool_authority_context: None,
-            preload_skills: None,
-            realm_id: Some(state.realm.to_string()),
-            instance_id: state.instance_id.clone(),
-            backend: Some(state.backend.clone()),
-            config_generation: state.config_runtime.get().await.ok().map(|s| s.generation),
-            connection_ref: turn_connection_ref,
-            keep_alive,
-            checkpointer: None,
-            silent_comms_intents: Vec::new(),
-            max_inline_peer_notifications: None,
-            app_context: None,
-            additional_instructions: None,
-            shell_env: None,
-            resume_override_mask: ResumeOverrideMask {
-                model: turn_model.is_some(),
-                provider: llm_binding.provider_overridden,
-                provider_params: provider_params_overridden,
-                connection_ref: connection_ref_overridden,
-                keep_alive: keep_alive_override.is_some(),
+        let current_generation = state.config_runtime.get().await.ok().map(|s| s.generation);
+        let recovered = match build_recovered_session(
+            session,
+            &SurfaceSessionRecoveryOverrides {
+                turn_metadata: turn_metadata.clone(),
                 ..Default::default()
             },
-            call_timeout_override: Default::default(),
-            blob_store_override: None,
-            mob_tools: None,
-            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            SurfaceSessionRecoveryContext {
+                llm_client_override: state
+                    .llm_client_override
+                    .clone()
+                    .map(encode_llm_client_override_for_service),
+                external_tools: None,
+                checkpointer: None,
+                runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                require_runtime_build_mode: true,
+                realm_id: Some(state.realm.to_string()),
+                instance_id: state.instance_id.clone(),
+                backend: Some(state.backend.clone()),
+                config_generation: current_generation,
+            },
+        ) {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return RequestTerminal::RespondWithoutPublish(Err(surface_recovery_error_to_api(
+                    error,
+                )));
+            }
         };
-        build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
-        let create_req = SvcCreateSessionRequest {
-            model: turn_model
-                .clone()
-                .unwrap_or_else(|| state.default_model.to_string()),
-            prompt: turn_prompt.clone(),
-            render_metadata: None,
-            system_prompt: None,
-            max_tokens: Some(state.max_tokens),
-            event_tx: Some(caller_event_tx.clone()),
-            skill_references: None,
-            initial_turn: InitialTurnPolicy::Defer,
-            deferred_prompt_policy: DeferredPromptPolicy::Discard,
-            build: Some(build),
-            labels: None,
-        };
+        let mut create_req = recovered.into_deferred_create_request();
+        create_req.prompt = turn_prompt.clone();
+        create_req.event_tx = Some(caller_event_tx.clone());
         let create_provider = create_req.build.as_ref().and_then(|build| build.provider);
         let validation_identity = match resolve_validation_identity(
             &state.config_runtime,
@@ -6223,6 +6150,23 @@ mod tests {
                 || message.contains("unknown field"),
             "unexpected deserialize error: {message}"
         );
+    }
+
+    #[test]
+    fn test_rest_continue_does_not_project_turn_metadata_into_split_recovery_fields() {
+        let source = include_str!("lib.rs");
+        for split_projection in [
+            concat!("rest_", "turn", "_provider", "_params"),
+            concat!("rest_", "turn", "_connection", "_ref"),
+            concat!("turn_", "provider", "_params"),
+            concat!("provider", "_params", "_overridden"),
+            concat!("connection", "_ref", "_overridden"),
+        ] {
+            assert!(
+                !source.contains(split_projection),
+                "REST continue must pass turn_metadata as one carrier, not rebuild split field {split_projection}"
+            );
+        }
     }
 
     #[test]

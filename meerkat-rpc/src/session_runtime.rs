@@ -34,8 +34,8 @@ use meerkat_core::ToolConfigChangedPayload;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive, RuntimeTurnMetadata,
-    TurnMetadataOverride,
+    ConversationContextAppend, CoreRenderable, KeepAliveMode, KeepAlivePolicy, RunApplyBoundary,
+    RunPrimitive, RuntimeTurnMetadata, TurnMetadataOverride,
 };
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
@@ -761,6 +761,22 @@ fn approval_service_from_persistence(
 }
 
 impl SessionRuntime {
+    const DEFAULT_TURN_KEEP_ALIVE_TTL_SECS: u64 = 30;
+
+    fn turn_metadata_for_keep_alive(keep_alive: bool) -> RuntimeTurnMetadata {
+        RuntimeTurnMetadata {
+            keep_alive: Some(if keep_alive {
+                TurnMetadataOverride::Set(KeepAlivePolicy {
+                    ttl: std::time::Duration::from_secs(Self::DEFAULT_TURN_KEEP_ALIVE_TTL_SECS),
+                    policy: KeepAliveMode::Pinned,
+                })
+            } else {
+                TurnMetadataOverride::Clear
+            }),
+            ..Default::default()
+        }
+    }
+
     fn turn_metadata_keep_alive_override(metadata: Option<&RuntimeTurnMetadata>) -> Option<bool> {
         match metadata.and_then(|metadata| metadata.keep_alive.as_ref()) {
             Some(TurnMetadataOverride::Set(_)) => Some(true),
@@ -903,7 +919,7 @@ impl SessionRuntime {
                     session_id,
                     stored_session,
                     SurfaceSessionRecoveryOverrides {
-                        keep_alive: Some(true),
+                        turn_metadata: Some(Self::turn_metadata_for_keep_alive(true)),
                         ..Default::default()
                     },
                 )
@@ -1219,29 +1235,11 @@ impl SessionRuntime {
     fn recovery_overrides_from_turn(
         &self,
         turn_metadata: Option<&RuntimeTurnMetadata>,
-        keep_alive: bool,
-    ) -> Result<SurfaceSessionRecoveryOverrides, RpcError> {
-        Ok(SurfaceSessionRecoveryOverrides {
-            model: turn_metadata
-                .and_then(|metadata| metadata.model.as_ref().map(ToString::to_string)),
-            provider: turn_metadata.and_then(|metadata| metadata.provider),
-            provider_params: turn_metadata.and_then(Self::turn_metadata_provider_params),
-            clear_provider_params: turn_metadata.is_some_and(|metadata| {
-                matches!(
-                    metadata.provider_params.as_ref(),
-                    Some(TurnMetadataOverride::Clear)
-                )
-            }),
-            connection_ref: turn_metadata.and_then(Self::turn_metadata_connection_ref),
-            clear_connection_ref: turn_metadata.is_some_and(|metadata| {
-                matches!(
-                    metadata.connection_ref.as_ref(),
-                    Some(TurnMetadataOverride::Clear)
-                )
-            }),
-            keep_alive: Some(keep_alive),
+    ) -> SurfaceSessionRecoveryOverrides {
+        SurfaceSessionRecoveryOverrides {
+            turn_metadata: turn_metadata.cloned(),
             ..Default::default()
-        })
+        }
     }
 
     fn recovery_external_tools(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
@@ -2763,7 +2761,7 @@ impl SessionRuntime {
                 message: format!("session not found: {session_id}"),
                 data: None,
             })?;
-        let recovery_overrides = self.recovery_overrides_from_turn(turn_metadata, keep_alive)?;
+        let recovery_overrides = self.recovery_overrides_from_turn(turn_metadata);
         let create_request = self
             .recovered_create_request(session_id, stored_session, recovery_overrides)
             .await?;
@@ -3201,7 +3199,6 @@ impl SessionRuntime {
                 session_id,
                 turn_prompt,
                 event_tx,
-                keep_alive,
                 turn_metadata,
             ))
             .await;
@@ -3256,7 +3253,6 @@ impl SessionRuntime {
                     session_id,
                     turn_prompt,
                     event_tx,
-                    keep_alive,
                     turn_metadata,
                 ))
                 .await
@@ -3323,7 +3319,6 @@ impl SessionRuntime {
         session_id: &SessionId,
         prompt: ContentInput,
         event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
-        keep_alive: bool,
         turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Result<RunResult, RpcError> {
         let loaded_session = self.load_persisted_session(session_id).await?;
@@ -3343,8 +3338,7 @@ impl SessionRuntime {
             });
         }
 
-        let recovery_overrides =
-            self.recovery_overrides_from_turn(turn_metadata.as_ref(), keep_alive)?;
+        let recovery_overrides = self.recovery_overrides_from_turn(turn_metadata.as_ref());
         let create_request = self
             .recovered_create_request(session_id, session, recovery_overrides)
             .await?;
@@ -5012,7 +5006,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
-            .try_recover_persisted_session(&session_id, "Recover".into(), event_tx, false, None)
+            .try_recover_persisted_session(&session_id, "Recover".into(), event_tx, None)
             .await
             .expect("try_recover_persisted_session");
 
@@ -5267,7 +5261,7 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
-            .try_recover_persisted_session(&session_id, "Recover".into(), event_tx, false, None)
+            .try_recover_persisted_session(&session_id, "Recover".into(), event_tx, None)
             .await
             .expect("try_recover_persisted_session");
 
@@ -8037,7 +8031,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_overrides_from_turn_preserve_clear_and_connection_intent() {
+    fn recovery_overrides_from_turn_preserves_single_metadata_carrier() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let connection_ref = test_connection_ref("dev", "default");
@@ -8047,24 +8041,16 @@ mod tests {
             ..Default::default()
         };
 
-        let recovered = runtime
-            .recovery_overrides_from_turn(Some(&turn_metadata), false)
-            .expect("valid recovery overrides");
+        let recovered = runtime.recovery_overrides_from_turn(Some(&turn_metadata));
 
-        assert!(recovered.clear_provider_params);
-        assert_eq!(recovered.provider_params, None);
-        assert_eq!(recovered.connection_ref, Some(connection_ref));
-        assert!(!recovered.clear_connection_ref);
+        assert_eq!(recovered.turn_metadata, Some(turn_metadata));
 
         let clear_connection = RuntimeTurnMetadata {
             connection_ref: Some(TurnMetadataOverride::Clear),
             ..Default::default()
         };
-        let recovered = runtime
-            .recovery_overrides_from_turn(Some(&clear_connection), false)
-            .expect("valid clear connection recovery override");
-        assert!(recovered.clear_connection_ref);
-        assert_eq!(recovered.connection_ref, None);
+        let recovered = runtime.recovery_overrides_from_turn(Some(&clear_connection));
+        assert_eq!(recovered.turn_metadata, Some(clear_connection));
     }
 
     // -----------------------------------------------------------------------
@@ -8609,7 +8595,7 @@ mod tests {
 
         let (event_tx, _rx) = mpsc::channel(100);
         let recovered = runtime
-            .try_recover_persisted_session(&session_id, "recover".into(), event_tx, false, None)
+            .try_recover_persisted_session(&session_id, "recover".into(), event_tx, None)
             .await;
         assert!(
             recovered.is_ok(),

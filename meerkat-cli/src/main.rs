@@ -6425,14 +6425,42 @@ async fn resume_session_with_llm_override(
 
         let hooks_override =
             (hooks_override != HookRunOverrides::default()).then_some(hooks_override);
+        let provider_override = provider.map(Provider::as_core);
+        let provider_for_params = provider_override.unwrap_or(stored_metadata.provider);
+        let turn_metadata =
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                model: model_override
+                    .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
+                provider: provider_override,
+                provider_params: merged_provider_params.map(|params| {
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::from_legacy_provider_value(
+                            provider_for_params.as_str(),
+                            &params,
+                        ),
+                    )
+                }),
+                keep_alive: keep_alive_override.map(|enabled| {
+                    if enabled {
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                            meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
+                                ttl: std::time::Duration::from_secs(30),
+                                policy:
+                                    meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned,
+                            },
+                        )
+                    } else {
+                        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear
+                    }
+                }),
+                ..Default::default()
+            };
+        let turn_metadata = (!turn_metadata.is_empty()).then_some(turn_metadata);
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
-            model: model_override,
-            provider: provider.map(Provider::as_core),
-            provider_params: merged_provider_params,
+            turn_metadata,
             max_tokens,
             system_prompt,
             output_schema: parsed_output_schema,
-            keep_alive: keep_alive_override,
             hooks_override,
             budget_limits: budget_override,
             override_builtins: explicit_tooling.map(|resolved| resolved.builtins),

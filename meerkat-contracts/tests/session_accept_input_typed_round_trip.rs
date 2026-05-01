@@ -9,8 +9,9 @@
 //! metadata + idempotency round-trip intact.
 
 use meerkat_contracts::wire::runtime::{
-    SessionAcceptInputParams, WireConversationAppend, WireConversationAppendRole,
-    WireConversationContextAppend, WireRunPrimitive, WireRuntimeTurnMetadata, WireStagedRunInput,
+    RuntimeAcceptParams, SessionAcceptInputParams, WireConversationAppend,
+    WireConversationAppendRole, WireConversationContextAppend, WireRunPrimitive,
+    WireRuntimeTurnMetadata, WireStagedRunInput,
 };
 
 #[test]
@@ -69,4 +70,64 @@ fn staged_input_round_trip_with_turn_metadata() {
     assert!(json.contains("\"boundary\":42"));
     let back: SessionAcceptInputParams = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back, params);
+}
+
+#[test]
+fn session_accept_input_rejects_retired_top_level_turn_metadata() {
+    let err = serde_json::from_value::<SessionAcceptInputParams>(serde_json::json!({
+        "session_id": "session-staged",
+        "primitive": {
+            "kind": "staged_input",
+            "contributing_input_ids": [],
+            "appends": [],
+            "context_appends": [],
+            "turn_metadata": {
+                "model": "metadata-model"
+            }
+        },
+        "turn_metadata": {
+            "model": "retired-top-level-model"
+        }
+    }))
+    .expect_err("session/accept_input must not accept a second top-level metadata carrier");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("turn_metadata") || message.contains("unknown field"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn runtime_accept_params_rejects_retired_top_level_turn_metadata() {
+    let err = serde_json::from_value::<RuntimeAcceptParams>(serde_json::json!({
+        "session_id": "session-staged",
+        "input": {
+            "input_type": "prompt",
+            "header": {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "timestamp": "2026-05-01T00:00:00Z",
+                "source": "operator",
+                "durability": "durable",
+                "visibility": {
+                    "transcript_eligible": true,
+                    "operator_eligible": true
+                }
+            },
+            "text": "hello",
+            "turn_metadata": {
+                "model": "metadata-model"
+            }
+        },
+        "turn_metadata": {
+            "model": "retired-top-level-model"
+        }
+    }))
+    .expect_err("runtime/session_submit must not accept top-level turn_metadata");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("turn_metadata") || message.contains("unknown field"),
+        "unexpected error: {message}"
+    );
 }

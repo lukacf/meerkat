@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 /// the colon-joined form cannot travel across wire boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct WireConnectionRef {
     pub realm: meerkat_core::connection::RealmId,
     pub binding: meerkat_core::connection::BindingId,

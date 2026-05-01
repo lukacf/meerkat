@@ -538,6 +538,7 @@
         "type": "string"
       },
       "WireConnectionRef": {
+        "additionalProperties": false,
         "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
           "binding": {
@@ -2382,6 +2383,7 @@
         "type": "string"
       },
       "WireProviderParamsOverride": {
+        "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
         "properties": {
           "max_output_tokens": {
@@ -4367,6 +4369,7 @@
         "type": "string"
       },
       "WireProviderParamsOverride": {
+        "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
         "properties": {
           "max_output_tokens": {
@@ -5129,6 +5132,7 @@
         "type": "string"
       },
       "WireProviderParamsOverride": {
+        "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
         "properties": {
           "max_output_tokens": {
@@ -6168,6 +6172,7 @@
         "type": "string"
       },
       "WireConnectionRef": {
+        "additionalProperties": false,
         "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
           "binding": {
@@ -6445,6 +6450,7 @@
         ]
       },
       "WireConnectionRef": {
+        "additionalProperties": false,
         "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
           "binding": {
@@ -7640,6 +7646,7 @@
         ]
       },
       "WireConnectionRef": {
+        "additionalProperties": false,
         "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
         "properties": {
           "binding": {
@@ -7858,6 +7865,7 @@
         "type": "string"
       },
       "WireKeepAlivePolicy": {
+        "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::KeepAlivePolicy`].",
         "properties": {
           "policy": {
@@ -7883,6 +7891,7 @@
         "type": "string"
       },
       "WireProviderParamsOverride": {
+        "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
         "properties": {
           "max_output_tokens": {
@@ -8394,6 +8403,7 @@
         "type": "object"
       },
       "WireTurnInstruction": {
+        "additionalProperties": false,
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstruction`].",
         "properties": {
           "body": {
@@ -9090,6 +9100,7 @@
   },
   "RuntimeAcceptParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
     "description": "Request payload for `runtime/session_submit`.\n\nThe runtime input body is owned by `meerkat-runtime`; contracts cannot\ndepend on the runtime crate without inverting the dependency graph. The\nenvelope is canonical here and the runtime crate remains the typed\nauthority over the `input` discriminator and variant body.",
     "properties": {
       "input": true,

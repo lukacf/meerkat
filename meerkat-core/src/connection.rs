@@ -105,6 +105,7 @@ slug_newtype!(
 /// and constructed field-by-field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct ConnectionRef {
     pub realm: RealmId,
     pub binding: BindingId,

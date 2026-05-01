@@ -41,6 +41,7 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -73,6 +74,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -121,6 +123,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/connection_ref_no_string_form.rs",
@@ -171,6 +174,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/fork_at_rotates_session_id.rs",
@@ -223,6 +227,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/hooks_behavior.rs",
@@ -273,6 +278,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/hooks_contracts.rs",
@@ -329,6 +335,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/image_generation_contracts.rs",
@@ -379,6 +386,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/ops_lifecycle_integration.rs",
@@ -428,6 +436,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/rct_contracts.rs",
@@ -480,6 +489,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/realm_connection_config.rs",
@@ -530,6 +540,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/runtime_turn_metadata_typed_round_trip.rs",
@@ -580,6 +591,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/source_identity_resolve_enforces_lifecycle.rs",
@@ -630,6 +642,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/config_template.toml",
+        "src/session_recovery.rs",
     ],
     srcs = [
         "tests/tool_notice_projection.rs",

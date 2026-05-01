@@ -106,7 +106,7 @@ type AgentFactoryBuildFuture = Pin<
 >;
 
 #[allow(improper_ctypes_definitions, unsafe_code)]
-#[unsafe(export_name = "__meerkat_core_agent_factory_policy_build")]
+#[unsafe(export_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL"))]
 pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
     builder: AgentBuilder,
     client: Arc<dyn AgentLlmClient>,

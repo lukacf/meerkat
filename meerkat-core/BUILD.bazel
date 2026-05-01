@@ -44,6 +44,9 @@ rust_library(
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
+    rustc_env = {
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
+    },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-core",
         proc_macro = True,
@@ -72,6 +75,9 @@ rust_library(
     visibility = [
         "//:__subpackages__",
     ],
+    rustc_env = {
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
+    },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-core",
         proc_macro = True,
@@ -106,6 +112,7 @@ rust_test(
     visibility = ["//visibility:public"],
     rustc_env = {
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -157,6 +164,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "connection_ref_no_string_form",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -207,6 +215,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "fork_at_rotates_session_id",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -259,6 +268,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "hooks_behavior",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -309,6 +319,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "hooks_contracts",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -365,6 +376,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "image_generation_contracts",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -415,6 +427,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "ops_lifecycle_integration",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "integration",
@@ -464,6 +477,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "rct_contracts",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -516,6 +530,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "realm_connection_config",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -566,6 +581,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "runtime_turn_metadata_typed_round_trip",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -616,6 +632,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "source_identity_resolve_enforces_lifecycle",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",
@@ -666,6 +683,7 @@ rust_test(
     rustc_env = {
         "CARGO_BIN_NAME": "tool_notice_projection",
         "CARGO_MANIFEST_DIR": "./meerkat-core",
+        "MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL": "__meerkat_agent_factory_policy_bridge_bazel_3ec40ef0883b45cfbfc8f3e79c3b1886",
     },
     tags = [
         "fast",

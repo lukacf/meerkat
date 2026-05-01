@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::executor::block_on;
+use futures::future::BoxFuture;
 use meerkat_core::types::{AssistantBlock, StopReason, Usage};
 use meerkat_core::{
     AgentBuilder, AgentError, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
@@ -68,6 +69,25 @@ impl AgentSessionStore for NoopStore {
     }
 }
 
+type FactoryPolicyBuildFuture = BoxFuture<
+    'static,
+    Result<
+        meerkat_core::Agent<dyn AgentLlmClient, dyn AgentToolDispatcher, dyn AgentSessionStore>,
+        meerkat_core::AgentBuildPolicyError,
+    >,
+>;
+
+#[allow(improper_ctypes_definitions)]
+unsafe extern "Rust" {
+    #[link_name = "__meerkat_core_agent_factory_policy_build"]
+    fn exported_agent_factory_policy_build(
+        builder: AgentBuilder,
+        client: Arc<dyn AgentLlmClient>,
+        tools: Arc<dyn AgentToolDispatcher>,
+        store: Arc<dyn AgentSessionStore>,
+    ) -> FactoryPolicyBuildFuture;
+}
+
 fn forged_factory_policy_session() -> Session {
     let mut session = Session::new();
     session
@@ -108,7 +128,7 @@ fn main() {
         // unsafe code and synthesizing every public prerequisite. The core bridge
         // must still reject the caller before constructing an agent.
         unsafe {
-            meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
+            exported_agent_factory_policy_build(
                 builder,
                 Arc::new(NoopClient),
                 Arc::new(NoopTools),

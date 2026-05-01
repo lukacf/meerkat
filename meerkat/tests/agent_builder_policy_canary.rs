@@ -412,7 +412,7 @@ meerkat-core = {{ path = "{}" }}
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
-        .arg("check")
+        .arg("run")
         .arg("--quiet")
         .arg("--manifest-path")
         .arg(temp.path().join("Cargo.toml"))
@@ -426,9 +426,9 @@ meerkat-core = {{ path = "{}" }}
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("build_agent_after_factory_policy")
-            || stderr.contains("__agent_factory_build_bridge")
-            || stderr.contains("not found"),
+        stderr.contains("__meerkat_core_agent_factory_policy_build")
+            || stderr.contains("exported_agent_factory_policy_build")
+            || stderr.contains("link_name"),
         "downstream unsafe finalizer fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -895,7 +895,8 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("validate_factory_policy()?")
-            && builder.contains("__meerkat_core_agent_factory_policy_build")
+            && builder.contains("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")
+            && !builder.contains("__meerkat_core_agent_factory_policy_build")
             && builder.contains("pub(crate) unsafe extern \"Rust\" fn")
             && !builder.contains("is_canonical_factory_authority()")
             && !builder.contains("AgentBuildPolicyError::InvalidBuildAuthority")

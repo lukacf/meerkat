@@ -33,7 +33,7 @@ type CoreAgentFactoryBuildFuture =
 
 #[allow(improper_ctypes_definitions, unsafe_code)]
 unsafe extern "Rust" {
-    #[link_name = "__meerkat_core_agent_factory_policy_build"]
+    #[link_name = env!("MEERKAT_AGENT_FACTORY_POLICY_BUILD_SYMBOL")]
     fn core_agent_factory_policy_build(
         builder: AgentBuilder,
         client: Arc<dyn AgentLlmClient>,

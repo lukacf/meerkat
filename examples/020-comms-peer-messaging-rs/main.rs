@@ -321,14 +321,18 @@ rkat run --comms-name "agent-a" --keep-alive "Send hello to agent-b"
 result = await client.create_session(
     prompt="Hello peers!",
     comms_name="agent-a",
-    keep_alive=True,   # Stay alive for incoming messages
+    turn_metadata={
+        "keep_alive": {
+            "action": "set",
+            "value": {"policy": "pinned", "ttl_secs": 30},
+        },
+    },  # Stay alive for incoming messages
 )
 
 # TypeScript SDK:
-const result = await client.createSession({
-    prompt: "Hello peers!",
-    comms_name: "agent-a",
-    keep_alive: true,
+const result = await client.createSession("Hello peers!", {
+    commsName: "agent-a",
+    turnMetadata: { keepAlive: true },
 });
 
 # Peer directory:

@@ -241,15 +241,19 @@ Configuration:
   # Python SDK
   result = await client.create_session(
       "Process incoming events",
-      keep_alive=True,
       comms_name="processor",
+      turn_metadata={{
+          "keep_alive": {{
+              "action": "set",
+              "value": {{"policy": "pinned", "ttl_secs": 30}},
+          }},
+      }},
   )
 
   # TypeScript SDK
-  const result = await client.createSession({{
-      prompt: "Process incoming events",
-      keepAlive: true,
+  const result = await client.createSession("Process incoming events", {{
       commsName: "processor",
+      turnMetadata: {{ keepAlive: true }},
   }});
 
   # Inject events via REST

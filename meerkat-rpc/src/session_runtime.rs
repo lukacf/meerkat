@@ -5944,6 +5944,7 @@ mod tests {
                         "token": "birch seventeen",
                     })),
                     blocks: None,
+                    turn_metadata: None,
                     handling_mode: None,
                 }),
             )
@@ -6048,6 +6049,7 @@ mod tests {
                         "token": "birch seventeen",
                     })),
                     blocks: None,
+                    turn_metadata: None,
                     handling_mode: None,
                 }),
             )
@@ -6211,6 +6213,7 @@ mod tests {
                         "token": "birch seventeen",
                     })),
                     blocks: None,
+                    turn_metadata: None,
                     handling_mode: None,
                 }),
             )
@@ -6330,6 +6333,7 @@ mod tests {
                         "token": "birch seventeen",
                     })),
                     blocks: None,
+                    turn_metadata: None,
                     handling_mode: None,
                 }),
             )

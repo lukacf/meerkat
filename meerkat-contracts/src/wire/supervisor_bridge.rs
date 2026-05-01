@@ -9,6 +9,8 @@ use meerkat_core::comms::{PeerAddress, PeerId, PeerName, TrustedPeerDescriptor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::fmt;
 
+use super::runtime::WireRuntimeTurnMetadata;
+
 /// Comms intent used for all supervisor bridge commands.
 ///
 /// The sender sets this as the request `intent`; the receiver checks for it
@@ -789,13 +791,15 @@ pub struct BridgeAck {
 }
 
 /// Deliver one logical input to a member.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BridgeDeliveryPayload {
     pub supervisor: BridgePeerSpec,
     pub epoch: u64,
     pub protocol_version: BridgeProtocolVersion,
     pub input_id: String,
     pub content: meerkat_core::types::ContentInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     pub handling_mode: meerkat_core::types::HandlingMode,
 }
 
@@ -1108,6 +1112,7 @@ mod tests {
             protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
             input_id: "input-1".to_string(),
             content: meerkat_core::types::ContentInput::Text("hello".to_string()),
+            turn_metadata: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
         });
         assert_command_round_trip(&cmd);

@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use meerkat_contracts::wire::supervisor_bridge::BridgeBootstrapToken;
 use meerkat_core::comms::{PeerName, TrustedPeerDescriptor};
 use meerkat_core::event::{AgentEvent, EventEnvelope};
+use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 use meerkat_core::service::{MobToolCallerProvenance, OpaquePrincipalToken};
 use meerkat_core::types::SessionId;
 use serde::ser::SerializeMap;
@@ -297,6 +298,18 @@ pub enum MobEventKind {
         agent_runtime_id: AgentRuntimeId,
     },
 
+    /// The first turn-only metadata for a member incarnation has been consumed.
+    ///
+    /// The metadata payload itself is stored on `MemberSpawned` as internal
+    /// replay material; this event only advances the projection so resume
+    /// after a successful first turn does not replay it again.
+    MemberInitialTurnMetadataConsumed {
+        /// Stable member identity.
+        agent_identity: AgentIdentity,
+        /// Generation whose first-turn metadata was consumed.
+        generation: Generation,
+    },
+
     /// Kickoff state for an existing member changed.
     MemberKickoffUpdated {
         /// Member whose kickoff state changed.
@@ -502,6 +515,9 @@ pub struct MemberSpawnedEvent {
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// Internal replay-only first-turn metadata for this member incarnation.
+    #[serde(skip, default)]
+    pub(crate) initial_turn_metadata: Option<RuntimeTurnMetadata>,
     /// Bridge-internal member reference needed for event replay.
     /// Not part of the public identity-native contract.
     #[serde(skip, default)]
@@ -524,8 +540,17 @@ impl MemberSpawnedEvent {
             role,
             runtime_mode: MobRuntimeMode::AutonomousHost,
             labels: BTreeMap::new(),
+            initial_turn_metadata: None,
             bridge_member_ref: None,
         }
+    }
+
+    pub(crate) fn with_initial_turn_metadata(
+        mut self,
+        initial_turn_metadata: Option<RuntimeTurnMetadata>,
+    ) -> Self {
+        self.initial_turn_metadata = initial_turn_metadata.filter(|metadata| !metadata.is_empty());
+        self
     }
 
     pub(crate) fn with_bridge_member_ref(mut self, bridge_member_ref: Option<MemberRef>) -> Self {
@@ -570,6 +595,15 @@ pub(crate) fn encode_stored_mob_event(event: &MobEvent) -> Result<Vec<u8>, serde
             serde_json::to_value(bridge_member_ref)?,
         );
     }
+    if let Some(member_spawned) = event.kind.member_spawned()
+        && let Some(initial_turn_metadata) = member_spawned.initial_turn_metadata.as_ref()
+        && let Some(kind) = value.get_mut("kind").and_then(Value::as_object_mut)
+    {
+        kind.insert(
+            "initial_turn_metadata".to_string(),
+            serde_json::to_value(initial_turn_metadata)?,
+        );
+    }
     serde_json::to_vec(&serde_json::json!({
         "schema_version": CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION,
         "event": value,
@@ -606,11 +640,22 @@ pub(crate) fn decode_stored_mob_event(bytes: &[u8]) -> Result<MobEvent, serde_js
         .and_then(|kind| kind.remove("bridge_member_ref"))
         .map(serde_json::from_value)
         .transpose()?;
+    let initial_turn_metadata = value
+        .get_mut("kind")
+        .and_then(Value::as_object_mut)
+        .and_then(|kind| kind.remove("initial_turn_metadata"))
+        .map(serde_json::from_value)
+        .transpose()?;
     let mut event: MobEvent = serde_json::from_value(value)?;
     if let Some(bridge_member_ref) = bridge_member_ref
         && let Some(member_spawned) = event.kind.member_spawned_mut()
     {
         member_spawned.bridge_member_ref = Some(bridge_member_ref);
+    }
+    if let Some(initial_turn_metadata) = initial_turn_metadata
+        && let Some(member_spawned) = event.kind.member_spawned_mut()
+    {
+        member_spawned.initial_turn_metadata = Some(initial_turn_metadata);
     }
     Ok(event)
 }
@@ -622,6 +667,7 @@ mod tests {
     use crate::ids::MobId;
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
     use crate::tasks::TaskStatus;
+    use meerkat_core::lifecycle::run_primitive::{TurnInstruction, TurnInstructionKind};
     use serde_json::json;
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -924,6 +970,13 @@ mod tests {
     fn test_stored_mob_event_roundtrip_preserves_bridge_member_ref() {
         let sid = SessionId::from_uuid(Uuid::nil());
         let identity = AgentIdentity::from("researcher");
+        let initial_turn_metadata = RuntimeTurnMetadata {
+            additional_instructions: Some(vec![TurnInstruction {
+                kind: TurnInstructionKind::Host,
+                body: "spawn-time metadata".to_string(),
+            }]),
+            ..Default::default()
+        };
         let event = MobEvent {
             cursor: 1,
             timestamp: Utc::now(),
@@ -936,6 +989,7 @@ mod tests {
                     AgentRuntimeId::initial(identity),
                     ProfileName::from("worker"),
                 )
+                .with_initial_turn_metadata(Some(initial_turn_metadata.clone()))
                 .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid.clone()))),
             ),
         };
@@ -951,6 +1005,10 @@ mod tests {
                         .and_then(MemberRef::bridge_session_id),
                     Some(&sid)
                 );
+                assert_eq!(
+                    member_spawned.initial_turn_metadata,
+                    Some(initial_turn_metadata)
+                );
             }
             other => panic!("expected MemberSpawned, got {other:?}"),
         }
@@ -961,11 +1019,11 @@ mod tests {
     /// inline fields. The reason is load-bearing: `bridge_member_ref` is
     /// crate-internal replay metadata gated by `#[serde(skip)]` that must
     /// never leak onto the public wire shape. This test pins the public
-    /// `MobEventKind::MemberSpawned` serialized form to exclude
-    /// `bridge_member_ref` so a future refactor cannot silently promote
-    /// the internal replay pointer into the public event contract.
+    /// `MobEventKind::MemberSpawned` serialized form to exclude internal
+    /// replay fields so a future refactor cannot silently promote them into
+    /// the public event contract.
     #[test]
-    fn member_spawned_public_wire_shape_excludes_bridge_member_ref() {
+    fn member_spawned_public_wire_shape_excludes_internal_replay_fields() {
         let identity = AgentIdentity::from("researcher");
         let sid = SessionId::from_uuid(Uuid::nil());
         let kind = MobEventKind::MemberSpawned(
@@ -978,7 +1036,14 @@ mod tests {
             )
             // set the internal pointer so we know the exclusion is real,
             // not a side-effect of it being None.
-            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid))),
+            .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(sid)))
+            .with_initial_turn_metadata(Some(RuntimeTurnMetadata {
+                additional_instructions: Some(vec![TurnInstruction {
+                    kind: TurnInstructionKind::Host,
+                    body: "spawn-time metadata".to_string(),
+                }]),
+                ..Default::default()
+            })),
         );
 
         let value = serde_json::to_value(&kind).expect("serialize mob event kind");
@@ -994,6 +1059,11 @@ mod tests {
         assert!(
             !serialized.contains("bridge_member_ref"),
             "public MemberSpawned wire shape must never expose bridge_member_ref; got: {serialized}",
+        );
+        assert!(
+            !serialized.contains("initial_turn_metadata")
+                && !serialized.contains("spawn-time metadata"),
+            "public MemberSpawned wire shape must never expose first-turn metadata; got: {serialized}",
         );
 
         // And the standard struct fields ARE present.

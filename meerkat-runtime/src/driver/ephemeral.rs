@@ -2257,6 +2257,7 @@ mod tests {
             body: "peer body".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         })
     }

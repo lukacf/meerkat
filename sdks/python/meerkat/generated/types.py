@@ -141,13 +141,68 @@ class WireTurnInstruction(TypedDict):
     body: str
 
 
+class StructuredProviderExtension(TypedDict):
+    namespace: str
+    key: str
+    body: str
+
+
+class WireAnthropicProviderTag(TypedDict, total=False):
+    provider: Required[Literal['anthropic']]
+    thinking: NotRequired[object | None]
+    thinking_budget_tokens: NotRequired[int | None]
+    web_search: NotRequired[object | None]
+    top_k: NotRequired[int | None]
+    effort: NotRequired[object | None]
+    structured_output: NotRequired[object | None]
+    inference_geo: NotRequired[object | None]
+    compaction: NotRequired[object | None]
+    context: NotRequired[object | None]
+    supports_temperature_override: NotRequired[bool | None]
+
+
+class WireOpenAiProviderTag(TypedDict, total=False):
+    provider: Required[Literal['open_ai']]
+    reasoning_effort: NotRequired[object | None]
+    seed: NotRequired[int | None]
+    frequency_penalty: NotRequired[float | None]
+    presence_penalty: NotRequired[float | None]
+    web_search: NotRequired[object | None]
+    structured_output: NotRequired[object | None]
+    reasoning: NotRequired[object | None]
+    chat_template_kwargs: NotRequired[object | None]
+    thinking: NotRequired[object | None]
+    supports_temperature_override: NotRequired[bool | None]
+    supports_reasoning_override: NotRequired[bool | None]
+
+
+class WireGeminiProviderTag(TypedDict, total=False):
+    provider: Required[Literal['gemini']]
+    thinking: NotRequired[object | None]
+    thinking_budget: NotRequired[int | None]
+    thinking_level: NotRequired[object | None]
+    top_k: NotRequired[int | None]
+    top_p: NotRequired[float | None]
+    structured_output: NotRequired[object | None]
+    google_search: NotRequired[object | None]
+    candidate_count: NotRequired[int | None]
+
+
+class WireUnknownProviderTag(TypedDict):
+    provider: Literal['unknown']
+    bag: StructuredProviderExtension
+
+
+WireProviderTag = WireAnthropicProviderTag | WireOpenAiProviderTag | WireGeminiProviderTag | WireUnknownProviderTag
+
+
 class WireProviderParamsOverride(TypedDict, total=False):
     temperature: NotRequired[float | None]
     top_p: NotRequired[float | None]
     max_output_tokens: NotRequired[int | None]
     reasoning: NotRequired[WireReasoningMode | None]
     thinking_budget_tokens: NotRequired[int | None]
-    provider_tag: NotRequired[dict[str, object] | None]
+    provider_tag: NotRequired[WireProviderTag | None]
 
 
 class WireKeepAlivePolicy(TypedDict):

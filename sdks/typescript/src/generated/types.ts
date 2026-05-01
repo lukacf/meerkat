@@ -113,13 +113,63 @@ export interface WireTurnInstruction {
   body: string;
 }
 
+export interface StructuredProviderExtension {
+  namespace: string;
+  key: string;
+  body: string;
+}
+
+export type WireProviderTag =
+  | {
+      provider: "anthropic";
+      thinking?: JsonValue | null;
+      thinking_budget_tokens?: number | null;
+      web_search?: JsonValue | null;
+      top_k?: number | null;
+      effort?: JsonValue | null;
+      structured_output?: JsonValue | null;
+      inference_geo?: JsonValue | null;
+      compaction?: JsonValue | null;
+      context?: JsonValue | null;
+      supports_temperature_override?: boolean | null;
+    }
+  | {
+      provider: "open_ai";
+      reasoning_effort?: JsonValue | null;
+      seed?: number | null;
+      frequency_penalty?: number | null;
+      presence_penalty?: number | null;
+      web_search?: JsonValue | null;
+      structured_output?: JsonValue | null;
+      reasoning?: JsonValue | null;
+      chat_template_kwargs?: JsonValue | null;
+      thinking?: JsonValue | null;
+      supports_temperature_override?: boolean | null;
+      supports_reasoning_override?: boolean | null;
+    }
+  | {
+      provider: "gemini";
+      thinking?: JsonValue | null;
+      thinking_budget?: number | null;
+      thinking_level?: JsonValue | null;
+      top_k?: number | null;
+      top_p?: number | null;
+      structured_output?: JsonValue | null;
+      google_search?: JsonValue | null;
+      candidate_count?: number | null;
+    }
+  | {
+      provider: "unknown";
+      bag: StructuredProviderExtension;
+    };
+
 export interface WireProviderParamsOverride {
   temperature?: number | null;
   top_p?: number | null;
   max_output_tokens?: number | null;
   reasoning?: WireReasoningMode | null;
   thinking_budget_tokens?: number | null;
-  provider_tag?: Record<string, JsonValue> | null;
+  provider_tag?: WireProviderTag | null;
 }
 
 export interface WireKeepAlivePolicy {

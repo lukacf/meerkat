@@ -987,6 +987,18 @@ describe("Session wrappers", () => {
         connectionRef: { action: "set", value: { realm: "dev", binding: "default_openai" } },
       },
     });
+    await client._startTurn("s1", "hello", {
+      turnMetadata: {
+        provider: "openai",
+        providerParams: {
+          action: "set",
+          value: {
+            provider_tag: { provider: "not-real" },
+            foo: "bar",
+          },
+        },
+      },
+    });
 
     assert.equal(calls[0].method, "turn/start");
     assert.deepEqual(calls[0].params.turn_metadata.skill_references, [
@@ -1025,6 +1037,19 @@ describe("Session wrappers", () => {
             namespace: "openai-compatible",
             key: "provider_params",
             body: "{\"foo\":\"bar\"}",
+          },
+        },
+      },
+    });
+    assert.deepEqual(calls[2].params.turn_metadata.provider_params, {
+      action: "set",
+      value: {
+        provider_tag: {
+          provider: "unknown",
+          bag: {
+            namespace: "openai",
+            key: "provider_params",
+            body: "{\"provider_tag\":{\"provider\":\"not-real\"},\"foo\":\"bar\"}",
           },
         },
       },

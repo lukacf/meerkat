@@ -690,6 +690,7 @@ fn make_progress_input(label: &str) -> Input {
         body: format!("progress-{label}"),
         payload: Some(serde_json::json!({ "label": label })),
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     })
 }
@@ -5042,6 +5043,7 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
         body: "interrupt while running".into(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     });
     let peer_input_id = peer_input.id().clone();
@@ -5299,6 +5301,7 @@ async fn service_peer_admission_uses_live_cancel_after_boundary() {
         body: "interrupt through service ext ingest".into(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     });
 
@@ -17130,6 +17133,7 @@ fn runtime_parity_peer_message(text: &str) -> Input {
         body: text.into(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     })
 }

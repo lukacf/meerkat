@@ -1735,6 +1735,9 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MemberSpawned(..) => "MemberSpawned",
             MobEventKind::MemberRetired { .. } => "MemberRetired",
             MobEventKind::MemberReset { .. } => "MemberReset",
+            MobEventKind::MemberInitialTurnMetadataConsumed { .. } => {
+                "MemberInitialTurnMetadataConsumed"
+            }
             MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
             MobEventKind::MembersWired { .. } => "MembersWired",
             MobEventKind::MembersUnwired { .. } => "MembersUnwired",
@@ -3092,6 +3095,7 @@ struct LiveExternalPeerHarness {
     interrupt_count: Arc<std::sync::atomic::AtomicUsize>,
     bind_protocol_versions: Arc<RwLock<Vec<super::bridge_protocol::BridgeProtocolVersion>>>,
     delivered_inputs: Arc<RwLock<Vec<String>>>,
+    delivered_payloads: Arc<RwLock<Vec<serde_json::Value>>>,
     hard_cancel_reasons: Arc<RwLock<Vec<String>>>,
     received_intents: Arc<RwLock<Vec<String>>>,
     supervisor_state: Arc<RwLock<Option<HarnessSupervisorState>>>,
@@ -3146,6 +3150,10 @@ impl LiveExternalPeerHarness {
 
     async fn delivered_input_ids(&self) -> Vec<String> {
         self.delivered_inputs.read().await.clone()
+    }
+
+    async fn delivered_payloads(&self) -> Vec<serde_json::Value> {
+        self.delivered_payloads.read().await.clone()
     }
 
     async fn hard_cancel_reasons(&self) -> Vec<String> {
@@ -3214,6 +3222,8 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
     let responder_bind_protocol_versions = bind_protocol_versions.clone();
     let delivered_inputs = Arc::new(RwLock::new(Vec::new()));
     let responder_delivered_inputs = delivered_inputs.clone();
+    let delivered_payloads = Arc::new(RwLock::new(Vec::new()));
+    let responder_delivered_payloads = delivered_payloads.clone();
     let hard_cancel_reasons = Arc::new(RwLock::new(Vec::new()));
     let responder_hard_cancel_reasons = hard_cancel_reasons.clone();
     let delivery_responses = Arc::new(RwLock::new(HashMap::new()));
@@ -3548,7 +3558,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                     } else {
                                         let supervisor_spec =
                                             meerkat_core::comms::TrustedPeerDescriptor::try_from(
-                                                payload.supervisor,
+                                                payload.supervisor.clone(),
                                             )
                                             .expect("valid supervisor spec");
                                         responder_runtime
@@ -3559,6 +3569,13 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                             .write()
                                             .await
                                             .push(payload.input_id.clone());
+                                        responder_delivered_payloads
+                                            .write()
+                                            .await
+                                            .push(
+                                                serde_json::to_value(&payload)
+                                                    .expect("delivery payload json"),
+                                            );
                                         let response =
                                         super::bridge_protocol::BridgeDeliveryResponse {
                                             input_id: payload.input_id.clone(),
@@ -3720,6 +3737,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
         interrupt_count,
         bind_protocol_versions,
         delivered_inputs,
+        delivered_payloads,
         hard_cancel_reasons,
         received_intents,
         supervisor_state,
@@ -5616,6 +5634,7 @@ async fn test_rotate_supervisor_reauthorizes_live_remote_members_and_rejects_sta
             protocol_version: original.protocol_version,
             input_id: "stale-epoch-input".to_string(),
             content: ContentInput::from("stale-epoch".to_string()),
+            turn_metadata: None,
             handling_mode: HandlingMode::Queue,
         },
     );
@@ -14429,6 +14448,137 @@ async fn test_turn_driven_spawn_replays_turn_metadata_on_first_member_turn() {
 }
 
 #[tokio::test]
+async fn test_turn_driven_spawn_turn_metadata_survives_resume_before_first_member_turn() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let events = storage.events.clone();
+    let runtime_metadata = storage.runtime_metadata.clone();
+    let handle = MobBuilder::new(sample_definition(), storage)
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        additional_instructions: Some(vec![
+            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                body: "survive mob resume".to_string(),
+            },
+        ]),
+        ..Default::default()
+    };
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("lead", AgentIdentity::from("l-turn-resume"))
+                .with_runtime_mode(crate::MobRuntimeMode::TurnDriven)
+                .with_turn_metadata(turn_metadata),
+        )
+        .await
+        .expect("spawn turn-driven lead with metadata");
+    handle.stop().await.expect("stop before resume");
+
+    let resumed = MobBuilder::for_resume(MobStorage::with_events_and_runtime_metadata(
+        events,
+        runtime_metadata,
+    ))
+    .with_session_service(service.clone())
+    .resume()
+    .await
+    .expect("resume mob");
+    let baseline_start_turn_calls = service.start_turn_call_count();
+
+    resumed
+        .member(&AgentIdentity::from("l-turn-resume"))
+        .await
+        .expect("member handle")
+        .send(
+            "first post-resume turn",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("first post-resume turn should execute");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn_calls + 1
+    );
+    let recorded = service.recorded_start_turn_metadata().await;
+    let (_, metadata) = recorded
+        .last()
+        .expect("turn-driven send should record start_turn metadata");
+    let instruction = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.additional_instructions.as_ref())
+        .and_then(|instructions| instructions.first())
+        .expect("spawn metadata should survive resume before first turn");
+    assert_eq!(
+        instruction.kind,
+        meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host
+    );
+    assert_eq!(instruction.body, "survive mob resume");
+}
+
+#[tokio::test]
+async fn test_turn_driven_respawn_preserves_spawn_turn_metadata() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        additional_instructions: Some(vec![
+            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                body: "survive respawn".to_string(),
+            },
+        ]),
+        ..Default::default()
+    };
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("lead", AgentIdentity::from("l-turn-respawn"))
+                .with_runtime_mode(crate::MobRuntimeMode::TurnDriven)
+                .with_turn_metadata(turn_metadata),
+        )
+        .await
+        .expect("spawn turn-driven lead with metadata");
+
+    handle
+        .respawn(AgentIdentity::from("l-turn-respawn"), None)
+        .await
+        .expect("respawn turn-driven member");
+    let baseline_start_turn_calls = service.start_turn_call_count();
+
+    handle
+        .member(&AgentIdentity::from("l-turn-respawn"))
+        .await
+        .expect("member handle")
+        .send(
+            "first post-respawn turn",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("first post-respawn turn should execute");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        baseline_start_turn_calls + 1
+    );
+    let recorded = service.recorded_start_turn_metadata().await;
+    let (_, metadata) = recorded
+        .last()
+        .expect("turn-driven send should record start_turn metadata");
+    let instruction = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.additional_instructions.as_ref())
+        .and_then(|instructions| instructions.first())
+        .expect("spawn metadata should survive respawn");
+    assert_eq!(
+        instruction.kind,
+        meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host
+    );
+    assert_eq!(instruction.body, "survive respawn");
+}
+
+#[tokio::test]
 async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() {
     let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
     handle
@@ -14918,6 +15068,68 @@ async fn test_external_backend_turn_driven_mode_uses_start_turn_dispatch() {
         service.start_turn_call_count(),
         baseline_start_turn,
         "peer-only turn-driven external dispatch should avoid local bridge start_turn"
+    );
+}
+
+#[tokio::test]
+async fn test_peer_only_turn_driven_dispatch_carries_turn_metadata() {
+    let _serial = REAL_COMMS_TEST_LOCK.lock().expect("real-comms test lock");
+    let definition = with_unique_mob_id(
+        sample_definition_with_external_backend(),
+        "external-turn-driven-metadata",
+    );
+    let mob_id = definition.id.clone();
+    let (handle, _service) = create_test_mob(definition).await;
+    let external =
+        spawn_live_external_peer(&test_comms_name_for(&mob_id, "lead", "l-ext-metadata")).await;
+    let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        additional_instructions: Some(vec![
+            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                body: "preserve peer-only bridge metadata".to_string(),
+            },
+        ]),
+        ..Default::default()
+    };
+    {
+        let mut spec = SpawnMemberSpec::new("lead", "l-ext-metadata");
+        spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+        spec.binding = Some(external.binding());
+        spec.turn_metadata = Some(turn_metadata);
+        handle
+            .spawn_spec(spec)
+            .await
+            .expect("spawn external turn-driven lead");
+    }
+
+    handle
+        .member(&AgentIdentity::from("l-ext-metadata"))
+        .await
+        .expect("member handle")
+        .send(
+            "external turn-driven",
+            meerkat_core::types::HandlingMode::Queue,
+        )
+        .await
+        .expect("external turn should execute");
+
+    let payloads = external.delivered_payloads().await;
+    let metadata = payloads
+        .last()
+        .and_then(|payload| payload.get("turn_metadata"))
+        .expect("bridge delivery should carry canonical turn_metadata");
+    let instruction = metadata
+        .get("additional_instructions")
+        .and_then(|instructions| instructions.as_array())
+        .and_then(|instructions| instructions.first())
+        .expect("bridge metadata should include additional instructions");
+    assert_eq!(
+        instruction.get("kind").and_then(|kind| kind.as_str()),
+        Some("host")
+    );
+    assert_eq!(
+        instruction.get("body").and_then(|body| body.as_str()),
+        Some("preserve peer-only bridge metadata")
     );
 }
 

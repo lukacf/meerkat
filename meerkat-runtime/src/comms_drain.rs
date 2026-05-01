@@ -530,6 +530,17 @@ fn peer_input_from_delivery_payload(
             (body, Some(blocks))
         }
     };
+    let mut turn_metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        payload.turn_metadata.map(Into::into).unwrap_or_default();
+    if turn_metadata.handling_mode.is_none()
+        && payload.handling_mode != meerkat_core::types::HandlingMode::Queue
+    {
+        turn_metadata.handling_mode = Some(payload.handling_mode);
+    }
+    let turn_metadata = (!turn_metadata.is_empty()).then_some(turn_metadata);
+    let handling_mode = turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.handling_mode);
 
     Input::Peer(PeerInput {
         header: InputHeader {
@@ -553,10 +564,8 @@ fn peer_input_from_delivery_payload(
         body,
         payload: None,
         blocks,
-        handling_mode: match payload.handling_mode {
-            meerkat_core::types::HandlingMode::Queue => None,
-            mode => Some(mode),
-        },
+        turn_metadata,
+        handling_mode,
     })
 }
 

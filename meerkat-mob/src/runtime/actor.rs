@@ -304,6 +304,9 @@ struct RespawnSnapshot {
     /// Runtime binding extracted from the old roster entry's member_ref.
     /// Preserves real external identity across respawns.
     binding: crate::RuntimeBinding,
+    /// Canonical spawn turn metadata to replay for the replacement member's
+    /// first turn when the original incarnation had not consumed it.
+    initial_turn_metadata: Option<RuntimeTurnMetadata>,
     /// Effective profile override persisted in the roster.
     /// Used on respawn to avoid re-resolving from the definition.
     effective_profile_override: Option<crate::profile::Profile>,
@@ -365,8 +368,6 @@ pub(super) struct MobActor {
     pub(super) retired_event_index: Arc<RwLock<HashSet<String>>>,
     pub(super) autonomous_initial_turns:
         Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, InitialTurnHandle>>>,
-    pub(super) turn_driven_initial_turn_metadata:
-        Arc<tokio::sync::Mutex<BTreeMap<MeerkatId, RuntimeTurnMetadata>>>,
     pub(super) next_spawn_ticket: u64,
     /// Monotonically increasing fence token counter.
     /// Each spawn/respawn/reset issues a strictly newer token.
@@ -2821,40 +2822,6 @@ impl MobActor {
         .await
     }
 
-    async fn stage_turn_driven_initial_turn_metadata(
-        &self,
-        agent_identity: &MeerkatId,
-        runtime_mode: crate::MobRuntimeMode,
-        turn_metadata: Option<RuntimeTurnMetadata>,
-    ) {
-        let mut staged = self.turn_driven_initial_turn_metadata.lock().await;
-        if runtime_mode == crate::MobRuntimeMode::TurnDriven
-            && let Some(metadata) = turn_metadata.filter(|metadata| !metadata.is_empty())
-        {
-            staged.insert(agent_identity.clone(), metadata);
-        } else {
-            staged.remove(agent_identity);
-        }
-    }
-
-    async fn turn_driven_initial_turn_metadata(
-        &self,
-        agent_identity: &MeerkatId,
-    ) -> Option<RuntimeTurnMetadata> {
-        self.turn_driven_initial_turn_metadata
-            .lock()
-            .await
-            .get(agent_identity)
-            .cloned()
-    }
-
-    async fn consume_turn_driven_initial_turn_metadata(&self, agent_identity: &MeerkatId) {
-        self.turn_driven_initial_turn_metadata
-            .lock()
-            .await
-            .remove(agent_identity);
-    }
-
     /// Stop an autonomous member: abort initial turn, interrupt, abort comms drain.
     ///
     /// Does NOT unregister the session — that happens only on dispose (retire/destroy).
@@ -5133,7 +5100,8 @@ impl MobActor {
                     )
                     .with_bridge_member_ref(Some(Self::sanitized_member_ref(
                         provision.member_ref(),
-                    )));
+                    )))
+                    .with_initial_turn_metadata(turn_metadata.clone());
                     event.runtime_mode = runtime_mode;
                     event.labels = labels.clone();
                     event
@@ -5225,6 +5193,7 @@ impl MobActor {
                 peer_id,
                 transport_public_key,
                 labels: labels.clone(),
+                initial_turn_metadata: turn_metadata.clone(),
                 effective_profile_override: effective_profile_override.clone(),
             });
         }
@@ -5442,13 +5411,6 @@ impl MobActor {
                 }
             }
         }
-
-        self.stage_turn_driven_initial_turn_metadata(
-            agent_identity,
-            runtime_mode,
-            turn_metadata.clone(),
-        )
-        .await;
 
         tracing::debug!(
             agent_identity = %agent_identity,
@@ -7420,8 +7382,6 @@ impl MobActor {
 
         self.delete_external_binding_overlay_for_member(&entry.agent_identity, entry.generation)
             .await?;
-        self.consume_turn_driven_initial_turn_metadata(&entry.agent_identity)
-            .await;
 
         Ok(())
     }
@@ -7496,6 +7456,7 @@ impl MobActor {
                 generation: entry.generation,
                 restore_wiring,
                 binding,
+                initial_turn_metadata: entry.initial_turn_metadata.clone(),
                 effective_profile_override: entry.effective_profile_override,
             }
         };
@@ -7647,7 +7608,7 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             admitted_bridge_session_id,
             prompt: prompt.clone(),
-            turn_metadata: None,
+            turn_metadata: snapshot.initial_turn_metadata.clone(),
             runtime_mode: snapshot.runtime_mode,
             labels: snapshot.labels.clone(),
             owner_bridge_session_id: None,
@@ -7758,7 +7719,7 @@ impl MobActor {
                 respawn_fence,
                 snapshot.runtime_mode,
                 prompt,
-                None,
+                snapshot.initial_turn_metadata.clone(),
                 snapshot.labels.clone(),
                 provision,
                 spawn_receipt.operation_id,
@@ -9246,9 +9207,7 @@ impl MobActor {
                 Ok(())
             }
             crate::MobRuntimeMode::TurnDriven => {
-                let initial_turn_metadata = self
-                    .turn_driven_initial_turn_metadata(&entry.agent_identity)
-                    .await;
+                let initial_turn_metadata = entry.initial_turn_metadata.clone();
                 let mut turn_metadata =
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                         handling_mode: Some(handling_mode),
@@ -9272,8 +9231,20 @@ impl MobActor {
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
                 if initial_turn_metadata.is_some() {
-                    self.consume_turn_driven_initial_turn_metadata(&entry.agent_identity)
-                        .await;
+                    self.events
+                        .append(NewMobEvent {
+                            mob_id: self.definition.id.clone(),
+                            timestamp: None,
+                            kind: MobEventKind::MemberInitialTurnMetadataConsumed {
+                                agent_identity: entry.agent_identity.clone(),
+                                generation: entry.generation,
+                            },
+                        })
+                        .await?;
+                    self.roster
+                        .write()
+                        .await
+                        .clear_initial_turn_metadata(&entry.agent_identity, entry.generation);
                 }
                 Ok(())
             }
@@ -10418,6 +10389,7 @@ impl MobActor {
                     external_peer_specs: std::collections::BTreeMap::new(),
                     labels: std::collections::BTreeMap::new(),
                     kickoff: None,
+                    initial_turn_metadata: None,
                     effective_profile_override: None,
                 }
             }),
@@ -10433,8 +10405,6 @@ impl MobActor {
             rollback_ctx.entry.generation,
         )
         .await?;
-        self.consume_turn_driven_initial_turn_metadata(&rollback_ctx.entry.agent_identity)
-            .await;
 
         Ok(())
     }

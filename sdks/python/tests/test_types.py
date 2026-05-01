@@ -134,6 +134,33 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
         "body": "{\"foo\":\"bar\"}",
     }
 
+    invalid_provider_tag = _runtime_turn_metadata(
+        {
+            "provider": "openai",
+            "provider_params": {
+                "action": "set",
+                "value": {
+                    "provider_tag": {"provider": "not-real"},
+                    "foo": "bar",
+                },
+            },
+        }
+    )
+    assert invalid_provider_tag is not None
+    assert invalid_provider_tag["provider_params"] == {
+        "action": "set",
+        "value": {
+            "provider_tag": {
+                "provider": "unknown",
+                "bag": {
+                    "namespace": "openai",
+                    "key": "provider_params",
+                    "body": "{\"provider_tag\":{\"provider\":\"not-real\"},\"foo\":\"bar\"}",
+                },
+            },
+        },
+    }
+
     for field, value in [
         ("keep_alive", True),
         ("provider_params", {"foo": "bar"}),

@@ -190,7 +190,11 @@ impl Input {
             Input::FlowStep(flow_step) => flow_step.turn_metadata.as_ref()?.handling_mode,
             Input::ExternalEvent(event) => Some(event.handling_mode),
             Input::Continuation(continuation) => Some(continuation.handling_mode),
-            Input::Peer(peer) => peer.handling_mode,
+            Input::Peer(peer) => peer
+                .turn_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.handling_mode)
+                .or(peer.handling_mode),
             Input::Operation(_) => None,
         }
     }
@@ -382,6 +386,12 @@ pub struct PeerInput {
     /// text projection (backwards compat), and `blocks` carries the full content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_public_runtime_turn_metadata"
+    )]
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
     /// Optional handling-mode override for actionable peer inputs.
     /// When present on Message/Request/no-convention, overrides kind-based
     /// policy defaults. Forbidden on ResponseProgress and ResponseTerminal
@@ -473,6 +483,7 @@ pub fn peer_response_terminal_input(
         body: String::new(),
         payload: Some(result),
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     })
 }
@@ -1002,6 +1013,7 @@ mod tests {
             body: "hi there".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let mut json = serde_json::to_value(&input).unwrap();
@@ -1047,6 +1059,7 @@ mod tests {
             body: "hi there".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1077,6 +1090,7 @@ mod tests {
                     data: "abc".into(),
                 },
             ]),
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1123,6 +1137,7 @@ mod tests {
             body: "legacy response body".into(),
             payload: Some(serde_json::json!({"answer":"ok"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1161,6 +1176,7 @@ mod tests {
             body: "Agent joined".into(),
             payload: Some(serde_json::json!({"name": "agent-1"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1183,6 +1199,7 @@ mod tests {
             body: "Done".into(),
             payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1201,6 +1218,7 @@ mod tests {
             body: "Working...".into(),
             payload: Some(serde_json::json!({"progress": "working"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1369,6 +1387,7 @@ mod tests {
             body: "hi".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         assert_eq!(peer_msg.kind(), InputKind::PeerMessage);
@@ -1382,6 +1401,7 @@ mod tests {
             body: "hi".into(),
             payload: Some(serde_json::json!({"subject": "x"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         assert_eq!(peer_req.kind(), InputKind::PeerRequest);
@@ -1466,6 +1486,7 @@ mod tests {
             body: "hi".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1538,6 +1559,7 @@ mod tests {
             body: "hi".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Steer),
         });
         let json = serde_json::to_value(&input).unwrap();
@@ -1557,6 +1579,7 @@ mod tests {
             body: "hi".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let json = serde_json::to_value(&input).unwrap();

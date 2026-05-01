@@ -46,6 +46,7 @@ fn peer_message_input(handling_mode: Option<HandlingMode>) -> Input {
         body: "hello".into(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode,
     })
 }

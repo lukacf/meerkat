@@ -114,6 +114,7 @@ fn runtime_non_prompt_inputs_reject_stale_metadata_fields() {
         body: "hello".to_string(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     });
     assert_unknown_field_rejected(
@@ -177,6 +178,7 @@ fn runtime_peer_convention_rejects_unknown_fields() {
         body: "hello".to_string(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     });
     let mut value = serde_json::to_value(peer).expect("serialize peer");

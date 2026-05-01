@@ -139,6 +139,7 @@ mod tests {
             body: "hi".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         assert!(validate_durability(&input).is_err());
@@ -155,6 +156,7 @@ mod tests {
             body: "hi".into(),
             payload: Some(serde_json::json!({"subject": "x"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         assert!(validate_durability(&input).is_err());
@@ -171,6 +173,7 @@ mod tests {
             body: "done".into(),
             payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         assert!(validate_durability(&input).is_err());
@@ -187,6 +190,7 @@ mod tests {
             body: "working".into(),
             payload: Some(serde_json::json!({"progress": "working"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         assert!(validate_durability(&input).is_ok());

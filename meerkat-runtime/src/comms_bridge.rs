@@ -142,6 +142,7 @@ fn peer_input_from_ingress_fact(
         body: peer_rendered_body(interaction),
         payload: peer_payload(interaction),
         blocks: peer_blocks(interaction),
+        turn_metadata: None,
         handling_mode: match interaction.handling_mode {
             meerkat_core::types::HandlingMode::Queue => None,
             mode => Some(mode),

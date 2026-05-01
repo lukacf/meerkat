@@ -50,6 +50,13 @@ pub(crate) fn for_input(
             handling_mode: Some(continuation.handling_mode),
             ..Default::default()
         },
+        Input::Peer(peer) => {
+            let mut metadata = peer.turn_metadata.clone().unwrap_or_default();
+            if metadata.handling_mode.is_none() {
+                metadata.handling_mode = peer.handling_mode;
+            }
+            metadata
+        }
         _ => RuntimeTurnMetadata::default(),
     };
     metadata.execution_kind = Some(semantics.execution_kind);
@@ -929,6 +936,7 @@ mod tests {
     use chrono::Utc;
     use meerkat_core::lifecycle::run_primitive::{
         ConversationAppendRole, CoreRenderable, PeerResponseTerminalApplyIntent,
+        RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind,
     };
     use std::sync::Arc;
 
@@ -1061,6 +1069,7 @@ mod tests {
             body: "peer message".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         assert_eq!(input_to_prompt(&input), "peer message");
@@ -1087,6 +1096,7 @@ mod tests {
             body: "[COMMS MESSAGE from peer-1]\nplain body payload".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1120,6 +1130,7 @@ mod tests {
             body: "stale helper-local comms prose".into(),
             payload: Some(serde_json::json!({"subject": "alpha beta gamma"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1161,6 +1172,7 @@ mod tests {
                 "token": "birch seventeen"
             })),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1209,6 +1221,7 @@ mod tests {
                 "token": "birch seventeen"
             })),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1319,6 +1332,7 @@ mod tests {
                 "token": "birch seventeen"
             })),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let input_id = input.id().clone();
@@ -1390,6 +1404,7 @@ mod tests {
                 "token": "birch seventeen"
             })),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1435,6 +1450,7 @@ mod tests {
                 "token": "birch seventeen"
             })),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let primitive = inputs_to_primitive(&[(input.id().clone(), input)])
@@ -1498,6 +1514,7 @@ mod tests {
                 "token": "birch seventeen"
             })),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
 
@@ -1566,6 +1583,7 @@ mod tests {
             body: body.into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         })
     }
@@ -1593,6 +1611,7 @@ mod tests {
             body: String::new(),
             payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         })
     }
@@ -1708,6 +1727,7 @@ mod tests {
             body: "see this image".into(),
             payload: None,
             blocks: Some(blocks.clone()),
+            turn_metadata: None,
             handling_mode: None,
         });
         let input_id = input.id().clone();
@@ -1766,6 +1786,7 @@ mod tests {
             body: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
             payload: None,
             blocks: Some(blocks.clone()),
+            turn_metadata: None,
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -1818,6 +1839,7 @@ mod tests {
             body: "[COMMS MESSAGE from peer-1]\n[image: image/png]".into(),
             payload: None,
             blocks: Some(blocks.clone()),
+            turn_metadata: None,
             handling_mode: None,
         });
         let staged = match input_to_primitive(&input, input.id().clone())
@@ -2357,6 +2379,7 @@ mod tests {
             body: "done".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let id = input.id().clone();
@@ -2365,6 +2388,55 @@ mod tests {
         let meta = primitive
             .turn_metadata()
             .expect("should have turn_metadata");
+        assert_eq!(
+            meta.execution_kind,
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn primitive_from_peer_message_preserves_turn_metadata() {
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "p".into(),
+                    display_identity: None,
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(PeerConvention::Message),
+            body: "msg".into(),
+            payload: None,
+            blocks: None,
+            turn_metadata: Some(RuntimeTurnMetadata {
+                additional_instructions: Some(vec![TurnInstruction {
+                    kind: TurnInstructionKind::Host,
+                    body: "peer metadata".into(),
+                }]),
+                ..Default::default()
+            }),
+            handling_mode: None,
+        });
+        let id = input.id().clone();
+        let primitive =
+            input_to_primitive(&input, id).expect("single input metadata cannot conflict");
+        let meta = primitive
+            .turn_metadata()
+            .expect("should have turn_metadata");
+        let instruction = meta
+            .additional_instructions
+            .as_ref()
+            .and_then(|instructions| instructions.first())
+            .expect("peer metadata should flow into primitive");
+        assert_eq!(instruction.kind, TurnInstructionKind::Host);
+        assert_eq!(instruction.body, "peer metadata");
         assert_eq!(
             meta.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
@@ -2395,6 +2467,7 @@ mod tests {
             body: "msg".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         });
         let continuation =

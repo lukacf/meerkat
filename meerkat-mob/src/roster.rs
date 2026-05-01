@@ -15,6 +15,7 @@ use crate::event::{MemberRef, MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
 use crate::runtime_mode::MobRuntimeMode;
 use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
+use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -70,7 +71,7 @@ pub struct MobMemberKickoffSnapshot {
 /// Public fields use the identity-native model (0.6). Bridge-level fields
 /// (`member_ref`, `peer_id`, `external_peer_specs`) are
 /// `pub(crate)` for internal dispatch only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RosterEntry {
     // --- Identity-native public fields ---
     /// Stable member identity.
@@ -98,6 +99,9 @@ pub struct RosterEntry {
     /// Projected kickoff state for autonomous initial turn resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff: Option<MobMemberKickoffSnapshot>,
+    /// Internal replay-only first-turn metadata for this member incarnation.
+    #[serde(skip, default)]
+    pub(crate) initial_turn_metadata: Option<RuntimeTurnMetadata>,
 
     // --- Internal bridge fields (pub(crate)) ---
     /// Backend-neutral bridge identity.
@@ -139,6 +143,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) peer_id: Option<PeerId>,
     pub(crate) transport_public_key: Option<String>,
     pub(crate) labels: BTreeMap<String, String>,
+    pub(crate) initial_turn_metadata: Option<RuntimeTurnMetadata>,
     pub(crate) effective_profile_override: Option<crate::profile::Profile>,
 }
 
@@ -186,6 +191,7 @@ impl Roster {
                     peer_id: None,
                     transport_public_key: None,
                     labels: member_spawned.labels.clone(),
+                    initial_turn_metadata: member_spawned.initial_turn_metadata.clone(),
                     effective_profile_override: None,
                 });
             }
@@ -204,6 +210,12 @@ impl Roster {
                     entry.fence_token = *fence_token;
                     entry.agent_runtime_id = agent_runtime_id.clone();
                 }
+            }
+            MobEventKind::MemberInitialTurnMetadataConsumed {
+                agent_identity,
+                generation,
+            } => {
+                self.clear_initial_turn_metadata(agent_identity, *generation);
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 self.set_kickoff_by_identity(member, Some(kickoff.clone()));
@@ -290,10 +302,27 @@ impl Roster {
                     external_peer_specs: BTreeMap::new(),
                     labels: entry.labels,
                     kickoff: None,
+                    initial_turn_metadata: entry
+                        .initial_turn_metadata
+                        .filter(|metadata| !metadata.is_empty()),
                     effective_profile_override: entry.effective_profile_override,
                 },
             )
             .is_none()
+    }
+
+    pub(crate) fn clear_initial_turn_metadata(
+        &mut self,
+        identity: &AgentIdentity,
+        generation: Generation,
+    ) -> bool {
+        let Some(entry) = self.entries.get_mut(identity) else {
+            return false;
+        };
+        if entry.generation != generation {
+            return false;
+        }
+        entry.initial_turn_metadata.take().is_some()
     }
 
     /// Remove a member by AgentIdentity.
@@ -638,6 +667,7 @@ mod tests {
             peer_id: None,
             transport_public_key: None,
             labels,
+            initial_turn_metadata: None,
             effective_profile_override: None,
         }
     }
@@ -988,6 +1018,7 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
+            initial_turn_metadata: None,
             effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -1013,6 +1044,7 @@ mod tests {
             external_peer_specs: BTreeMap::new(),
             labels: BTreeMap::new(),
             kickoff: None,
+            initial_turn_metadata: None,
             effective_profile_override: None,
         };
         let json = serde_json::to_string(&entry).unwrap();

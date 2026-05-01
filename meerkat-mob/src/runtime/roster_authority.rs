@@ -92,6 +92,15 @@ impl RosterAuthority {
         self.roster.mark_retiring_by_identity(identity)
     }
 
+    pub(crate) fn clear_initial_turn_metadata(
+        &mut self,
+        identity: &AgentIdentity,
+        generation: Generation,
+    ) -> bool {
+        self.roster
+            .clear_initial_turn_metadata(identity, generation)
+    }
+
     pub(crate) fn replace_backend_peer_binding_by_peer_id(
         &mut self,
         prior_peer_id: &str,

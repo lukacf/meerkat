@@ -204,6 +204,24 @@ def _provider_params_namespace(provider: str | None) -> str:
     return provider or "unknown"
 
 
+def _is_structured_provider_extension(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("namespace"), str)
+        and isinstance(value.get("key"), str)
+        and isinstance(value.get("body"), str)
+    )
+
+
+def _is_wire_provider_tag(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    provider = value.get("provider")
+    if provider == "unknown":
+        return _is_structured_provider_extension(value.get("bag"))
+    return provider in {"anthropic", "open_ai", "gemini"}
+
+
 def _is_json_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -232,7 +250,20 @@ def _runtime_provider_params_override(
             }
         }
     if "provider_tag" in provider_params:
-        return provider_params
+        if provider_params["provider_tag"] is None or _is_wire_provider_tag(
+            provider_params["provider_tag"]
+        ):
+            return provider_params
+        return {
+            "provider_tag": {
+                "provider": "unknown",
+                "bag": {
+                    "namespace": _provider_params_namespace(provider),
+                    "key": "provider_params",
+                    "body": json.dumps(provider_params, separators=(",", ":")),
+                },
+            }
+        }
 
     wire: dict[str, Any] = {}
     remaining: dict[str, Any] = {}

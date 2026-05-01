@@ -135,6 +135,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
             body,
             payload: None,
             blocks,
+            turn_metadata: None,
             handling_mode: match handling_mode {
                 HandlingMode::Queue => None,
                 mode => Some(mode),

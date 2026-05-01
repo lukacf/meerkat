@@ -696,6 +696,7 @@ mod tests {
             body: "test".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode,
         })
     }

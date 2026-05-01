@@ -54,6 +54,7 @@ import {
   type RuntimeResetResult,
   type RuntimeRetireResult,
   type RuntimeStateResult,
+  type WireProviderTag,
   type WireTurnInstruction,
   type WireInputState,
   type McpAddParams,
@@ -245,6 +246,31 @@ function providerParamsNamespace(provider: string | undefined): string {
   return provider ?? "unknown";
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStructuredProviderExtension(value: unknown): value is {
+  namespace: string;
+  key: string;
+  body: string;
+} {
+  return (
+    isRecord(value) &&
+    typeof value.namespace === "string" &&
+    typeof value.key === "string" &&
+    typeof value.body === "string"
+  );
+}
+
+function isWireProviderTag(value: unknown): value is WireProviderTag {
+  if (!isRecord(value) || typeof value.provider !== "string") return false;
+  if (value.provider === "unknown") {
+    return isStructuredProviderExtension(value.bag);
+  }
+  return ["anthropic", "open_ai", "gemini"].includes(value.provider);
+}
+
 function isJsonNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -258,7 +284,22 @@ function runtimeProviderParamsPayload(
   provider: string | undefined,
 ): Record<string, unknown> {
   if (Object.prototype.hasOwnProperty.call(providerParams, "provider_tag")) {
-    return providerParams;
+    if (
+      providerParams.provider_tag === null ||
+      isWireProviderTag(providerParams.provider_tag)
+    ) {
+      return providerParams;
+    }
+    return {
+      provider_tag: {
+        provider: "unknown",
+        bag: {
+          namespace: providerParamsNamespace(provider),
+          key: "provider_params",
+          body: JSON.stringify(providerParams),
+        },
+      },
+    };
   }
 
   const metadata: Record<string, unknown> = {};

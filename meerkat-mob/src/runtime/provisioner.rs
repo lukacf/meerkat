@@ -2347,6 +2347,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         protocol_version: authority.protocol_version,
                         input_id: Uuid::now_v7().to_string(),
                         content: req.prompt.clone(),
+                        turn_metadata: req.turn_metadata.clone().map(Into::into),
                         handling_mode: req
                             .turn_metadata
                             .as_ref()

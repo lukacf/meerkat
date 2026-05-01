@@ -54,6 +54,7 @@ fn make_peer_terminal(body: &str) -> Input {
         body: body.into(),
         payload: Some(serde_json::json!({"body": body})),
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     })
 }
@@ -81,6 +82,7 @@ fn make_peer_progress() -> Input {
         body: "working...".into(),
         payload: Some(serde_json::json!({"progress": "working"})),
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     })
 }
@@ -806,6 +808,7 @@ async fn accept_peer_response_progress_with_handling_mode_returns_rejected() {
         body: "working".into(),
         payload: Some(serde_json::json!({"progress": "working"})),
         blocks: None,
+        turn_metadata: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -840,6 +843,7 @@ async fn accept_peer_response_terminal_with_handling_mode_returns_accepted() {
         body: "done".into(),
         payload: Some(serde_json::json!({"ok": true})),
         blocks: None,
+        turn_metadata: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -896,6 +900,7 @@ async fn accept_peer_response_terminal_with_empty_request_id_returns_rejected() 
         body: "done".into(),
         payload: Some(serde_json::json!({"ok": true})),
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -927,6 +932,7 @@ async fn accept_peer_message_with_steer_handling_mode_returns_accepted() {
         body: "hi".into(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let outcome = driver.accept_input(input).await.unwrap();
@@ -1022,6 +1028,7 @@ async fn post_admission_signal_steer_is_request_immediate() {
         body: "urgent".into(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
     });
     let outcome = driver.accept_input(steer_input).await.unwrap();
@@ -1068,6 +1075,7 @@ async fn post_admission_signal_queue_peer_message_while_running_interrupts_yield
         body: "interrupt me".into(),
         payload: None,
         blocks: None,
+        turn_metadata: None,
         handling_mode: None,
     });
     let outcome = driver.accept_input(peer).await.unwrap();

@@ -75,6 +75,7 @@ mod tests {
             body: "test body".into(),
             payload: Some(serde_json::json!({"intent": intent_str})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         })
     }
@@ -95,6 +96,7 @@ mod tests {
             body: "test body".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: None,
         })
     }

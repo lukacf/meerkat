@@ -69,6 +69,7 @@ mod tests {
             body: "working".into(),
             payload: Some(serde_json::json!({"progress": "working"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         let err = validate_peer_handling_mode(&input).unwrap_err();
@@ -89,6 +90,7 @@ mod tests {
             body: "done".into(),
             payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Steer),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -105,6 +107,7 @@ mod tests {
             body: "done".into(),
             payload: Some(serde_json::json!({"ok": true})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -118,6 +121,7 @@ mod tests {
             body: "hi".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -134,6 +138,7 @@ mod tests {
             body: "do it".into(),
             payload: Some(serde_json::json!({"subject": "x"})),
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Steer),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -147,6 +152,7 @@ mod tests {
             body: "hi".into(),
             payload: None,
             blocks: None,
+            turn_metadata: None,
             handling_mode: Some(HandlingMode::Queue),
         });
         assert!(validate_peer_handling_mode(&input).is_ok());
@@ -176,6 +182,7 @@ mod tests {
                 body: "hi".into(),
                 payload: None,
                 blocks: None,
+                turn_metadata: None,
                 handling_mode: None,
             });
             assert!(

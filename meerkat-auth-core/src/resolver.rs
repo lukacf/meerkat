@@ -15,7 +15,10 @@ use async_trait::async_trait;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::AuthStatusPhase;
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::auth::{PersistedAuthMode, PersistedTokens, TokenKey, TokenStore};
+use meerkat_core::auth::{
+    PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
+    TokenStore,
+};
 use meerkat_core::{
     AnthropicAuthMetadata, AuthError, AuthLease, AuthMetadata, AuthMetadataDefaults,
     AuthRouteHints, CredentialSourceSpec, GoogleAuthMetadata, HttpAuthorizationRequest,
@@ -611,6 +614,11 @@ pub fn mark_managed_store_oauth_refresh_failed(
         .as_ref()
         .ok_or(ProviderAuthError::Auth(AuthError::InteractiveLoginRequired))?;
     let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&binding.connection_ref);
+    if auth_lease.snapshot(&lease_key).phase
+        != Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
+    {
+        return Ok(());
+    }
     auth_lease
         .refresh_failed(&lease_key, permanent)
         .map_err(|e| {
@@ -618,6 +626,80 @@ pub fn mark_managed_store_oauth_refresh_failed(
                 "AuthMachine lifecycle refresh_failed failed: {e}"
             ))
         })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn managed_store_oauth_refresh_failure_coordinator(
+    inner: Arc<dyn RefreshCoordinator>,
+    env: ResolverEnvironment,
+    binding: ValidatedBinding,
+    refresh_started: bool,
+) -> Arc<dyn RefreshCoordinator> {
+    Arc::new(ManagedStoreOAuthRefreshFailureCoordinator {
+        inner,
+        env,
+        binding,
+        refresh_started,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ManagedStoreOAuthRefreshFailureCoordinator {
+    inner: Arc<dyn RefreshCoordinator>,
+    env: ResolverEnvironment,
+    binding: ValidatedBinding,
+    refresh_started: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ManagedStoreOAuthRefreshFailureCoordinator {
+    fn wrap_refresh_fn(&self, refresh_fn: RefreshFn) -> RefreshFn {
+        let env = self.env.clone();
+        let binding = self.binding.clone();
+        let refresh_started = self.refresh_started;
+        Box::new(move || {
+            Box::pin(async move {
+                let result = refresh_fn().await;
+                if let Err(err) = result.as_ref() {
+                    let permanent =
+                        managed_store_oauth_refresh_failure_is_permanent(&err.to_string());
+                    if let Err(lifecycle_err) = mark_managed_store_oauth_refresh_failed(
+                        &env,
+                        &binding,
+                        refresh_started,
+                        permanent,
+                    ) {
+                        return Err(RefreshError::Refresh(format!("{err}; {lifecycle_err}")));
+                    }
+                }
+                result
+            })
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
+    async fn with_refresh(
+        &self,
+        key: TokenKey,
+        refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        self.inner
+            .with_refresh(key, self.wrap_refresh_fn(refresh_fn))
+            .await
+    }
+
+    async fn with_forced_refresh(
+        &self,
+        key: TokenKey,
+        refresh_fn: RefreshFn,
+    ) -> Result<PersistedTokens, RefreshError> {
+        self.inner
+            .with_forced_refresh(key, self.wrap_refresh_fn(refresh_fn))
+            .await
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2670,6 +2752,89 @@ mod tests {
             retryable.lifecycle,
             ManagedStoreLifecycle::RefreshRequired
         ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn cancelled_oauth_refresh_failure_publishes_owner_lifecycle_failure() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let tokens = chatgpt_oauth_tokens("cancelled-refresh-access");
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(expires_at),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(2_000),
+        });
+        let mut previous = managed_store_tokens(
+            Arc::clone(&store),
+            key.clone(),
+            tokens,
+            Some(auth_lease.snapshot(&lease_key)),
+            ManagedStoreLifecycle::RefreshRequired,
+            None,
+        );
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+        let refresh_started =
+            begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
+                .expect("valid lifecycle can enter refreshing");
+        assert!(refresh_started);
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::Refreshing)
+        );
+
+        let coord = managed_store_oauth_refresh_failure_coordinator(
+            Arc::new(crate::InMemoryCoordinator::new()),
+            env.clone(),
+            binding.clone(),
+            refresh_started,
+        );
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let refresh_fn: crate::auth_store::RefreshFn = Box::new(move || {
+            Box::pin(async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+                Err(crate::auth_store::RefreshError::Refresh(
+                    "status=400 body=invalid_grant".to_string(),
+                ))
+            })
+        });
+        let waiter = tokio::spawn({
+            let coord = Arc::clone(&coord);
+            async move { coord.with_refresh(key, refresh_fn).await }
+        });
+        started_rx
+            .await
+            .expect("background refresh should start before waiter cancellation");
+        waiter.abort();
+        let _ = waiter.await;
+        release_tx
+            .send(())
+            .expect("refresh closure should still be running after waiter cancellation");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if auth_lease.refresh_failed_count() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background refresh failure should publish AuthMachine failure");
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::ReauthRequired)
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

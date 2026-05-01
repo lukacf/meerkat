@@ -20,9 +20,9 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
     ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
-    load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_is_permanent,
-    mark_managed_store_oauth_refresh_failed, publish_managed_store_tokens_lifecycle_and_save,
-    refresh_allowed,
+    load_managed_store_tokens_with_lifecycle, managed_store_oauth_refresh_failure_coordinator,
+    managed_store_oauth_refresh_failure_is_permanent, mark_managed_store_oauth_refresh_failed,
+    publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
@@ -390,6 +390,12 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                 let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                     Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                 });
+                                let coord = managed_store_oauth_refresh_failure_coordinator(
+                                    coord,
+                                    env.clone(),
+                                    binding.clone(),
+                                    refresh_started,
+                                );
                                 let endpoints =
                                     oauth::claude_ai_endpoints(oauth::MANUAL_REDIRECT_URL);
                                 let runtime = oauth::AnthropicOAuthRuntime::new(

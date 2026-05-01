@@ -27,6 +27,7 @@ use super::RuntimeAuthLeaseHandle;
 use super::auth_lease::{AuthLeaseReleaseObserver, ReleasedOAuthFlows};
 
 type StoreSlot = Arc<Mutex<Option<Weak<dyn RuntimeStore>>>>;
+type PayloadLock = Arc<Mutex<()>>;
 
 fn current_time_millis() -> u64 {
     SystemTime::now()
@@ -48,6 +49,7 @@ pub struct RuntimeOAuthFlowHandle {
     registry: Arc<OAuthFlowRegistry>,
     lifecycle: Arc<RuntimeAuthLeaseHandle>,
     store: StoreSlot,
+    payload_lock: PayloadLock,
     _release_observer: Option<Arc<OAuthPayloadReleaseObserver>>,
 }
 
@@ -55,10 +57,15 @@ pub struct RuntimeOAuthFlowHandle {
 struct OAuthPayloadReleaseObserver {
     registry: Arc<OAuthFlowRegistry>,
     store: StoreSlot,
+    payload_lock: PayloadLock,
 }
 
 impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
     fn auth_lease_released(&self, released: &ReleasedOAuthFlows) -> Result<(), DslTransitionError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let target = ConnectionRef {
             realm: released.lease_key.realm.clone(),
             binding: released.lease_key.binding.clone(),
@@ -148,9 +155,11 @@ impl RuntimeOAuthFlowHandle {
     ) -> Self {
         let registry = Arc::new(OAuthFlowRegistry::new_with_capacity(ttl, max_outstanding));
         let store = Arc::new(Mutex::new(store));
+        let payload_lock = Arc::new(Mutex::new(()));
         let release_observer = Arc::new(OAuthPayloadReleaseObserver {
             registry: Arc::clone(&registry),
             store: Arc::clone(&store),
+            payload_lock: Arc::clone(&payload_lock),
         });
         let release_observer_dyn: Arc<dyn AuthLeaseReleaseObserver> = release_observer.clone();
         lifecycle.add_release_observer(Arc::downgrade(&release_observer_dyn));
@@ -158,6 +167,7 @@ impl RuntimeOAuthFlowHandle {
             registry,
             lifecycle,
             store,
+            payload_lock,
             _release_observer: Some(release_observer),
         };
         handle.rehydrate_persisted_payloads();
@@ -699,6 +709,10 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         redirect_uri: String,
         pkce_verifier: String,
     ) -> Result<String, OAuthFlowError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.expire_pruned_flows();
         let state = OAuthFlowRegistry::new_state()?;
         let expires_at = expires_at_millis(self.registry.ttl())?;
@@ -766,6 +780,10 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         provider: OAuthProviderIdentity,
         redirect_uri: &str,
     ) -> Result<OAuthFlowRecord, OAuthFlowError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.expire_pruned_flows();
         if let Err(machine_err) = self.verify_browser(target, state, provider, redirect_uri) {
             return match self.registry.verify(state, target, provider, redirect_uri) {
@@ -804,6 +822,10 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         device_code: String,
         expires_in: Duration,
     ) -> Result<(), OAuthFlowError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.expire_pruned_flows();
         let machine_expires_at = expires_at_millis(expires_in)?;
         if let Err(err) = self.admit_device(&target, &device_code, provider, machine_expires_at) {
@@ -883,6 +905,10 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         target: &ConnectionRef,
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDevicePollLease, OAuthFlowError> {
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.expire_pruned_flows();
         if let Err(machine_err) = self.begin_device_poll(target, device_code, provider) {
             return match self
@@ -923,14 +949,16 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 registry: Arc::clone(&self.registry),
                 store: Arc::clone(&self.store),
             });
-        Ok(poll.with_lifecycle(lifecycle))
+        Ok(poll
+            .with_lifecycle(lifecycle)
+            .with_operation_lock(Arc::clone(&self.payload_lock)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc, Mutex as StdMutex,
+        Arc, Condvar, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     };
 
@@ -962,12 +990,77 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
+    struct BlockingOAuthPersistState {
+        armed: bool,
+        blocked: bool,
+        released: bool,
+    }
+
+    #[derive(Debug, Default)]
     struct FailingOAuthSnapshotStore {
         snapshot: StdMutex<Option<Vec<u8>>>,
         fail_oauth_persist: AtomicBool,
+        blocking_oauth_persist: StdMutex<BlockingOAuthPersistState>,
+        blocking_oauth_persist_cv: Condvar,
     }
 
     impl FailingOAuthSnapshotStore {
+        fn block_next_oauth_persist(&self) {
+            let mut state = self
+                .blocking_oauth_persist
+                .lock()
+                .expect("blocking persist state lock");
+            state.armed = true;
+            state.blocked = false;
+            state.released = false;
+        }
+
+        fn wait_for_blocked_oauth_persist(&self) {
+            let mut state = self
+                .blocking_oauth_persist
+                .lock()
+                .expect("blocking persist state lock");
+            while !state.blocked {
+                let (next, timeout) = self
+                    .blocking_oauth_persist_cv
+                    .wait_timeout(state, Duration::from_secs(1))
+                    .expect("blocking persist state wait");
+                assert!(
+                    !timeout.timed_out(),
+                    "expected OAuth snapshot persist to block"
+                );
+                state = next;
+            }
+        }
+
+        fn release_blocked_oauth_persist(&self) {
+            let mut state = self
+                .blocking_oauth_persist
+                .lock()
+                .expect("blocking persist state lock");
+            state.released = true;
+            self.blocking_oauth_persist_cv.notify_all();
+        }
+
+        fn wait_if_oauth_persist_blocked(&self) {
+            let mut state = self
+                .blocking_oauth_persist
+                .lock()
+                .expect("blocking persist state lock");
+            if !state.armed {
+                return;
+            }
+            state.armed = false;
+            state.blocked = true;
+            self.blocking_oauth_persist_cv.notify_all();
+            while !state.released {
+                state = self
+                    .blocking_oauth_persist_cv
+                    .wait(state)
+                    .expect("blocking persist state wait");
+            }
+        }
+
         fn fail_oauth_persist(&self) {
             self.fail_oauth_persist.store(true, Ordering::SeqCst);
         }
@@ -983,6 +1076,7 @@ mod tests {
             &self,
             snapshot_json: &[u8],
         ) -> Result<(), RuntimeStoreError> {
+            self.wait_if_oauth_persist_blocked();
             if self.fail_oauth_persist.load(Ordering::SeqCst) {
                 return Err(RuntimeStoreError::WriteFailed(
                     "injected oauth snapshot failure".to_string(),
@@ -1164,6 +1258,93 @@ mod tests {
             snapshot_phase(&lifecycle, &target),
             Some(AuthLeasePhase::ReauthRequired)
         );
+    }
+
+    #[test]
+    fn concurrent_browser_admits_preserve_newer_durable_snapshot() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let store = Arc::new(FailingOAuthSnapshotStore::default());
+        let store_dyn = Arc::clone(&store) as Arc<dyn RuntimeStore>;
+        let authority = Arc::new(
+            RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+                Duration::from_secs(60),
+                lifecycle,
+                &store_dyn,
+            ),
+        );
+        let first_target = target();
+        let second_target = alternate_target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let first_redirect_uri = "http://127.0.0.1/callback";
+        let second_redirect_uri = "http://127.0.0.1/other-callback";
+
+        store.block_next_oauth_persist();
+        let first_admit = std::thread::spawn({
+            let authority = Arc::clone(&authority);
+            let target = first_target.clone();
+            move || {
+                authority.start(
+                    target,
+                    provider,
+                    first_redirect_uri.to_string(),
+                    "verifier-1".to_string(),
+                )
+            }
+        });
+        store.wait_for_blocked_oauth_persist();
+
+        let (second_done_tx, second_done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let authority = Arc::clone(&authority);
+            let target = second_target.clone();
+            move || {
+                let result = authority.start(
+                    target,
+                    provider,
+                    second_redirect_uri.to_string(),
+                    "verifier-2".to_string(),
+                );
+                let _ = second_done_tx.send(result);
+            }
+        });
+        let second_before_release = second_done_rx.recv_timeout(Duration::from_millis(100)).ok();
+        store.release_blocked_oauth_persist();
+        first_admit
+            .join()
+            .expect("first admit thread should not panic")
+            .expect("first browser flow admitted");
+        let second_state = second_before_release
+            .unwrap_or_else(|| {
+                second_done_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("second admit should finish after first durable write is released")
+            })
+            .expect("second browser flow admitted");
+
+        let snapshot_json = store
+            .load_auth_oauth_flow_snapshot()
+            .expect("durable OAuth snapshot loads")
+            .expect("durable OAuth snapshot exists");
+        let snapshot = serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&snapshot_json)
+            .expect("durable OAuth snapshot decodes");
+        assert!(
+            snapshot
+                .browser
+                .iter()
+                .any(|flow| flow.state == second_state),
+            "durable snapshot must retain flow admitted by a concurrent newer write"
+        );
+
+        let restarted_lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            restarted_lifecycle,
+            &store_dyn,
+        );
+        let record = restarted
+            .consume(&second_state, &second_target, provider, second_redirect_uri)
+            .expect("newer durable flow should survive restart");
+        assert_eq!(record.pkce_verifier, "verifier-2");
     }
 
     #[test]

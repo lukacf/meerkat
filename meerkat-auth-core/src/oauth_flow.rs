@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    Arc,
+    Arc, Mutex as StdMutex,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -490,6 +490,7 @@ pub struct OAuthDevicePollLease {
     provider: OAuthProviderIdentity,
     lease_id: u64,
     lifecycle: Option<Arc<dyn OAuthDevicePollLifecycle>>,
+    operation_lock: Option<Arc<StdMutex<()>>>,
     active: bool,
 }
 
@@ -501,6 +502,7 @@ impl std::fmt::Debug for OAuthDevicePollLease {
             .field("provider", &self.provider)
             .field("lease_id", &self.lease_id)
             .field("has_lifecycle", &self.lifecycle.is_some())
+            .field("has_operation_lock", &self.operation_lock.is_some())
             .field("active", &self.active)
             .finish()
     }
@@ -521,6 +523,7 @@ impl OAuthDevicePollLease {
             provider,
             lease_id,
             lifecycle: None,
+            operation_lock: None,
             active: true,
         }
     }
@@ -530,7 +533,16 @@ impl OAuthDevicePollLease {
         self
     }
 
+    pub fn with_operation_lock(mut self, operation_lock: Arc<StdMutex<()>>) -> Self {
+        self.operation_lock = Some(operation_lock);
+        self
+    }
+
     pub fn finish(mut self) -> Result<(), OAuthFlowError> {
+        let _operation_guard = self.operation_lock.as_ref().map(|lock| {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         let verify_result = {
             let mut flows = self.device_flows.lock();
             prune_expired_device_locked(&mut flows);
@@ -596,6 +608,10 @@ impl OAuthDevicePollLease {
     }
 
     pub fn consume(mut self) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+        let _operation_guard = self.operation_lock.as_ref().map(|lock| {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         let verified = {
             let mut flows = self.device_flows.lock();
             prune_expired_device_locked(&mut flows);

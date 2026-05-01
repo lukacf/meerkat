@@ -18,15 +18,10 @@ use crate::tool_scope::{
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
 use tokio::sync::mpsc;
 
 use super::{
@@ -85,94 +80,8 @@ pub enum AgentBuildPolicyError {
     MissingSessionBuildState,
     #[error("factory policy build requires a runtime turn-state handle")]
     MissingTurnStateHandle,
-    #[error("factory policy build requires a registered canonical factory bridge token")]
-    MissingFactoryBridgeTokenRegistration,
-    #[error("factory policy build found multiple canonical factory bridge token registrations")]
-    AmbiguousFactoryBridgeTokenRegistration,
-    #[error("factory policy build found a forged factory bridge token registration")]
-    ForgedFactoryBridgeTokenRegistration,
     #[error("factory policy build requires the canonical factory bridge token")]
     InvalidFactoryBridgeToken,
-}
-
-/// Link-time registration for the facade-private factory bridge token.
-///
-/// The registration carries only a type-id projection function for the private
-/// token owned by the `meerkat` facade. Core validates the token type before it
-/// enters the low-level build path, so recovering the exported symbol is not
-/// sufficient to construct an agent.
-#[doc(hidden)]
-pub struct AgentFactoryPolicyBridgeRegistration {
-    kind: AgentFactoryPolicyBridgeRegistrationKind,
-    package_name: &'static str,
-    manifest_dir: &'static str,
-    source_file: &'static str,
-    #[cfg(target_arch = "wasm32")]
-    source_line: u32,
-    #[cfg(target_arch = "wasm32")]
-    source_column: u32,
-    source_fingerprint: u64,
-    token_type_id: fn() -> TypeId,
-}
-
-#[doc(hidden)]
-enum AgentFactoryPolicyBridgeRegistrationKind {
-    Facade,
-}
-
-const FACADE_FACTORY_SOURCE_FINGERPRINT: u64 = 0xa9de_0aae_2b8a_98aa;
-
-impl AgentFactoryPolicyBridgeRegistration {
-    #[doc(hidden)]
-    #[track_caller]
-    pub const fn __facade_from_compile_env(
-        package_name: &'static str,
-        manifest_dir: &'static str,
-        source_fingerprint: u64,
-        token_type_id: fn() -> TypeId,
-    ) -> Self {
-        Self {
-            kind: AgentFactoryPolicyBridgeRegistrationKind::Facade,
-            package_name,
-            manifest_dir,
-            source_file: core::panic::Location::caller().file(),
-            #[cfg(target_arch = "wasm32")]
-            source_line: core::panic::Location::caller().line(),
-            #[cfg(target_arch = "wasm32")]
-            source_column: core::panic::Location::caller().column(),
-            source_fingerprint,
-            token_type_id,
-        }
-    }
-}
-
-inventory::collect!(AgentFactoryPolicyBridgeRegistration);
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __meerkat_agent_factory_policy_bridge_registration {
-    ($token_type_id:path) => {
-        $crate::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_MANIFEST_DIR"),
-            $crate::agent::__meerkat_agent_factory_policy_source_fingerprint(include_bytes!(
-                concat!("factory", ".rs")
-            )),
-            $token_type_id,
-        )
-    };
-}
-
-#[doc(hidden)]
-pub const fn __meerkat_agent_factory_policy_source_fingerprint(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325;
-    let mut index = 0;
-    while index < bytes.len() {
-        hash ^= bytes[index] as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        index += 1;
-    }
-    hash
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -199,6 +108,14 @@ type AgentFactoryBuildFuture = Pin<
     >,
 >;
 
+#[allow(improper_ctypes, unsafe_code)]
+unsafe extern "Rust" {
+    #[link_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1"]
+    fn facade_agent_factory_policy_bridge_token_is_valid(
+        factory_bridge_token: &(dyn Any + Send + Sync),
+    ) -> bool;
+}
+
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = "__meerkat_agent_factory_policy_build_v3")]
 pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
@@ -218,163 +135,17 @@ pub(crate) unsafe extern "Rust" fn exported_agent_factory_policy_build(
 fn validate_factory_bridge_token(
     token: &(dyn Any + Send + Sync),
 ) -> Result<(), AgentBuildPolicyError> {
-    let mut canonical = None;
-    for registration in inventory::iter::<AgentFactoryPolicyBridgeRegistration> {
-        if !registration.is_canonical_meerkat_factory_registration() {
-            if registration.package_name == "meerkat" {
-                return Err(AgentBuildPolicyError::ForgedFactoryBridgeTokenRegistration);
-            }
-            continue;
-        }
-        let token_type_id = (registration.token_type_id)();
-        if canonical.replace(token_type_id).is_some() {
-            return Err(AgentBuildPolicyError::AmbiguousFactoryBridgeTokenRegistration);
-        }
-    }
-    let canonical =
-        canonical.ok_or(AgentBuildPolicyError::MissingFactoryBridgeTokenRegistration)?;
-    if token.type_id() == canonical {
+    // The only authority core accepts is a positive check from the linked
+    // facade crate. Public inventory/source metadata is intentionally not part
+    // of this proof because downstream crates can spoof package names, source
+    // paths, and fingerprints.
+    #[allow(unsafe_code)]
+    let is_valid = unsafe { facade_agent_factory_policy_bridge_token_is_valid(token) };
+    if is_valid {
         Ok(())
     } else {
         Err(AgentBuildPolicyError::InvalidFactoryBridgeToken)
     }
-}
-
-impl AgentFactoryPolicyBridgeRegistration {
-    fn is_canonical_meerkat_factory_registration(&self) -> bool {
-        match self.kind {
-            AgentFactoryPolicyBridgeRegistrationKind::Facade => {
-                matches!(self.package_name, "meerkat" | "meerkat_unit_test")
-                    && manifest_dir_matches(self.manifest_dir, expected_facade_manifest_dir())
-                    && source_file_matches(self.source_file, "meerkat", "src/factory.rs")
-                    && self.source_content_fingerprint_matches(FACADE_FACTORY_SOURCE_FINGERPRINT)
-            }
-        }
-    }
-
-    fn source_content_fingerprint_matches(&self, expected: u64) -> bool {
-        if self.source_fingerprint != expected {
-            return false;
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.source_location_matches_canonical_facade_site()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            source_file_content_fingerprint(self.manifest_dir, self.source_file)
-                .is_some_and(|actual| actual == expected)
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn source_location_matches_canonical_facade_site(&self) -> bool {
-        self.source_line == 188 && self.source_column == 5
-    }
-}
-
-fn expected_facade_manifest_dir() -> Option<String> {
-    let core_manifest_dir = normalized_path(env!("CARGO_MANIFEST_DIR"));
-    let suffixes = [
-        ("meerkat-core".to_string(), "meerkat".to_string()),
-        (
-            format!("meerkat-core-{}", env!("CARGO_PKG_VERSION")),
-            format!("meerkat-{}", env!("CARGO_PKG_VERSION")),
-        ),
-    ];
-    for (core_suffix, facade_suffix) in suffixes {
-        if let Some(base) = core_manifest_dir.strip_suffix(&core_suffix) {
-            return Some(
-                format!("{base}{facade_suffix}")
-                    .trim_end_matches('/')
-                    .to_string(),
-            );
-        }
-    }
-    None
-}
-
-fn manifest_dir_matches(actual: &str, expected: Option<String>) -> bool {
-    expected.is_some_and(|expected| normalized_path(actual) == expected)
-}
-
-fn source_file_matches(source_file: &str, package_dir_name: &str, relative_file: &str) -> bool {
-    let source_file = normalized_path(source_file);
-    source_file == relative_file
-        || source_file == format!("{package_dir_name}/{relative_file}")
-        || source_file.ends_with(&format!("/{package_dir_name}/{relative_file}"))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn source_file_content_fingerprint(manifest_dir: &str, source_file: &str) -> Option<u64> {
-    source_file_content_candidates(manifest_dir, source_file)
-        .into_iter()
-        .find_map(|path| {
-            fs::read(path)
-                .ok()
-                .map(|bytes| __meerkat_agent_factory_policy_source_fingerprint(&bytes))
-        })
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn source_file_content_candidates(manifest_dir: &str, source_file: &str) -> Vec<PathBuf> {
-    let source = Path::new(source_file);
-    if source.is_absolute() {
-        return vec![source.to_path_buf()];
-    }
-
-    let manifest = Path::new(manifest_dir);
-    let mut candidates = Vec::with_capacity(8);
-    candidates.push(manifest.join(source));
-    if source_starts_with_manifest_package_dir(source, manifest)
-        && let Some(workspace) = manifest.parent()
-    {
-        candidates.push(workspace.join(source));
-    }
-    runfiles_source_file_content_candidates(&mut candidates, manifest, source);
-    candidates
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn runfiles_source_file_content_candidates(
-    candidates: &mut Vec<PathBuf>,
-    manifest: &Path,
-    source: &Path,
-) {
-    if manifest.is_absolute() {
-        return;
-    }
-
-    let workspace = std::env::var_os("TEST_WORKSPACE").unwrap_or_else(|| "_main".into());
-    for variable in ["RUNFILES_DIR", "TEST_SRCDIR"] {
-        let Some(runfiles) = std::env::var_os(variable).map(PathBuf::from) else {
-            continue;
-        };
-        candidates.push(runfiles.join(&workspace).join(manifest).join(source));
-        candidates.push(runfiles.join(manifest).join(source));
-        if source_starts_with_manifest_package_dir(source, manifest) {
-            candidates.push(runfiles.join(&workspace).join(source));
-            candidates.push(runfiles.join(source));
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn source_starts_with_manifest_package_dir(source: &Path, manifest: &Path) -> bool {
-    let Some(package_dir) = manifest.file_name() else {
-        return false;
-    };
-    source
-        .components()
-        .next()
-        .is_some_and(|component| component.as_os_str() == package_dir)
-}
-
-fn normalized_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_start_matches("./")
-        .trim_end_matches('/')
-        .to_string()
 }
 
 impl AgentBuilder {

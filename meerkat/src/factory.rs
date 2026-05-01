@@ -2,7 +2,7 @@
 
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::BTreeMap;
 #[cfg(feature = "skills")]
 use std::collections::BTreeSet;
@@ -176,18 +176,17 @@ struct AgentFactoryPolicyBridgeToken;
 static AGENT_FACTORY_POLICY_BRIDGE_TOKEN: AgentFactoryPolicyBridgeToken =
     AgentFactoryPolicyBridgeToken;
 
-fn agent_factory_policy_bridge_token_type_id() -> TypeId {
-    TypeId::of::<AgentFactoryPolicyBridgeToken>()
-}
-
 fn agent_factory_policy_bridge_token() -> &'static (dyn Any + Send + Sync) {
     &AGENT_FACTORY_POLICY_BRIDGE_TOKEN
 }
 
-inventory::submit! {
-    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
-        agent_factory_policy_bridge_token_type_id
-    )
+#[doc(hidden)]
+#[allow(improper_ctypes_definitions, unsafe_code)]
+#[unsafe(export_name = "__meerkat_agent_factory_policy_bridge_token_is_valid_v1")]
+pub extern "Rust" fn agent_factory_policy_bridge_token_is_valid(
+    factory_bridge_token: &(dyn Any + Send + Sync),
+) -> bool {
+    factory_bridge_token.is::<AgentFactoryPolicyBridgeToken>()
 }
 
 #[allow(improper_ctypes_definitions, unsafe_code)]

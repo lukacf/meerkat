@@ -2565,7 +2565,6 @@ dependencies = [
  "getrandom 0.3.4",
  "humantime-serde",
  "indexmap",
- "inventory",
  "js-sys",
  "jsonschema",
  "parking_lot",

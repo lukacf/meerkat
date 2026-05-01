@@ -52,10 +52,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-pub use builder::{
-    __meerkat_agent_factory_policy_source_fingerprint, AgentBuildPolicyError, AgentBuilder,
-    AgentFactoryPolicyBridgeRegistration,
-};
+pub use builder::{AgentBuildPolicyError, AgentBuilder};
 pub use runner::AgentRunner;
 
 /// Trait for LLM clients that can be used with the agent

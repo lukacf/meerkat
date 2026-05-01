@@ -473,9 +473,12 @@ meerkat-core = {{ path = "{}" }}
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("AgentFactoryPolicyBridgeRegistration")
+            || stderr.contains("__meerkat_agent_factory_policy_bridge_registration")
             || stderr.contains("__meerkat_agent_factory_policy_build_v3")
             || stderr.contains("exported_agent_factory_policy_build")
             || stderr.contains("link_name")
+            || stderr.contains("undefined symbol")
+            || stderr.contains("not found in")
             || stderr.contains("couldn't read")
             || stderr.contains("No such file or directory"),
         "downstream unsafe finalizer fixture failed for the wrong reason:\n{stderr}"
@@ -581,17 +584,33 @@ meerkat-core = { path = "../meerkat-core" }
             format!("--remap-path-prefix={}=meerkat", project_dir.display()),
         )
         .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
+            "downstream package-spoof finalizer fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
     assert!(
-        output.status.success(),
-        "downstream package-spoof finalizer fixture must compile and run to bridge rejection; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("unsafe downstream finalizer call constructed an agent"),
+        "downstream package-spoof finalizer reached the live factory-policy bridge and constructed an agent:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
-        "downstream package-spoof finalizer fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("AgentFactoryPolicyBridgeRegistration")
+            || stderr.contains("__meerkat_agent_factory_policy_bridge_registration")
+            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
+            || stderr.contains("exported_agent_factory_policy_build")
+            || stderr.contains("link_name")
+            || stderr.contains("undefined symbol")
+            || stderr.contains("not found in")
+            || stderr.contains("couldn't read")
+            || stderr.contains("No such file or directory"),
+        "downstream package-spoof finalizer fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }
@@ -773,17 +792,141 @@ meerkat-core = { path = "../meerkat-core" }
         .arg(project_dir.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", temp.path().join("target"))
         .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
+            "downstream direct bridge-registration fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
     assert!(
-        output.status.success(),
-        "downstream direct bridge-registration fixture must compile and run to bridge rejection; stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("unsafe downstream finalizer call constructed an agent"),
+        "downstream direct bridge-registration fixture reached the live factory-policy bridge and constructed an agent:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
-        "downstream direct bridge-registration fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+        stderr.contains("AgentFactoryPolicyBridgeRegistration")
+            || stderr.contains("__meerkat_agent_factory_policy_bridge_registration")
+            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
+            || stderr.contains("exported_agent_factory_policy_build")
+            || stderr.contains("link_name")
+            || stderr.contains("undefined symbol")
+            || stderr.contains("not found in")
+            || stderr.contains("couldn't read")
+            || stderr.contains("No such file or directory"),
+        "downstream direct bridge-registration fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_direct_bridge_registration_cannot_borrow_real_facade_source() -> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_direct_bridge_registration_cannot_borrow_real_facade_source",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-real-facade-source"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+futures = "0.3"
+inventory = "0.3"
+meerkat-core = {{ path = "{}" }}
+"#,
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        "mod factory;\nfn main() { factory::run(); }\n",
+    )?;
+    let fixture =
+        include_str!("fixtures/agent_builder_policy/downstream_unsafe_factory_policy_finalizer.rs")
+            .replace("fn main() {", "pub fn run() {");
+    let fixture = fixture.replace(
+        r"inventory::submit! {
+    meerkat_core::__meerkat_agent_factory_policy_bridge_registration!(
+        forged_agent_factory_policy_bridge_token_type_id
+    )
+}
+
+",
+        &format!(
+            r#"inventory::submit! {{
+    meerkat_core::agent::AgentFactoryPolicyBridgeRegistration::__facade_from_compile_env(
+        "meerkat",
+        "{}",
+        0xa9de_0aae_2b8a_98aa,
+        forged_agent_factory_policy_bridge_token_type_id,
+    )
+}}
+
+"#,
+            repo_root().join("meerkat").display()
+        ),
+    );
+    fs::write(src_dir.join("factory.rs"), fixture)?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env(
+            "RUSTFLAGS",
+            format!("--remap-path-prefix={}=meerkat", temp.path().display()),
+        )
+        .output()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("unsafe downstream finalizer rejected forged bridge token"),
+            "downstream real-facade-source fixture passed for the wrong reason; stdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+    assert!(
+        !String::from_utf8_lossy(&output.stderr)
+            .contains("unsafe downstream finalizer call constructed an agent"),
+        "downstream real-facade-source fixture reached the live factory-policy bridge and constructed an agent:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("AgentFactoryPolicyBridgeRegistration")
+            || stderr.contains("__meerkat_agent_factory_policy_bridge_registration")
+            || stderr.contains("__meerkat_agent_factory_policy_build_v3")
+            || stderr.contains("exported_agent_factory_policy_build")
+            || stderr.contains("link_name")
+            || stderr.contains("undefined symbol")
+            || stderr.contains("not found in")
+            || stderr.contains("couldn't read")
+            || stderr.contains("No such file or directory"),
+        "downstream real-facade-source fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }
@@ -1250,21 +1393,22 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     assert!(
         builder.contains("validate_factory_policy()?")
             && builder.contains("validate_factory_bridge_token(factory_bridge_token)?")
-            && builder.contains("AgentFactoryPolicyBridgeRegistration")
-            && builder.contains("__meerkat_agent_factory_policy_bridge_registration")
+            && builder.contains("facade_agent_factory_policy_bridge_token_is_valid")
+            && builder.contains("__meerkat_agent_factory_policy_bridge_token_is_valid_v1")
             && builder.contains("InvalidFactoryBridgeToken")
-            && builder.contains("ForgedFactoryBridgeTokenRegistration")
-            && builder.contains("FACADE_FACTORY_SOURCE_FINGERPRINT")
-            && builder.contains("__facade_from_compile_env")
-            && builder.contains("__meerkat_agent_factory_policy_source_fingerprint")
-            && builder.contains("source_content_fingerprint_matches")
-            && builder.contains("source_file_content_fingerprint")
-            && builder.contains("core::panic::Location::caller")
-            && builder.contains("source_line")
-            && builder.contains("source_column")
-            && builder.contains("source_location_matches_canonical_facade_site")
-            && builder.contains("source_file_matches")
-            && builder.contains("inventory::collect!(AgentFactoryPolicyBridgeRegistration)")
+            && !builder.contains("AgentFactoryPolicyBridgeRegistration")
+            && !builder.contains("__meerkat_agent_factory_policy_bridge_registration")
+            && !builder.contains("FACADE_FACTORY_SOURCE_FINGERPRINT")
+            && !builder.contains("__facade_from_compile_env")
+            && !builder.contains("__meerkat_agent_factory_policy_source_fingerprint")
+            && !builder.contains("source_content_fingerprint_matches")
+            && !builder.contains("source_file_content_fingerprint")
+            && !builder.contains("core::panic::Location::caller")
+            && !builder.contains("source_line")
+            && !builder.contains("source_column")
+            && !builder.contains("source_location_matches_canonical_facade_site")
+            && !builder.contains("source_file_matches")
+            && !builder.contains("inventory::collect!(AgentFactoryPolicyBridgeRegistration)")
             && !builder.contains("AgentFactoryPolicyBridgeRegistration::new")
             && !builder.contains("pub const fn new(")
             && !builder.contains("pub const fn __from_compile_env")

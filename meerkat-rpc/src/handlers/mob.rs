@@ -127,65 +127,12 @@ fn apply_spawn_turn_metadata(
     };
     let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
         turn_metadata.into();
-
-    if metadata.handling_mode.is_some() {
-        return Err("mob spawn turn_metadata.handling_mode is not supported".to_string());
-    }
-    if metadata.skill_references.is_some() {
-        return Err("mob spawn turn_metadata.skill_references is not supported".to_string());
-    }
-    if metadata.flow_tool_overlay.is_some() {
-        return Err("mob spawn turn_metadata.flow_tool_overlay is not supported".to_string());
-    }
-    if metadata.provider.is_some() {
-        return Err("mob spawn turn_metadata.provider is not supported".to_string());
-    }
-    if metadata.keep_alive.is_some() {
-        return Err("mob spawn turn_metadata.keep_alive is not supported".to_string());
-    }
-    if metadata.render_metadata.is_some() {
-        return Err("mob spawn turn_metadata.render_metadata is not supported".to_string());
-    }
-
-    if let Some(model) = metadata.model {
-        spec.model_override = Some(model.to_string());
-    }
-    if let Some(provider_params) = metadata.provider_params {
-        spec.provider_params_override = match provider_params {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
-                Some(params.to_legacy_provider_value())
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob spawn turn_metadata.provider_params clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-    if let Some(instructions) = metadata.additional_instructions {
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.body)
-            .filter(|body| !body.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            spec.additional_instructions = Some(instructions);
-        }
-    }
-    if let Some(connection_ref) = metadata.connection_ref {
-        spec.connection_ref = match connection_ref {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
-                Some(connection_ref)
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob spawn turn_metadata.connection_ref clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-
-    Ok(())
+    spec.merge_turn_metadata(metadata).map_err(|err| {
+        format!(
+            "mob spawn turn_metadata conflict on {}: {}",
+            err.field, err.reason
+        )
+    })
 }
 
 fn apply_helper_turn_metadata(
@@ -197,64 +144,12 @@ fn apply_helper_turn_metadata(
     };
     let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
         turn_metadata.into();
-
-    if metadata.handling_mode.is_some() {
-        return Err("mob helper turn_metadata.handling_mode is not supported".to_string());
-    }
-    if metadata.skill_references.is_some() {
-        return Err("mob helper turn_metadata.skill_references is not supported".to_string());
-    }
-    if metadata.flow_tool_overlay.is_some() {
-        return Err("mob helper turn_metadata.flow_tool_overlay is not supported".to_string());
-    }
-    if metadata.provider.is_some() {
-        return Err("mob helper turn_metadata.provider is not supported".to_string());
-    }
-    if metadata.keep_alive.is_some() {
-        return Err("mob helper turn_metadata.keep_alive is not supported".to_string());
-    }
-    if metadata.render_metadata.is_some() {
-        return Err("mob helper turn_metadata.render_metadata is not supported".to_string());
-    }
-    if let Some(model) = metadata.model {
-        options.model_override = Some(model.to_string());
-    }
-    if let Some(provider_params) = metadata.provider_params {
-        options.provider_params_override = match provider_params {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
-                Some(params.to_legacy_provider_value())
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob helper turn_metadata.provider_params clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-    if let Some(instructions) = metadata.additional_instructions {
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.body)
-            .filter(|body| !body.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            options.additional_instructions = Some(instructions);
-        }
-    }
-    if let Some(connection_ref) = metadata.connection_ref {
-        options.connection_ref = match connection_ref {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
-                Some(connection_ref)
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob helper turn_metadata.connection_ref clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-
-    Ok(())
+    options.merge_turn_metadata(metadata).map_err(|err| {
+        format!(
+            "mob helper turn_metadata conflict on {}: {}",
+            err.field, err.reason
+        )
+    })
 }
 
 fn runtime_binding_from_wire(
@@ -2480,7 +2375,7 @@ mod tests {
     }
 
     #[test]
-    fn mob_spawn_rejects_clear_turn_metadata_overrides_it_cannot_apply() {
+    fn mob_spawn_keeps_clear_turn_metadata_overrides_in_carrier() {
         for (field, value) in [
             ("provider_params", serde_json::json!({ "action": "clear" })),
             ("connection_ref", serde_json::json!({ "action": "clear" })),
@@ -2491,18 +2386,37 @@ mod tests {
             )
             .expect("clear metadata should deserialize at the wire boundary");
 
-            let err = apply_spawn_turn_metadata(&mut spec, Some(turn_metadata))
-                .expect_err("mob spawn must reject clear overrides it cannot apply");
+            apply_spawn_turn_metadata(&mut spec, Some(turn_metadata))
+                .expect("mob spawn must preserve clear overrides in turn_metadata");
+            let metadata = spec
+                .turn_metadata
+                .as_ref()
+                .expect("canonical turn metadata");
+            let override_is_clear = match field {
+                "provider_params" => matches!(
+                    metadata.provider_params,
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+                ),
+                "connection_ref" => matches!(
+                    metadata.connection_ref,
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+                ),
+                _ => unreachable!("covered fields only"),
+            };
             assert!(
-                err.contains(field) && err.contains("clear"),
-                "unexpected error for {field}: {err}"
+                override_is_clear,
+                "expected {field} clear override to remain in the canonical carrier"
             );
         }
     }
 
     #[test]
-    fn mob_helper_turn_metadata_applies_additional_instructions() {
+    fn mob_helper_turn_metadata_preserves_typed_fields() {
         let turn_metadata = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            "flow_tool_overlay": {
+                "allowed_tools": ["shell"],
+                "blocked_tools": ["network"]
+            },
             "additional_instructions": [
                 { "kind": "user", "body": "stay concise" }
             ]
@@ -2511,12 +2425,30 @@ mod tests {
         let mut options = meerkat_mob::HelperOptions::default();
 
         apply_helper_turn_metadata(&mut options, Some(turn_metadata))
-            .expect("helper additional_instructions must be accepted canonically");
+            .expect("helper turn metadata fields must be accepted canonically");
 
+        let metadata = options
+            .turn_metadata
+            .as_ref()
+            .expect("helper should keep canonical turn metadata");
         assert_eq!(
-            options.additional_instructions.as_deref(),
-            Some(["stay concise".to_string()].as_slice())
+            metadata
+                .flow_tool_overlay
+                .as_ref()
+                .and_then(|overlay| overlay.allowed_tools.as_ref())
+                .cloned(),
+            Some(vec!["shell".to_string()])
         );
+        let instruction = metadata
+            .additional_instructions
+            .as_ref()
+            .and_then(|instructions| instructions.first())
+            .expect("typed instruction");
+        assert_eq!(
+            instruction.kind,
+            meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User
+        );
+        assert_eq!(instruction.body, "stay concise");
     }
 
     #[test]

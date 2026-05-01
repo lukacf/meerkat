@@ -2131,7 +2131,7 @@ impl MobMcpDispatcher {
                                     "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
                                     "labels":{"type":"object","additionalProperties":{"type":"string"}},
                                     "context":{"type":"object"},
-                                    "turn_metadata":{"type":"object"}
+                                    "turn_metadata": runtime_turn_metadata_schema()
                                 },
                                 "required":["profile","agent_identity"],
                                 "additionalProperties": false
@@ -2281,6 +2281,126 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
             kind: ToolSourceKind::Mob,
             source_id: "mob".into(),
         }),
+    })
+}
+
+fn runtime_turn_metadata_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "handling_mode": { "type": "string", "enum": ["queue", "steer"] },
+            "skill_references": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source_uuid": { "type": "string" },
+                        "skill_name": { "type": "string" }
+                    },
+                    "required": ["source_uuid", "skill_name"],
+                    "additionalProperties": false
+                }
+            },
+            "flow_tool_overlay": {
+                "type": "object",
+                "properties": {
+                    "allowed_tools": { "type": "array", "items": { "type": "string" } },
+                    "blocked_tools": { "type": "array", "items": { "type": "string" } }
+                },
+                "additionalProperties": false
+            },
+            "additional_instructions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["user", "system", "host"] },
+                        "body": { "type": "string" }
+                    },
+                    "required": ["kind", "body"],
+                    "additionalProperties": false
+                }
+            },
+            "model": { "type": "string" },
+            "provider": {
+                "type": "string",
+                "enum": ["anthropic", "openai", "gemini", "self_hosted", "other"]
+            },
+            "provider_params": turn_metadata_override_schema(json!({ "type": "object" })),
+            "connection_ref": turn_metadata_override_schema(json!({
+                "type": "object",
+                "properties": {
+                    "realm": { "type": "string" },
+                    "binding": { "type": "string" },
+                    "profile": { "type": "string" }
+                },
+                "required": ["realm", "binding"],
+                "additionalProperties": false
+            })),
+            "keep_alive": turn_metadata_override_schema(json!({
+                "type": "object",
+                "properties": {
+                    "ttl_secs": { "type": "integer", "minimum": 0 },
+                    "policy": {
+                        "type": "string",
+                        "enum": ["pinned", "policy_driven"]
+                    }
+                },
+                "required": ["ttl_secs", "policy"],
+                "additionalProperties": false
+            })),
+            "render_metadata": {
+                "type": "object",
+                "properties": {
+                    "class": {
+                        "type": "string",
+                        "enum": [
+                            "user_prompt",
+                            "peer_message",
+                            "peer_request",
+                            "peer_response",
+                            "external_event",
+                            "flow_step",
+                            "continuation",
+                            "system_notice",
+                            "tool_scope_notice",
+                            "ops_progress"
+                        ]
+                    },
+                    "salience": {
+                        "type": "string",
+                        "enum": ["background", "normal", "important", "urgent"]
+                    }
+                },
+                "required": ["class"],
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn turn_metadata_override_schema(value_schema: serde_json::Value) -> serde_json::Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "action": { "const": "set" },
+                    "value": value_schema
+                },
+                "required": ["action", "value"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": { "const": "clear" }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        ]
     })
 }
 
@@ -2487,65 +2607,12 @@ fn apply_dispatcher_spawn_turn_metadata(
     };
     let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
         turn_metadata.into();
-
-    if metadata.handling_mode.is_some() {
-        return Err("mob spawn turn_metadata.handling_mode is not supported".to_string());
-    }
-    if metadata.skill_references.is_some() {
-        return Err("mob spawn turn_metadata.skill_references is not supported".to_string());
-    }
-    if metadata.flow_tool_overlay.is_some() {
-        return Err("mob spawn turn_metadata.flow_tool_overlay is not supported".to_string());
-    }
-    if metadata.provider.is_some() {
-        return Err("mob spawn turn_metadata.provider is not supported".to_string());
-    }
-    if metadata.keep_alive.is_some() {
-        return Err("mob spawn turn_metadata.keep_alive is not supported".to_string());
-    }
-    if metadata.render_metadata.is_some() {
-        return Err("mob spawn turn_metadata.render_metadata is not supported".to_string());
-    }
-
-    if let Some(model) = metadata.model {
-        spec.model_override = Some(model.to_string());
-    }
-    if let Some(provider_params) = metadata.provider_params {
-        spec.provider_params_override = match provider_params {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
-                Some(params.to_legacy_provider_value())
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob spawn turn_metadata.provider_params clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-    if let Some(instructions) = metadata.additional_instructions {
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.body)
-            .filter(|body| !body.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            spec.additional_instructions = Some(instructions);
-        }
-    }
-    if let Some(connection_ref) = metadata.connection_ref {
-        spec.connection_ref = match connection_ref {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
-                Some(connection_ref)
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob spawn turn_metadata.connection_ref clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-
-    Ok(())
+    spec.merge_turn_metadata(metadata).map_err(|err| {
+        format!(
+            "mob spawn turn_metadata conflict on {}: {}",
+            err.field, err.reason
+        )
+    })
 }
 
 impl WireActionArgs {
@@ -4212,7 +4279,21 @@ mod tests {
             "mob_spawn_member schema must expose canonical turn_metadata carrier: {schema_text}"
         );
         assert!(
-            !schema_text.contains("\"additional_instructions\""),
+            schema_text.contains("\"flow_tool_overlay\"")
+                && schema_text.contains("\"additional_instructions\"")
+                && schema_text.contains("\"provider_params\"")
+                && schema_text.contains("\"connection_ref\"")
+                && schema_text.contains("\"queue\"")
+                && schema_text.contains("\"steer\"")
+                && schema_text.contains("\"source_uuid\"")
+                && schema_text.contains("\"skill_name\"")
+                && schema_text.contains("\"profile\"")
+                && schema_text.contains("\"render_metadata\""),
+            "mob_spawn_member schema must expose the canonical turn_metadata shape: {schema_text}"
+        );
+        assert!(
+            !schema_text.contains("\"additional_instructions\":{\"type\"")
+                && !schema_text.contains("\"additional_instructions\": {\"type\""),
             "mob_spawn_member schema must not expose retired split carrier: {schema_text}"
         );
     }

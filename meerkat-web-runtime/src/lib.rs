@@ -1747,84 +1747,15 @@ fn apply_spawn_turn_metadata(
     };
     let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
         turn_metadata.into();
-
-    if metadata.handling_mode.is_some() {
-        return Err(err_js(
+    spec.merge_turn_metadata(metadata).map_err(|err| {
+        err_js(
             "invalid_specs",
-            "mob spawn turn_metadata.handling_mode is not supported",
-        ));
-    }
-    if metadata.skill_references.is_some() {
-        return Err(err_js(
-            "invalid_specs",
-            "mob spawn turn_metadata.skill_references is not supported",
-        ));
-    }
-    if metadata.flow_tool_overlay.is_some() {
-        return Err(err_js(
-            "invalid_specs",
-            "mob spawn turn_metadata.flow_tool_overlay is not supported",
-        ));
-    }
-    if metadata.provider.is_some() {
-        return Err(err_js(
-            "invalid_specs",
-            "mob spawn turn_metadata.provider is not supported",
-        ));
-    }
-    if metadata.keep_alive.is_some() {
-        return Err(err_js(
-            "invalid_specs",
-            "mob spawn turn_metadata.keep_alive is not supported",
-        ));
-    }
-    if metadata.render_metadata.is_some() {
-        return Err(err_js(
-            "invalid_specs",
-            "mob spawn turn_metadata.render_metadata is not supported",
-        ));
-    }
-
-    if let Some(model) = metadata.model {
-        spec.model_override = Some(model.to_string());
-    }
-    if let Some(provider_params) = metadata.provider_params {
-        spec.provider_params_override = match provider_params {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
-                Some(params.to_legacy_provider_value())
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(err_js(
-                    "invalid_specs",
-                    "mob spawn turn_metadata.provider_params clear is not supported",
-                ));
-            }
-        };
-    }
-    if let Some(instructions) = metadata.additional_instructions {
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.body)
-            .filter(|body| !body.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            spec.additional_instructions = Some(instructions);
-        }
-    }
-    if let Some(connection_ref) = metadata.connection_ref {
-        spec.connection_ref = match connection_ref {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
-                Some(connection_ref)
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(err_js(
-                    "invalid_specs",
-                    "mob spawn turn_metadata.connection_ref clear is not supported",
-                ));
-            }
-        };
-    }
-    Ok(())
+            &format!(
+                "mob spawn turn_metadata conflict on {}: {}",
+                err.field, err.reason
+            ),
+        )
+    })
 }
 
 fn apply_helper_turn_metadata(
@@ -1836,84 +1767,15 @@ fn apply_helper_turn_metadata(
     };
     let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
         turn_metadata.into();
-
-    if metadata.handling_mode.is_some() {
-        return Err(err_js(
+    options.merge_turn_metadata(metadata).map_err(|err| {
+        err_js(
             "invalid_request",
-            "mob helper turn_metadata.handling_mode is not supported",
-        ));
-    }
-    if metadata.skill_references.is_some() {
-        return Err(err_js(
-            "invalid_request",
-            "mob helper turn_metadata.skill_references is not supported",
-        ));
-    }
-    if metadata.flow_tool_overlay.is_some() {
-        return Err(err_js(
-            "invalid_request",
-            "mob helper turn_metadata.flow_tool_overlay is not supported",
-        ));
-    }
-    if metadata.provider.is_some() {
-        return Err(err_js(
-            "invalid_request",
-            "mob helper turn_metadata.provider is not supported",
-        ));
-    }
-    if metadata.keep_alive.is_some() {
-        return Err(err_js(
-            "invalid_request",
-            "mob helper turn_metadata.keep_alive is not supported",
-        ));
-    }
-    if metadata.render_metadata.is_some() {
-        return Err(err_js(
-            "invalid_request",
-            "mob helper turn_metadata.render_metadata is not supported",
-        ));
-    }
-    if let Some(model) = metadata.model {
-        options.model_override = Some(model.to_string());
-    }
-    if let Some(provider_params) = metadata.provider_params {
-        options.provider_params_override = match provider_params {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
-                Some(params.to_legacy_provider_value())
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(err_js(
-                    "invalid_request",
-                    "mob helper turn_metadata.provider_params clear is not supported",
-                ));
-            }
-        };
-    }
-    if let Some(instructions) = metadata.additional_instructions {
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.body)
-            .filter(|body| !body.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            options.additional_instructions = Some(instructions);
-        }
-    }
-    if let Some(connection_ref) = metadata.connection_ref {
-        options.connection_ref = match connection_ref {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
-                Some(connection_ref)
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(err_js(
-                    "invalid_request",
-                    "mob helper turn_metadata.connection_ref clear is not supported",
-                ));
-            }
-        };
-    }
-
-    Ok(())
+            &format!(
+                "mob helper turn_metadata conflict on {}: {}",
+                err.field, err.reason
+            ),
+        )
+    })
 }
 
 /// Retire a member from a mob.
@@ -2979,7 +2841,16 @@ capabilities = [{capability_values}]
                 &mob_id,
                 vec![
                     SpawnMemberSpec::new("worker", "worker-1")
-                        .with_connection_ref(test_connection_ref())
+                        .with_turn_metadata(
+                            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                                connection_ref: Some(
+                                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                                        test_connection_ref(),
+                                    ),
+                                ),
+                                ..Default::default()
+                            },
+                        )
                         .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven),
                 ],
             )
@@ -3146,6 +3017,9 @@ capabilities = [{capability_values}]
         let turn_metadata = serde_json::from_value::<
             meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata,
         >(json!({
+            "flow_tool_overlay": {
+                "allowed_tools": ["shell"]
+            },
             "additional_instructions": [
                 { "kind": "user", "body": "stay concise" }
             ]
@@ -3156,9 +3030,15 @@ capabilities = [{capability_values}]
         super::apply_helper_turn_metadata(&mut options, Some(turn_metadata))
             .expect("helper additional_instructions must be accepted canonically");
 
+        let metadata = options.turn_metadata.as_ref().expect("turn metadata");
+        assert!(metadata.flow_tool_overlay.is_some());
         assert_eq!(
-            options.additional_instructions.as_deref(),
-            Some(["stay concise".to_string()].as_slice())
+            metadata
+                .additional_instructions
+                .as_ref()
+                .and_then(|items| items.first())
+                .map(|instruction| instruction.kind),
+            Some(meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User)
         );
     }
 
@@ -3214,7 +3094,16 @@ capabilities = [{capability_values}]
             .expect("create mob");
         let mut options = meerkat_mob::HelperOptions::default();
         options.role_name = Some(meerkat_mob::ProfileName::from("worker"));
-        options.connection_ref = Some(test_connection_ref());
+        options.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                connection_ref: Some(
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        test_connection_ref(),
+                    ),
+                ),
+                ..Default::default()
+            },
+        );
 
         let result = mob_state
             .mob_spawn_helper(

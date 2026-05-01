@@ -1013,76 +1013,12 @@ fn apply_spawn_turn_metadata(
     };
     let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
         turn_metadata.into();
-
-    if metadata.handling_mode.is_some() {
-        return Err(McpToolError::invalid_params(
-            "mob spawn turn_metadata.handling_mode is not supported",
-        ));
-    }
-    if metadata.skill_references.is_some() {
-        return Err(McpToolError::invalid_params(
-            "mob spawn turn_metadata.skill_references is not supported",
-        ));
-    }
-    if metadata.flow_tool_overlay.is_some() {
-        return Err(McpToolError::invalid_params(
-            "mob spawn turn_metadata.flow_tool_overlay is not supported",
-        ));
-    }
-    if metadata.provider.is_some() {
-        return Err(McpToolError::invalid_params(
-            "mob spawn turn_metadata.provider is not supported",
-        ));
-    }
-    if metadata.keep_alive.is_some() {
-        return Err(McpToolError::invalid_params(
-            "mob spawn turn_metadata.keep_alive is not supported",
-        ));
-    }
-    if metadata.render_metadata.is_some() {
-        return Err(McpToolError::invalid_params(
-            "mob spawn turn_metadata.render_metadata is not supported",
-        ));
-    }
-
-    if let Some(model) = metadata.model {
-        spec.model_override = Some(model.to_string());
-    }
-    if let Some(provider_params) = metadata.provider_params {
-        spec.provider_params_override = match provider_params {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
-                Some(params.to_legacy_provider_value())
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(McpToolError::invalid_params(
-                    "mob spawn turn_metadata.provider_params clear is not supported",
-                ));
-            }
-        };
-    }
-    if let Some(instructions) = metadata.additional_instructions {
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.body)
-            .filter(|body| !body.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            spec.additional_instructions = Some(instructions);
-        }
-    }
-    if let Some(connection_ref) = metadata.connection_ref {
-        spec.connection_ref = match connection_ref {
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
-                Some(connection_ref)
-            }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
-                return Err(McpToolError::invalid_params(
-                    "mob spawn turn_metadata.connection_ref clear is not supported",
-                ));
-            }
-        };
-    }
-    Ok(())
+    spec.merge_turn_metadata(metadata).map_err(|err| {
+        McpToolError::invalid_params(format!(
+            "mob spawn turn_metadata conflict on {}: {}",
+            err.field, err.reason
+        ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1304,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn public_mcp_spawn_rejects_clear_turn_metadata_overrides_it_cannot_apply() {
+    fn public_mcp_spawn_preserves_clear_turn_metadata_overrides() {
         for (field, value) in [
             ("provider_params", serde_json::json!({ "action": "clear" })),
             ("connection_ref", serde_json::json!({ "action": "clear" })),
@@ -1314,7 +1250,7 @@ mod tests {
             )
             .expect("clear metadata should deserialize at the wire boundary");
 
-            let err = build_spawn_spec(
+            let spec = build_spawn_spec(
                 "worker".to_string(),
                 "worker-1".to_string(),
                 None,
@@ -1325,11 +1261,22 @@ mod tests {
                 None,
                 Some(turn_metadata),
             )
-            .expect_err("MCP mob spawn must reject clear overrides it cannot apply");
-            let message = err.message;
+            .expect("MCP mob spawn should keep clear overrides in turn_metadata");
+            let metadata = spec.turn_metadata.as_ref().expect("turn metadata");
+            let override_is_clear = match field {
+                "provider_params" => matches!(
+                    metadata.provider_params,
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+                ),
+                "connection_ref" => matches!(
+                    metadata.connection_ref,
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+                ),
+                _ => unreachable!("covered fields only"),
+            };
             assert!(
-                message.contains(field) && message.contains("clear"),
-                "unexpected error for {field}: {message}"
+                override_is_clear,
+                "expected {field} clear override to remain in turn_metadata"
             );
         }
     }

@@ -21,6 +21,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use meerkat_core::comms::{
     PeerAddress, PeerLifecycleKind, PeerName, PeerRoute, TrustedPeerDescriptor,
 };
+use meerkat_core::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataOverride};
 use meerkat_core::time_compat::SystemTime;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -226,6 +227,7 @@ pub(super) struct PendingSpawn {
     pub(super) agent_identity: MeerkatId,
     pub(super) admitted_bridge_session_id: SessionId,
     pub(super) prompt: ContentInput,
+    pub(super) turn_metadata: Option<RuntimeTurnMetadata>,
     pub(super) runtime_mode: crate::MobRuntimeMode,
     pub(super) labels: std::collections::BTreeMap<String, String>,
     pub(super) owner_bridge_session_id: Option<SessionId>,
@@ -237,6 +239,45 @@ pub(super) struct PendingSpawn {
     pub(super) effective_profile_override: Option<crate::profile::Profile>,
     pub(super) progress: Arc<std::sync::Mutex<PendingSpawnProgress>>,
     pub(super) reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
+}
+
+fn apply_member_turn_metadata_to_profile(
+    profile: &mut crate::profile::Profile,
+    metadata: &RuntimeTurnMetadata,
+) {
+    if let Some(model) = metadata.model.as_ref() {
+        profile.model = model.as_str().to_string();
+    }
+    match metadata.provider_params.as_ref() {
+        Some(TurnMetadataOverride::Set(params)) => {
+            profile.provider_params = Some(params.to_legacy_provider_value());
+        }
+        Some(TurnMetadataOverride::Clear) => {
+            profile.provider_params = None;
+        }
+        None => {}
+    }
+}
+
+fn apply_member_turn_metadata_to_build_config(
+    config: &mut meerkat::AgentBuildConfig,
+    metadata: Option<RuntimeTurnMetadata>,
+) -> Result<(), MobError> {
+    let Some(metadata) = metadata.filter(|metadata| !metadata.is_empty()) else {
+        return Ok(());
+    };
+    match config.initial_turn_metadata.as_mut() {
+        Some(existing) => existing.merge(metadata).map_err(|err| {
+            MobError::Internal(format!(
+                "member turn_metadata conflict on {}: {}",
+                err.field, err.reason
+            ))
+        }),
+        None => {
+            config.initial_turn_metadata = Some(metadata);
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2482,6 +2523,7 @@ impl MobActor {
         agent_identity: &MeerkatId,
         member_ref: &MemberRef,
         prompt: meerkat_core::types::ContentInput,
+        turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Result<(), MobError> {
         self.ensure_autonomous_runtime_ready(agent_identity, member_ref)
             .await?;
@@ -2551,7 +2593,7 @@ impl MobActor {
                 } else {
                     None
                 },
-                turn_metadata: None,
+                turn_metadata,
                 build_only_overrides: None,
             });
 
@@ -3984,14 +4026,12 @@ impl MobActor {
             tool_access_policy: _tool_access_policy,
             budget_split_policy: _budget_split_policy,
             auto_wire_parent,
-            additional_instructions,
+            turn_metadata,
             shell_env,
             inherited_tool_filter,
             override_profile,
-            model_override,
-            provider_params_override,
-            connection_ref,
         } = spec;
+        let turn_metadata = turn_metadata.filter(|metadata| !metadata.is_empty());
         let agent_identity = MeerkatId::from(identity.as_str());
         if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
             let _ = reply_tx.send(Err(error));
@@ -4059,11 +4099,8 @@ impl MobActor {
                     .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
                     .await?
             };
-            if let Some(model) = model_override {
-                profile.model = model;
-            }
-            if provider_params_override.is_some() {
-                profile.provider_params = provider_params_override;
+            if let Some(metadata) = turn_metadata.as_ref() {
+                apply_member_turn_metadata_to_profile(&mut profile, metadata);
             }
 
             let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
@@ -4120,6 +4157,7 @@ impl MobActor {
                         profile_name,
                         agent_identity,
                         prompt,
+                        turn_metadata.clone(),
                         selected_runtime_mode,
                         profile_external_addressable,
                         resolved_labels,
@@ -4155,7 +4193,7 @@ impl MobActor {
                                 external_tools,
                                 context,
                                 labels: labels.clone(),
-                                additional_instructions,
+                                additional_instructions: None,
                                 shell_env,
                                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
                                 inherited_tool_filter: inherited_tool_filter.clone(),
@@ -4165,6 +4203,7 @@ impl MobActor {
                         },
                     )
                     .await?;
+                    apply_member_turn_metadata_to_build_config(&mut config, turn_metadata.clone())?;
                     config.keep_alive =
                         selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
                     if let Some(ref client) = self.default_llm_client {
@@ -4197,6 +4236,7 @@ impl MobActor {
                         profile_name,
                         agent_identity,
                         prompt,
+                        turn_metadata.clone(),
                         selected_runtime_mode,
                         profile_external_addressable,
                         resolved_labels,
@@ -4286,22 +4326,18 @@ impl MobActor {
                 external_tools,
                 context,
                 labels: labels.clone(),
-                additional_instructions,
+                additional_instructions: None,
                 shell_env,
                 mob_tool_access_context: crate::build::MobToolAccessContext::None,
                 inherited_tool_filter,
             })
             .await?;
+            apply_member_turn_metadata_to_build_config(&mut config, turn_metadata.clone())?;
             config.keep_alive =
                 selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost;
             if let Some(ref client) = self.default_llm_client {
                 config.llm_client_override = Some(client.clone());
             }
-            // Deferral §1: per-member auth binding.
-            if let Some(ref cref) = connection_ref {
-                config.connection_ref = Some(cref.clone());
-            }
-
             let base_prompt = initial_message.clone().unwrap_or_else(|| {
                 ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
             });
@@ -4337,6 +4373,7 @@ impl MobActor {
                 profile_name,
                 agent_identity,
                 prompt,
+                turn_metadata.clone(),
                 selected_runtime_mode,
                 profile_external_addressable,
                 resolved_labels,
@@ -4353,6 +4390,7 @@ impl MobActor {
             profile_name,
             agent_identity,
             prompt,
+            turn_metadata,
             selected_runtime_mode,
             external_addressable,
             resolved_labels,
@@ -4423,6 +4461,7 @@ impl MobActor {
                     fence,
                     selected_runtime_mode,
                     prompt,
+                    turn_metadata,
                     resolved_labels,
                     provision,
                     operation_id,
@@ -4475,6 +4514,7 @@ impl MobActor {
             agent_identity,
             admitted_bridge_session_id,
             prompt,
+            turn_metadata,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
             owner_bridge_session_id: spawn_owner_bridge_session_id,
@@ -4624,6 +4664,7 @@ impl MobActor {
                 agent_identity,
                 admitted_bridge_session_id: _,
                 prompt,
+                turn_metadata,
                 runtime_mode,
                 labels,
                 owner_bridge_session_id,
@@ -4657,6 +4698,7 @@ impl MobActor {
                             fence,
                             runtime_mode,
                             prompt,
+                            turn_metadata,
                             labels,
                             provision,
                             spawn_receipt.operation_id,
@@ -4774,6 +4816,7 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             admitted_bridge_session_id,
             prompt: prompt.clone(),
+            turn_metadata: None,
             runtime_mode,
             labels: labels.clone(),
             owner_bridge_session_id: None,
@@ -4845,6 +4888,7 @@ impl MobActor {
                 fence,
                 runtime_mode,
                 prompt,
+                None,
                 labels,
                 provision,
                 spawn_receipt.operation_id,
@@ -4890,6 +4934,7 @@ impl MobActor {
         fence_token: crate::ids::FenceToken,
         runtime_mode: crate::MobRuntimeMode,
         prompt: ContentInput,
+        turn_metadata: Option<RuntimeTurnMetadata>,
         labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
         operation_id: meerkat_core::ops::OperationId,
@@ -5256,7 +5301,7 @@ impl MobActor {
                 return Err(binding_error);
             }
             if let Err(start_error) = self
-                .start_autonomous_member(agent_identity, &member_ref, prompt)
+                .start_autonomous_member(agent_identity, &member_ref, prompt, turn_metadata)
                 .await
             {
                 self.clear_kickoff_state(agent_identity).await;
@@ -7557,6 +7602,7 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             admitted_bridge_session_id,
             prompt: prompt.clone(),
+            turn_metadata: None,
             runtime_mode: snapshot.runtime_mode,
             labels: snapshot.labels.clone(),
             owner_bridge_session_id: None,
@@ -7667,6 +7713,7 @@ impl MobActor {
                 respawn_fence,
                 snapshot.runtime_mode,
                 prompt,
+                None,
                 snapshot.labels.clone(),
                 provision,
                 spawn_receipt.operation_id,

@@ -24,6 +24,7 @@ use crate::tokio;
 use meerkat_core::comms::{
     PeerDirectoryEntry, PeerId, PeerReachability, PeerReachabilityReason, TrustedPeerDescriptor,
 };
+use meerkat_core::lifecycle::run_primitive::{RuntimeTurnMetadata, TurnMetadataMergeConflict};
 use meerkat_core::ops::OperationId;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{MobToolAuthorityContext, SessionError};
@@ -644,18 +645,28 @@ pub struct HelperOptions {
     pub backend: Option<MobBackendKind>,
     /// Tool access policy for the helper.
     pub tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
-    /// Explicit auth binding used for the helper member's agent build.
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
+    /// Canonical runtime turn metadata for helper first-turn/build overrides.
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
     /// Pre-resolved inherited tool filter from scheduled or agent-owned tooling resolution.
     pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
     /// Override profile resolved from scheduled or agent-owned tooling resolution.
     pub override_profile: Option<crate::profile::Profile>,
-    /// Model override resolved from scheduled helper tooling.
-    pub model_override: Option<String>,
-    /// Provider params override resolved from scheduled helper tooling.
-    pub provider_params_override: Option<serde_json::Value>,
-    /// Additional instruction sections appended to the helper system prompt.
-    pub additional_instructions: Option<Vec<String>>,
+}
+
+impl HelperOptions {
+    /// Merge metadata into the canonical helper carrier, refusing scalar divergence.
+    pub fn merge_turn_metadata(
+        &mut self,
+        metadata: RuntimeTurnMetadata,
+    ) -> Result<(), TurnMetadataMergeConflict> {
+        match self.turn_metadata.as_mut() {
+            Some(existing) => existing.merge(metadata),
+            None => {
+                self.turn_metadata = (!metadata.is_empty()).then_some(metadata);
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Result from a helper spawn-and-wait operation.
@@ -932,8 +943,8 @@ pub struct SpawnMemberSpec {
     pub budget_split_policy: Option<crate::launch::BudgetSplitPolicy>,
     /// When true, automatically wire this member to its spawner.
     pub auto_wire_parent: bool,
-    /// Additional instruction sections appended to the system prompt for this member.
-    pub additional_instructions: Option<Vec<String>>,
+    /// Canonical runtime turn metadata for member first-turn/build overrides.
+    pub turn_metadata: Option<RuntimeTurnMetadata>,
     /// Per-agent environment variables injected into shell tool subprocesses.
     pub shell_env: Option<std::collections::HashMap<String, String>>,
     /// Pre-resolved inherited tool filter from spawn tooling resolution.
@@ -948,16 +959,6 @@ pub struct SpawnMemberSpec {
     /// tooling to specify a different model/skills/tools via inline or
     /// realm-scoped profiles.
     pub override_profile: Option<crate::profile::Profile>,
-    /// Model override resolved outside the mob runtime while keeping the selected role profile.
-    pub model_override: Option<String>,
-    /// Provider params override resolved outside the mob runtime while keeping the selected role profile.
-    pub provider_params_override: Option<serde_json::Value>,
-    /// Per-member auth binding. When set, this member's agent builds with
-    /// `AgentBuildConfig.connection_ref = Some(this)`, scoping credential
-    /// resolution to the named realm + binding. `None` means the caller did not
-    /// provide binding authority; build paths that require a binding must reject
-    /// the spawn instead of promoting an ambient fallback.
-    pub connection_ref: Option<meerkat_core::ConnectionRef>,
 }
 
 impl SpawnMemberSpec {
@@ -975,20 +976,11 @@ impl SpawnMemberSpec {
             tool_access_policy: None,
             budget_split_policy: None,
             auto_wire_parent: false,
-            additional_instructions: None,
+            turn_metadata: None,
             shell_env: None,
             inherited_tool_filter: None,
             override_profile: None,
-            model_override: None,
-            provider_params_override: None,
-            connection_ref: None,
         }
-    }
-
-    /// Set the per-member auth binding (deferral §1).
-    pub fn with_connection_ref(mut self, conn_ref: meerkat_core::ConnectionRef) -> Self {
-        self.connection_ref = Some(conn_ref);
-        self
     }
 
     pub fn with_shell_env(mut self, env: std::collections::HashMap<String, String>) -> Self {
@@ -1063,9 +1055,23 @@ impl SpawnMemberSpec {
         self
     }
 
-    pub fn with_additional_instructions(mut self, instructions: Vec<String>) -> Self {
-        self.additional_instructions = Some(instructions);
+    pub fn with_turn_metadata(mut self, metadata: RuntimeTurnMetadata) -> Self {
+        self.turn_metadata = (!metadata.is_empty()).then_some(metadata);
         self
+    }
+
+    /// Merge metadata into the canonical member carrier, refusing scalar divergence.
+    pub fn merge_turn_metadata(
+        &mut self,
+        metadata: RuntimeTurnMetadata,
+    ) -> Result<(), TurnMetadataMergeConflict> {
+        match self.turn_metadata.as_mut() {
+            Some(existing) => existing.merge(metadata),
+            None => {
+                self.turn_metadata = (!metadata.is_empty()).then_some(metadata);
+                Ok(())
+            }
+        }
     }
 
     pub fn from_wire(
@@ -3816,12 +3822,9 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
-        spec.connection_ref = options.connection_ref;
+        spec.turn_metadata = options.turn_metadata;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
-        spec.model_override = options.model_override;
-        spec.provider_params_override = options.provider_params_override;
-        spec.additional_instructions = options.additional_instructions;
         spec.auto_wire_parent = true;
 
         self.spawn_spec(spec).await?;
@@ -3867,12 +3870,9 @@ impl MobHandle {
         );
         spec.backend = options.backend;
         spec.tool_access_policy = options.tool_access_policy;
-        spec.connection_ref = options.connection_ref;
+        spec.turn_metadata = options.turn_metadata;
         spec.inherited_tool_filter = options.inherited_tool_filter;
         spec.override_profile = options.override_profile;
-        spec.model_override = options.model_override;
-        spec.provider_params_override = options.provider_params_override;
-        spec.additional_instructions = options.additional_instructions;
         spec.auto_wire_parent = true;
         spec.launch_mode = crate::launch::MemberLaunchMode::Fork {
             source_member_id,
@@ -4234,5 +4234,47 @@ mod tests {
 
         assert_eq!(spec.launch_mode.resume_bridge_session_id(), Some(&sid));
         assert_eq!(spec.launch_mode.resume_bridge_session_id(), Some(&sid));
+    }
+
+    #[test]
+    fn helper_and_spawn_specs_expose_single_turn_metadata_carrier() {
+        let source = include_str!("handle.rs");
+        let helper_start = source
+            .find("pub struct HelperOptions")
+            .expect("HelperOptions source");
+        let helper_end = source[helper_start..]
+            .find("pub struct HelperResult")
+            .map(|offset| helper_start + offset)
+            .expect("HelperOptions end");
+        let helper_source = &source[helper_start..helper_end];
+        let spawn_start = source
+            .find("pub struct SpawnMemberSpec")
+            .expect("SpawnMemberSpec source");
+        let spawn_end = source[spawn_start..]
+            .find("impl SpawnMemberSpec")
+            .map(|offset| spawn_start + offset)
+            .expect("SpawnMemberSpec end");
+        let spawn_source = &source[spawn_start..spawn_end];
+
+        for (name, struct_source) in [
+            ("HelperOptions", helper_source),
+            ("SpawnMemberSpec", spawn_source),
+        ] {
+            assert!(
+                struct_source.contains("pub turn_metadata: Option<RuntimeTurnMetadata>"),
+                "{name} must expose canonical RuntimeTurnMetadata as the public metadata carrier"
+            );
+            for split_field in [
+                "pub connection_ref:",
+                "pub model_override:",
+                "pub provider_params_override:",
+                "pub additional_instructions:",
+            ] {
+                assert!(
+                    !struct_source.contains(split_field),
+                    "{name} must not expose split metadata field {split_field}"
+                );
+            }
+        }
     }
 }

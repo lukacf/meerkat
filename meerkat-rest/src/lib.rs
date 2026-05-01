@@ -1779,60 +1779,12 @@ fn apply_helper_turn_metadata(
         return Ok(());
     };
     let metadata: RuntimeTurnMetadata = turn_metadata.into();
-
-    if metadata.handling_mode.is_some() {
-        return Err("mob helper turn_metadata.handling_mode is not supported".to_string());
-    }
-    if metadata.skill_references.is_some() {
-        return Err("mob helper turn_metadata.skill_references is not supported".to_string());
-    }
-    if metadata.flow_tool_overlay.is_some() {
-        return Err("mob helper turn_metadata.flow_tool_overlay is not supported".to_string());
-    }
-    if metadata.provider.is_some() {
-        return Err("mob helper turn_metadata.provider is not supported".to_string());
-    }
-    if metadata.keep_alive.is_some() {
-        return Err("mob helper turn_metadata.keep_alive is not supported".to_string());
-    }
-    if metadata.render_metadata.is_some() {
-        return Err("mob helper turn_metadata.render_metadata is not supported".to_string());
-    }
-    if let Some(model) = metadata.model {
-        options.model_override = Some(model.to_string());
-    }
-    if let Some(provider_params) = metadata.provider_params {
-        options.provider_params_override = match provider_params {
-            TurnMetadataOverride::Set(params) => Some(params.to_legacy_provider_value()),
-            TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob helper turn_metadata.provider_params clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-    if let Some(instructions) = metadata.additional_instructions {
-        let instructions = instructions
-            .into_iter()
-            .map(|instruction| instruction.body)
-            .filter(|body| !body.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            options.additional_instructions = Some(instructions);
-        }
-    }
-    if let Some(connection_ref) = metadata.connection_ref {
-        options.connection_ref = match connection_ref {
-            TurnMetadataOverride::Set(connection_ref) => Some(connection_ref),
-            TurnMetadataOverride::Clear => {
-                return Err(
-                    "mob helper turn_metadata.connection_ref clear is not supported".to_string(),
-                );
-            }
-        };
-    }
-
-    Ok(())
+    options.merge_turn_metadata(metadata).map_err(|err| {
+        format!(
+            "mob helper turn_metadata conflict on {}: {}",
+            err.field, err.reason
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -7038,6 +6990,9 @@ mod tests {
     #[test]
     fn test_mob_helper_turn_metadata_applies_additional_instructions() {
         let turn_metadata = serde_json::from_value::<WireRuntimeTurnMetadata>(serde_json::json!({
+            "flow_tool_overlay": {
+                "allowed_tools": ["shell"]
+            },
             "additional_instructions": [
                 { "kind": "user", "body": "stay concise" }
             ]
@@ -7048,9 +7003,15 @@ mod tests {
         apply_helper_turn_metadata(&mut options, Some(turn_metadata))
             .expect("helper additional_instructions must be accepted canonically");
 
+        let metadata = options.turn_metadata.as_ref().expect("turn metadata");
+        assert!(metadata.flow_tool_overlay.is_some());
         assert_eq!(
-            options.additional_instructions.as_deref(),
-            Some(["stay concise".to_string()].as_slice())
+            metadata
+                .additional_instructions
+                .as_ref()
+                .and_then(|items| items.first())
+                .map(|instruction| instruction.kind),
+            Some(meerkat_core::lifecycle::run_primitive::TurnInstructionKind::User)
         );
     }
 

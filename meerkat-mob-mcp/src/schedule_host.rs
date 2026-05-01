@@ -12,6 +12,9 @@ use meerkat::{
     ScheduleSpawnTooling, ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode,
     TargetProbeOutcome,
 };
+use meerkat_core::lifecycle::run_primitive::{
+    ModelId, ProviderParamsOverride, RuntimeTurnMetadata, TurnMetadataOverride,
+};
 use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata};
 use meerkat_mob::{
     AgentIdentity, FlowId, ForkContext, HelperOptions, MobBackendKind, MobError, MobId,
@@ -428,8 +431,18 @@ fn helper_options_from_spec(
     options.tool_access_policy = spec.tool_access_policy.clone();
     if let Some(snapshot) = &spec.resolved_spawn_snapshot {
         options.inherited_tool_filter = Some(snapshot.tool_filter.clone());
-        options.model_override = Some(snapshot.model.clone());
-        options.provider_params_override = snapshot.provider_params.clone();
+        let mut metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new(snapshot.model.clone())),
+            ..Default::default()
+        };
+        if let Some(provider_params) = snapshot.provider_params.as_ref() {
+            metadata.provider_params = Some(TurnMetadataOverride::Set(
+                ProviderParamsOverride::from_legacy_provider_value("other", provider_params),
+            ));
+        }
+        options
+            .merge_turn_metadata(metadata)
+            .map_err(|err| ScheduleDomainError::InvalidSchedule(err.to_string()))?;
     }
     Ok(options)
 }
@@ -886,11 +899,15 @@ mod tests {
             Some("delegate")
         );
         assert_eq!(options.inherited_tool_filter.as_ref(), Some(&filter));
-        assert_eq!(options.model_override.as_deref(), Some("claude-snapshot"));
+        let turn_metadata = options
+            .turn_metadata
+            .as_ref()
+            .expect("schedule helper snapshot metadata");
         assert_eq!(
-            options.provider_params_override,
-            Some(serde_json::json!({"thinking_budget": 1024}))
+            turn_metadata.model.as_ref().map(|model| model.as_str()),
+            Some("claude-snapshot")
         );
+        assert!(turn_metadata.provider_params.is_some());
         assert!(
             options.override_profile.is_none(),
             "schedule snapshot should not fabricate a replacement role profile"

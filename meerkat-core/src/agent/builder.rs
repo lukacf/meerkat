@@ -77,8 +77,6 @@ pub enum AgentBuildPolicyError {
     MissingSessionBuildState,
     #[error("factory policy build requires a runtime turn-state handle")]
     MissingTurnStateHandle,
-    #[error("factory policy build must be called by the canonical factory caller")]
-    InvalidFactoryPolicyCaller,
 }
 
 /// Build an agent after the canonical factory has composed policy metadata.
@@ -94,79 +92,20 @@ pub enum AgentBuildPolicyError {
 /// only as a crate boundary bridge between `meerkat` and `meerkat-core`; it is
 /// not a standalone construction API.
 #[doc(hidden)]
-#[track_caller]
 #[allow(unsafe_code)]
-pub unsafe fn build_agent_after_factory_policy<C, T, S>(
+pub async unsafe fn build_agent_after_factory_policy<C, T, S>(
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
     store: Arc<S>,
-) -> impl std::future::Future<Output = Result<Agent<C, T, S>, AgentBuildPolicyError>>
+) -> Result<Agent<C, T, S>, AgentBuildPolicyError>
 where
     C: AgentLlmClient + ?Sized,
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
-    let caller = std::panic::Location::caller();
-    async move {
-        validate_factory_policy_caller(caller)?;
-        builder.validate_factory_policy()?;
-        Ok(builder.build_inner(client, tools, store).await)
-    }
-}
-
-fn normalize_source_path(path: &str) -> String {
-    let path = path.replace('\\', "/");
-    let absolute =
-        path.starts_with('/') || path.as_bytes().get(1).is_some_and(|byte| *byte == b':');
-    let mut parts: Vec<&str> = Vec::new();
-
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            part => parts.push(part),
-        }
-    }
-
-    let mut normalized = String::new();
-    if absolute {
-        normalized.push('/');
-    }
-    normalized.push_str(&parts.join("/"));
-    normalized
-}
-
-fn workspace_source_path(relative_or_absolute: &str) -> String {
-    let path = relative_or_absolute.replace('\\', "/");
-    if path.starts_with('/') || path.as_bytes().get(1).is_some_and(|byte| *byte == b':') {
-        normalize_source_path(&path)
-    } else {
-        normalize_source_path(&format!(
-            "{}/../{}",
-            env!("CARGO_MANIFEST_DIR"),
-            relative_or_absolute
-        ))
-    }
-}
-
-fn canonical_factory_source_path() -> String {
-    normalize_source_path(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../meerkat/src/factory.rs"
-    ))
-}
-
-fn validate_factory_policy_caller(
-    location: &'static std::panic::Location<'static>,
-) -> Result<(), AgentBuildPolicyError> {
-    if workspace_source_path(location.file()) == canonical_factory_source_path() {
-        Ok(())
-    } else {
-        Err(AgentBuildPolicyError::InvalidFactoryPolicyCaller)
-    }
+    builder.validate_factory_policy()?;
+    Ok(builder.build_inner(client, tools, store).await)
 }
 
 impl AgentBuilder {
@@ -318,37 +257,11 @@ impl AgentBuilder {
 
     /// Build a standalone low-level agent without facade/factory policy.
     ///
-    /// This is an explicit escape hatch for core tests and embeddings that own
-    /// every loop primitive themselves. Production-facing Meerkat surfaces
-    /// should route through `AgentFactory::build_agent`. The method is not part
-    /// of the default production API; embedding users must opt into the
-    /// `standalone-agent-builder` feature explicitly.
+    /// This is an explicit escape hatch for core tests that own every loop
+    /// primitive themselves. Production-facing Meerkat surfaces route through
+    /// `AgentFactory::build_agent`.
     #[cfg(test)]
     pub async fn build_standalone<C, T, S>(
-        self,
-        client: Arc<C>,
-        tools: Arc<T>,
-        store: Arc<S>,
-    ) -> Agent<C, T, S>
-    where
-        C: AgentLlmClient + ?Sized,
-        T: AgentToolDispatcher + ?Sized,
-        S: AgentSessionStore + ?Sized,
-    {
-        self.build_inner(client, tools, store).await
-    }
-
-    #[cfg(all(not(test), feature = "standalone-agent-builder"))]
-    /// Build a standalone low-level agent after the caller has explicitly opted
-    /// out of facade/factory policy.
-    ///
-    /// # Safety
-    ///
-    /// The caller must own all policy normally composed by `AgentFactory`,
-    /// including durable session metadata, runtime state handles, hook/tool
-    /// wiring, auth leases, and persistence semantics.
-    #[allow(unsafe_code)]
-    pub async unsafe fn build_standalone<C, T, S>(
         self,
         client: Arc<C>,
         tools: Arc<T>,

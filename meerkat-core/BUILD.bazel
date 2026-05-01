@@ -62,7 +62,6 @@ rust_library(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -97,7 +96,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -146,7 +144,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -197,7 +194,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -250,7 +246,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -266,8 +261,9 @@ rust_test(
         "CARGO_MANIFEST_DIR": "./meerkat-core",
     },
     tags = [
-        "required-feature",
+        "fast",
     ],
+    size = "small",
     data = [],
     env = {
         "RUST_MIN_STACK": "16777216",
@@ -300,7 +296,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -357,7 +352,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -408,7 +402,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -458,7 +451,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -511,7 +503,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -562,7 +553,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -613,7 +603,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -664,7 +653,6 @@ rust_test(
     crate_features = [
         "jsonschema",
         "schema",
-        "standalone-agent-builder",
     ],
     edition = "2024",
     compile_data = [
@@ -706,6 +694,7 @@ test_suite(
     tests = [
         ":connection_ref_no_string_form_test",
         ":fork_at_rotates_session_id_test",
+        ":hooks_behavior_test",
         ":hooks_contracts_test",
         ":image_generation_contracts_test",
         ":meerkat_core_unit_test",

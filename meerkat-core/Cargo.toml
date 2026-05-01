@@ -44,7 +44,6 @@ uuid = { version = "1.11", features = ["v4", "v7", "serde", "js"] }
 default = ["schema", "jsonschema"]
 schema = []
 jsonschema = ["dep:jsonschema"]
-standalone-agent-builder = []
 # Retained for compatibility with older workspace selectors. The factory
 # finalizer is always compiled and validates canonical factory provenance.
 internal-agent-factory-build = []
@@ -56,7 +55,6 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 [[test]]
 name = "hooks_behavior"
 path = "tests/hooks_behavior.rs"
-required-features = ["standalone-agent-builder"]
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "js-sys"]  # cfg(target_arch = "wasm32")

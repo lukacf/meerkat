@@ -58,7 +58,8 @@ pub struct BuildAgentConfigParams<'a> {
     /// Pre-resolved inherited tool filter from spawn tooling.
     ///
     /// When set, stored as `INHERITED_TOOL_FILTER_METADATA_KEY` on the session
-    /// so `AgentBuilder::build()` recovers it as a base filter on ToolScope.
+    /// so the factory-backed core build recovers it as a base filter on
+    /// ToolScope.
     pub inherited_tool_filter: Option<meerkat_core::tool_scope::ToolFilter>,
 }
 
@@ -187,8 +188,8 @@ pub async fn build_agent_config(
         });
     }
 
-    // Inherited tool filter: inject into session metadata so AgentBuilder::build()
-    // recovers it as a base filter on ToolScope.
+    // Inherited tool filter: inject into session metadata so the factory-backed
+    // core build recovers it as a base filter on ToolScope.
     if let Some(filter) = inherited_tool_filter
         && let Ok(value) = serde_json::to_value(&filter)
     {

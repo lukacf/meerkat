@@ -301,7 +301,11 @@ async fn build_agent(
 
     #[allow(unsafe_code)]
     unsafe {
-        builder.build_standalone(client, tools, store).await
+        meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
+            builder, client, tools, store,
+        )
+        .await
+        .expect("test builder has factory policy metadata")
     }
 }
 

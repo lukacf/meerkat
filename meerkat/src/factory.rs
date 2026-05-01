@@ -3878,7 +3878,7 @@ impl AgentFactory {
         // runtime, auth, session, tool, and metadata policy composition above.
         #[allow(unsafe_code)]
         let mut agent = unsafe {
-            meerkat_core::agent::build_agent_after_factory_policy(
+            meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
                 builder,
                 llm_adapter,
                 tools,
@@ -4026,7 +4026,7 @@ mod tests {
         // intentionally omitting required factory metadata.
         #[allow(unsafe_code)]
         let result = unsafe {
-            meerkat_core::agent::build_agent_after_factory_policy(
+            meerkat_core::agent::__agent_factory_build_bridge::build_agent_after_factory_policy(
                 builder,
                 llm_adapter,
                 tools,

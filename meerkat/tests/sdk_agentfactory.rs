@@ -714,16 +714,14 @@ fn public_agentfactory_value_is_not_core_policy_authority() {
 
     assert!(
         builder.contains("validate_factory_policy()?")
-            && builder.contains("#[track_caller]")
-            && builder.contains("let caller = std::panic::Location::caller();")
-            && builder.contains("validate_factory_policy_caller(caller)?")
-            && builder.contains("canonical_factory_source_path()")
+            && !builder.contains("std::panic::Location::caller")
+            && !builder.contains("validate_factory_policy_caller")
+            && !builder.contains("canonical_factory_source_path")
             && !builder.contains("pub struct AgentFactoryPolicyAuthority")
             && !builder.contains("pub fn from_registered_source<A: 'static>")
-            && !builder.contains(".ends_with(")
             && !builder.contains("pub fn agent_factory_policy_authority"),
         "core factory-policy build must validate factory-composed policy state \
-         and exact canonical factory caller provenance without exposing a \
-         public core authority type or minting helper"
+         without trusting runtime source paths or exposing a public core \
+         authority type or minting helper"
     );
 }

@@ -119,9 +119,9 @@ fn is_test_source(path: &Path) -> bool {
         || path.file_name().is_some_and(|name| name == "tests.rs")
 }
 
-fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
+fn public_standalone_build_is_test_only(source: &str) -> bool {
     let Some(pos) = source.find("pub async fn build_standalone") else {
-        return source.contains("pub async unsafe fn build_standalone");
+        return !source.contains("pub async unsafe fn build_standalone");
     };
     let cfg_window = source[..pos]
         .lines()
@@ -129,7 +129,9 @@ fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
         .take(4)
         .collect::<Vec<_>>()
         .join("\n");
-    cfg_window.contains("#[cfg(test)]") && source.contains("pub async unsafe fn build_standalone")
+    cfg_window.contains("#[cfg(test)]")
+        && !source.contains("pub async unsafe fn build_standalone")
+        && !source.contains("#[cfg(all(not(test), feature = \"standalone-agent-builder\"))]")
 }
 
 fn public_factory_policy_finalizer_is_unsafe_bridge(source: &str) -> bool {
@@ -438,17 +440,24 @@ meerkat-core = {{ path = "{}" }}
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let output = Command::new(cargo)
-        .arg("run")
+        .arg("check")
         .arg("--quiet")
         .arg("--manifest-path")
         .arg(temp.path().join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", temp.path().join("target"))
         .output()?;
     assert!(
-        output.status.success(),
-        "downstream unsafe finalizer fixture did not observe a policy rejection; stdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "downstream unsafe finalizer fixture unexpectedly compiled; stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("build_agent_after_factory_policy")
+            || stderr.contains("__agent_factory_build_bridge")
+            || stderr.contains("not found"),
+        "downstream unsafe finalizer fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
 }
@@ -884,15 +893,15 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          route through AgentFactory policy or an explicitly named low-level seam"
     );
     assert!(
-        public_standalone_build_is_cfg_gated(&builder),
+        public_standalone_build_is_test_only(&builder),
         "meerkat_core::AgentBuilder must not expose public standalone \
-         build(client, tools, store) in its default production API; low-level \
-         standalone construction must be test/embedding opt-in"
+         build(client, tools, store) outside core tests; low-level standalone \
+         construction must not be a downstream feature opt-in"
     );
     assert!(
-        builder.contains("pub async unsafe fn build_standalone"),
-        "the feature-gated standalone builder must be an explicit unsafe \
-         escape hatch; downstream safe code must not bypass AgentFactory"
+        !builder.contains("pub async unsafe fn build_standalone"),
+        "the standalone builder must not be a public unsafe feature-gated \
+         escape hatch; downstream unsafe code can opt into public features"
     );
     assert!(
         !builder.contains("StandaloneAgentBuildAuthority"),
@@ -914,7 +923,8 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("validate_factory_policy()?")
-            && builder.contains("pub unsafe fn build_agent_after_factory_policy")
+            && (builder.contains("pub unsafe fn build_agent_after_factory_policy")
+                || builder.contains("pub async unsafe fn build_agent_after_factory_policy"))
             && !builder.contains("is_canonical_factory_authority()")
             && !builder.contains("AgentBuildPolicyError::InvalidBuildAuthority")
             && !builder.contains("pub fn from_registered_source<A: 'static>")
@@ -927,13 +937,14 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          registration or authority-minting API"
     );
     assert!(
-        builder.contains("#[track_caller]")
-            && builder.contains("let caller = std::panic::Location::caller();")
-            && builder.contains("validate_factory_policy_caller(caller)?")
-            && builder.contains("canonical_factory_source_path()")
-            && !builder.contains(".ends_with("),
-        "core factory authority must validate exact canonical factory caller \
-         provenance and must not trust source file path suffixes"
+        !builder.contains("std::panic::Location::caller")
+            && !builder.contains("validate_factory_policy_caller")
+            && !builder.contains("canonical_factory_source_path")
+            && !builder.contains("workspace_source_path")
+            && !builder.contains("normalize_source_path"),
+        "core factory authority must not trust runtime source file paths; \
+         packaged/vendored Cargo layouts change source paths and downstream \
+         callers can shape source locations"
     );
     assert!(
         !builder.contains("pub struct AgentFactoryBuildToken")
@@ -954,6 +965,13 @@ fn core_factory_authority_token_is_not_reexported() {
         agent_mod_reexport_is_doc_hidden(&agent_mod),
         "meerkat_core::agent must not re-export the factory-policy finalizer \
          as a normal public construction surface"
+    );
+    assert!(
+        !agent_mod.contains("pub use builder::build_agent_after_factory_policy")
+            && agent_mod.contains("pub mod __agent_factory_build_bridge"),
+        "meerkat_core::agent must keep the factory-policy finalizer off the \
+         normal agent module surface; only the explicit facade/core bridge may \
+         expose it"
     );
     assert!(
         !agent_mod.contains("AgentFactoryBuildToken"),
@@ -1092,11 +1110,11 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     let internal_core = bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build")
         .expect("meerkat-core BUILD.bazel must contain a non-public AgentFactory core variant");
     assert!(
-        internal_core.contains("\"standalone-agent-builder\"")
+        !internal_core.contains("\"standalone-agent-builder\"")
             && !internal_core.contains("meerkat_agent_build_authority")
             && !internal_core.contains("//visibility:public"),
         "Bazel AgentFactory core bridge must stay non-public and must not \
-         carry the retired authority dependency"
+         expose standalone build features or carry the retired authority dependency"
     );
 }
 

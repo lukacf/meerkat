@@ -210,9 +210,8 @@ impl AgentBuilder {
     ///
     /// This is intentionally a builder-only core escape hatch. Facade builds
     /// route compaction through the factory/config pipeline; use
-    /// the explicit unsafe standalone core builder when a test or embedding
-    /// must inject a bespoke compactor directly into the core agent loop.
-    /// Calling this on the
+    /// a dedicated factory extension when a test or embedding must inject a
+    /// bespoke compactor directly into the core agent loop. Calling this on the
     /// facade builder makes `try_build` return a configuration error.
     pub fn compactor(mut self, _compactor: Arc<dyn meerkat_core::compact::Compactor>) -> Self {
         self.unsupported_core_injections.push("compactor");
@@ -223,9 +222,8 @@ impl AgentBuilder {
     ///
     /// This direct core-loop injection is intentionally not a facade authority;
     /// the factory owns memory tool/session composition. Use
-    /// the explicit unsafe standalone core builder for low-level standalone
-    /// tests. Calling this on the facade builder makes `try_build` return a
-    /// configuration error.
+    /// a dedicated factory extension for low-level tests. Calling this on the
+    /// facade builder makes `try_build` return a configuration error.
     pub fn memory_store(mut self, _store: Arc<dyn meerkat_core::memory::MemoryStore>) -> Self {
         self.unsupported_core_injections.push("memory_store");
         self

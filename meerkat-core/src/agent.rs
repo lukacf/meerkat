@@ -50,10 +50,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-#[doc(hidden)]
-pub use builder::build_agent_after_factory_policy;
 pub use builder::{AgentBuildPolicyError, AgentBuilder};
 pub use runner::AgentRunner;
+
+#[doc(hidden)]
+pub mod __agent_factory_build_bridge {
+    pub use super::builder::build_agent_after_factory_policy;
+}
 
 /// Trait for LLM clients that can be used with the agent
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

@@ -68,9 +68,6 @@ fn meerkat_command_self_catalog_input(
             Some(MeerkatInput::EnsureSessionWithExecutor)
         }
         MeerkatMachineCommandVariant::SetSilentIntents => Some(MeerkatInput::SetSilentIntents),
-        MeerkatMachineCommandVariant::InterruptCurrentRun => {
-            Some(MeerkatInput::InterruptCurrentRun)
-        }
         MeerkatMachineCommandVariant::CancelAfterBoundary => {
             Some(MeerkatInput::CancelAfterBoundary)
         }

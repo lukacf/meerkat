@@ -23,13 +23,12 @@ use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
-use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::types::SessionId;
 use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 use meerkat_core::{
-    SessionToolVisibilityState, ToolFilter, ToolScopeApplyError, ToolScopeRevision,
-    ToolScopeStageError, ToolVisibilityOwner, ToolVisibilityWitness,
+    DeferredToolLoadAuthority, SessionToolVisibilityState, ToolFilter, ToolScopeApplyError,
+    ToolScopeRevision, ToolScopeStageError, ToolVisibilityOwner, ToolVisibilityWitness,
 };
 
 use crate::accept::AcceptOutcome;
@@ -142,6 +141,7 @@ mod dispatch_session;
 #[allow(clippy::assign_op_pattern)]
 pub mod dsl;
 pub(crate) mod dsl_authority;
+mod dsl_effects;
 mod llm_reconfigure;
 mod runtime_control;
 mod session_management;
@@ -155,11 +155,12 @@ pub use comms_drain::{
     SupervisorBinding, SupervisorBindingStageError,
 };
 pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
+pub(crate) use dsl_effects::{DslTransitionEffects, apply_dsl_transition_on_authority};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 
 struct StagedSessionDslInput {
     previous_state: Box<dsl::MeerkatMachineState>,
-    effects: Vec<dsl::MeerkatMachineEffect>,
+    effects: DslTransitionEffects,
 }
 
 #[derive(Clone, Copy)]
@@ -211,6 +212,10 @@ struct RuntimeSessionEntry {
     /// Registration phase — explicit type-level distinction between
     /// "registered but inert" and "executor attached."
     phase: RegistrationPhase,
+    /// Temporary live interrupt capability for prepared, session-owned turns
+    /// that run before the runtime loop attachment is published.
+    provisional_interrupt_handle:
+        Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
     /// DSL authority for coarse lifecycle phase transitions.
     /// Sync field — validates transitions, writes back phase.
     ///
@@ -239,8 +244,9 @@ struct RuntimeSessionEntry {
 /// drift into partially-populated shell state.
 struct RuntimeLoopAttachment {
     wake_tx: mpsc::Sender<()>,
-    control_tx: mpsc::Sender<RunControlCommand>,
-    control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
+    effect_tx: mpsc::Sender<crate::effect::RuntimeEffect>,
+    boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
+    interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
     _loop_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -276,7 +282,7 @@ impl RuntimeSessionEntry {
     fn attachment_is_live(&self) -> bool {
         match &self.phase {
             RegistrationPhase::Active(attachment) => {
-                !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed()
+                !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed()
             }
             RegistrationPhase::Queuing | RegistrationPhase::Attaching => false,
         }
@@ -300,14 +306,17 @@ impl RuntimeSessionEntry {
     fn attach_runtime_loop(
         &mut self,
         wake_tx: mpsc::Sender<()>,
-        control_tx: mpsc::Sender<RunControlCommand>,
-        control_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>>,
+        effect_tx: mpsc::Sender<crate::effect::RuntimeEffect>,
+        boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
+        interrupt_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>>,
         loop_handle: tokio::task::JoinHandle<()>,
     ) {
+        self.provisional_interrupt_handle = None;
         self.phase = RegistrationPhase::Active(RuntimeLoopAttachment {
             wake_tx,
-            control_tx,
-            control_handle,
+            effect_tx,
+            boundary_handle,
+            interrupt_handle,
             _loop_handle: loop_handle,
         });
     }
@@ -325,7 +334,7 @@ impl RuntimeSessionEntry {
     fn wake_sender(&self) -> Option<mpsc::Sender<()>> {
         match &self.phase {
             RegistrationPhase::Active(attachment)
-                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
                 Some(attachment.wake_tx.clone())
             }
@@ -333,25 +342,49 @@ impl RuntimeSessionEntry {
         }
     }
 
-    fn control_sender(&self) -> Option<mpsc::Sender<RunControlCommand>> {
+    fn effect_sender(&self) -> Option<mpsc::Sender<crate::effect::RuntimeEffect>> {
         match &self.phase {
             RegistrationPhase::Active(attachment)
-                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
-                Some(attachment.control_tx.clone())
+                Some(attachment.effect_tx.clone())
             }
             _ => None,
         }
     }
 
-    fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
+    fn boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
         match &self.phase {
             RegistrationPhase::Active(attachment)
-                if !attachment.wake_tx.is_closed() && !attachment.control_tx.is_closed() =>
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
             {
-                attachment.control_handle.clone()
+                attachment.boundary_handle.clone()
             }
             _ => None,
+        }
+    }
+
+    fn interrupt_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
+        match &self.phase {
+            RegistrationPhase::Active(attachment)
+                if !attachment.wake_tx.is_closed() && !attachment.effect_tx.is_closed() =>
+            {
+                attachment.interrupt_handle.clone()
+            }
+            _ => self.provisional_interrupt_handle.clone(),
+        }
+    }
+
+    fn install_provisional_interrupt_handle(
+        &mut self,
+        handle: Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>,
+    ) {
+        if !self.attachment_is_live() {
+            self.provisional_interrupt_handle = Some(handle);
         }
     }
 }
@@ -424,105 +457,6 @@ impl MeerkatMachine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(authority.state.clone())
-    }
-
-    async fn stage_session_dsl_input(
-        &self,
-        session_id: &SessionId,
-        input: dsl::MeerkatMachineInput,
-        context: &str,
-    ) -> Result<Box<dsl::MeerkatMachineState>, String> {
-        self.stage_session_dsl_transition(session_id, input, context)
-            .await
-            .map(|staged| staged.previous_state)
-    }
-
-    async fn stage_session_dsl_transition(
-        &self,
-        session_id: &SessionId,
-        input: dsl::MeerkatMachineInput,
-        context: &str,
-    ) -> Result<StagedSessionDslInput, String> {
-        let authority = self.session_dsl_authority(session_id).await?;
-        Self::stage_dsl_transition_on_authority(&authority, input, context)
-    }
-
-    fn stage_dsl_transition_on_authority(
-        authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
-        input: dsl::MeerkatMachineInput,
-        context: &str,
-    ) -> Result<StagedSessionDslInput, String> {
-        let mut authority = authority
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous_state = Box::new(authority.state.clone());
-        let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-            .map(|transition| transition.effects)
-            .map_err(|err| dsl_authority::map_error(err, context))?;
-        Ok(StagedSessionDslInput {
-            previous_state,
-            effects,
-        })
-    }
-
-    async fn apply_session_dsl_input(
-        &self,
-        session_id: &SessionId,
-        input: dsl::MeerkatMachineInput,
-        context: &str,
-    ) -> Result<
-        (
-            Box<dsl::MeerkatMachineState>,
-            Vec<dsl::MeerkatMachineEffect>,
-        ),
-        String,
-    > {
-        self.apply_session_dsl_input_with_dispatch_failure(
-            session_id,
-            input,
-            context,
-            CommittedEffectDispatchFailure::RestorePreviousDslState,
-        )
-        .await
-    }
-
-    async fn apply_session_dsl_input_with_dispatch_failure(
-        &self,
-        session_id: &SessionId,
-        input: dsl::MeerkatMachineInput,
-        context: &str,
-        dispatch_failure: CommittedEffectDispatchFailure,
-    ) -> Result<
-        (
-            Box<dsl::MeerkatMachineState>,
-            Vec<dsl::MeerkatMachineEffect>,
-        ),
-        String,
-    > {
-        let authority = self.session_dsl_authority(session_id).await?;
-        let (previous_state, effects) = {
-            let mut authority = authority
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let previous_state = Box::new(authority.state.clone());
-            let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
-                .map(|transition| transition.effects)
-                .map_err(|err| dsl_authority::map_error(err, context))?;
-            (previous_state, effects)
-        };
-        if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
-            match dispatch_failure {
-                CommittedEffectDispatchFailure::PreserveCommittedDslState => {}
-                CommittedEffectDispatchFailure::RestorePreviousDslState => {
-                    self.restore_session_dsl_state(session_id, previous_state)
-                        .await;
-                }
-            }
-            return Err(format!(
-                "DSL authority ({context}): committed effect dispatch failed: {error}"
-            ));
-        }
-        Ok((previous_state, effects))
     }
 
     async fn commit_session_dsl_transition(
@@ -964,7 +898,6 @@ impl MeerkatMachine {
                 MeerkatMachineCommand::RegisterSession { .. }
                 | MeerkatMachineCommand::UnregisterSession { .. }
                 | MeerkatMachineCommand::SetSilentIntents { .. }
-                | MeerkatMachineCommand::InterruptCurrentRun { .. }
                 | MeerkatMachineCommand::CancelAfterBoundary { .. }
                 | MeerkatMachineCommand::StopRuntimeExecutor { .. }
                 | MeerkatMachineCommand::ContainsSession { .. }

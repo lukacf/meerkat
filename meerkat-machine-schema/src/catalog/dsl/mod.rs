@@ -451,6 +451,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RuntimeNoticeKind",
                 &["Drain", "Reset", "Stop", "Exit", "Recover"],
             ),
+            NamedTypeBinding::string_enum(
+                "RuntimeEffectKind",
+                &["CancelAfterBoundary", "StopRuntimeExecutor"],
+            ),
             NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string("SessionLlmCapabilitySurface"),
             NamedTypeBinding::string_enum(
@@ -609,6 +613,7 @@ runtime_internal_inputs!(
         FatalFailure,
         ForceCancelNoRun,
         IncrementAttemptCount,
+        InterruptCurrentRun,
         InteractionStreamAttached,
         InteractionStreamClosedEarly,
         InteractionStreamCompleted,

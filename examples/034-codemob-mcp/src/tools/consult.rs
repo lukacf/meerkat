@@ -58,6 +58,8 @@ pub async fn handle(
         if let Some(context) = request_context.as_ref() {
             let service = state.session_service.clone();
             let session_id_for_cancel = session_id.clone();
+            // This example is explicitly standalone/ephemeral; production
+            // runtime-backed surfaces route cancellation through MeerkatMachine.
             let _ = context
                 .install_cancel_action(request_action(move || {
                     let service = service.clone();
@@ -103,6 +105,8 @@ pub async fn handle(
         let service = state.session_service.clone();
         let session_id_for_cancel = session_id.clone();
         // No archive cleanup — session stays alive for continuation via session_id.
+        // This example is explicitly standalone/ephemeral; production
+        // runtime-backed surfaces route cancellation through MeerkatMachine.
         let _ = context
             .install_cancel_action(request_action(move || {
                 let service = service.clone();

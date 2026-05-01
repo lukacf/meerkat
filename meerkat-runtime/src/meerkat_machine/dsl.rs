@@ -1609,6 +1609,15 @@ pub enum RuntimeNoticeKind {
     Recover,
 }
 
+/// Closed classifier for runtime-loop executor effects emitted as neutral DSL
+/// facts before the runtime shell converts them to sealed executable effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeEffectKind {
+    #[default]
+    CancelAfterBoundary,
+    StopRuntimeExecutor,
+}
+
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
 /// cancellation-observation origins emitted when a turn's cancellation
 /// request lands at an observable boundary. Replaces the former literal-

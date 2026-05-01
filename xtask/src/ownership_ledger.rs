@@ -1620,11 +1620,19 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                     "register_session_with_executor",
                     "ensure_session_with_executor",
                     "unregister_session",
-                    "interrupt_current_run",
                 ]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            },
+            PublicInherentBoundary {
+                family_name: "runtime-session-adapter".into(),
+                path_suffix: "meerkat-runtime/src/user_interrupt.rs".into(),
+                type_name: "MeerkatMachine".into(),
+                method_names: vec!["hard_cancel_current_run"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
             },
             PublicInherentBoundary {
                 family_name: "runtime-session-adapter".into(),
@@ -2311,8 +2319,8 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(
-            "meerkat-runtime/src/meerkat_machine/session_management.rs",
-            "interrupt_current_run",
+            "meerkat-runtime/src/user_interrupt.rs",
+            "hard_cancel_current_run",
             BoundaryKind::PublicInherent,
             "MeerkatMachine",
             &["driver", "attachment"],

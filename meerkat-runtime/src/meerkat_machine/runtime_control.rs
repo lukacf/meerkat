@@ -1,64 +1,95 @@
 use super::*;
 
 impl MeerkatMachine {
-    pub(super) async fn interrupt_current_run_inner(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), RuntimeDriverError> {
-        let control_tx = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            entry.control_sender()
-        };
-
-        let Some(control_tx) = control_tx else {
-            let state = self
-                .existing_session_runtime_state(session_id)
-                .await
-                .unwrap_or(RuntimeState::Destroyed);
-            return Err(RuntimeDriverError::NotReady { state });
-        };
-        control_tx
-            .send(RunControlCommand::CancelCurrentRun {
-                reason: "mob interrupt".to_string(),
-            })
-            .await
-            .map_err(|err| RuntimeDriverError::Internal(format!("failed to send interrupt: {err}")))
-    }
-
     pub(super) async fn cancel_after_boundary_inner(
         &self,
         session_id: &SessionId,
     ) -> Result<(), RuntimeDriverError> {
-        let control_tx = {
+        let staged = match self
+            .stage_session_dsl_transition(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CancelAfterBoundary {
+                    reason: "boundary cancel".to_string(),
+                },
+                "CancelAfterBoundary",
+            )
+            .await
+        {
+            Ok(staged) => staged,
+            Err(_) => {
+                return Err(RuntimeDriverError::NotReady {
+                    state: self
+                        .existing_session_runtime_state(session_id)
+                        .await
+                        .unwrap_or(RuntimeState::Destroyed),
+                });
+            }
+        };
+        let projected_effect =
+            crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+                .map_err(RuntimeDriverError::Internal)?;
+
+        let (effect_tx, boundary_handle) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
                 .ok_or(RuntimeDriverError::NotReady {
                     state: RuntimeState::Destroyed,
                 })?;
-            entry.control_sender()
+            (entry.effect_sender(), entry.boundary_handle())
         };
 
-        let Some(control_tx) = control_tx else {
+        let Some(effect_tx) = effect_tx else {
             let state = self
                 .existing_session_runtime_state(session_id)
                 .await
                 .unwrap_or(RuntimeState::Destroyed);
+            self.restore_session_dsl_state(session_id, staged.previous_state)
+                .await;
             return Err(RuntimeDriverError::NotReady { state });
         };
-        control_tx
-            .send(RunControlCommand::CancelAfterBoundary {
-                reason: "boundary cancel".to_string(),
-            })
-            .await
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!("failed to send cancel_after_boundary: {err}"))
-            })
+
+        let reason = projected_effect.reason().to_string();
+        if let Some(boundary_handle) = boundary_handle {
+            if let Err(err) = boundary_handle.cancel_after_boundary(reason.clone()).await {
+                self.restore_session_dsl_state(session_id, staged.previous_state)
+                    .await;
+                return Err(RuntimeDriverError::Internal(format!(
+                    "failed to apply live boundary cancel: {err}"
+                )));
+            }
+
+            match effect_tx.try_send(projected_effect.into_effect()) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::debug!(
+                        %session_id,
+                        "runtime effect channel full after live boundary cancel; live wake already delivered"
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::warn!(
+                        %session_id,
+                        "runtime effect channel closed after live boundary cancel; live wake already delivered"
+                    );
+                    let mut sessions = self.sessions.write().await;
+                    if let Some(entry) = sessions.get_mut(session_id) {
+                        entry.clear_dead_attachment();
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        if let Err(err) = effect_tx.send(projected_effect.into_effect()).await {
+            self.restore_session_dsl_state(session_id, staged.previous_state)
+                .await;
+            return Err(RuntimeDriverError::Internal(format!(
+                "failed to send runtime effect: {err}"
+            )));
+        }
+
+        Ok(())
     }
 
     /// Stop the attached runtime executor through the out-of-band control
@@ -67,13 +98,13 @@ impl MeerkatMachine {
     pub async fn stop_runtime_executor(
         &self,
         session_id: &SessionId,
-        command: RunControlCommand,
+        reason: impl Into<String>,
     ) -> Result<(), RuntimeDriverError> {
         self.execute_meerkat_machine_command(
             None,
             MeerkatMachineCommand::StopRuntimeExecutor {
                 session_id: session_id.clone(),
-                command,
+                reason: reason.into(),
             },
         )
         .await
@@ -84,9 +115,21 @@ impl MeerkatMachine {
     pub(super) async fn stop_runtime_executor_inner(
         &self,
         session_id: &SessionId,
-        command: RunControlCommand,
+        reason: String,
     ) -> Result<(), RuntimeDriverError> {
-        let (driver, completions, control_tx) = {
+        let staged = self
+            .stage_session_dsl_transition(
+                session_id,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::StopRuntimeExecutor { reason },
+                "StopRuntimeExecutor",
+            )
+            .await
+            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        let projected_effect =
+            crate::effect::runtime_effect_projection_from_dsl_effects(&staged.effects)
+                .map_err(RuntimeDriverError::Internal)?;
+
+        let (driver, completions, effect_tx) = {
             let sessions = self.sessions.read().await;
             let entry = sessions
                 .get(session_id)
@@ -96,7 +139,7 @@ impl MeerkatMachine {
             (
                 entry.driver.clone(),
                 entry.completions.clone(),
-                entry.control_sender(),
+                entry.effect_sender(),
             )
         };
 
@@ -105,16 +148,11 @@ impl MeerkatMachine {
             .await
             .unwrap_or(RuntimeState::Destroyed);
 
-        if let Some(control_tx) = control_tx
-            && control_tx.send(command.clone()).await.is_ok()
+        let effect = projected_effect.into_effect();
+        if let Some(effect_tx) = effect_tx
+            && effect_tx.send(effect).await.is_ok()
         {
-            if matches!(
-                (state_before_stop, &command),
-                (
-                    RuntimeState::Attached,
-                    RunControlCommand::StopRuntimeExecutor { .. }
-                )
-            ) {
+            if matches!(state_before_stop, RuntimeState::Attached) {
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(200), async {
                     loop {
                         match self.existing_session_runtime_state(session_id).await {
@@ -132,21 +170,15 @@ impl MeerkatMachine {
             return Ok(());
         }
 
-        if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-            crate::control_plane::terminalize_async_stop(&driver, Some(&completions)).await?;
+        crate::control_plane::terminalize_async_stop(&driver, Some(&completions)).await?;
 
-            // No live control sender was available for this stop path. Scrub any
-            // dead attachment capabilities that may still be published.
-            let mut sessions = self.sessions.write().await;
-            if let Some(entry) = sessions.get_mut(session_id) {
-                entry.clear_dead_attachment();
-            }
-            Ok(())
-        } else {
-            Err(RuntimeDriverError::Internal(
-                "failed to send stop: runtime loop is unavailable".into(),
-            ))
+        // No live effect sender was available for this stop path. Scrub any
+        // dead attachment capabilities that may still be published.
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            entry.clear_dead_attachment();
         }
+        Ok(())
     }
 
     /// Accept an input and execute it synchronously through the runtime driver.

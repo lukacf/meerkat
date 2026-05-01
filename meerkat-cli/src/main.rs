@@ -35,8 +35,8 @@ use meerkat_core::CommsRuntimeMode;
 #[cfg(feature = "mob")]
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
-    CreateSessionRequest, DeferredPromptPolicy, SessionBuildOptions, SessionError, SessionQuery,
-    SessionService, SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    CreateSessionRequest, DeferredPromptPolicy, SessionBuildOptions, SessionQuery, SessionService,
+    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, AuthStatusPhase, BlobId, ConnectionRef, EventEnvelope, RealmConfig, RealmLocator,
@@ -4925,8 +4925,78 @@ fn cli_terminal_pre_turn_context_appends(
         .collect()
 }
 
+struct CliRuntimeBoundaryHandle {
+    service: Arc<dyn meerkat_core::service::SessionService>,
+    session_id: meerkat_core::types::SessionId,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorBoundaryHandle for CliRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(
+        &self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                meerkat::SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                    err.to_string(),
+                )
+            })
+    }
+}
+
+struct CliRuntimeInterruptHandle {
+    service: Arc<dyn meerkat_core::service::SessionService>,
+    session_id: meerkat_core::types::SessionId,
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::lifecycle::CoreExecutorInterruptHandle for CliRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(
+        &self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .interrupt(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                meerkat::SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                    err.to_string(),
+                )
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
+    fn boundary_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(CliRuntimeBoundaryHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(
+        &self,
+    ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorInterruptHandle>> {
+        Some(Arc::new(CliRuntimeInterruptHandle {
+            service: Arc::clone(&self.service),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -5012,32 +5082,33 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         )
     }
 
-    async fn control(
+    async fn cancel_after_boundary(
         &mut self,
-        cmd: meerkat_core::lifecycle::run_control::RunControlCommand,
+        _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
-        match cmd {
-            meerkat_core::lifecycle::run_control::RunControlCommand::CancelCurrentRun {
-                ..
-            } => {
-                let _ = self.service.interrupt(&self.session_id).await;
-                Ok(())
-            }
-            meerkat_core::lifecycle::run_control::RunControlCommand::StopRuntimeExecutor {
-                ..
-            } => {
-                // Discard live session state via concrete type (not on SessionService trait).
-                #[cfg(feature = "session-store")]
-                if let Some(ref persistent) = self.persistent_service {
-                    let _ = persistent.discard_live_session(&self.session_id).await;
-                }
-                self.runtime_adapter
-                    .unregister_session(&self.session_id)
-                    .await;
-                Ok(())
-            }
-            _ => Ok(()),
+        self.service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .map_err(|err| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::control_failed_runtime(
+                    err.to_string(),
+                )
+            })
+    }
+
+    async fn stop_runtime_executor(
+        &mut self,
+        _reason: String,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        // Discard live session state via concrete type (not on SessionService trait).
+        #[cfg(feature = "session-store")]
+        if let Some(ref persistent) = self.persistent_service {
+            let _ = persistent.discard_live_session(&self.session_id).await;
         }
+        self.runtime_adapter
+            .unregister_session(&self.session_id)
+            .await;
+        Ok(())
     }
 }
 
@@ -7859,10 +7930,17 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
         let session_id = resolve_scoped_session_id(id, scope)?;
 
         let (config, _) = load_config(scope).await?;
-        let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+        let (service, runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+        service
+            .read(&session_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to interrupt session: {e}"))?;
 
-        match service.interrupt(&session_id).await {
-            Ok(()) | Err(SessionError::NotRunning { .. }) => {
+        match runtime_adapter
+            .hard_cancel_current_run(&session_id, "CLI session interrupt")
+            .await
+        {
+            Ok(()) => {
                 println!("Interrupted session: {session_id}");
                 println!(
                     "Session Ref: {}",
@@ -7870,9 +7948,67 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 );
                 Ok(())
             }
+            Err(meerkat_runtime::RuntimeDriverError::NotReady { state })
+                if interrupt_not_ready_is_noop(state) =>
+            {
+                println!("Interrupted session: {session_id}");
+                println!(
+                    "Session Ref: {}",
+                    format_session_ref(&scope.locator.realm, &session_id)
+                );
+                Ok(())
+            }
+            Err(meerkat_runtime::RuntimeDriverError::NotReady {
+                state: meerkat_runtime::RuntimeState::Destroyed,
+            })
+            | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+                reject_persisted_runtime_state_for_interrupt_noop(service.as_ref(), &session_id)
+                    .await?;
+                println!("Interrupted session: {session_id}");
+                println!(
+                    "Session Ref: {}",
+                    format_session_ref(&scope.locator.realm, &session_id)
+                );
+                Ok(())
+            }
+            Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(anyhow::anyhow!(
+                "Failed to interrupt session: runtime is not interruptible while {state}"
+            )),
             Err(e) => Err(anyhow::anyhow!("Failed to interrupt session: {e}")),
         }
     }
+}
+
+fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
+    )
+}
+
+fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
+    )
+}
+
+#[cfg(feature = "session-store")]
+async fn reject_persisted_runtime_state_for_interrupt_noop(
+    service: &meerkat::PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> anyhow::Result<()> {
+    let Some(state) = service
+        .persisted_runtime_state(session_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to interrupt session: {e}"))?
+    else {
+        return Ok(());
+    };
+    if persisted_runtime_state_blocks_interrupt_noop(state) {
+        anyhow::bail!("Failed to interrupt session: runtime is not interruptible while {state}");
+    }
+    Ok(())
 }
 
 #[cfg(all(feature = "comms", test))]
@@ -10014,6 +10150,34 @@ mod tests {
         let preload_skills: Vec<meerkat_core::skills::SkillKey> = Vec::new();
 
         assert_eq!(materialized_preload_skills(&preload_skills), None);
+    }
+
+    #[test]
+    fn interrupt_not_ready_noop_is_only_idle_or_attached() {
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Idle
+        ));
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Attached
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Destroyed
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Retired
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Stopped
+        ));
+        assert!(persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Retired
+        ));
+        assert!(persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Stopped
+        ));
+        assert!(!persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Idle
+        ));
     }
 
     fn test_scope(state_root: PathBuf, realm_id: &str) -> RuntimeScope {
@@ -13809,6 +13973,76 @@ capabilities = ["definitely_missing_capability"]
                 .is_some(),
             "authoritative reads must resolve through the runtime snapshot"
         );
+    }
+
+    #[cfg(feature = "session-store")]
+    #[tokio::test]
+    async fn test_cli_interrupt_destroyed_noop_rejects_persisted_stopped_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Some(Arc::clone(&runtime_store)),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        );
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle> =
+            Arc::new(meerkat_runtime::RuntimeAuthLeaseHandle::new());
+        let (service, _runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            auth_lease,
+            None,
+        );
+        let service = Arc::new(service);
+        let llm_override: Arc<dyn LlmClient> = Arc::new(CapturingLlmClient::new(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
+        ));
+
+        let created = service
+            .create_session(CreateSessionRequest {
+                model: "gpt-5.4".to_string(),
+                prompt: "seed".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: Some(32),
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("runtime-backed CLI service should create deferred session");
+        runtime_store
+            .persist_runtime_state(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
+                meerkat_runtime::RuntimeState::Stopped,
+            )
+            .await
+            .expect("runtime state should persist");
+
+        let err = reject_persisted_runtime_state_for_interrupt_noop(
+            service.as_ref(),
+            &created.session_id,
+        )
+        .await
+        .expect_err("persisted stopped runtime must reject cold interrupt no-op");
+
+        assert!(err.to_string().contains("stopped"));
     }
 
     #[tokio::test]

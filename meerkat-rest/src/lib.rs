@@ -61,8 +61,10 @@ use meerkat_contracts::{
     WireError, format_session_ref,
 };
 use meerkat_core::EventEnvelope;
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
+};
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
@@ -200,6 +202,46 @@ struct RestRuntimeExecutorContext {
 struct RestSessionRuntimeExecutor {
     context: RestRuntimeExecutorContext,
     session_id: SessionId,
+}
+
+struct RestSessionRuntimeBoundaryHandle {
+    context: RestRuntimeExecutorContext,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorBoundaryHandle for RestSessionRuntimeBoundaryHandle {
+    async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.context
+            .session_service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+}
+
+struct RestSessionRuntimeInterruptHandle {
+    context: RestRuntimeExecutorContext,
+    session_id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl CoreExecutorInterruptHandle for RestSessionRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.context
+            .session_service
+            .interrupt(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
 }
 
 impl AppState {
@@ -782,6 +824,20 @@ async fn apply_runtime_turn(
 
 #[async_trait::async_trait]
 impl CoreExecutor for RestSessionRuntimeExecutor {
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        Some(Arc::new(RestSessionRuntimeBoundaryHandle {
+            context: self.context.clone(),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+        Some(Arc::new(RestSessionRuntimeInterruptHandle {
+            context: self.context.clone(),
+            session_id: self.session_id.clone(),
+        }))
+    }
+
     async fn apply(
         &mut self,
         run_id: meerkat_core::lifecycle::RunId,
@@ -794,30 +850,31 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
             .map_err(|err| CoreExecutorError::apply_failed_runtime_turn(err.to_string()))
     }
 
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-        match command {
-            RunControlCommand::CancelCurrentRun { .. } => self
-                .context
-                .session_service
-                .interrupt(&self.session_id)
-                .await
-                .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string())),
-            RunControlCommand::StopRuntimeExecutor { .. } => {
-                let discard_result = self
-                    .context
-                    .session_service
-                    .discard_live_session(&self.session_id)
-                    .await;
-                self.context
-                    .runtime_adapter
-                    .unregister_session(&self.session_id)
-                    .await;
-                match discard_result {
-                    Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
-                    Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
-                }
-            }
-            _ => Ok(()),
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        self.context
+            .session_service
+            .cancel_after_boundary(&self.session_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        let discard_result = self
+            .context
+            .session_service
+            .discard_live_session(&self.session_id)
+            .await;
+        self.context
+            .runtime_adapter
+            .unregister_session(&self.session_id)
+            .await;
+        match discard_result {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(err) => Err(CoreExecutorError::control_failed_runtime(err.to_string())),
         }
     }
 }
@@ -1290,6 +1347,13 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .get("session_archived")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+fn session_metadata_marks_mob_member(session: &Session) -> bool {
+    session
+        .session_metadata()
+        .and_then(|metadata| metadata.peer_meta)
+        .is_some_and(|peer_meta| peer_meta.labels.contains_key("mob_id"))
 }
 
 fn runtime_state_to_wire(
@@ -2599,6 +2663,131 @@ fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<Session
     Ok(locator.session_id)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptNoopTarget {
+    Present,
+    Missing,
+    NotInterruptible(meerkat_runtime::RuntimeState),
+}
+
+fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
+    )
+}
+
+fn interrupt_noop_target_for_presence(
+    present: bool,
+    blocking_runtime_state: Option<meerkat_runtime::RuntimeState>,
+) -> InterruptNoopTarget {
+    if !present {
+        return InterruptNoopTarget::Missing;
+    }
+    match blocking_runtime_state {
+        Some(state) => InterruptNoopTarget::NotInterruptible(state),
+        None => InterruptNoopTarget::Present,
+    }
+}
+
+async fn interrupt_noop_target(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<InterruptNoopTarget, ApiError> {
+    let blocking_runtime_state = state
+        .session_service
+        .persisted_runtime_state(session_id)
+        .await
+        .map_err(|err| {
+            ApiError::Internal(format!(
+                "Failed to load runtime state before interrupt no-op: {err}"
+            ))
+        })?
+        .filter(|state| persisted_runtime_state_blocks_interrupt_noop(*state));
+
+    match state
+        .session_service
+        .load_authoritative_session(session_id)
+        .await
+    {
+        Ok(Some(session)) if session_metadata_marks_archived(&session) => {
+            return Ok(InterruptNoopTarget::Missing);
+        }
+        Ok(Some(session)) if session_metadata_marks_mob_member(&session) => {
+            #[cfg(feature = "mob")]
+            {
+                let owns_mob_session = state.mob_state.owns_live_bridge_session(session_id).await
+                    || state
+                        .mob_state
+                        .owns_persisted_bridge_session(session_id)
+                        .await;
+                return Ok(interrupt_noop_target_for_presence(
+                    owns_mob_session,
+                    blocking_runtime_state,
+                ));
+            }
+            #[cfg(not(feature = "mob"))]
+            return Ok(InterruptNoopTarget::Missing);
+        }
+        Ok(Some(_)) => {
+            return Ok(interrupt_noop_target_for_presence(
+                true,
+                blocking_runtime_state,
+            ));
+        }
+        Ok(_) => {}
+        Err(SessionError::NotFound { .. }) => {}
+        Err(err) => {
+            return Err(ApiError::Internal(format!(
+                "Failed to load session before interrupt no-op: {err}"
+            )));
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    if state.mob_state.owns_live_bridge_session(session_id).await
+        || state
+            .mob_state
+            .owns_persisted_bridge_session(session_id)
+            .await
+    {
+        match state.mob_state.session_service().read(session_id).await {
+            Ok(_) => {
+                return Ok(interrupt_noop_target_for_presence(
+                    true,
+                    blocking_runtime_state,
+                ));
+            }
+            Err(SessionError::NotFound { .. }) => {}
+            Err(err) => {
+                return Err(ApiError::Internal(format!(
+                    "Failed to inspect mob session before interrupt no-op: {err}"
+                )));
+            }
+        }
+    }
+
+    match state.session_service.read(session_id).await {
+        Ok(_) => {
+            return Ok(interrupt_noop_target_for_presence(
+                true,
+                blocking_runtime_state,
+            ));
+        }
+        Err(SessionError::NotFound { .. }) => {}
+        Err(err) => {
+            return Err(ApiError::Internal(format!(
+                "Failed to inspect session before interrupt no-op: {err}"
+            )));
+        }
+    }
+
+    Ok(interrupt_noop_target_for_presence(
+        false,
+        blocking_runtime_state,
+    ))
+}
+
 fn resolve_schedule_id(input: &str) -> Result<meerkat::ScheduleId, ApiError> {
     meerkat::ScheduleId::parse(input)
         .map_err(|e| ApiError::BadRequest(format!("Invalid schedule id '{input}': {e}")))
@@ -2805,14 +2994,16 @@ async fn create_session_inner(
         // Install cancel action: interrupt the session. If a cancel already
         // landed before this install, install_cancel_action fires the newly
         // installed action immediately and reports the observed phase.
-        let cancel_svc = state.session_service.clone();
+        let cancel_adapter = state.runtime_adapter.clone();
         let cancel_sid = session_id.clone();
         let phase = ctx
             .install_cancel_action_or_cancelled(request_action(move || {
-                let svc = cancel_svc.clone();
+                let adapter = cancel_adapter.clone();
                 let sid = cancel_sid.clone();
                 async move {
-                    let _ = svc.interrupt(&sid).await;
+                    let _ = adapter
+                        .hard_cancel_current_run(&sid, "REST request cancelled")
+                        .await;
                 }
             }))
             .await;
@@ -3315,14 +3506,41 @@ async fn interrupt_session(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let session_id = resolve_session_id_for_state(&id, &state)?;
-    match state.session_service.interrupt(&session_id).await {
-        Ok(()) | Err(SessionError::NotRunning { .. }) => Ok(Json(json!({
+    match state
+        .runtime_adapter
+        .hard_cancel_current_run(&session_id, "REST session interrupt")
+        .await
+    {
+        Ok(()) => Ok(Json(json!({
             "session_id": session_id.to_string(),
             "interrupted": true
         }))),
-        Err(SessionError::NotFound { .. }) => {
-            Err(ApiError::NotFound(format!("Session not found: {id}")))
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached,
+        }) => Ok(Json(json!({
+            "session_id": session_id.to_string(),
+            "interrupted": true
+        }))),
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        })
+        | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+            match interrupt_noop_target(&state, &session_id).await? {
+                InterruptNoopTarget::Present => Ok(Json(json!({
+                    "session_id": session_id.to_string(),
+                    "interrupted": true
+                }))),
+                InterruptNoopTarget::Missing => {
+                    Err(ApiError::NotFound(format!("Session not found: {id}")))
+                }
+                InterruptNoopTarget::NotInterruptible(state) => Err(ApiError::Conflict(format!(
+                    "Session is not interruptible while runtime is {state}"
+                ))),
+            }
         }
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(ApiError::Conflict(
+            format!("Session is not interruptible while runtime is {state}"),
+        )),
         Err(e) => Err(ApiError::Internal(format!(
             "Failed to interrupt session: {e}"
         ))),
@@ -3722,14 +3940,16 @@ async fn continue_session_inner(
                 }
             }));
 
-            let cancel_svc = state.session_service.clone();
+            let cancel_adapter = state.runtime_adapter.clone();
             let cancel_sid = session_id.clone();
             let phase = ctx
                 .install_cancel_action_or_cancelled(request_action(move || {
-                    let svc = cancel_svc.clone();
+                    let adapter = cancel_adapter.clone();
                     let sid = cancel_sid.clone();
                     async move {
-                        let _ = svc.interrupt(&sid).await;
+                        let _ = adapter
+                            .hard_cancel_current_run(&sid, "REST request cancelled")
+                            .await;
                     }
                 }))
                 .await;
@@ -3857,14 +4077,16 @@ async fn continue_session_inner(
 
         // Install cancel action: interrupt the session.
         if let Some(ctx) = req_ctx.as_ref() {
-            let cancel_svc = state.session_service.clone();
+            let cancel_adapter = state.runtime_adapter.clone();
             let cancel_sid = session_id.clone();
             let phase = ctx
                 .install_cancel_action_or_cancelled(request_action(move || {
-                    let svc = cancel_svc.clone();
+                    let adapter = cancel_adapter.clone();
                     let sid = cancel_sid.clone();
                     async move {
-                        let _ = svc.interrupt(&sid).await;
+                        let _ = adapter
+                            .hard_cancel_current_run(&sid, "REST request cancelled")
+                            .await;
                     }
                 }))
                 .await;
@@ -4516,6 +4738,22 @@ mod tests {
             meerkat_contracts::PeerResponseTerminalStatusWire::Completed
         );
         assert_eq!(body.result["ok"], true);
+    }
+
+    #[test]
+    fn interrupt_noop_target_for_presence_rejects_terminal_runtime_state() {
+        assert_eq!(
+            interrupt_noop_target_for_presence(true, Some(meerkat_runtime::RuntimeState::Stopped)),
+            InterruptNoopTarget::NotInterruptible(meerkat_runtime::RuntimeState::Stopped)
+        );
+        assert_eq!(
+            interrupt_noop_target_for_presence(true, None),
+            InterruptNoopTarget::Present
+        );
+        assert_eq!(
+            interrupt_noop_target_for_presence(false, Some(meerkat_runtime::RuntimeState::Stopped)),
+            InterruptNoopTarget::Missing
+        );
     }
 
     #[test]
@@ -7044,6 +7282,164 @@ mod tests {
                 .unwrap();
 
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_interrupt_unknown_session_returns_404() {
+            use axum::body::Body;
+            use tower::ServiceExt;
+
+            let temp = TempDir::new().unwrap();
+            let state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            let app = router(state);
+            let unknown_session_id = SessionId::new();
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/sessions/{unknown_session_id}/interrupt"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_interrupt_service_owned_idle_session_returns_ok() {
+            use axum::body::Body;
+            use http_body_util::BodyExt;
+            use tower::ServiceExt;
+
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            let created = state
+                .session_service
+                .create_session(SvcCreateSessionRequest {
+                    model: state.default_model.to_string(),
+                    prompt: "Hello".to_string().into(),
+                    render_metadata: None,
+                    system_prompt: None,
+                    max_tokens: Some(state.max_tokens),
+                    event_tx: None,
+                    skill_references: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions {
+                        llm_client_override: state
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        ..Default::default()
+                    }),
+                    labels: None,
+                })
+                .await
+                .expect("service-owned idle session should be created");
+            let app = router(state);
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/sessions/{}/interrupt", created.session_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "interrupt response body: {}",
+                String::from_utf8_lossy(&body)
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["interrupted"], true);
+        }
+
+        #[tokio::test]
+        async fn test_interrupt_cold_persisted_stopped_runtime_returns_conflict() {
+            use axum::body::Body;
+            use http_body_util::BodyExt;
+            use tower::ServiceExt;
+
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            let created = state
+                .session_service
+                .create_session(SvcCreateSessionRequest {
+                    model: state.default_model.to_string(),
+                    prompt: "Hello".to_string().into(),
+                    render_metadata: None,
+                    system_prompt: None,
+                    max_tokens: Some(state.max_tokens),
+                    event_tx: None,
+                    skill_references: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions {
+                        llm_client_override: state
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        ..Default::default()
+                    }),
+                    labels: None,
+                })
+                .await
+                .expect("service-owned idle session should be created");
+            let runtime_store = state
+                .session_service
+                .runtime_store()
+                .expect("REST test state should include runtime store");
+            runtime_store
+                .persist_runtime_state(
+                    &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
+                    meerkat_runtime::RuntimeState::Stopped,
+                )
+                .await
+                .expect("runtime state should persist");
+            let app = router(state);
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/sessions/{}/interrupt", created.session_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                status,
+                StatusCode::CONFLICT,
+                "interrupt response body: {}",
+                String::from_utf8_lossy(&body)
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                payload["error"].as_str().unwrap().contains("stopped"),
+                "unexpected payload: {payload}"
+            );
         }
 
         #[tokio::test]

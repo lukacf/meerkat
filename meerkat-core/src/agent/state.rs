@@ -3391,8 +3391,8 @@ mod tests {
                 outcome
                     .session_effects
                     .push(crate::ops::SessionEffect::RequestDeferredTools {
-                        authorities: [(
-                            "deferred_tool".to_string(),
+                        authorities: vec![crate::DeferredToolLoadAuthority::new(
+                            "deferred_tool",
                             crate::ToolVisibilityWitness {
                                 stable_owner_key: Some("callback:test".to_string()),
                                 last_seen_provenance: Some(crate::ToolProvenance {
@@ -3400,9 +3400,7 @@ mod tests {
                                     source_id: "test".into(),
                                 }),
                             },
-                        )]
-                        .into_iter()
-                        .collect(),
+                        )],
                     });
                 return Ok(outcome);
             }

@@ -5,7 +5,6 @@
 //! layers can reference it without circular dependencies.
 
 use super::RunId;
-use super::run_control::RunControlCommand;
 use super::run_primitive::RunPrimitive;
 use super::run_receipt::RunBoundaryReceipt;
 use crate::types::RunResult;
@@ -254,12 +253,30 @@ impl CoreApplyOutput {
     }
 }
 
-/// Cloneable out-of-band control endpoint for executors whose live work can be
-/// interrupted without borrowing the runtime loop's `CoreExecutor` value.
+/// Cloneable live endpoint for asking an executor to stop at the next
+/// cooperative turn boundary.
+///
+/// ```compile_fail
+/// use meerkat_core::lifecycle::CoreExecutorBoundaryHandle;
+///
+/// async fn boundary_handles_cannot_hard_cancel(handle: &dyn CoreExecutorBoundaryHandle) {
+///     handle
+///         .hard_cancel_current_run("wrong authority".to_string())
+///         .await
+///         .unwrap();
+/// }
+/// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait CoreExecutorControl: Send + Sync {
-    async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError>;
+pub trait CoreExecutorBoundaryHandle: Send + Sync {
+    async fn cancel_after_boundary(&self, reason: String) -> Result<(), CoreExecutorError>;
+}
+
+/// Cloneable live endpoint for hard-cancelling the active run immediately.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait CoreExecutorInterruptHandle: Send + Sync {
+    async fn hard_cancel_current_run(&self, reason: String) -> Result<(), CoreExecutorError>;
 }
 
 /// The interface core exposes for the runtime layer to apply run primitives.
@@ -273,12 +290,21 @@ pub trait CoreExecutorControl: Send + Sync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CoreExecutor: Send + Sync {
-    /// Optional out-of-band control endpoint.
+    /// Optional live cooperative-boundary endpoint.
     ///
-    /// The runtime loop still owns the ordered `control(&mut self, ...)` path.
-    /// Implementations return this only when the underlying live turn has its
-    /// own interrupt channel and can be signaled while `apply()` is in flight.
-    fn control_handle(&self) -> Option<Arc<dyn CoreExecutorControl>> {
+    /// Implementations return this only when the underlying live turn can be
+    /// signaled while `apply()` is in flight and will also wake any yielding
+    /// turn so the boundary request can be observed.
+    fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+        None
+    }
+
+    /// Optional live hard-interrupt endpoint.
+    ///
+    /// Hard cancel is intentionally live-handle-only. It is not available on
+    /// the queued in-loop executor channel because user/session interrupt
+    /// semantics require prompt delivery during a long in-flight turn.
+    fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
         None
     }
 
@@ -292,8 +318,11 @@ pub trait CoreExecutor: Send + Sync {
         primitive: RunPrimitive,
     ) -> Result<CoreApplyOutput, CoreExecutorError>;
 
-    /// Execute an out-of-band control command.
-    async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError>;
+    /// Request cancellation at the next cooperative boundary.
+    async fn cancel_after_boundary(&mut self, reason: String) -> Result<(), CoreExecutorError>;
+
+    /// Stop this runtime executor and release live session state.
+    async fn stop_runtime_executor(&mut self, reason: String) -> Result<(), CoreExecutorError>;
 }
 
 #[cfg(test)]

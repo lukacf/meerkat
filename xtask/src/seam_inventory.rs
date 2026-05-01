@@ -146,6 +146,12 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
+            "RuntimeEffectFact",
+            SeamClassification::NoOwnerRealization,
+            "Local typed runtime-effect fact consumed by the runtime shell to construct sealed executor effects",
+        ),
+        (
+            "MeerkatMachine",
             "ResolveAdmission",
             SeamClassification::NoOwnerRealization,
             "Local admission resolution inside the kernel's input-lifecycle region",

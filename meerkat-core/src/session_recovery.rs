@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::lifecycle::run_primitive::{
-    KeepAliveMode, KeepAlivePolicy, RuntimeTurnMetadata, TurnInstruction, TurnInstructionKind,
-    TurnMetadataOverride,
+    KeepAliveMode, KeepAlivePolicy, RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata,
+    TurnInstruction, TurnInstructionKind, TurnMetadataOverride,
 };
 use crate::runtime_epoch::RuntimeBuildMode;
 use crate::service::{
@@ -104,6 +104,27 @@ pub fn has_build_only_turn_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.system_prompt.is_some()
         || overrides.output_schema.is_some()
         || overrides.structured_output_retries.is_some()
+}
+
+pub fn recovery_overrides_from_runtime_turn(
+    turn_metadata: Option<&RuntimeTurnMetadata>,
+    build_only_overrides: Option<&RuntimeBuildOnlyTurnOverrides>,
+) -> SurfaceSessionRecoveryOverrides {
+    let mut overrides = SurfaceSessionRecoveryOverrides {
+        turn_metadata: turn_metadata.cloned(),
+        ..Default::default()
+    };
+    if let Some(build_only) = build_only_overrides {
+        overrides.max_tokens = build_only.max_tokens;
+        overrides
+            .system_prompt
+            .clone_from(&build_only.system_prompt);
+        overrides
+            .output_schema
+            .clone_from(&build_only.output_schema);
+        overrides.structured_output_retries = build_only.structured_output_retries;
+    }
+    overrides
 }
 
 pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides) -> bool {
@@ -408,8 +429,8 @@ mod tests {
     use super::*;
 
     use crate::lifecycle::run_primitive::{
-        KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride, RuntimeTurnMetadata,
-        TurnMetadataOverride,
+        KeepAliveMode, KeepAlivePolicy, ModelId, ProviderParamsOverride,
+        RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata, TurnMetadataOverride,
     };
     use crate::skills::{SkillName, SourceUuid};
     use crate::time_compat::Duration;
@@ -1184,6 +1205,30 @@ mod tests {
                 "surface recovery overrides must not expose split turn metadata carrier {split_field}"
             );
         }
+    }
+
+    #[test]
+    fn recovery_overrides_from_runtime_turn_carries_build_only_overrides() {
+        let metadata = RuntimeTurnMetadata {
+            model: Some(ModelId::new("gpt-runtime")),
+            ..Default::default()
+        };
+        let output_schema =
+            OutputSchema::new(json!({"type": "object"})).expect("valid output schema");
+        let build_only = RuntimeBuildOnlyTurnOverrides {
+            max_tokens: Some(256),
+            system_prompt: Some("deferred system".to_string()),
+            output_schema: Some(output_schema.clone()),
+            structured_output_retries: Some(2),
+        };
+
+        let overrides = recovery_overrides_from_runtime_turn(Some(&metadata), Some(&build_only));
+
+        assert_eq!(overrides.turn_metadata, Some(metadata));
+        assert_eq!(overrides.max_tokens, Some(256));
+        assert_eq!(overrides.system_prompt.as_deref(), Some("deferred system"));
+        assert_eq!(overrides.output_schema, Some(output_schema));
+        assert_eq!(overrides.structured_output_retries, Some(2));
     }
 
     #[test]

@@ -45,7 +45,8 @@ use futures::stream::Stream;
 use meerkat::surface::{
     RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
     SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
-    SurfaceSessionRecoveryOverrides, build_recovered_session, noop_request_action, request_action,
+    SurfaceSessionRecoveryOverrides, build_recovered_session, has_build_only_turn_overrides,
+    noop_request_action, recovery_overrides_from_runtime_turn, request_action,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -68,7 +69,7 @@ use meerkat_core::lifecycle::core_executor::{
 };
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, ModelId, ProviderParamsOverride, RunApplyBoundary,
-    RunPrimitive, RuntimeTurnMetadata, TurnMetadataOverride,
+    RunPrimitive, RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata, TurnMetadataOverride,
 };
 use meerkat_core::service::{
     AppendSystemContextRequest as SvcAppendSystemContextRequest,
@@ -628,11 +629,20 @@ async fn apply_runtime_turn(
             meerkat_core::error::AgentError::InternalError(reason.to_string()),
         ));
     }
+    let recovery_overrides = recovery_overrides_from_runtime_turn(
+        primitive.turn_metadata(),
+        primitive.build_only_overrides(),
+    );
 
     // Context-only staged primitives may land directly as runtime
     // system-context appends, but terminal peer responses carry a typed apply
     // intent that requires a requester reaction turn.
     if primitive.is_context_only_apply_without_turn() {
+        if has_build_only_turn_overrides(&recovery_overrides) {
+            return Err(SessionError::Unsupported(
+                meerkat::surface::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
+            ));
+        }
         let RunPrimitive::StagedInput(staged) = primitive else {
             unreachable!("context-only apply without turn only matches staged primitives");
         };
@@ -688,7 +698,9 @@ async fn apply_runtime_turn(
 
     let svc_req = SvcStartTurnRequest {
         prompt: prompt.clone(),
-        system_prompt: None,
+        system_prompt: primitive
+            .build_only_overrides()
+            .and_then(|overrides| overrides.system_prompt.clone()),
         event_tx: Some(event_tx.clone()),
         pre_turn_context_appends: pre_turn_context_appends.clone(),
         turn_metadata: primitive.turn_metadata().cloned(),
@@ -720,17 +732,27 @@ async fn apply_runtime_turn(
     };
     let contributing_input_ids = primitive.contributing_input_ids().to_vec();
 
-    let result = match context
-        .session_service
-        .apply_runtime_turn(
-            session_id,
-            run_id.clone(),
-            svc_req,
-            boundary,
-            contributing_input_ids.clone(),
-        )
-        .await
-    {
+    let build_only_requires_recovery = primitive
+        .build_only_overrides()
+        .is_some_and(|overrides| overrides.requires_materialization_recovery());
+    let live_result = if build_only_requires_recovery {
+        Err(SessionError::NotFound {
+            id: session_id.clone(),
+        })
+    } else {
+        context
+            .session_service
+            .apply_runtime_turn(
+                session_id,
+                run_id.clone(),
+                svc_req,
+                boundary,
+                contributing_input_ids.clone(),
+            )
+            .await
+    };
+
+    let result = match live_result {
         Ok(output) => Ok(output),
         Err(SessionError::NotFound { .. }) => {
             let session = context
@@ -757,10 +779,7 @@ async fn apply_runtime_turn(
                 })?;
             let recovered = build_recovered_session(
                 session,
-                &SurfaceSessionRecoveryOverrides {
-                    turn_metadata: primitive.turn_metadata().cloned(),
-                    ..Default::default()
-                },
+                &recovery_overrides,
                 SurfaceSessionRecoveryContext {
                     llm_client_override: context
                         .llm_client_override
@@ -779,10 +798,13 @@ async fn apply_runtime_turn(
                     config_generation: current_generation,
                 },
             )
-            .map_err(|error| {
-                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
-                    error.to_string(),
-                ))
+            .map_err(|error| match error {
+                SurfaceSessionRecoveryError::InvalidOverride(message) => {
+                    SessionError::Unsupported(message)
+                }
+                other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    other.to_string(),
+                )),
             })?;
             context
                 .session_service
@@ -807,7 +829,7 @@ async fn apply_runtime_turn(
                         system_prompt: None,
                         event_tx: Some(event_tx.clone()),
                         pre_turn_context_appends,
-                        turn_metadata: primitive.turn_metadata().cloned(),
+                        turn_metadata: recovery_overrides.turn_metadata.clone(),
                     },
                     boundary,
                     contributing_input_ids,
@@ -4978,6 +5000,55 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
+    async fn rest_context_only_runtime_apply_rejects_build_only_overrides() {
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rest-build-only".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                build_only_overrides: Some(RuntimeBuildOnlyTurnOverrides {
+                    system_prompt: Some("context-only system".to_string()),
+                    ..Default::default()
+                }),
+            });
+
+        let error = super::apply_runtime_turn(
+            &state.runtime_executor_context(),
+            &SessionId::new(),
+            meerkat_core::RunId::new(),
+            &primitive,
+            ContentInput::Text(String::new()),
+        )
+        .await
+        .expect_err("context-only runtime applies must not drop build-only overrides");
+
+        assert!(
+            error
+                .to_string()
+                .contains(meerkat::surface::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
     }
 
     #[tokio::test]

@@ -4347,17 +4347,9 @@
         "type": "object"
       },
       "MobMemberSpecWire": {
+        "additionalProperties": false,
         "description": "Per-member spec for `mob/ensure_member` and the `desired` entries of\n`mob/reconcile`.\n\nMirrors the essential, codegen-friendly fields of\n[`meerkat_mob::SpawnMemberSpec`]. Complex sub-types (tool access policy,\nbudget split, inherited tool filter, override profile) are not on this\nwire surface — callers that need that parity should use the non-declarative\n`mob/spawn` method.",
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "agent_identity": {
             "description": "Stable member identity within the mob.",
             "type": "string"
@@ -4416,6 +4408,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
               },
               {
                 "type": "null"

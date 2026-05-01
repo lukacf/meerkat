@@ -708,7 +708,6 @@ export interface MobWiringRulesInput {
 }
 
 export interface MobMemberSpecWire {
-  additional_instructions?: string[];
   agent_identity: string;
   auto_wire_parent?: boolean;
   backend?: WireMobBackendKind;
@@ -718,6 +717,7 @@ export interface MobMemberSpecWire {
   labels?: Record<string, string>;
   profile: string;
   runtime_mode?: WireMobRuntimeMode;
+  turn_metadata?: WireRuntimeTurnMetadata;
 }
 
 export interface MobReconcileOptionsWire {

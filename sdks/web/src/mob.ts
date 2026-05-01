@@ -23,6 +23,7 @@ import type {
   MobMemberSnapshot,
   MobHelperResult,
   EventEnvelope,
+  RuntimeTurnMetadata,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
@@ -73,6 +74,33 @@ function encodeMemberRef(mobId: string, agentIdentity: string): string {
   return encodeBase64UrlJson({ m: mobId, a: agentIdentity });
 }
 
+function metadataOverrideToWasm<T>(
+  override: { action: 'set'; value: T } | { action: 'clear' } | undefined,
+  mapValue: (value: T) => unknown = (value) => value,
+): unknown {
+  if (!override) return undefined;
+  if (override.action === 'clear') return { action: 'clear' };
+  return { action: 'set', value: mapValue(override.value) };
+}
+
+function turnMetadataToWasm(
+  metadata: RuntimeTurnMetadata | undefined,
+): Record<string, unknown> | undefined {
+  if (!metadata) return undefined;
+  return {
+    model: metadata.model,
+    provider: metadata.provider,
+    provider_params: metadataOverrideToWasm(metadata.providerParams),
+    connection_ref: metadataOverrideToWasm(metadata.connectionRef),
+    keep_alive: metadataOverrideToWasm(metadata.keepAlive, (value) => ({
+      ttl_secs: value.ttlSecs,
+      policy: value.policy,
+    })),
+    skill_references: metadata.skillReferences,
+    additional_instructions: metadata.additionalInstructions,
+  };
+}
+
 function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
   return {
     profile: spec.profile,
@@ -81,7 +109,7 @@ function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
     initial_message: spec.initial_message,
     labels: spec.labels,
     context: spec.context,
-    additional_instructions: spec.additional_instructions,
+    turn_metadata: turnMetadataToWasm(spec.turnMetadata),
   };
 }
 

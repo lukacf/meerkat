@@ -924,7 +924,7 @@ pub struct MobMemberSendResult {
 /// This is the ergonomic "ensure an ingress member, then deliver user input"
 /// path. It composes the existing declarative roster and member-send
 /// semantics without introducing a separate thread/project runtime.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobIngressInteractionParams {
@@ -1109,8 +1109,9 @@ impl From<RenderMetadata> for WireRenderMetadata {
 /// budget split, inherited tool filter, override profile) are not on this
 /// wire surface — callers that need that parity should use the non-declarative
 /// `mob/spawn` method.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MobMemberSpecWire {
     /// Profile name (role) in the mob definition.
     pub profile: String,
@@ -1129,7 +1130,7 @@ pub struct MobMemberSpecWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_wire_parent: Option<bool>,
 }
@@ -1149,7 +1150,7 @@ impl MobMemberSpecWire {
 }
 
 /// Request payload for `mob/ensure_member`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobEnsureMemberParams {
@@ -1323,7 +1324,7 @@ pub enum WireMobReconcileStage {
 }
 
 /// Request payload for `mob/reconcile`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobReconcileParams {
@@ -1872,7 +1873,7 @@ mod tests {
             binding: None,
             context: Some(serde_json::json!({"client_ref": "member-card"})),
             labels: Some(BTreeMap::from([("client.member_id".into(), "w1".into())])),
-            additional_instructions: None,
+            turn_metadata: None,
             auto_wire_parent: None,
         };
 
@@ -1898,11 +1899,38 @@ mod tests {
             binding: None,
             context: None,
             labels: Some(BTreeMap::from([("mob_id".into(), "spoof".into())])),
-            additional_instructions: None,
+            turn_metadata: None,
             auto_wire_parent: None,
         };
 
         assert!(spec.validate_public_surface_metadata().is_err());
+    }
+
+    #[test]
+    fn mob_member_spec_uses_turn_metadata_carrier_for_first_turn_metadata() {
+        let spec: MobMemberSpecWire = serde_json::from_value(serde_json::json!({
+            "profile": "worker",
+            "agent_identity": "w1",
+            "turn_metadata": {
+                "additional_instructions": [
+                    { "kind": "user", "body": "canonical member instruction" }
+                ]
+            }
+        }))
+        .expect("member spec should accept canonical turn_metadata");
+
+        assert!(spec.turn_metadata.is_some());
+        let err = serde_json::from_value::<MobMemberSpecWire>(serde_json::json!({
+            "profile": "worker",
+            "agent_identity": "w1",
+            "additional_instructions": ["legacy split instruction"]
+        }))
+        .expect_err("member spec must reject retired split instruction carrier");
+
+        assert!(
+            err.to_string().contains("additional_instructions"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

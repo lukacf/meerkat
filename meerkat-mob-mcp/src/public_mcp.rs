@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 
 use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
+use meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata;
 use meerkat_contracts::{
     MobCreateParams, MobMemberSendParams, RealtimeCapabilities, RealtimeCapabilitiesParams,
     RealtimeCapabilitiesResult, RealtimeChannelTarget, RealtimeOpenRequest, RealtimeStatusParams,
@@ -74,7 +75,7 @@ struct MeerkatMobSpawnInput {
     #[serde(default)]
     context: Option<Value>,
     #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -102,7 +103,7 @@ struct MeerkatMobSpawnInputSpec {
     #[serde(default)]
     context: Option<Value>,
     #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -617,7 +618,7 @@ pub async fn handle_public_tools_call(
                 input.binding,
                 input.labels,
                 input.context,
-                input.additional_instructions,
+                input.turn_metadata,
             )?;
             let spawn_result = state
                 .mob_spawn_spec(&mob_id, spec)
@@ -643,7 +644,7 @@ pub async fn handle_public_tools_call(
                         spec.binding,
                         spec.labels,
                         spec.context,
-                        spec.additional_instructions,
+                        spec.turn_metadata,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1003,6 +1004,79 @@ fn backend_kind_from_wire(kind: WireMobBackendKind) -> meerkat_mob::MobBackendKi
     }
 }
 
+fn apply_spawn_turn_metadata(
+    spec: &mut meerkat_mob::SpawnMemberSpec,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
+) -> Result<(), McpToolError> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err(McpToolError::invalid_params(
+            "mob spawn turn_metadata.handling_mode is not supported",
+        ));
+    }
+    if metadata.skill_references.is_some() {
+        return Err(McpToolError::invalid_params(
+            "mob spawn turn_metadata.skill_references is not supported",
+        ));
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err(McpToolError::invalid_params(
+            "mob spawn turn_metadata.flow_tool_overlay is not supported",
+        ));
+    }
+    if metadata.provider.is_some() {
+        return Err(McpToolError::invalid_params(
+            "mob spawn turn_metadata.provider is not supported",
+        ));
+    }
+    if metadata.keep_alive.is_some() {
+        return Err(McpToolError::invalid_params(
+            "mob spawn turn_metadata.keep_alive is not supported",
+        ));
+    }
+    if metadata.render_metadata.is_some() {
+        return Err(McpToolError::invalid_params(
+            "mob spawn turn_metadata.render_metadata is not supported",
+        ));
+    }
+
+    if let Some(model) = metadata.model {
+        spec.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        spec.provider_params_override = match provider_params {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
+                Some(params.to_legacy_provider_value())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+        };
+    }
+    if let Some(instructions) = metadata.additional_instructions {
+        let instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.body)
+            .filter(|body| !body.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            spec.additional_instructions = Some(instructions);
+        }
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        spec.connection_ref = match connection_ref {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
+                Some(connection_ref)
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+        };
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_spawn_spec(
     profile: String,
@@ -1013,7 +1087,7 @@ fn build_spawn_spec(
     binding: Option<WireRuntimeBinding>,
     labels: Option<BTreeMap<String, String>>,
     context: Option<Value>,
-    additional_instructions: Option<Vec<String>>,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
 ) -> Result<meerkat_mob::SpawnMemberSpec, McpToolError> {
     let mut spec = meerkat_mob::SpawnMemberSpec::new(profile.as_str(), agent_identity.as_str());
     spec.initial_message = initial_message.map(content_input_from_wire).transpose()?;
@@ -1047,7 +1121,7 @@ fn build_spawn_spec(
     };
     spec.labels = labels;
     spec.context = context;
-    spec.additional_instructions = additional_instructions;
+    apply_spawn_turn_metadata(&mut spec, turn_metadata)?;
     Ok(spec)
 }
 
@@ -1189,6 +1263,35 @@ mod tests {
         assert!(
             !schema_text.contains("\"peer_id\"") && !schema_text.contains("\"pubkey\""),
             "wire schema must not expose raw comms identity atoms: {schema_text}"
+        );
+    }
+
+    #[test]
+    fn public_mcp_spawn_uses_turn_metadata_carrier_for_instructions() {
+        let input: MeerkatMobSpawnInput = serde_json::from_value(serde_json::json!({
+            "mob_id": "mob-1",
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "turn_metadata": {
+                "additional_instructions": [
+                    { "kind": "user", "body": "canonical member instruction" }
+                ]
+            }
+        }))
+        .expect("spawn input should accept canonical turn_metadata");
+
+        assert!(input.turn_metadata.is_some());
+        let err = serde_json::from_value::<MeerkatMobSpawnInput>(serde_json::json!({
+            "mob_id": "mob-1",
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "additional_instructions": ["legacy instruction"]
+        }))
+        .expect_err("spawn input must reject retired split instruction carrier");
+
+        assert!(
+            err.to_string().contains("additional_instructions"),
+            "unexpected error: {err}"
         );
     }
 

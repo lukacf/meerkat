@@ -1427,6 +1427,12 @@ impl RuntimeBuildOnlyTurnOverrides {
             && self.output_schema.is_none()
             && self.structured_output_retries.is_none()
     }
+
+    pub fn requires_materialization_recovery(&self) -> bool {
+        self.max_tokens.is_some()
+            || self.output_schema.is_some()
+            || self.structured_output_retries.is_some()
+    }
 }
 
 #[derive(Deserialize)]

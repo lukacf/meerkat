@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use meerkat_core::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR;
 use meerkat_core::lifecycle::core_executor::{
     CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
     CoreExecutorInterruptHandle,
@@ -236,7 +237,18 @@ fn pending_system_context_appends(
 fn start_turn_request_from_primitive(
     primitive: &RunPrimitive,
 ) -> Result<meerkat_core::service::StartTurnRequest, CoreExecutorError> {
+    if primitive
+        .build_only_overrides()
+        .is_some_and(|overrides| overrides.requires_materialization_recovery())
+    {
+        return Err(CoreExecutorError::apply_failed_primitive_rejected(
+            BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
+        ));
+    }
     let metadata = primitive.turn_metadata();
+    let system_prompt = primitive
+        .build_only_overrides()
+        .and_then(|overrides| overrides.system_prompt.clone());
     let pre_turn_context_appends = match primitive {
         RunPrimitive::StagedInput(staged)
             if primitive.is_peer_response_terminal_context_and_run() =>
@@ -248,7 +260,7 @@ fn start_turn_request_from_primitive(
 
     Ok(meerkat_core::service::StartTurnRequest {
         prompt: primitive.extract_content_input(),
-        system_prompt: None,
+        system_prompt,
         event_tx: None,
         pre_turn_context_appends,
         turn_metadata: metadata.cloned(),
@@ -409,7 +421,8 @@ mod tests {
     use async_trait::async_trait;
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, TestClient};
     use meerkat_core::lifecycle::run_primitive::{
-        KeepAliveMode, KeepAlivePolicy, RuntimeTurnMetadata, TurnMetadataOverride,
+        KeepAliveMode, KeepAlivePolicy, RuntimeBuildOnlyTurnOverrides, RuntimeTurnMetadata,
+        TurnMetadataOverride,
     };
     use meerkat_core::{HandlingMode, SessionBuildOptions};
     #[cfg(all(
@@ -500,6 +513,67 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.execution_kind),
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
+        );
+    }
+
+    #[test]
+    fn run_primitive_carries_build_only_system_prompt_into_start_turn_request() {
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                    role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                    content: CoreRenderable::Text {
+                        text: "hello".to_string(),
+                    },
+                }],
+                context_appends: Vec::new(),
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: None,
+                build_only_overrides: Some(RuntimeBuildOnlyTurnOverrides {
+                    system_prompt: Some("runtime deferred system".to_string()),
+                    ..Default::default()
+                }),
+            });
+
+        let req = start_turn_request_from_primitive(&primitive)
+            .expect("system_prompt is the only build-only override a live turn can carry");
+
+        assert_eq!(
+            req.system_prompt.as_deref(),
+            Some("runtime deferred system")
+        );
+        assert!(req.turn_metadata.is_none());
+    }
+
+    #[test]
+    fn run_primitive_rejects_materialization_only_build_overrides_for_live_start() {
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                    role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                    content: CoreRenderable::Text {
+                        text: "hello".to_string(),
+                    },
+                }],
+                context_appends: Vec::new(),
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: None,
+                build_only_overrides: Some(RuntimeBuildOnlyTurnOverrides {
+                    max_tokens: Some(128),
+                    ..Default::default()
+                }),
+            });
+
+        let error = start_turn_request_from_primitive(&primitive)
+            .expect_err("max_tokens must not be dropped on a live service turn");
+
+        assert!(
+            error
+                .to_string()
+                .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
         );
     }
 

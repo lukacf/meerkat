@@ -5,8 +5,9 @@ use meerkat::{
     CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService, RunResult, Session,
     SessionServiceControlExt,
     surface::{
-        SurfaceRuntimeMaterializeError, SurfaceSessionRecoveryContext,
-        SurfaceSessionRecoveryOverrides, build_recovered_session, materialize_session,
+        BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, SurfaceRuntimeMaterializeError,
+        SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
+        has_build_only_turn_overrides, materialize_session, recovery_overrides_from_runtime_turn,
     },
 };
 use meerkat_core::agent::AgentToolDispatcher;
@@ -271,7 +272,7 @@ impl McpRuntimeIngressContext {
         &self,
         session_id: &SessionId,
         state: Arc<McpRuntimeSessionState>,
-        turn_metadata: Option<RuntimeTurnMetadata>,
+        recovery_overrides: SurfaceSessionRecoveryOverrides,
     ) -> Result<SessionId, SessionError> {
         let session = self
             .service
@@ -293,10 +294,7 @@ impl McpRuntimeIngressContext {
         let external_tools = self.external_tools_for_session(session_id, &state).await?;
         let recovered = build_recovered_session(
             session.clone(),
-            &SurfaceSessionRecoveryOverrides {
-                turn_metadata: turn_metadata.clone(),
-                ..Default::default()
-            },
+            &recovery_overrides,
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
@@ -331,7 +329,12 @@ fn surface_materialize_session_error(error: SurfaceRuntimeMaterializeError) -> S
 fn surface_recovery_session_error(
     error: meerkat::surface::SurfaceSessionRecoveryError,
 ) -> SessionError {
-    SessionError::Agent(AgentError::InternalError(error.to_string()))
+    match error {
+        meerkat::surface::SurfaceSessionRecoveryError::InvalidOverride(message) => {
+            SessionError::Unsupported(message)
+        }
+        other => SessionError::Agent(AgentError::InternalError(other.to_string())),
+    }
 }
 
 #[derive(Default)]
@@ -535,11 +538,20 @@ async fn apply_runtime_turn(
             reason.to_string(),
         )));
     }
+    let recovery_overrides = recovery_overrides_from_runtime_turn(
+        primitive.turn_metadata(),
+        primitive.build_only_overrides(),
+    );
 
     // Context-only staged primitives may land directly as runtime
     // system-context appends, but terminal peer responses carry a typed apply
     // intent that requires a requester reaction turn.
     if primitive.is_context_only_apply_without_turn() {
+        if has_build_only_turn_overrides(&recovery_overrides) {
+            return Err(SessionError::Unsupported(
+                meerkat::surface::BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
+            ));
+        }
         let RunPrimitive::StagedInput(staged) = primitive else {
             unreachable!("context-only apply without turn only matches staged primitives");
         };
@@ -560,7 +572,7 @@ async fn apply_runtime_turn(
                 Box::pin(context.rematerialize_persisted_session(
                     session_id,
                     state.clone(),
-                    primitive.turn_metadata().cloned(),
+                    recovery_overrides.clone(),
                 ))
                 .await
                 .map(|_| ())?;
@@ -598,22 +610,33 @@ async fn apply_runtime_turn(
 
     let turn_request = StartTurnRequest {
         prompt: prompt.clone(),
-        system_prompt: None,
+        system_prompt: primitive
+            .build_only_overrides()
+            .and_then(|overrides| overrides.system_prompt.clone()),
         event_tx: event_tx.clone(),
         pre_turn_context_appends: pre_turn_context_appends.clone(),
         turn_metadata: primitive.turn_metadata().cloned(),
     };
 
-    let live_result = context
-        .service
-        .apply_runtime_turn(
-            session_id,
-            run_id.clone(),
-            turn_request,
-            boundary,
-            contributing_input_ids.clone(),
-        )
-        .await;
+    let build_only_requires_recovery = primitive
+        .build_only_overrides()
+        .is_some_and(|overrides| overrides.requires_materialization_recovery());
+    let live_result = if build_only_requires_recovery {
+        Err(SessionError::NotFound {
+            id: session_id.clone(),
+        })
+    } else {
+        context
+            .service
+            .apply_runtime_turn(
+                session_id,
+                run_id.clone(),
+                turn_request,
+                boundary,
+                contributing_input_ids.clone(),
+            )
+            .await
+    };
 
     match live_result {
         Ok(output) => Ok(output),
@@ -621,7 +644,7 @@ async fn apply_runtime_turn(
             Box::pin(context.rematerialize_persisted_session(
                 session_id,
                 state.clone(),
-                primitive.turn_metadata().cloned(),
+                recovery_overrides.clone(),
             ))
             .await
             .map(|_| ())?;
@@ -635,7 +658,7 @@ async fn apply_runtime_turn(
                         system_prompt: None,
                         event_tx,
                         pre_turn_context_appends,
-                        turn_metadata: primitive.turn_metadata().cloned(),
+                        turn_metadata: recovery_overrides.turn_metadata.clone(),
                     },
                     boundary,
                     contributing_input_ids,
@@ -711,8 +734,8 @@ mod tests {
     use meerkat::{AgentFactory, Config, PersistenceBundle};
     use meerkat_client::TestClient;
     use meerkat_core::lifecycle::run_primitive::{
-        PeerResponseTerminalApplyIntent, RunApplyBoundary, RuntimeExecutionKind,
-        RuntimeTurnMetadata, StagedRunInput,
+        PeerResponseTerminalApplyIntent, RunApplyBoundary, RuntimeBuildOnlyTurnOverrides,
+        RuntimeExecutionKind, RuntimeTurnMetadata, StagedRunInput,
     };
     use meerkat_core::lifecycle::{InputId, RunId};
     use meerkat_core::{MemoryConfigStore, RealmId};
@@ -800,8 +823,45 @@ mod tests {
             "runtime rematerialization must not rebuild with empty recovery overrides"
         );
         assert!(
-            source.contains("turn_metadata: turn_metadata.clone()"),
-            "runtime rematerialization must pass primitive turn metadata into recovery"
+            source.contains("recovery_overrides_from_runtime_turn(")
+                && source.contains("primitive.build_only_overrides()")
+                && source.contains(
+                    "build_recovered_session(\n            session.clone(),\n            &recovery_overrides,"
+                ),
+            "runtime rematerialization must pass primitive turn metadata and build-only overrides into recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_context_only_runtime_apply_rejects_build_only_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let context = build_test_context(&temp).await;
+        let state = Arc::new(McpRuntimeSessionState::default());
+        let session_id = SessionId::new();
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![context_append()],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+            build_only_overrides: Some(RuntimeBuildOnlyTurnOverrides {
+                system_prompt: Some("context-only system".to_string()),
+                ..Default::default()
+            }),
+        });
+
+        let error = apply_runtime_turn(&context, &state, &session_id, RunId::new(), &primitive)
+            .await
+            .expect_err("context-only runtime applies must not drop build-only overrides");
+
+        assert!(
+            error
+                .to_string()
+                .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
         );
     }
 

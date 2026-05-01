@@ -19,7 +19,7 @@ pub use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,
     SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, build_recovered_session,
     has_build_only_turn_overrides, has_materialization_overrides,
-    session_allows_first_turn_build_overrides,
+    recovery_overrides_from_runtime_turn, session_allows_first_turn_build_overrides,
 };
 pub use request_execution::{
     CancelActionInstallOutcome, CancelOutcome, CompleteOutcome, PreparedSurfaceSession,

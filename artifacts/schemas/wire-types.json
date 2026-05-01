@@ -3569,22 +3569,21 @@
   },
   "MobIngressInteractionParams": {
     "$defs": {
+      "BindingId": {
+        "description": "Opaque slug identifying a binding inside a realm.",
+        "type": "string"
+      },
       "BridgeBootstrapToken": {
         "description": "One-time bootstrap proof exchanged between a mob supervisor and a\nmember runtime on initial bind.\n\nTransparent over the wire (`#[serde(transparent)]` — a bare JSON string),\nbut carries a redacting `Debug` impl and has no `Display` impl so the\nraw secret cannot accidentally land in logs or panic messages. Treat it\nlike an API key: read `as_str()` only at the comms/transport boundary.",
         "type": "string"
       },
+      "MeerkatSchema": {
+        "description": "A Meerkat-native JSON schema."
+      },
       "MobMemberSpecWire": {
+        "additionalProperties": false,
         "description": "Per-member spec for `mob/ensure_member` and the `desired` entries of\n`mob/reconcile`.\n\nMirrors the essential, codegen-friendly fields of\n[`meerkat_mob::SpawnMemberSpec`]. Complex sub-types (tool access policy,\nbudget split, inherited tool filter, override profile) are not on this\nwire surface — callers that need that parity should use the non-declarative\n`mob/spawn` method.",
         "properties": {
-          "additional_instructions": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "agent_identity": {
             "description": "Stable member identity within the mob.",
             "type": "string"
@@ -3648,11 +3647,326 @@
                 "type": "null"
               }
             ]
+          },
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireRuntimeTurnMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "profile",
           "agent_identity"
+        ],
+        "type": "object"
+      },
+      "OutputSchema": {
+        "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. The extraction JSON becomes the final\nresponse text (schema-only) in [`RunResult`].",
+        "properties": {
+          "compat": {
+            "$ref": "#/$defs/SchemaCompat",
+            "default": "lossy",
+            "description": "Compatibility mode for provider lowering (lossy or strict)"
+          },
+          "format": {
+            "$ref": "#/$defs/SchemaFormat",
+            "default": "meerkat_v1",
+            "description": "Schema format version"
+          },
+          "name": {
+            "description": "Optional name for the schema (used by some providers)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "$ref": "#/$defs/MeerkatSchema",
+            "description": "The JSON schema that the output must conform to"
+          },
+          "strict": {
+            "default": false,
+            "description": "Whether to enforce strict schema validation (provider-specific)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema"
+        ],
+        "type": "object"
+      },
+      "ProfileId": {
+        "description": "Opaque slug identifying an auth profile override on a connection.",
+        "type": "string"
+      },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
+      "RealmId": {
+        "description": "Opaque slug identifying a realm.",
+        "type": "string"
+      },
+      "SchemaCompat": {
+        "description": "Compatibility mode for provider lowering.",
+        "enum": [
+          "lossy",
+          "strict"
+        ],
+        "type": "string"
+      },
+      "SchemaFormat": {
+        "description": "Schema format versions supported by Meerkat.",
+        "enum": [
+          "meerkat_v1"
+        ],
+        "type": "string"
+      },
+      "SkillKey": {
+        "additionalProperties": false,
+        "description": "Canonical runtime identity for a skill.\n\nThis is the single identity carried across every surface — the wire parses\ndirectly into this struct, tools receive this struct, the registry stores\nthis struct. There is no slash-delimited string path form.",
+        "properties": {
+          "skill_name": {
+            "$ref": "#/$defs/SkillName"
+          },
+          "source_uuid": {
+            "$ref": "#/$defs/SourceUuid"
+          }
+        },
+        "required": [
+          "source_uuid",
+          "skill_name"
+        ],
+        "type": "object"
+      },
+      "SkillName": {
+        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "type": "string"
+      },
+      "SourceUuid": {
+        "description": "Canonical source identifier.",
+        "type": "string"
+      },
+      "StructuredProviderExtension": {
+        "additionalProperties": false,
+        "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+        "properties": {
+          "body": {
+            "default": "",
+            "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Opaque key identifying the extension within the namespace.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "namespace",
+          "key"
+        ],
+        "type": "object"
+      },
+      "TurnToolOverlay": {
+        "additionalProperties": false,
+        "description": "Ephemeral per-turn tool overlay for flow-dispatched turns.",
+        "properties": {
+          "allowed_tools": {
+            "default": null,
+            "description": "Optional allow-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "default": null,
+            "description": "Optional deny-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireAnthropicCompactionConfig": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "auto",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "edit": true,
+              "kind": {
+                "const": "custom",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "edit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicContextWindow": {
+        "enum": [
+          "one_megabyte"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high",
+          "max",
+          "xhigh"
+        ],
+        "type": "string"
+      },
+      "WireAnthropicInferenceGeo": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "us",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "global",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "other",
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "region"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireAnthropicThinkingConfig": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "adaptive",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "enabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "budget_tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireConnectionRef": {
+        "additionalProperties": false,
+        "description": "Wire projection of [`meerkat_core::ConnectionRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
+        "properties": {
+          "binding": {
+            "$ref": "#/$defs/BindingId"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ProfileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "realm": {
+            "$ref": "#/$defs/RealmId"
+          }
+        },
+        "required": [
+          "realm",
+          "binding"
         ],
         "type": "object"
       },
@@ -3794,6 +4108,45 @@
         ],
         "description": "Wire-safe content input (mirrors `ContentInput`)."
       },
+      "WireGeminiThinkingConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "include_thoughts": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "thinking_budget": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "thinking_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireGeminiThinkingLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireGeminiThinkingLevel": {
+        "enum": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
       "WireHandlingMode": {
         "description": "Public handling mode for mob member delivery.",
         "enum": [
@@ -3801,6 +4154,33 @@
           "steer"
         ],
         "type": "string"
+      },
+      "WireKeepAliveMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::KeepAliveMode`].",
+        "enum": [
+          "pinned",
+          "policy_driven"
+        ],
+        "type": "string"
+      },
+      "WireKeepAlivePolicy": {
+        "additionalProperties": false,
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::KeepAlivePolicy`].",
+        "properties": {
+          "policy": {
+            "$ref": "#/$defs/WireKeepAliveMode"
+          },
+          "ttl_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ttl_secs",
+          "policy"
+        ],
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -3813,6 +4193,345 @@
         "enum": [
           "autonomous_host",
           "turn_driven"
+        ],
+        "type": "string"
+      },
+      "WireProviderParamsOverride": {
+        "additionalProperties": false,
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderParamsOverride`].",
+        "properties": {
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "provider_tag": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireProviderTag"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireReasoningMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking_budget_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireProviderTag": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ProviderTag`].",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "compaction": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicCompactionConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicContextWindow"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inference_geo": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicInferenceGeo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireAnthropicThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget_tokens": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "chat_template_kwargs": true,
+              "frequency_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "presence_penalty": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "reasoning": true,
+              "reasoning_effort": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireReasoningEffort"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "seed": {
+                "format": "int64",
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "supports_reasoning_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "supports_temperature_override": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "thinking": true,
+              "web_search": true
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "candidate_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "google_search": true,
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "structured_output": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OutputSchema"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingConfig"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "thinking_budget": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "thinking_level": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WireGeminiThinkingLevel"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "top_k": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "top_p": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Wire projection of `ProviderTag::Unknown { bag }` — the typed\nescape hatch for V3 legacy-row provider knobs that don't (yet) map\nto a typed variant.",
+            "properties": {
+              "bag": {
+                "$ref": "#/$defs/StructuredProviderExtension"
+              },
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "bag"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireReasoningEffort": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
+      },
+      "WireReasoningMode": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningMode`].",
+        "enum": [
+          "emit",
+          "silent",
+          "off"
         ],
         "type": "string"
       },
@@ -3915,6 +4634,107 @@
           }
         ]
       },
+      "WireRuntimeTurnMetadata": {
+        "additionalProperties": false,
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata`].\n\nThe per-turn seam between control plane and core is fully typed —\n`serde_json::Value` does not appear here.",
+        "properties": {
+          "additional_instructions": {
+            "items": {
+              "$ref": "#/$defs/WireTurnInstruction"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "connection_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireTurnMetadataOverride2"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "flow_tool_overlay": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "handling_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireHandlingMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "keep_alive": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireTurnMetadataOverride3"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Provider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider_params": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireTurnMetadataOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "render_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireRenderMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skill_references": {
+            "items": {
+              "$ref": "#/$defs/SkillKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WireTrustedPeerIdentity": {
         "description": "Typed external peer identity for public mob wiring surfaces.",
         "oneOf": [
@@ -3933,6 +4753,137 @@
             "required": [
               "kind",
               "public_key"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnInstruction": {
+        "additionalProperties": false,
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstruction`].",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WireTurnInstructionKind"
+          }
+        },
+        "required": [
+          "kind",
+          "body"
+        ],
+        "type": "object"
+      },
+      "WireTurnInstructionKind": {
+        "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::TurnInstructionKind`].",
+        "enum": [
+          "user",
+          "system",
+          "host"
+        ],
+        "type": "string"
+      },
+      "WireTurnMetadataOverride": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WireProviderParamsOverride"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnMetadataOverride2": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WireConnectionRef"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTurnMetadataOverride3": {
+        "description": "Wire tri-state override for per-turn runtime metadata fields.\n\n`None` on the containing field means preserve, `Set` provides a new value,\nand `Clear` removes the durable value for this turn.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "set",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WireKeepAlivePolicy"
+              }
+            },
+            "required": [
+              "action",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              }
+            },
+            "required": [
+              "action"
             ],
             "type": "object"
           }

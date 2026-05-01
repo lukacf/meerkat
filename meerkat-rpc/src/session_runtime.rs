@@ -2537,11 +2537,23 @@ impl SessionRuntime {
                 data: None,
             });
         }
+        let build_only_overrides =
+            Self::surface_build_only_overrides(primitive.build_only_overrides());
 
         // Context-only staged primitives may land directly as runtime
         // system-context appends, but terminal peer responses carry a typed
         // apply intent that requires a requester reaction turn.
         if primitive.is_context_only_apply_without_turn() {
+            if build_only_overrides
+                .as_ref()
+                .is_some_and(has_build_only_turn_overrides)
+            {
+                return Err(RpcError {
+                    code: error::INVALID_PARAMS,
+                    message: BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
+                    data: None,
+                });
+            }
             let RunPrimitive::StagedInput(staged) = primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
@@ -2570,8 +2582,6 @@ impl SessionRuntime {
         let turn_metadata = primitive.turn_metadata();
         let service_turn_metadata = turn_metadata.cloned();
         let keep_alive_override = Self::turn_metadata_keep_alive_override(turn_metadata);
-        let build_only_overrides =
-            Self::surface_build_only_overrides(primitive.build_only_overrides());
 
         #[cfg(feature = "comms")]
         if let Some(keep_alive) = keep_alive_override
@@ -5311,6 +5321,51 @@ mod tests {
 
         assert_eq!(output.receipt.boundary, RunApplyBoundary::RunCheckpoint);
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
+    }
+
+    #[tokio::test]
+    async fn context_only_runtime_apply_rejects_build_only_overrides() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 10);
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![ConversationContextAppend {
+                    key: "ctx-rpc-build-only".to_string(),
+                    content: CoreRenderable::Text {
+                        text: "context-only runtime context".to_string(),
+                    },
+                }],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(RuntimeTurnMetadata {
+                    execution_kind: Some(
+                        meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
+                    ),
+                    ..Default::default()
+                }),
+                build_only_overrides: Some(RuntimeBuildOnlyTurnOverrides {
+                    system_prompt: Some("context-only system".to_string()),
+                    ..Default::default()
+                }),
+            });
+        let (event_tx, _event_rx) = mpsc::channel(100);
+
+        let error = runtime
+            .apply_runtime_turn(
+                &SessionId::new(),
+                RunId::new(),
+                &primitive,
+                ContentInput::Text(String::new()),
+                event_tx,
+            )
+            .await
+            .expect_err("context-only runtime applies must not drop build-only overrides");
+
+        assert!(
+            error.message.contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error:?}"
+        );
     }
 
     #[tokio::test]

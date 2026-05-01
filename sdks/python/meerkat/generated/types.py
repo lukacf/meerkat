@@ -967,7 +967,6 @@ wire surface — callers that need that parity should use the non-declarative
 `mob/spawn` method."""
     agent_identity: str
     profile: str
-    additional_instructions: Optional[list[str]] = None
     auto_wire_parent: Optional[bool] = None
     backend: Optional[WireMobBackendKind] = None
     binding: Optional[WireRuntimeBinding] = None
@@ -975,6 +974,7 @@ wire surface — callers that need that parity should use the non-declarative
     initial_message: Optional[WireContentInput] = None
     labels: Optional[dict[str, str]] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    turn_metadata: Optional[WireRuntimeTurnMetadata] = None
 
 
 @dataclass

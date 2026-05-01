@@ -1667,7 +1667,8 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
 /// Spawn one or more members in a mob.
 ///
 /// `specs_json`: JSON array of `{ "profile": "...", "agent_identity": "...", "initial_message"?: "...",
-///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "session"|"external" }`
+///                "runtime_mode"?: "autonomous_host"|"turn_driven", "backend"?: "session"|"external",
+///                "turn_metadata"?: { ... } }`
 ///
 /// Returns JSON array of results per spec.
 #[wasm_bindgen]
@@ -1686,7 +1687,7 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
         spec.backend = s.backend;
         spec.context = s.context;
         spec.labels = s.labels;
-        spec.additional_instructions = s.additional_instructions;
+        apply_spawn_turn_metadata(&mut spec, s.turn_metadata)?;
         spawn_specs.push(spec);
     }
 
@@ -1732,9 +1733,88 @@ struct SpawnSpecInput {
     /// runtime owns member generations. Accept and ignore it for raw JS callers.
     #[serde(default, rename = "generation")]
     _generation: Option<u64>,
-    /// Additional instruction sections appended to the system prompt.
+    /// Canonical first-turn runtime metadata for this member.
     #[serde(default)]
-    additional_instructions: Option<Vec<String>>,
+    turn_metadata: Option<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>,
+}
+
+fn apply_spawn_turn_metadata(
+    spec: &mut meerkat_mob::SpawnMemberSpec,
+    turn_metadata: Option<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>,
+) -> Result<(), JsValue> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err(err_js(
+            "invalid_specs",
+            "mob spawn turn_metadata.handling_mode is not supported",
+        ));
+    }
+    if metadata.skill_references.is_some() {
+        return Err(err_js(
+            "invalid_specs",
+            "mob spawn turn_metadata.skill_references is not supported",
+        ));
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err(err_js(
+            "invalid_specs",
+            "mob spawn turn_metadata.flow_tool_overlay is not supported",
+        ));
+    }
+    if metadata.provider.is_some() {
+        return Err(err_js(
+            "invalid_specs",
+            "mob spawn turn_metadata.provider is not supported",
+        ));
+    }
+    if metadata.keep_alive.is_some() {
+        return Err(err_js(
+            "invalid_specs",
+            "mob spawn turn_metadata.keep_alive is not supported",
+        ));
+    }
+    if metadata.render_metadata.is_some() {
+        return Err(err_js(
+            "invalid_specs",
+            "mob spawn turn_metadata.render_metadata is not supported",
+        ));
+    }
+
+    if let Some(model) = metadata.model {
+        spec.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        spec.provider_params_override = match provider_params {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
+                Some(params.to_legacy_provider_value())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+        };
+    }
+    if let Some(instructions) = metadata.additional_instructions {
+        let instructions = instructions
+            .into_iter()
+            .map(|instruction| instruction.body)
+            .filter(|body| !body.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !instructions.is_empty() {
+            spec.additional_instructions = Some(instructions);
+        }
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        spec.connection_ref = match connection_ref {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
+                Some(connection_ref)
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+        };
+    }
+    Ok(())
 }
 
 /// Retire a member from a mob.
@@ -2894,6 +2974,35 @@ capabilities = [{capability_values}]
             serde_json::from_value(payload).expect("legacy generation should be ignored");
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].agent_identity, "worker-1");
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn spawn_spec_input_uses_turn_metadata_carrier_for_instructions() {
+        let payload = json!([{
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "turn_metadata": {
+                "additional_instructions": [
+                    { "kind": "user", "body": "canonical member instruction" }
+                ]
+            }
+        }]);
+
+        let specs: Vec<super::SpawnSpecInput> =
+            serde_json::from_value(payload).expect("turn_metadata should deserialize");
+        assert!(specs[0].turn_metadata.is_some());
+
+        let err = serde_json::from_value::<Vec<super::SpawnSpecInput>>(json!([{
+            "profile": "worker",
+            "agent_identity": "worker-1",
+            "additional_instructions": ["legacy instruction"]
+        }]))
+        .expect_err("retired split instruction carrier should be rejected");
+        assert!(
+            err.to_string().contains("additional_instructions"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

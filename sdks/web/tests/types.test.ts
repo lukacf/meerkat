@@ -209,6 +209,9 @@ const spawnSpec: SpawnSpec = {
   runtime_mode: 'autonomous_host',
   initial_message: 'Hello',
   labels: { role: 'worker' },
+  turnMetadata: {
+    additionalInstructions: [{ kind: 'user', body: 'canonical member instruction' }],
+  },
 };
 
 const spawnSpecWithoutGeneration: SpawnSpec = {
@@ -218,6 +221,9 @@ const spawnSpecWithoutGeneration: SpawnSpec = {
 
 // @ts-expect-error generation is runtime-owned and not a public spawn knob.
 spawnSpecWithoutGeneration.generation = 1;
+
+// @ts-expect-error additional_instructions is retired; use turnMetadata.
+spawnSpecWithoutGeneration.additional_instructions = ['legacy'];
 
 // ─── Event narrowing (matches Rust AgentEvent serde) ────────────
 

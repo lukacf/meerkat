@@ -1945,7 +1945,7 @@ fn spawn_spec_from_wire(
     spec.backend = spec_wire.backend.map(mob_backend_kind_from_wire);
     spec.context = spec_wire.context.clone();
     spec.labels = spec_wire.labels.clone();
-    spec.additional_instructions = spec_wire.additional_instructions.clone();
+    apply_spawn_turn_metadata(&mut spec, spec_wire.turn_metadata.clone())?;
     if let Some(binding) = spec_wire.binding.clone() {
         spec.binding = Some(runtime_binding_from_wire(binding)?);
     }
@@ -2559,7 +2559,7 @@ mod tests {
             binding: None,
             context: Some(serde_json::json!({"meerkat.runtime_id": "spoof"})),
             labels: None,
-            additional_instructions: None,
+            turn_metadata: None,
             auto_wire_parent: None,
         };
 

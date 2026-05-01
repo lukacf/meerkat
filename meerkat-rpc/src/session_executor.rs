@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use meerkat_core::EventEnvelope;
 use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{
@@ -17,6 +16,7 @@ use meerkat_core::lifecycle::core_executor::{
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
+use meerkat_core::{BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, EventEnvelope};
 use tokio::sync::mpsc;
 
 use crate::router::NotificationSink;
@@ -211,6 +211,14 @@ impl CoreExecutor for SessionRuntimeExecutor {
         // system-context appends, but terminal peer responses carry a typed
         // apply intent that requires a requester reaction turn.
         if primitive.is_context_only_apply_without_turn() {
+            if primitive
+                .build_only_overrides()
+                .is_some_and(|overrides| !overrides.is_empty())
+            {
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
+                ));
+            }
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
@@ -307,8 +315,24 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 reason.to_string(),
             ));
         }
+        if primitive
+            .build_only_overrides()
+            .is_some_and(|overrides| overrides.requires_materialization_recovery())
+        {
+            return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
+            ));
+        }
 
         if primitive.is_context_only_apply_without_turn() {
+            if primitive
+                .build_only_overrides()
+                .is_some_and(|overrides| !overrides.is_empty())
+            {
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
+                ));
+            }
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
@@ -345,7 +369,9 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
 
         let req = meerkat_core::service::StartTurnRequest {
             prompt,
-            system_prompt: None,
+            system_prompt: primitive
+                .build_only_overrides()
+                .and_then(|overrides| overrides.system_prompt.clone()),
             event_tx: Some(event_tx),
             pre_turn_context_appends,
             turn_metadata: primitive.turn_metadata().cloned(),
@@ -503,6 +529,47 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     impl MobSessionService for BoundaryCancelSessionService {}
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_rpc_executor_rejects_materialization_only_build_overrides() {
+        let session_service: Arc<dyn MobSessionService> =
+            Arc::new(BoundaryCancelSessionService::unsupported());
+        let session_id = SessionId::new();
+        let mut executor =
+            MobRpcRuntimeExecutor::new(session_service, session_id, NotificationSink::noop());
+        let primitive =
+            RunPrimitive::StagedInput(meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                appends: vec![meerkat_core::lifecycle::run_primitive::ConversationAppend {
+                    role: meerkat_core::lifecycle::run_primitive::ConversationAppendRole::User,
+                    content: CoreRenderable::Text {
+                        text: "hello".to_string(),
+                    },
+                }],
+                context_appends: Vec::new(),
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: None,
+                build_only_overrides: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeBuildOnlyTurnOverrides {
+                        max_tokens: Some(128),
+                        ..Default::default()
+                    },
+                ),
+            });
+
+        let error = executor
+            .apply(meerkat_core::lifecycle::RunId::new(), primitive)
+            .await
+            .expect_err("mob RPC executor must reject build-only overrides it cannot recover");
+
+        assert!(
+            error
+                .to_string()
+                .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn mob_rpc_boundary_handle_propagates_unsupported_boundary_cancel() {

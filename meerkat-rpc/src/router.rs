@@ -3375,7 +3375,9 @@ mod tests {
         use meerkat::surface::CancelOutcome;
         let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
         let key = serde_json::to_string(id).expect("request id should serialize");
-        let context = executor.begin_request(key.clone(), noop_request_action());
+        let context = executor
+            .try_begin_request(key.clone(), noop_request_action())
+            .expect("test request key should be unique");
         let outcome = executor.cancel_request(&key).await;
         assert_eq!(
             outcome,

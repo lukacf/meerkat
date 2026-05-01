@@ -2711,6 +2711,7 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     if let Some(context) = request_context.as_ref() {
+        context.mark_publish_on_success();
         let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -2905,6 +2906,7 @@ async fn handle_meerkat_resume(
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
 
     if let Some(context) = request_context.as_ref() {
+        context.mark_publish_on_success();
         let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
@@ -3435,7 +3437,9 @@ mod tests {
     async fn cancelled_request_context(key: &str) -> RequestContext {
         use meerkat::surface::CancelOutcome;
         let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
-        let context = executor.begin_request(key.to_string(), noop_request_action());
+        let context = executor
+            .try_begin_request(key.to_string(), noop_request_action())
+            .expect("test request key should be unique");
         let outcome = executor.cancel_request(key).await;
         assert_eq!(
             outcome,
@@ -4330,7 +4334,9 @@ mod tests {
         use meerkat::surface::CancelOutcome;
 
         let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
-        let context = executor.begin_request("req-cancel-before-admission", noop_request_action());
+        let context = executor
+            .try_begin_request("req-cancel-before-admission", noop_request_action())
+            .expect("test request key should be unique");
         let install = context
             .install_cancel_action_or_cancelled(noop_request_action())
             .await;

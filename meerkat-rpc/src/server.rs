@@ -5,14 +5,13 @@
 //! responses from spawned dispatch tasks, and event notifications.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use meerkat::surface::{
-    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestSemantics,
-    noop_request_action,
+    RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, noop_request_action,
 };
-use meerkat_contracts::rpc_request_lifecycle;
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,6 +27,16 @@ use crate::transport::{BlockingWriter, JsonlTransport, TransportError, Transport
 struct LongRunningResponse {
     request_key: String,
     terminal: RequestTerminal<RpcResponse>,
+}
+
+enum SpawnedTrackedRequest {
+    Tracked {
+        request_key: String,
+        task: tokio::task::JoinHandle<()>,
+    },
+    Untracked {
+        task: tokio::task::JoinHandle<()>,
+    },
 }
 
 /// Errors from the RPC server.
@@ -248,9 +257,15 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                                 continue;
                             }
 
-                            if let Some((request_key, task)) = self.spawn_long_running_request(&request) {
-                                self.request_executor
-                                    .attach_task(&request_key, task);
+                            if let Some(spawned) = self.spawn_tracked_request(&request) {
+                                match spawned {
+                                    SpawnedTrackedRequest::Tracked { request_key, task } => {
+                                        let _ = self.request_executor.attach_task(&request_key, task);
+                                    }
+                                    SpawnedTrackedRequest::Untracked { task } => {
+                                        drop(task);
+                                    }
+                                }
                                 continue;
                             }
 
@@ -330,28 +345,50 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         Ok(())
     }
 
-    fn spawn_long_running_request(
+    fn spawn_tracked_request(&self, request: &RpcRequest) -> Option<SpawnedTrackedRequest> {
+        let router = self.router.clone();
+        self.spawn_tracked_request_with_dispatch(request, move |request, context| async move {
+            Box::pin(router.dispatch_with_request_context(request, Some(context))).await
+        })
+    }
+
+    fn spawn_tracked_request_with_dispatch<F, Fut>(
         &self,
         request: &RpcRequest,
-    ) -> Option<(String, tokio::task::JoinHandle<()>)> {
-        let semantics = request_semantics(request);
-        if !semantics.requires_long_running_executor() {
-            return None;
-        }
+        dispatch: F,
+    ) -> Option<SpawnedTrackedRequest>
+    where
+        F: FnOnce(RpcRequest, meerkat::surface::RequestContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Option<RpcResponse>> + Send + 'static,
+    {
         let id = request.id.clone()?;
         let request_key = request_key(&id);
-        let context = self
+        let context = match self
             .request_executor
-            .begin_request(request_key.clone(), noop_request_action());
-        let router = self.router.clone();
+            .try_begin_request(request_key.clone(), noop_request_action())
+        {
+            Ok(context) => context,
+            Err(_) => {
+                let response_tx = self.response_tx.clone();
+                let handle = tokio::spawn(async move {
+                    let response = RpcResponse::error(
+                        Some(id),
+                        crate::error::INVALID_REQUEST,
+                        "duplicate in-flight request id",
+                    );
+                    let _ = response_tx.send(response).await;
+                });
+                return Some(SpawnedTrackedRequest::Untracked { task: handle });
+            }
+        };
+        let terminal_context = context.clone();
         let long_running_tx = self.long_running_tx.clone();
         let request = request.clone();
         let request_key_for_task = request_key.clone();
         let handle = tokio::spawn(async move {
-            if let Some(response) =
-                Box::pin(router.dispatch_with_request_context(request, Some(context))).await
-            {
-                let terminal = classify_long_running_response(&response, semantics);
+            if let Some(response) = dispatch(request, context).await {
+                let terminal =
+                    terminal_context.classify_terminal(response.error.is_none(), response);
                 let _ = long_running_tx
                     .send(LongRunningResponse {
                         request_key: request_key_for_task,
@@ -360,7 +397,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                     .await;
             }
         });
-        Some((request_key, handle))
+        Some(SpawnedTrackedRequest::Tracked {
+            request_key,
+            task: handle,
+        })
     }
 
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
@@ -431,13 +471,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 }
 
-fn classify_long_running_response(
-    response: &RpcResponse,
-    semantics: SurfaceRequestSemantics,
-) -> RequestTerminal<RpcResponse> {
-    semantics.classify_terminal(response.error.is_none(), response.clone())
-}
-
 fn request_key(id: &RpcId) -> String {
     serde_json::to_string(id).unwrap_or_else(|_| format!("{id:?}"))
 }
@@ -466,13 +499,6 @@ fn request_lifecycle_error_response(
         crate::error::INTERNAL_ERROR,
         format!("request lifecycle rejected publish response: {err}"),
     )
-}
-
-fn request_semantics(request: &RpcRequest) -> SurfaceRequestSemantics {
-    SurfaceRequestSemantics::from(rpc_request_lifecycle(
-        request.method.as_str(),
-        request.params.as_deref().map(|params| params.get()),
-    ))
 }
 
 /// Start the RPC server on stdin/stdout.
@@ -600,6 +626,7 @@ pub async fn serve_tcp_with_realtime_ws_host(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn raw_params(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
         let raw = serde_json::value::to_raw_value(&value);
@@ -610,54 +637,120 @@ mod tests {
         }
     }
 
-    #[test]
-    fn deferred_session_create_uses_simple_path() {
-        let request = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(RpcId::Num(1)),
-            method: "session/create".to_string(),
-            params: Some(raw_params(serde_json::json!({
-                "prompt": "hello",
-                "initial_turn": "deferred"
-            }))),
-        };
-
-        assert!(!request_semantics(&request).requires_long_running_executor());
-    }
-
-    #[test]
-    fn immediate_session_create_uses_long_running_executor() {
-        let request = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: Some(RpcId::Num(1)),
-            method: "session/create".to_string(),
-            params: Some(raw_params(serde_json::json!({
-                "prompt": "hello"
-            }))),
-        };
-
-        assert!(request_semantics(&request).requires_long_running_executor());
-    }
-
-    #[test]
-    fn turn_start_is_publish_on_success() {
+    #[tokio::test]
+    async fn raw_rpc_method_name_alone_does_not_grant_publish_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(output);
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
         let request = RpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(RpcId::Num(1)),
             method: "turn/start".to_string(),
-            params: Some(raw_params(serde_json::json!({
-                "session_id": "01234567-89ab-cdef-0123-456789abcdef",
-                "prompt": "hello"
-            }))),
+            params: Some(raw_params(serde_json::json!({}))),
         };
 
-        let semantics = request_semantics(&request);
-        assert!(semantics.requires_long_running_executor());
-        let response = RpcResponse::success(request.id, serde_json::json!({"ok": true}));
-        assert!(matches!(
-            classify_long_running_response(&response, semantics),
-            RequestTerminal::Publish(_)
-        ));
+        let spawned = server
+            .spawn_tracked_request_with_dispatch(&request, |request, _context| async move {
+                assert_eq!(request.method, "turn/start");
+                Some(RpcResponse::success(
+                    request.id.clone(),
+                    serde_json::json!({"ok": true}),
+                ))
+            })
+            .expect("id-bearing request should be admitted through RPC tracking");
+        let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
+            panic!("first RPC request should be tracked");
+        };
+        let response = tokio::time::timeout(Duration::from_secs(2), server.long_running_rx.recv())
+            .await
+            .expect("tracked response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("synthetic dispatch task should complete");
+        assert!(
+            !response.terminal.is_publish(),
+            "raw turn/start method name must not grant committed publish authority before the typed handler marks the request"
+        );
+    }
+
+    #[test]
+    fn rpc_request_context_grants_publish_authority_after_handler_marks_it() {
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let context = executor
+            .try_begin_request("rpc-marked", noop_request_action())
+            .expect("test request key should be unique");
+        context.mark_publish_on_success();
+
+        let response = RpcResponse::success(Some(RpcId::Num(1)), serde_json::json!({"ok": true}));
+        assert!(
+            context
+                .classify_terminal(response.error.is_none(), response)
+                .is_publish()
+        );
+
+        let error = RpcResponse::error(Some(RpcId::Num(1)), crate::error::INTERNAL_ERROR, "boom");
+        assert!(
+            context
+                .classify_terminal(error.error.is_none(), error)
+                .is_respond_without_publish()
+        );
+    }
+
+    #[test]
+    fn rpc_admission_does_not_call_raw_lifecycle_helper() {
+        let source = include_str!("server.rs");
+        assert!(
+            !source.contains(concat!("rpc", "_request", "_lifecycle")),
+            "RPC request admission must use machine-owned request classification, not the legacy raw method lifecycle helper"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_admission_rejects_duplicate_in_flight_request_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(output);
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let request_id = RpcId::Num(7);
+        let request_key = request_key(&request_id);
+        let _existing = server
+            .request_executor
+            .try_begin_request(request_key.clone(), noop_request_action())
+            .expect("test request key should be unique");
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "initialize".to_string(),
+            params: None,
+        };
+
+        let spawned = server
+            .spawn_tracked_request(&request)
+            .expect("id-bearing request should produce a tracked task");
+        let SpawnedTrackedRequest::Untracked { task } = spawned else {
+            panic!("duplicate request should produce an untracked response task");
+        };
+        task.await.expect("duplicate response task should complete");
+        let response = server
+            .response_rx
+            .recv()
+            .await
+            .expect("duplicate id should produce a response");
+
+        assert_eq!(response.id, Some(request_id));
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some(crate::error::INVALID_REQUEST)
+        );
+        assert_eq!(
+            server.request_executor.phase(&request_key),
+            Some(meerkat::surface::SurfaceRequestPhase::Pending),
+            "duplicate admission must not overwrite the existing lifecycle entry"
+        );
     }
 
     #[derive(Clone)]
@@ -685,9 +778,11 @@ mod tests {
         let mut server = RpcServer::new(reader, writer, runtime, config_store);
         let request_id = RpcId::Num(42);
         let request_key = request_key(&request_id);
-        let _ctx = server
+        let context = server
             .request_executor
-            .begin_request(request_key.clone(), noop_request_action());
+            .try_begin_request(request_key.clone(), noop_request_action())
+            .expect("test request key should be unique");
+        context.mark_publish_on_success();
 
         assert_eq!(
             server.request_executor.cancel_request(&request_key).await,
@@ -696,11 +791,12 @@ mod tests {
 
         let publish_response =
             RpcResponse::success(Some(request_id.clone()), serde_json::json!({"ok": true}));
+        let terminal = context.classify_terminal(true, publish_response);
         assert!(
             server
                 .write_long_running_response(LongRunningResponse {
                     request_key: request_key.clone(),
-                    terminal: RequestTerminal::Publish(publish_response),
+                    terminal,
                 })
                 .await
         );

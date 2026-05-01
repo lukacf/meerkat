@@ -389,6 +389,9 @@ pub async fn handle_create(
     }
 
     if let Some(context) = request_context.as_ref() {
+        if params.initial_turn != Some(InitialTurn::Deferred) {
+            context.mark_publish_on_success();
+        }
         let runtime_adapter_for_cancel = Arc::clone(runtime_adapter);
         let session_id_for_cancel = session_id.clone();
         let install = context

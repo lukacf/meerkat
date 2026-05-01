@@ -7,7 +7,8 @@ mod state;
 mod tools;
 
 use meerkat::surface::{
-    noop_request_action, spawn_stdio_json_writer, RequestTerminal, SurfaceRequestExecutor,
+    noop_request_action, spawn_stdio_json_writer, RequestTerminal, RequestTerminalResolution,
+    SurfaceRequestExecutor,
 };
 use serde_json::{json, Value};
 use state::ForceState;
@@ -122,7 +123,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_else(|| json!({}));
                         let progress_token = params.pointer("/_meta/progressToken").cloned();
 
-                        let context = executor.begin_request(request_key.clone(), noop_request_action());
+                        let context = match executor.try_begin_request(
+                            request_key.clone(),
+                            noop_request_action(),
+                        ) {
+                            Ok(context) => context,
+                            Err(_) => {
+                                let response = json!({
+                                    "jsonrpc": "2.0",
+                                    "id": request_id,
+                                    "error": {
+                                        "code": -32600,
+                                        "message": "duplicate in-flight request id"
+                                    }
+                                });
+                                if writer.send(response).await.is_err() {
+                                    break Ok(());
+                                }
+                                continue;
+                            }
+                        };
+                        context.mark_cancellable_observation();
                         let writer_for_progress = writer.clone();
                         let progress_notifier: tools::ProgressNotifier = Arc::new(move |token, progress, total, message| {
                             let writer = writer_for_progress.clone();
@@ -155,18 +176,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Some(progress_notifier),
                                     Some(context),
                                 ).await {
-                                    Ok(result) => RequestTerminal::RespondWithoutPublish(json!({
+                                    Ok(result) => RequestTerminal::respond_without_publish(json!({
                                         "jsonrpc": "2.0",
                                         "id": request_id_for_task,
                                         "result": result
                                     })),
-                                    Err(err) => RequestTerminal::RespondWithoutPublish(json!({
+                                    Err(err) => RequestTerminal::respond_without_publish(json!({
                                         "jsonrpc": "2.0",
                                         "id": request_id_for_task,
                                         "error": {"code": err.code, "message": err.message}
                                     })),
                                 },
-                                Err(err) => RequestTerminal::RespondWithoutPublish(json!({
+                                Err(err) => RequestTerminal::respond_without_publish(json!({
                                     "jsonrpc": "2.0",
                                     "id": request_id_for_task,
                                     "error": {"code": -32603, "message": err}
@@ -176,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .send(ToolCompletion { request_key: request_key_for_task, terminal })
                                 .await;
                         });
-                        executor.attach_task(&request_key, handle);
+                        let _ = executor.attach_task(&request_key, handle);
                     }
                     _ => {
                         let response = json!({
@@ -191,27 +212,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Some(completion) = completion_rx.recv() => {
-                match completion.terminal {
-                    RequestTerminal::Publish(response) => {
-                        if writer.send(response).await.is_err() {
-                            let _ = executor.finish_unpublished(&completion.request_key).await;
-                            break Ok(());
+                let cancel_id = completion.terminal.payload().get("id").cloned();
+                let to_write = match executor
+                    .resolve_terminal(Some(&completion.request_key), completion.terminal)
+                    .await
+                {
+                    RequestTerminalResolution::Emit(response) => response,
+                    RequestTerminalResolution::Cancelled => request_cancelled_response(cancel_id),
+                    RequestTerminalResolution::LifecycleError(err) => json!({
+                        "jsonrpc": "2.0",
+                        "id": cancel_id.unwrap_or(Value::Null),
+                        "error": {
+                            "code": -32603,
+                            "message": format!("request lifecycle rejected publish response: {err}")
                         }
-                        let _ = executor.publish_and_complete(&completion.request_key);
-                    }
-                    RequestTerminal::RespondWithoutPublish(response) => {
-                        let cancel_id = response.get("id").cloned();
-                        let outcome = executor.finish_unpublished(&completion.request_key).await;
-                        let to_write = match outcome {
-                            meerkat::surface::CompleteOutcome::Completed => response,
-                            meerkat::surface::CompleteOutcome::SupersededByCancel => {
-                                request_cancelled_response(cancel_id)
-                            }
-                        };
-                        if writer.send(to_write).await.is_err() {
-                            break Ok(());
-                        }
-                    }
+                    }),
+                };
+                if writer.send(to_write).await.is_err() {
+                    break Ok(());
                 }
             }
             writer_result = &mut writer_task => {

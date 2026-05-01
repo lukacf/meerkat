@@ -123,6 +123,22 @@ EOF
   rm -rf "$tmpdir"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
+  mkdir -p "$tmpdir/meerkat-rpc/src"
+  cat >"$tmpdir/meerkat-rpc/src/session_executor.rs" <<'EOF'
+impl CoreExecutorInterruptHandle for SessionRuntimeInterruptHandle {
+    async fn hard_cancel_current_run(&self) {
+        let _ = self.runtime.interrupt(&self.session_id).await;
+    }
+}
+EOF
+  if "$self_script" "$tmpdir" >/dev/null 2>&1; then
+    echo "audit-effect-authority self-test failed: recursive RPC interrupt-handle fixture passed" >&2
+    exit 1
+  fi
+
+  rm -rf "$tmpdir"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
   mkdir -p "$tmpdir/meerkat-runtime/src"
   cat >"$tmpdir/meerkat-runtime/src/comms_drain.rs" <<'EOF'
 async fn bad(machine: Machine, session_id: SessionId) {
@@ -289,6 +305,11 @@ report_matches "peer-admission code can reach hard interrupt authority" "$peer_m
 if [[ -f "$root/meerkat-runtime/src/comms_drain.rs" ]]; then
   comms_drain_matches="$(rg -n '\b(hard_cancel_current_run|interrupt_handle|interrupt_handle_for)\b|\.interrupt_current_run\(|\b(runtime|adapter|session_service)\.interrupt\(' "$root/meerkat-runtime/src/comms_drain.rs" 2>/dev/null || true)"
   report_matches "comms-drain code can reach hard interrupt authority" "$comms_drain_matches"
+fi
+
+if [[ -f "$root/meerkat-rpc/src/session_executor.rs" ]]; then
+  rpc_executor_recursion="$(rg -n '\.runtime\.interrupt\(' "$root/meerkat-rpc/src/session_executor.rs" 2>/dev/null || true)"
+  report_matches "RPC executor interrupt handle must not re-enter public SessionRuntime::interrupt" "$rpc_executor_recursion"
 fi
 
 if [[ -f "$root/meerkat-runtime/src/user_interrupt.rs" ]]; then

@@ -38,11 +38,49 @@ impl MeerkatMachine {
         let fact = crate::effect::runtime_effect_fact_from_effects(&staged.effects)
             .map_err(RuntimeDriverError::Internal)?;
 
-        if let Err(err) = self.send_runtime_effect_fact(session_id, fact).await {
+        let (effect_tx, boundary_handle) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions
+                .get(session_id)
+                .ok_or(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Destroyed,
+                })?;
+            (entry.effect_sender(), entry.boundary_handle())
+        };
+
+        let Some(effect_tx) = effect_tx else {
+            let state = self
+                .existing_session_runtime_state(session_id)
+                .await
+                .unwrap_or(RuntimeState::Destroyed);
             self.restore_session_dsl_state(session_id, staged.previous_state)
                 .await;
-            return Err(err);
+            return Err(RuntimeDriverError::NotReady { state });
+        };
+
+        let reason = fact.reason().to_string();
+        if let Err(err) = effect_tx
+            .send(crate::effect::RuntimeEffect::from_fact(fact))
+            .await
+        {
+            self.restore_session_dsl_state(session_id, staged.previous_state)
+                .await;
+            return Err(RuntimeDriverError::Internal(format!(
+                "failed to send runtime effect: {err}"
+            )));
         }
+
+        if let Some(boundary_handle) = boundary_handle {
+            boundary_handle
+                .cancel_after_boundary(reason)
+                .await
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "failed to apply live boundary cancel: {err}"
+                    ))
+                })?;
+        }
+
         Ok(())
     }
 
@@ -132,36 +170,6 @@ impl MeerkatMachine {
             entry.clear_dead_attachment();
         }
         Ok(())
-    }
-
-    pub(crate) async fn send_runtime_effect_fact(
-        &self,
-        session_id: &SessionId,
-        fact: crate::effect::RuntimeEffectFact,
-    ) -> Result<(), RuntimeDriverError> {
-        let effect_tx = {
-            let sessions = self.sessions.read().await;
-            let entry = sessions
-                .get(session_id)
-                .ok_or(RuntimeDriverError::NotReady {
-                    state: RuntimeState::Destroyed,
-                })?;
-            entry.effect_sender()
-        };
-
-        let Some(effect_tx) = effect_tx else {
-            let state = self
-                .existing_session_runtime_state(session_id)
-                .await
-                .unwrap_or(RuntimeState::Destroyed);
-            return Err(RuntimeDriverError::NotReady { state });
-        };
-        effect_tx
-            .send(crate::effect::RuntimeEffect::from_fact(fact))
-            .await
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!("failed to send runtime effect: {err}"))
-            })
     }
 
     /// Accept an input and execute it synchronously through the runtime driver.

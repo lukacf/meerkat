@@ -320,19 +320,23 @@ pub async fn handle_interrupt(
         }) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
         Err(RuntimeDriverError::NotReady {
             state: RuntimeState::Destroyed,
-        }) => RpcResponse::error(
-            id,
-            error::SESSION_NOT_FOUND,
-            format!("Session not found: {session_id}"),
-        ),
+        })
+        | Err(RuntimeDriverError::Destroyed) => {
+            match runtime.interrupt_target_exists_for_noop(&session_id).await {
+                Ok(true) => RpcResponse::success(id, serde_json::json!({"interrupted": true})),
+                Ok(false) => RpcResponse::error(
+                    id,
+                    error::SESSION_NOT_FOUND,
+                    format!("Session not found: {session_id}"),
+                ),
+                Err(err) => RpcResponse::error(id, err.code, err.message),
+            }
+        }
         Err(RuntimeDriverError::NotReady { state }) => RpcResponse::error(
             id,
             error::INTERNAL_ERROR,
             format!("Runtime not ready: {state}"),
         ),
-        Err(RuntimeDriverError::Destroyed) => {
-            RpcResponse::error(id, error::SESSION_NOT_FOUND, "Session not found")
-        }
         Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     }
 }

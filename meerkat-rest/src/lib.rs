@@ -1349,6 +1349,13 @@ fn session_metadata_marks_archived(session: &Session) -> bool {
         .unwrap_or(false)
 }
 
+fn session_metadata_marks_mob_member(session: &Session) -> bool {
+    session
+        .session_metadata()
+        .and_then(|metadata| metadata.peer_meta)
+        .is_some_and(|peer_meta| peer_meta.labels.contains_key("mob_id"))
+}
+
 fn runtime_state_to_wire(
     state: meerkat_runtime::RuntimeState,
 ) -> meerkat_contracts::WireRuntimeState {
@@ -2656,6 +2663,69 @@ fn resolve_session_id_for_state(input: &str, state: &AppState) -> Result<Session
     Ok(locator.session_id)
 }
 
+async fn interrupt_target_exists_for_noop(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<bool, ApiError> {
+    match state
+        .session_service
+        .load_authoritative_session(session_id)
+        .await
+    {
+        Ok(Some(session)) if session_metadata_marks_archived(&session) => return Ok(false),
+        Ok(Some(session)) if session_metadata_marks_mob_member(&session) => {
+            #[cfg(feature = "mob")]
+            {
+                return Ok(state.mob_state.owns_live_bridge_session(session_id).await
+                    || state
+                        .mob_state
+                        .owns_persisted_bridge_session(session_id)
+                        .await);
+            }
+            #[cfg(not(feature = "mob"))]
+            return Ok(false);
+        }
+        Ok(Some(_)) => return Ok(true),
+        Ok(_) => {}
+        Err(SessionError::NotFound { .. }) => {}
+        Err(err) => {
+            return Err(ApiError::Internal(format!(
+                "Failed to load session before interrupt no-op: {err}"
+            )));
+        }
+    }
+
+    #[cfg(feature = "mob")]
+    if state.mob_state.owns_live_bridge_session(session_id).await
+        || state
+            .mob_state
+            .owns_persisted_bridge_session(session_id)
+            .await
+    {
+        match state.mob_state.session_service().read(session_id).await {
+            Ok(_) => return Ok(true),
+            Err(SessionError::NotFound { .. }) => {}
+            Err(err) => {
+                return Err(ApiError::Internal(format!(
+                    "Failed to inspect mob session before interrupt no-op: {err}"
+                )));
+            }
+        }
+    }
+
+    match state.session_service.read(session_id).await {
+        Ok(_) => return Ok(true),
+        Err(SessionError::NotFound { .. }) => {}
+        Err(err) => {
+            return Err(ApiError::Internal(format!(
+                "Failed to inspect session before interrupt no-op: {err}"
+            )));
+        }
+    }
+
+    Ok(false)
+}
+
 fn resolve_schedule_id(input: &str) -> Result<meerkat::ScheduleId, ApiError> {
     meerkat::ScheduleId::parse(input)
         .map_err(|e| ApiError::BadRequest(format!("Invalid schedule id '{input}': {e}")))
@@ -3391,13 +3461,20 @@ async fn interrupt_session(
         }))),
         Err(meerkat_runtime::RuntimeDriverError::NotReady {
             state: meerkat_runtime::RuntimeState::Destroyed,
-        }) => Err(ApiError::NotFound(format!("Session not found: {id}"))),
+        })
+        | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+            if interrupt_target_exists_for_noop(&state, &session_id).await? {
+                Ok(Json(json!({
+                    "session_id": session_id.to_string(),
+                    "interrupted": true
+                })))
+            } else {
+                Err(ApiError::NotFound(format!("Session not found: {id}")))
+            }
+        }
         Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => Err(ApiError::Conflict(
             format!("Session is not interruptible while runtime is {state}"),
         )),
-        Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
-            Err(ApiError::NotFound(format!("Session not found: {id}")))
-        }
         Err(e) => Err(ApiError::Internal(format!(
             "Failed to interrupt session: {e}"
         ))),
@@ -7149,6 +7226,65 @@ mod tests {
                 .unwrap();
 
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn test_interrupt_service_owned_idle_session_returns_ok() {
+            use axum::body::Body;
+            use http_body_util::BodyExt;
+            use tower::ServiceExt;
+
+            let temp = TempDir::new().unwrap();
+            let mut state = AppState::load_from(temp.path().to_path_buf())
+                .await
+                .unwrap();
+            state.llm_client_override = Some(Arc::new(MockLlmClient));
+            let created = state
+                .session_service
+                .create_session(SvcCreateSessionRequest {
+                    model: state.default_model.to_string(),
+                    prompt: "Hello".to_string().into(),
+                    render_metadata: None,
+                    system_prompt: None,
+                    max_tokens: Some(state.max_tokens),
+                    event_tx: None,
+                    skill_references: None,
+                    initial_turn: InitialTurnPolicy::Defer,
+                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                    build: Some(SessionBuildOptions {
+                        llm_client_override: state
+                            .llm_client_override
+                            .clone()
+                            .map(encode_llm_client_override_for_service),
+                        ..Default::default()
+                    }),
+                    labels: None,
+                })
+                .await
+                .expect("service-owned idle session should be created");
+            let app = router(state);
+
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/sessions/{}/interrupt", created.session_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "interrupt response body: {}",
+                String::from_utf8_lossy(&body)
+            );
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["interrupted"], true);
         }
 
         #[tokio::test]

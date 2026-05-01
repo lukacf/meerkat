@@ -7099,6 +7099,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_interrupt_service_owned_idle_session_returns_ok() {
+        let (router, _notif_rx) = test_router().await;
+        let llm_override: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
+        let created = router
+            .runtime
+            .core_session_service()
+            .create_session(meerkat_core::service::CreateSessionRequest {
+                model: "claude-sonnet-4-5".to_string(),
+                prompt: "Hello".to_string().into(),
+                render_metadata: None,
+                system_prompt: None,
+                max_tokens: None,
+                event_tx: None,
+                skill_references: None,
+                initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+                deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+                build: Some(meerkat_core::service::SessionBuildOptions {
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        llm_override,
+                    )),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("service-owned idle session should be created");
+
+        let interrupt_resp = router
+            .dispatch(make_request(
+                "turn/interrupt",
+                serde_json::json!({"session_id": created.session_id}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            interrupt_resp.error.is_none(),
+            "service-owned idle interrupt should no-op: {interrupt_resp:?}"
+        );
+        assert_eq!(result_value(&interrupt_resp)["interrupted"], true);
+    }
+
+    #[tokio::test]
     async fn session_create_returns_request_cancelled_and_rolls_back_when_pre_cancelled() {
         let (router, _notif_rx) = test_router_with_v9_runtime().await;
 

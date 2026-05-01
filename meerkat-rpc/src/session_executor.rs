@@ -15,7 +15,7 @@ use meerkat_core::lifecycle::core_executor::{
     CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunPrimitive};
-use meerkat_core::service::SessionError;
+use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
 use tokio::sync::mpsc;
 
@@ -31,6 +31,7 @@ use meerkat_mob::MobSessionService;
 /// and calls `start_turn`, forwarding events to the RPC notification sink.
 pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
+    session_service: Arc<dyn SessionService>,
     session_id: SessionId,
 }
 
@@ -64,8 +65,10 @@ impl SessionRuntimeExecutor {
     /// current sink from the runtime at apply time so reconnected TCP clients
     /// always get events routed to the live transport.
     pub fn new(runtime: Arc<SessionRuntime>, session_id: SessionId) -> Self {
+        let session_service = runtime.core_session_service();
         Self {
             runtime,
+            session_service,
             session_id,
         }
     }
@@ -87,17 +90,21 @@ impl CoreExecutorBoundaryHandle for SessionRuntimeBoundaryHandle {
 }
 
 struct SessionRuntimeInterruptHandle {
-    runtime: Arc<SessionRuntime>,
+    session_service: Arc<dyn SessionService>,
     session_id: SessionId,
 }
 
 #[async_trait::async_trait]
 impl CoreExecutorInterruptHandle for SessionRuntimeInterruptHandle {
     async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
-        self.runtime
+        self.session_service
             .interrupt(&self.session_id)
             .await
-            .map_err(|e| CoreExecutorError::control_failed_runtime(e.message))
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(()),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
 }
 
@@ -184,7 +191,7 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
     fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
         Some(Arc::new(SessionRuntimeInterruptHandle {
-            runtime: Arc::clone(&self.runtime),
+            session_service: Arc::clone(&self.session_service),
             session_id: self.session_id.clone(),
         }))
     }

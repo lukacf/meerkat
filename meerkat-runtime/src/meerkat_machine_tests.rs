@@ -4472,17 +4472,37 @@ async fn interrupt_current_run_on_attached_runtime_uses_live_handle_during_apply
 }
 
 #[tokio::test]
-async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finishes() {
+async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_effect() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
         boundary_cancel_calls: Arc<AtomicUsize>,
         apply_started: Arc<Notify>,
         apply_finished: Arc<Notify>,
         allow_finish: Arc<Notify>,
     }
 
+    struct BoundaryHandle {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for BoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.live_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(BoundaryHandle {
+                live_boundary_cancel_calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -4526,6 +4546,7 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let apply_started = Arc::new(Notify::new());
     let apply_finished = Arc::new(Notify::new());
@@ -4536,6 +4557,7 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
             session_id.clone(),
             Box::new(BlockingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
                 boundary_cancel_calls: Arc::clone(&boundary_cancel_calls),
                 apply_started: Arc::clone(&apply_started),
                 apply_finished: Arc::clone(&apply_finished),
@@ -4577,9 +4599,14 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
     assert_eq!(after_request.control.phase, RuntimeState::Running);
     assert!(after_request.control.current_run_id.is_some());
     assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        1,
+        "public boundary cancel should also call the live boundary handle while apply is in flight"
+    );
+    assert_eq!(
         boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "boundary cancel should remain queued until apply returns"
+        "in-loop boundary cancel should remain queued until apply returns"
     );
 
     allow_finish.notify_waiters();

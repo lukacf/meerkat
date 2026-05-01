@@ -851,6 +851,13 @@ meerkat_machine_runtime_internal_inputs!(
         SetModelRoutingBaseline,
     ],
     ExternalSurfaceLifecycle => [
+        BeginSurfaceRequest,
+        CancelSurfaceRequest,
+        ClassifySurfaceRequestTerminal,
+        DecideSurfaceRequestCancelActionInstall,
+        FinishSurfaceRequestUnpublished,
+        PublishSurfaceRequest,
+        RemoveSurfaceRequest,
         SurfaceApplyBoundary,
         SurfaceCallFinished,
         SurfaceCallStarted,

@@ -47,7 +47,7 @@ rust_library(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-memory",
@@ -95,7 +95,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-skills:meerkat_skills",
     ] + all_crate_deps(
         package_name = "meerkat-memory",

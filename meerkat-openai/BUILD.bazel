@@ -50,7 +50,7 @@ rust_library(
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-runtime:meerkat_runtime",
     ] + all_crate_deps(
@@ -102,7 +102,7 @@ rust_test(
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-runtime:meerkat_runtime",
     ] + all_crate_deps(
@@ -157,7 +157,7 @@ rust_test(
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-openai:meerkat_openai",
         "//meerkat-runtime:meerkat_runtime",
@@ -211,7 +211,7 @@ rust_test(
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
         "//meerkat-openai:meerkat_openai",
         "//meerkat-runtime:meerkat_runtime",

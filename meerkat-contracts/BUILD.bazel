@@ -47,7 +47,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -95,7 +95,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -128,7 +128,7 @@ rust_binary(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -179,7 +179,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -229,7 +229,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -279,7 +279,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -329,7 +329,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -379,7 +379,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -429,7 +429,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -479,7 +479,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -529,7 +529,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -579,7 +579,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",
@@ -629,7 +629,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-schedule:meerkat_schedule",
     ] + all_crate_deps(
         package_name = "meerkat-contracts",

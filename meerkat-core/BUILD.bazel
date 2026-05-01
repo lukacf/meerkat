@@ -34,6 +34,32 @@ rust_library(
     crate_name = "meerkat_core",
     crate_root = "src/lib.rs",
     crate_features = [
+        "jsonschema",
+        "schema",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "src/config_template.toml",
+    ],
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//visibility:public"],
+    proc_macro_deps = all_crate_deps(
+        package_name = "meerkat-core",
+        proc_macro = True,
+    ),
+    deps = all_crate_deps(
+        package_name = "meerkat-core",
+        normal = True,
+    ),
+)
+
+rust_library(
+    name = "meerkat_core_agent_factory_build",
+    aliases = aliases(package_name = "meerkat-core"),
+    crate_name = "meerkat_core",
+    crate_root = "src/lib.rs",
+    crate_features = [
         "internal-agent-factory-build",
         "jsonschema",
         "schema",
@@ -45,7 +71,9 @@ rust_library(
         "src/config_template.toml",
     ],
     srcs = glob(["src/**/*.rs"]),
-    visibility = ["//visibility:public"],
+    visibility = [
+        "//:__subpackages__",
+    ],
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-core",
         proc_macro = True,
@@ -155,7 +183,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -210,7 +238,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -262,7 +290,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -321,7 +349,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -374,7 +402,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -426,7 +454,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -481,7 +509,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -534,7 +562,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -587,7 +615,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -640,7 +668,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
@@ -693,7 +721,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
         normal = True,

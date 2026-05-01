@@ -47,7 +47,7 @@ rust_library(
     deps = [
         "//meerkat-client:meerkat_client",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-mob:meerkat_mob",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat:meerkat",
@@ -97,7 +97,7 @@ rust_test(
     deps = [
         "//meerkat-client:meerkat_client",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-mob:meerkat_mob",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat:meerkat",
@@ -131,7 +131,7 @@ rust_binary(
     deps = [
         "//meerkat-client:meerkat_client",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob:meerkat_mob",
         "//meerkat-runtime:meerkat_runtime",

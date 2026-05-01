@@ -50,7 +50,7 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -101,7 +101,7 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -155,7 +155,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -209,7 +209,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -263,7 +263,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -317,7 +317,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -373,7 +373,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -427,7 +427,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",
@@ -481,7 +481,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-llm-core:meerkat_llm_core",
     ] + all_crate_deps(
         package_name = "meerkat-auth-core",

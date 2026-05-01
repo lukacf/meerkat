@@ -54,7 +54,7 @@ rust_library(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-store:meerkat_store",
     ] + all_crate_deps(
@@ -111,7 +111,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-store:meerkat_store",
@@ -173,7 +173,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -235,7 +235,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -297,7 +297,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -359,7 +359,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -426,7 +426,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -486,7 +486,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -546,7 +546,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -606,7 +606,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -671,7 +671,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -731,7 +731,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -791,7 +791,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -851,7 +851,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -911,7 +911,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -975,7 +975,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1035,7 +1035,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1095,7 +1095,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1157,7 +1157,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1217,7 +1217,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1277,7 +1277,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1339,7 +1339,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1399,7 +1399,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1459,7 +1459,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1519,7 +1519,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1582,7 +1582,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1645,7 +1645,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1707,7 +1707,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",
@@ -1769,7 +1769,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-machine-kernels:meerkat_machine_kernels",
         "//meerkat-machine-schema:meerkat_machine_schema",
         "//meerkat-runtime:meerkat_runtime",

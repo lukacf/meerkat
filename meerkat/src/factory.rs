@@ -22,70 +22,44 @@ use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
     #[derive(Clone, Copy)]
     #[allow(dead_code)]
-    #[repr(C)]
     struct AgentFactoryBuildAuthoritySeal {
         words: [u64; 4],
+        guard: u128,
+        checksum: u64,
     }
 
     #[derive(Clone, Copy)]
     #[allow(dead_code)]
-    #[repr(C)]
     struct AgentFactoryBuildAuthorityRepr {
         seal: AgentFactoryBuildAuthoritySeal,
     }
 
-    const FALLBACK_AUTHORITY_WORDS: [u64; 4] = [
+    const CANONICAL_AUTHORITY_WORDS: [u64; 4] = [
         0xf4_22_2f_48_41_5f_d0_3b,
         0x91_7c_40_22_7a_8a_61_d9,
         0x5c_c6_93_13_d4_89_a2_7e,
         0xaa_d5_0e_b8_20_64_7f_11,
     ];
+    const CANONICAL_AUTHORITY_GUARD: u128 = 0x006d_6565_726b_6174_2d61_6765_6e74_2121;
 
-    const fn hex_nibble(byte: u8) -> u64 {
-        match byte {
-            b'0'..=b'9' => (byte - b'0') as u64,
-            b'a'..=b'f' => (byte - b'a' + 10) as u64,
-            b'A'..=b'F' => (byte - b'A' + 10) as u64,
-            _ => 0,
-        }
-    }
-
-    const fn authority_word(value: Option<&str>, fallback: u64) -> u64 {
-        let Some(value) = value else {
-            return fallback;
-        };
-        let bytes = value.as_bytes();
+    const fn authority_checksum(words: [u64; 4], guard: u128) -> u64 {
+        let mut checksum = 0x6d6b_7421_fade_beef_u64;
         let mut index = 0;
-        let mut word = 0_u64;
-        while index < bytes.len() {
-            word = (word << 4) | hex_nibble(bytes[index]);
+        while index < words.len() {
+            checksum ^= words[index].rotate_left((index as u32 + 1) * 11);
+            checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
             index += 1;
         }
-        word
+        checksum ^= (guard >> 64) as u64;
+        checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
+        checksum ^ guard as u64
     }
-
-    const CANONICAL_AUTHORITY_WORDS: [u64; 4] = [
-        authority_word(
-            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_0"),
-            FALLBACK_AUTHORITY_WORDS[0],
-        ),
-        authority_word(
-            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_1"),
-            FALLBACK_AUTHORITY_WORDS[1],
-        ),
-        authority_word(
-            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_2"),
-            FALLBACK_AUTHORITY_WORDS[2],
-        ),
-        authority_word(
-            option_env!("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_3"),
-            FALLBACK_AUTHORITY_WORDS[3],
-        ),
-    ];
 
     let authority = AgentFactoryBuildAuthorityRepr {
         seal: AgentFactoryBuildAuthoritySeal {
             words: CANONICAL_AUTHORITY_WORDS,
+            guard: CANONICAL_AUTHORITY_GUARD,
+            checksum: authority_checksum(CANONICAL_AUTHORITY_WORDS, CANONICAL_AUTHORITY_GUARD),
         },
     };
 

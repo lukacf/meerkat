@@ -47,7 +47,7 @@ rust_library(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-hooks:meerkat_hooks",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob-pack:meerkat_mob_pack",
@@ -104,7 +104,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-hooks:meerkat_hooks",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob-pack:meerkat_mob_pack",
@@ -162,7 +162,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-hooks:meerkat_hooks",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob-pack:meerkat_mob_pack",
@@ -220,7 +220,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-hooks:meerkat_hooks",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob-pack:meerkat_mob_pack",
@@ -278,7 +278,7 @@ rust_test(
     deps = [
         "//meerkat-comms:meerkat_comms",
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-hooks:meerkat_hooks",
         "//meerkat-mob-mcp:meerkat_mob_mcp",
         "//meerkat-mob-pack:meerkat_mob_pack",

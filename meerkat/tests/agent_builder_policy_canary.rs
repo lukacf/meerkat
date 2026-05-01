@@ -158,6 +158,7 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("export_name")
         && !source.contains("link_name")
         && !source.contains("extern \"Rust\"")
+        && !source.contains("#[repr(C)]")
         && !source.contains("#[repr(transparent)]")
         && !source.contains("NonZeroUsize")
         && !source.contains("pub const fn")
@@ -506,7 +507,8 @@ meerkat-core = {{ path = "{}" }}
     assert!(
         stderr.contains("assertion failed")
             || stderr.contains("InvalidBuildAuthority")
-            || stderr.contains("is_canonical_factory_authority"),
+            || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("cannot transmute between types of different sizes"),
         "downstream direct-authority mirror fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -658,6 +660,59 @@ fn bazel_factory_authority_target_is_not_publicly_visible() {
              facade/core bridge: missing {label}"
         );
     }
+}
+
+#[test]
+fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
+    let authority_build = repo_file("meerkat-agent-build-authority/build.rs");
+    let facade_build = repo_file("meerkat/build.rs");
+
+    assert!(
+        !authority_build.contains("cargo:metadata=")
+            && !authority_build.contains("cargo:word_")
+            && !authority_build.contains("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_"),
+        "authority build script must not publish canonical factory authority \
+         seal words through Cargo metadata or rustc environment"
+    );
+    assert!(
+        !facade_build.contains("DEP_MEERKAT_AGENT_BUILD_AUTHORITY_WORD_")
+            && !facade_build.contains("MEERKAT_AGENT_BUILD_AUTHORITY_WORD_"),
+        "facade build script must not consume leaked authority seal words from \
+         dependency metadata; direct downstream dependents can read the same \
+         DEP_* values"
+    );
+}
+
+#[test]
+fn public_bazel_core_target_does_not_expose_build_bypass_features() {
+    let Some(core_bazel) = try_repo_file("meerkat-core/BUILD.bazel") else {
+        // Cargo-only source layouts may not include generated Bazel files.
+        return;
+    };
+    let public_core = bazel_target_block(&core_bazel, "meerkat_core")
+        .expect("meerkat-core BUILD.bazel must contain public core rust_library");
+
+    assert!(
+        public_core.contains("visibility = [\"//visibility:public\"]"),
+        "the canonical public Bazel core library must remain public"
+    );
+    assert!(
+        !public_core.contains("\"internal-agent-factory-build\"")
+            && !public_core.contains("\"standalone-agent-builder\"")
+            && !public_core.contains("meerkat_agent_build_authority"),
+        "public //meerkat-core:meerkat_core must not expose factory-policy \
+         finalizer or standalone build features to Bazel consumers"
+    );
+
+    let internal_core = bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build")
+        .expect("meerkat-core BUILD.bazel must contain a non-public AgentFactory core variant");
+    assert!(
+        internal_core.contains("\"internal-agent-factory-build\"")
+            && internal_core.contains("meerkat_agent_build_authority")
+            && !internal_core.contains("//visibility:public"),
+        "Bazel AgentFactory core bridge must be a non-public target carrying \
+         the internal factory-build feature and authority dependency"
+    );
 }
 
 #[test]

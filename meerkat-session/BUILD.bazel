@@ -50,7 +50,7 @@ rust_library(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat-skills:meerkat_skills",
         "//meerkat-store:meerkat_store",
@@ -103,7 +103,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat-skills:meerkat_skills",
         "//meerkat-store:meerkat_store",
@@ -157,7 +157,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat-session:meerkat_session",
         "//meerkat-skills:meerkat_skills",
@@ -214,7 +214,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat-session:meerkat_session",
         "//meerkat-skills:meerkat_skills",
@@ -269,7 +269,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat-session:meerkat_session",
         "//meerkat-skills:meerkat_skills",
@@ -325,7 +325,7 @@ rust_test(
     ),
     deps = [
         "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
+        "//meerkat-core:meerkat_core_agent_factory_build",
         "//meerkat-runtime:meerkat_runtime",
         "//meerkat-session:meerkat_session",
         "//meerkat-skills:meerkat_skills",

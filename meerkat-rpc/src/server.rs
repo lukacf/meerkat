@@ -801,6 +801,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_session_create_success_late_cancel_preserves_admitted_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(Arc::clone(&output));
+        let mut server = RpcServer::new(reader, writer, Arc::clone(&runtime), config_store);
+        let request_id = RpcId::Num(33);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "session/create".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": "this turn will succeed before a late cancel"
+            }))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request(&request)
+            .expect("session/create should be tracked");
+        let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
+            panic!("session/create should use tracked request lifecycle");
+        };
+        let response = tokio::time::timeout(Duration::from_secs(10), server.long_running_rx.recv())
+            .await
+            .expect("tracked response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("session/create task should complete");
+
+        assert_eq!(
+            server.request_executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::Cancelled,
+            "late cancel should still be observed by the lifecycle gate before response publication"
+        );
+        assert!(server.write_long_running_response(response).await);
+        assert_eq!(server.request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "late cancel after runtime admission must not run create rollback cleanup"
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_session_create_pre_admission_turn_failure_archives_pending_session() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, config_store) = build_test_runtime(&temp);

@@ -14,7 +14,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Parser, Debug)]
 #[command(name = "rkat-mcp", version = env!("CARGO_PKG_VERSION"))]
@@ -198,7 +198,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .unwrap_or_else(|| json!({}));
 
-                        let context = match mcp_tracked_surface_request_kind(&name)
+                        let tracked_kind = mcp_tracked_surface_request_kind(&name);
+                        let context = match tracked_kind
                             .map(|kind| {
                                 begin_mcp_tool_request(&request_executor, request_key.clone(), kind)
                             })
@@ -252,14 +253,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                             });
 
+                        let cancel_rx = match (tracked_kind, context.as_ref()) {
+                            (Some(SurfaceRequestKind::CancellableObservation), Some(context)) => {
+                                let (cancel_tx, cancel_rx) = watch::channel(false);
+                                install_mcp_observation_cancel_signal(context, cancel_tx).await;
+                                Some(cancel_rx)
+                            }
+                            _ => None,
+                        };
                         let state = Arc::clone(&state);
                         let completion_tx = completion_tx.clone();
-                        let handle = spawn_mcp_tool_completion_with_dispatch(
+                        let handle = spawn_mcp_tool_completion_with_dispatch_and_cancel(
                             completion_tx,
                             request_key.clone(),
                             request_id.clone(),
                             name.clone(),
                             context,
+                            cancel_rx,
                             move |tool_name, context| async move {
                                 meerkat_mcp_server::handle_tools_call_with_notifier(
                                     &state,
@@ -338,6 +348,24 @@ fn begin_mcp_tool_request(
     Ok(executor.try_begin_request(request_key, kind, noop_request_action())?)
 }
 
+async fn install_mcp_observation_cancel_signal(
+    context: &RequestContext,
+    cancel_tx: watch::Sender<bool>,
+) {
+    let install = context
+        .install_cancel_action_or_cancelled(meerkat::surface::request_action(move || {
+            let cancel_tx = cancel_tx.clone();
+            async move {
+                let _ = cancel_tx.send(true);
+            }
+        }))
+        .await;
+    if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
+        tracing::debug!("MCP observation cancellation was already pending when signal installed");
+    }
+}
+
+#[cfg(test)]
 fn spawn_mcp_tool_completion_with_dispatch<F, Fut>(
     completion_tx: mpsc::Sender<ToolCompletion>,
     request_key: String,
@@ -350,40 +378,42 @@ where
     F: FnOnce(String, Option<RequestContext>) -> Fut + Send + 'static,
     Fut: Future<Output = Result<Value, meerkat_mcp_server::ToolCallError>> + Send + 'static,
 {
+    spawn_mcp_tool_completion_with_dispatch_and_cancel(
+        completion_tx,
+        request_key,
+        request_id,
+        tool_name,
+        context,
+        None,
+        dispatch,
+    )
+}
+
+fn spawn_mcp_tool_completion_with_dispatch_and_cancel<F, Fut>(
+    completion_tx: mpsc::Sender<ToolCompletion>,
+    request_key: String,
+    request_id: Value,
+    tool_name: String,
+    context: Option<RequestContext>,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    dispatch: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnOnce(String, Option<RequestContext>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Value, meerkat_mcp_server::ToolCallError>> + Send + 'static,
+{
     let terminal_context = context.clone();
     let tracked_request_key = terminal_context.as_ref().map(|_| request_key);
     tokio::spawn(async move {
-        let terminal = match dispatch(tool_name, context).await {
-            Ok(result) => {
-                let response = json!({
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "result": result
-                });
-                match terminal_context.as_ref() {
-                    Some(context) => context.classify_success_terminal(response),
-                    None => RequestTerminal::inline(response),
-                }
-            }
-            Err(err) => {
-                let mut error = json!({
-                    "code": err.code,
-                    "message": err.message
-                });
-                if let Some(data) = err.data {
-                    error["data"] = data;
-                }
-                let response = json!({
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": error
-                });
-                match terminal_context.as_ref() {
-                    Some(context) => context.classify_failure_terminal(response),
-                    None => RequestTerminal::inline(response),
-                }
-            }
-        };
+        let terminal = run_mcp_tool_completion(
+            request_id,
+            tool_name,
+            context,
+            terminal_context.as_ref(),
+            cancel_rx,
+            dispatch,
+        )
+        .await;
         let _ = completion_tx
             .send(ToolCompletion {
                 request_key: tracked_request_key,
@@ -391,6 +421,91 @@ where
             })
             .await;
     })
+}
+
+async fn run_mcp_tool_completion<F, Fut>(
+    request_id: Value,
+    tool_name: String,
+    context: Option<RequestContext>,
+    terminal_context: Option<&RequestContext>,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    dispatch: F,
+) -> RequestTerminal<Value>
+where
+    F: FnOnce(String, Option<RequestContext>) -> Fut,
+    Fut: Future<Output = Result<Value, meerkat_mcp_server::ToolCallError>>,
+{
+    let mut cancel_rx = cancel_rx;
+    let dispatch = dispatch(tool_name, context);
+    tokio::pin!(dispatch);
+
+    let result = if let Some(cancel_rx) = cancel_rx.as_mut() {
+        if *cancel_rx.borrow() {
+            return cancelled_mcp_tool_terminal(request_id, terminal_context);
+        }
+        tokio::select! {
+            result = &mut dispatch => result,
+            changed = cancel_rx.changed() => {
+                if changed.is_ok() && *cancel_rx.borrow() {
+                    return cancelled_mcp_tool_terminal(request_id, terminal_context);
+                }
+                dispatch.await
+            }
+        }
+    } else {
+        dispatch.await
+    };
+
+    mcp_tool_terminal_from_result(request_id, terminal_context, result)
+}
+
+fn cancelled_mcp_tool_terminal(
+    request_id: Value,
+    terminal_context: Option<&RequestContext>,
+) -> RequestTerminal<Value> {
+    let response = request_cancelled_response(Some(request_id));
+    match terminal_context {
+        Some(context) => context.classify_failure_terminal(response),
+        None => RequestTerminal::inline(response),
+    }
+}
+
+fn mcp_tool_terminal_from_result(
+    request_id: Value,
+    terminal_context: Option<&RequestContext>,
+    result: Result<Value, meerkat_mcp_server::ToolCallError>,
+) -> RequestTerminal<Value> {
+    match result {
+        Ok(result) => {
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": result
+            });
+            match terminal_context {
+                Some(context) => context.classify_success_terminal(response),
+                None => RequestTerminal::inline(response),
+            }
+        }
+        Err(err) => {
+            let mut error = json!({
+                "code": err.code,
+                "message": err.message
+            });
+            if let Some(data) = err.data {
+                error["data"] = data;
+            }
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": error
+            });
+            match terminal_context {
+                Some(context) => context.classify_failure_terminal(response),
+                None => RequestTerminal::inline(response),
+            }
+        }
+    }
 }
 
 fn duplicate_request_response(id: Value) -> Value {
@@ -642,6 +757,88 @@ mod tests {
             .expect("output should read");
         let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
         assert_eq!(response["id"], 22);
+        assert_eq!(
+            response["error"]["code"],
+            ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        assert!(response.get("result").is_none());
+    }
+
+    #[tokio::test]
+    async fn blocked_mcp_observation_cancel_writes_cancel_response() {
+        use tokio::io::AsyncReadExt;
+
+        let (transport, mut output) = tokio::io::duplex(4096);
+        let (writer, writer_task) = spawn_stdio_json_writer(transport, 8);
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_millis(1),
+            &meerkat_runtime::MeerkatMachine::ephemeral(),
+        );
+        let request_id = json!(24);
+        let request_key = request_key(&request_id);
+        let kind = mcp_tracked_surface_request_kind("meerkat_event_stream_read")
+            .expect("spawned blocking observation tools must be tracked");
+        assert_eq!(kind, SurfaceRequestKind::CancellableObservation);
+        let context = begin_mcp_tool_request(&request_executor, request_key.clone(), kind)
+            .expect("tracked MCP observation request should begin");
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        install_mcp_observation_cancel_signal(&context, cancel_tx).await;
+        let (completion_tx, mut completion_rx) = mpsc::channel(1);
+        let (dispatch_started_tx, dispatch_started_rx) = tokio::sync::oneshot::channel();
+
+        let handle = spawn_mcp_tool_completion_with_dispatch_and_cancel(
+            completion_tx,
+            request_key.clone(),
+            request_id,
+            "meerkat_event_stream_read".to_string(),
+            Some(context),
+            Some(cancel_rx),
+            |tool_name, context| async move {
+                assert_eq!(tool_name, "meerkat_event_stream_read");
+                assert!(context.is_some());
+                let _ = dispatch_started_tx.send(());
+                std::future::pending::<Result<Value, meerkat_mcp_server::ToolCallError>>().await
+            },
+        );
+        dispatch_started_rx
+            .await
+            .expect("synthetic dispatch should start");
+
+        assert_eq!(
+            request_executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::Cancelled
+        );
+        let completion =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+                .await
+                .expect("cancel completion should arrive without dispatch finishing")
+                .expect("tool completion channel should stay open");
+        handle
+            .await
+            .expect("blocked tool task should exit after cancellation signal");
+        assert_eq!(
+            completion.request_key.as_deref(),
+            Some(request_key.as_str())
+        );
+        assert!(
+            write_tool_completion(&writer, &request_executor, completion).await,
+            "blocked observation cancellation should write successfully"
+        );
+
+        assert_eq!(request_executor.phase(&request_key), None);
+        drop(writer);
+        writer_task
+            .await
+            .expect("writer task should join")
+            .expect("writer task should succeed");
+
+        let mut buf = String::new();
+        output
+            .read_to_string(&mut buf)
+            .await
+            .expect("output should read");
+        let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
+        assert_eq!(response["id"], 24);
         assert_eq!(
             response["error"]["code"],
             ErrorCode::RequestCancelled.jsonrpc_code()

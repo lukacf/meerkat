@@ -531,6 +531,10 @@ pub async fn handle_create(
         }
     };
 
+    if let Some(context) = request_context.as_ref() {
+        context.disarm_unpublished_cleanup();
+    }
+
     let mut response: CreateSessionResult = result.into();
     response.session_ref = runtime
         .realm_id()

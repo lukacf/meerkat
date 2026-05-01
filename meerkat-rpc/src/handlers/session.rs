@@ -437,6 +437,13 @@ pub async fn handle_create(
         }
     }
 
+    if let Some(response) = super::turn::reject_if_cancelled_before_runtime_admission(
+        id.clone(),
+        request_context.as_ref(),
+    ) {
+        return response;
+    }
+
     // Deferred mode: return session ID without running a turn.
     if params.initial_turn == Some(InitialTurn::Deferred) {
         let result = DeferredCreateResult {
@@ -461,7 +468,8 @@ pub async fn handle_create(
     });
 
     // Start the initial turn — route through runtime for V9 consistency
-    let result = if params.keep_alive {
+    let keep_alive = params.keep_alive;
+    let result = if keep_alive {
         let admission_cleanup_context = request_context.clone();
         let error_cleanup_context = request_context.clone();
         let runtime_for_turn = Arc::clone(&runtime);
@@ -549,7 +557,7 @@ pub async fn handle_create(
         }
     };
 
-    if let Some(context) = request_context.as_ref() {
+    if !keep_alive && let Some(context) = request_context.as_ref() {
         context.disarm_unpublished_cleanup();
     }
 

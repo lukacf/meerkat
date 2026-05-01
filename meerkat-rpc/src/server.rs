@@ -969,6 +969,71 @@ mod tests {
         let _ = task.await;
     }
 
+    #[cfg(feature = "comms")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_session_create_keep_alive_pre_admission_failure_archives_pending_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(output);
+        let mut server = RpcServer::new(reader, writer, Arc::clone(&runtime), config_store);
+        let request_id = RpcId::Num(36);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "session/create".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "prompt": [
+                    {"type": "text", "text": "inspect this clip"},
+                    {
+                        "type": "video",
+                        "media_type": "video/mp4",
+                        "duration_ms": 1000,
+                        "source": "inline",
+                        "data": "AAAA"
+                    }
+                ],
+                "keep_alive": true,
+                "comms_name": "keep-alive-pre-admission-rollback"
+            }))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request(&request)
+            .expect("session/create should be tracked");
+        let SpawnedTrackedRequest::Tracked {
+            request_key: tracked_key,
+            task,
+        } = spawned
+        else {
+            panic!("session/create should use tracked request lifecycle");
+        };
+        assert_eq!(tracked_key, request_key);
+
+        let _response =
+            tokio::time::timeout(Duration::from_secs(10), server.long_running_rx.recv())
+                .await
+                .expect("keep-alive create response should arrive")
+                .expect("tracked response channel should stay open");
+        task.await.expect("session/create task should complete");
+        server
+            .request_executor
+            .finish_unpublished(&tracked_key)
+            .await
+            .expect("pre-publication finish should run create rollback cleanup");
+        assert_eq!(server.request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert!(
+            sessions.is_empty(),
+            "keep-alive create must keep rollback cleanup armed until runtime admission commits"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rpc_session_create_finish_during_accept_admission_hook_preserves_admitted_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -1371,6 +1436,103 @@ mod tests {
             server.request_executor.phase(&request_key),
             Some(meerkat::surface::SurfaceRequestPhase::Pending),
             "duplicate admission must not overwrite the existing lifecycle entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_cancel_after_action_install_rejects_before_runtime_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let session_id = runtime
+            .create_session(
+                meerkat::AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+            )
+            .await
+            .expect("test session should be staged");
+        let runtime_adapter = runtime.runtime_adapter();
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(Arc::clone(&output));
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let request_id = RpcId::Num(37);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "turn/start".to_string(),
+            params: Some(raw_params(serde_json::json!({
+                "session_id": session_id.to_string(),
+                "prompt": "cancel before runtime admission"
+            }))),
+        };
+        let (installed_tx, installed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let cancel_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel_count_for_action = Arc::clone(&cancel_count);
+
+        let spawned = server
+            .spawn_tracked_request_with_dispatch(&request, move |request, context| async move {
+                context
+                    .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
+                    .await
+                    .expect("request lifecycle should bind to test session");
+                context
+                    .install_cancel_action_or_cancelled(meerkat::surface::request_action(
+                        move || {
+                            let cancel_count = Arc::clone(&cancel_count_for_action);
+                            async move {
+                                cancel_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        },
+                    ))
+                    .await;
+                installed_tx
+                    .send(())
+                    .expect("test should observe cancel action installation");
+                release_rx.await.expect("test should release dispatch");
+                crate::handlers::turn::reject_if_cancelled_before_runtime_admission(
+                    request.id.clone(),
+                    Some(&context),
+                )
+            })
+            .expect("turn/start should be tracked");
+        let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
+            panic!("turn/start should use tracked request lifecycle");
+        };
+
+        installed_rx
+            .await
+            .expect("dispatch should install cancel action");
+        assert_eq!(
+            server.request_executor.cancel_request(&request_key).await,
+            meerkat::surface::CancelOutcome::Cancelled
+        );
+        release_tx
+            .send(())
+            .expect("dispatch task should still be waiting");
+        let response = tokio::time::timeout(Duration::from_secs(2), server.long_running_rx.recv())
+            .await
+            .expect("tracked cancellation response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("synthetic dispatch should finish");
+        assert!(server.write_long_running_response(response).await);
+        assert_eq!(server.request_executor.phase(&request_key), None);
+        assert_eq!(
+            cancel_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cancel action should run for a post-install cancel before admission"
+        );
+
+        let bytes = output.lock().expect("output should be readable").clone();
+        let line = String::from_utf8(bytes).expect("response should be utf8");
+        let response: RpcResponse =
+            serde_json::from_str(line.trim()).expect("response should parse");
+        assert_eq!(response.id, Some(request_id));
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some(crate::error::REQUEST_CANCELLED)
         );
     }
 

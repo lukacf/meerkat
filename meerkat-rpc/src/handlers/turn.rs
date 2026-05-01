@@ -273,6 +273,12 @@ pub async fn handle_start(
         }
     }
 
+    if let Some(response) =
+        reject_if_cancelled_before_runtime_admission(id.clone(), request_context.as_ref())
+    {
+        return response;
+    }
+
     let result = match runtime
         .start_turn_via_runtime(
             &session_id,
@@ -301,6 +307,21 @@ pub async fn handle_start(
         .realm_id()
         .map(|realm| meerkat_contracts::format_session_ref(realm, &response.session_id));
     RpcResponse::success(id, response)
+}
+
+pub(crate) fn reject_if_cancelled_before_runtime_admission(
+    id: Option<RpcId>,
+    request_context: Option<&RequestContext>,
+) -> Option<RpcResponse> {
+    request_context
+        .is_some_and(RequestContext::cancel_already_requested)
+        .then(|| {
+            RpcResponse::error(
+                id,
+                error::REQUEST_CANCELLED,
+                "request cancelled before start",
+            )
+        })
 }
 
 /// Handle `turn/interrupt`.

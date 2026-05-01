@@ -94,7 +94,7 @@ use meerkat::{
     AgentFactory, Config, CreateSessionRequest, SessionService,
     build_persistent_service, open_realm_persistence_in,
 };
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
 use meerkat_store::RealmBackend;
 
 #[tokio::main]
@@ -113,12 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "What is the capital of France?".into(),
-        render_metadata: None,
         system_prompt: Some("You are a helpful assistant.".into()),
         max_tokens: Some(1024),
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     }).await?;
@@ -141,18 +140,17 @@ For **testing or embedded use** where runtime semantics are intentionally not ne
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
     prompt: "My name is Alice.".into(),
-    render_metadata: None,
     system_prompt: Some("You are a helpful assistant with memory.".into()),
     max_tokens: None,
     event_tx: None,
-    skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
+    deferred_prompt_policy: DeferredPromptPolicy::Discard,
     build: None,
     labels: None,
 }).await?;
@@ -179,17 +177,16 @@ service.archive(&session_id).await?;
 
 ```rust
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
 
 let created = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
     prompt: "Let's wait before we run.".into(),
-    render_metadata: None,
     system_prompt: Some("You are the original prompt.".into()),
     max_tokens: None,
     event_tx: None,
-    skill_references: None,
     initial_turn: InitialTurnPolicy::Defer,
+    deferred_prompt_policy: DeferredPromptPolicy::Retain,
     build: None,
     labels: None,
 }).await?;

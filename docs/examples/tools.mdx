@@ -114,11 +114,9 @@ Built-in tool categories: builtins, shell, semantic memory, and mob orchestratio
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "List files in /tmp".into(),
-        render_metadata: None,
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,

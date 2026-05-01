@@ -304,7 +304,7 @@ async fn handle_chat(
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
 use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::InitialTurnPolicy;
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -315,12 +315,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = service.create_session(CreateSessionRequest {
         model: "claude-sonnet-4-6".into(),
         prompt: "What is 25 * 17?".into(),
-        render_metadata: None,
         system_prompt: Some("You are a helpful math assistant.".into()),
         max_tokens: Some(2048),
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     }).await?;

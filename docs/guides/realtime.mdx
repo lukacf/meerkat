@@ -104,7 +104,7 @@ The runtime resolves the model, sees `ModelCapabilities.realtime == true`, and b
 
 ### Configuration defaults
 
-The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `model` parameter inherits the configured default — so setting `default_model = "gpt-realtime-1.5"` makes realtime the default for the whole install. See the [Configuration guide](/concepts/configuration).
+The session's default model can be set in config (`~/.rkat/config.toml` or project-local) via `default_model`. Any session created without an explicit `turn_metadata.model` inherits the configured default, so setting `default_model = "gpt-realtime-1.5"` makes realtime the default for the whole install. See the [Configuration guide](/concepts/configuration).
 
 ### Mid-session: swap to a realtime-capable model
 

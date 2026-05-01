@@ -269,13 +269,22 @@ impl InprocRegistry {
     }
 
     /// Look up an inproc peer by pubkey across all namespaces.
+    ///
+    /// Cross-namespace delivery has no typed target namespace. If the same
+    /// canonical identity is live in more than one namespace, fail closed
+    /// rather than choosing whichever namespace the map happens to yield first.
     pub(crate) fn get_by_pubkey_any_namespace(&self, pubkey: &PubKey) -> Option<InboxSender> {
         let state = self.state.read();
-        state
-            .namespaces
-            .values()
-            .find_map(|namespace_state| namespace_state.peers.get(pubkey))
-            .map(|peer| peer.sender.clone())
+        let mut found = None;
+        for namespace_state in state.namespaces.values() {
+            if let Some(peer) = namespace_state.peers.get(pubkey) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(peer.sender.clone());
+            }
+        }
+        found
     }
 
     /// Look up an inproc peer name by public key.
@@ -993,6 +1002,47 @@ mod tests {
             panic!("expected external envelope");
         };
         assert_eq!(envelope.to, target_pubkey);
+    }
+
+    #[test]
+    fn test_send_to_pubkey_any_namespace_rejects_ambiguous_identity() {
+        let registry = InprocRegistry::new();
+        let sender_keypair = make_keypair();
+        let target_keypair = make_keypair();
+        let target_pubkey = target_keypair.public_key();
+        let (mut alpha_inbox, alpha_sender) = Inbox::new();
+        let (mut beta_inbox, beta_sender) = Inbox::new();
+
+        registry.register_with_meta_in_namespace(
+            "realm-alpha",
+            "alpha-target",
+            target_pubkey,
+            alpha_sender,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            "realm-beta",
+            "beta-target",
+            target_pubkey,
+            beta_sender,
+            PeerMeta::default(),
+        );
+
+        let result = registry.send_to_pubkey_any_namespace_with_id(
+            &sender_keypair,
+            &target_pubkey,
+            Uuid::new_v4(),
+            MessageKind::Message {
+                blocks: None,
+                body: "ambiguous identity".to_string(),
+                handling_mode: None,
+            },
+            true,
+        );
+
+        assert!(matches!(result, Err(InprocSendError::PeerNotFound(_))));
+        assert!(alpha_inbox.try_drain().is_empty());
+        assert!(beta_inbox.try_drain().is_empty());
     }
 
     #[test]

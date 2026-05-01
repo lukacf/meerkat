@@ -76,6 +76,91 @@ fn oauth_target() -> meerkat_core::ConnectionRef {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+struct DelegatingCustomAuthLeaseHandle(crate::handles::RuntimeAuthLeaseHandle);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl meerkat_core::handles::AuthLeaseHandle for DelegatingCustomAuthLeaseHandle {
+    fn acquire_lease(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        expires_at: u64,
+    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
+    {
+        self.0.acquire_lease(lease_key, expires_at)
+    }
+
+    fn mark_expiring(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.mark_expiring(lease_key)
+    }
+
+    fn begin_refresh(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.begin_refresh(lease_key)
+    }
+
+    fn complete_refresh(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
+    {
+        self.0.complete_refresh(lease_key, new_expires_at, now)
+    }
+
+    fn refresh_failed(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        permanent: bool,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.refresh_failed(lease_key, permanent)
+    }
+
+    fn mark_reauth_required(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.mark_reauth_required(lease_key)
+    }
+
+    fn release_lease(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.release_lease(lease_key)
+    }
+
+    fn release_credential_lifecycle(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0.release_credential_lifecycle(lease_key)
+    }
+
+    fn restore_auth_lifecycle_snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+        snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+        expires_at: Option<u64>,
+    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+        self.0
+            .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
+    }
+
+    fn snapshot(
+        &self,
+        lease_key: &meerkat_core::handles::LeaseKey,
+    ) -> meerkat_core::handles::AuthLeaseSnapshot {
+        self.0.snapshot(lease_key)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn oauth_flow_authority_is_owned_by_meerkat_machine() {
     let machine = MeerkatMachine::ephemeral();
@@ -215,6 +300,31 @@ fn oauth_lifecycle_release_stays_paired_after_custom_auth_handle_install() {
             redirect_uri,
         ),
         Err(meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected { .. })
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn custom_auth_handle_install_does_not_create_separate_oauth_lifecycle_authority() {
+    let machine = MeerkatMachine::ephemeral();
+    let custom_auth = Arc::new(DelegatingCustomAuthLeaseHandle(
+        crate::handles::RuntimeAuthLeaseHandle::new(),
+    )) as Arc<dyn meerkat_core::handles::AuthLeaseHandle>;
+    machine.set_auth_lease_handle(custom_auth);
+
+    let err = machine
+        .oauth_flow_authority()
+        .start(
+            oauth_target(),
+            meerkat_auth_core::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
+            "http://127.0.0.1/callback".to_string(),
+            "verifier".to_string(),
+        )
+        .expect_err("custom auth handles without an OAuth lifecycle seam must not get a hidden runtime flow authority");
+
+    assert!(matches!(
+        err,
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected { .. }
     ));
 }
 

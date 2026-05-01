@@ -13,7 +13,8 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    ManagedStoreLifecycle, load_managed_store_tokens_with_lifecycle,
+    ManagedStoreLifecycle, begin_managed_store_oauth_refresh_lifecycle,
+    load_managed_store_tokens_with_lifecycle, mark_managed_store_oauth_refresh_failed,
     publish_managed_store_tokens_lifecycle_and_save, refresh_allowed,
 };
 use meerkat_auth_core::resolver::{
@@ -152,7 +153,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         expected_mode,
                     )
                     .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?;
-                    let managed = load_managed_store_tokens_with_lifecycle(env, binding).await?;
+                    let mut managed =
+                        load_managed_store_tokens_with_lifecycle(env, binding).await?;
                     let lifecycle = managed.lifecycle;
                     let persisted = managed.tokens.clone();
 
@@ -177,6 +179,11 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                 if !refresh_allowed(binding) {
                                     return Err(ProviderAuthError::Auth(AuthError::Expired));
                                 }
+                                let refresh_started = begin_managed_store_oauth_refresh_lifecycle(
+                                    env,
+                                    binding,
+                                    &mut managed,
+                                )?;
                                 let coord = env.refresh_coord.clone().unwrap_or_else(|| {
                                     Arc::new(meerkat_auth_core::InMemoryCoordinator::new())
                                 });
@@ -210,13 +217,30 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                                         })
                                     }))
                                     .await
-                                    .map_err(|e| match e {
-                                        oauth::OpenAiOAuthError::InteractiveLoginRequired => {
-                                            interactive_login_error(binding)
+                                    .map_err(|e| {
+                                        let failure = mark_managed_store_oauth_refresh_failed(
+                                            env,
+                                            binding,
+                                            refresh_started,
+                                            false,
+                                        )
+                                        .err()
+                                        .map(|err| format!("; {err}"))
+                                        .unwrap_or_default();
+                                        match e {
+                                            oauth::OpenAiOAuthError::InteractiveLoginRequired => {
+                                                let mut err = interactive_login_error(binding);
+                                                if !failure.is_empty() {
+                                                    err = ProviderAuthError::SourceResolutionFailed(
+                                                        format!("{err}{failure}"),
+                                                    );
+                                                }
+                                                err
+                                            }
+                                            other => ProviderAuthError::SourceResolutionFailed(
+                                                format!("{other}{failure}"),
+                                            ),
                                         }
-                                        other => ProviderAuthError::SourceResolutionFailed(
-                                            other.to_string(),
-                                        ),
                                     })?
                             }
                         }

@@ -1,6 +1,7 @@
 // AuthMachine — per-binding auth lease lifecycle (Phase 1.5-rev,
 // refactored from the original "absorbed into MeerkatMachine"
 // design after review).
+use super::OptionValueExt;
 //
 // Each binding_key (format: "<realm_id>:<binding_id>") has its own
 // AuthMachine instance, tracked by the runtime-level registry in
@@ -37,8 +38,14 @@ macro_rules! auth_catalog_machine_dsl {
                 refresh_attempt: u64,
                 credential_present: bool,
                 oauth_browser_flow_ids: Set<String>,
+                oauth_browser_flow_providers: Map<String, String>,
+                oauth_browser_flow_redirect_uris: Map<String, String>,
+                oauth_browser_flow_expires_at_millis: Map<String, u64>,
                 oauth_device_flow_ids: Set<String>,
+                oauth_device_flow_providers: Map<String, String>,
+                oauth_device_flow_expires_at_millis: Map<String, u64>,
                 oauth_device_poll_ids: Set<String>,
+                oauth_outstanding_flow_count: u64,
             }
 
             init(Valid) {
@@ -47,8 +54,14 @@ macro_rules! auth_catalog_machine_dsl {
                 refresh_attempt = 0,
                 credential_present = false,
                 oauth_browser_flow_ids = EmptySet,
+                oauth_browser_flow_providers = EmptyMap,
+                oauth_browser_flow_redirect_uris = EmptyMap,
+                oauth_browser_flow_expires_at_millis = EmptyMap,
                 oauth_device_flow_ids = EmptySet,
+                oauth_device_flow_providers = EmptyMap,
+                oauth_device_flow_expires_at_millis = EmptyMap,
                 oauth_device_poll_ids = EmptySet,
+                oauth_outstanding_flow_count = 0,
             }
 
             terminal [Released]
@@ -71,15 +84,15 @@ macro_rules! auth_catalog_machine_dsl {
                 MarkReauthRequired,
                 ClearCredentialLifecycle,
                 Release,
-                AdmitOAuthBrowserFlow { flow_id: String },
-                VerifyOAuthBrowserFlow { flow_id: String },
-                ConsumeOAuthBrowserFlow { flow_id: String },
+                AdmitOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64 },
+                VerifyOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
+                ConsumeOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
                 ExpireOAuthBrowserFlow { flow_id: String },
-                AdmitOAuthDeviceFlow { flow_id: String },
-                VerifyOAuthDeviceFlow { flow_id: String },
-                BeginOAuthDevicePoll { flow_id: String },
+                AdmitOAuthDeviceFlow { flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64 },
+                VerifyOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
+                BeginOAuthDevicePoll { flow_id: String, provider: String, now_millis: u64 },
                 FinishOAuthDevicePoll { flow_id: String },
-                ConsumeOAuthDeviceFlow { flow_id: String },
+                ConsumeOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
                 ExpireOAuthDeviceFlow { flow_id: String },
             }
 
@@ -197,8 +210,14 @@ macro_rules! auth_catalog_machine_dsl {
                 update {
                     self.credential_present = false;
                     self.oauth_browser_flow_ids = EmptySet;
+                    self.oauth_browser_flow_providers = EmptyMap;
+                    self.oauth_browser_flow_redirect_uris = EmptyMap;
+                    self.oauth_browser_flow_expires_at_millis = EmptyMap;
                     self.oauth_device_flow_ids = EmptySet;
+                    self.oauth_device_flow_providers = EmptyMap;
+                    self.oauth_device_flow_expires_at_millis = EmptyMap;
                     self.oauth_device_poll_ids = EmptySet;
+                    self.oauth_outstanding_flow_count = 0;
                 }
                 to Released
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -211,10 +230,15 @@ macro_rules! auth_catalog_machine_dsl {
             // credential-valid lease.
             transition AdmitOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input AdmitOAuthBrowserFlow { flow_id }
+                on input AdmitOAuthBrowserFlow { flow_id, provider, redirect_uri, expires_at_millis, max_outstanding_flows }
                 guard "browser_flow_absent" { self.oauth_browser_flow_ids.contains(flow_id) == false }
+                guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
                 update {
                     self.oauth_browser_flow_ids.insert(flow_id);
+                    self.oauth_browser_flow_providers.insert(flow_id, provider);
+                    self.oauth_browser_flow_redirect_uris.insert(flow_id, redirect_uri);
+                    self.oauth_browser_flow_expires_at_millis.insert(flow_id, expires_at_millis);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -222,8 +246,11 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition VerifyOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input VerifyOAuthBrowserFlow { flow_id }
+                on input VerifyOAuthBrowserFlow { flow_id, provider, redirect_uri, now_millis }
                 guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
+                guard "browser_flow_provider_matches" { self.oauth_browser_flow_providers.get_cloned(flow_id) == Some(provider) }
+                guard "browser_flow_redirect_uri_matches" { self.oauth_browser_flow_redirect_uris.get_cloned(flow_id) == Some(redirect_uri) }
+                guard "browser_flow_not_expired" { now_millis <= self.oauth_browser_flow_expires_at_millis.get_cloned(flow_id).get("value") }
                 update {}
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -231,10 +258,17 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition ConsumeOAuthBrowserFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input ConsumeOAuthBrowserFlow { flow_id }
+                on input ConsumeOAuthBrowserFlow { flow_id, provider, redirect_uri, now_millis }
                 guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
+                guard "browser_flow_provider_matches" { self.oauth_browser_flow_providers.get_cloned(flow_id) == Some(provider) }
+                guard "browser_flow_redirect_uri_matches" { self.oauth_browser_flow_redirect_uris.get_cloned(flow_id) == Some(redirect_uri) }
+                guard "browser_flow_not_expired" { now_millis <= self.oauth_browser_flow_expires_at_millis.get_cloned(flow_id).get("value") }
                 update {
                     self.oauth_browser_flow_ids.remove(flow_id);
+                    self.oauth_browser_flow_providers.remove(flow_id);
+                    self.oauth_browser_flow_redirect_uris.remove(flow_id);
+                    self.oauth_browser_flow_expires_at_millis.remove(flow_id);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count - 1;
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -246,6 +280,10 @@ macro_rules! auth_catalog_machine_dsl {
                 guard "browser_flow_present" { self.oauth_browser_flow_ids.contains(flow_id) }
                 update {
                     self.oauth_browser_flow_ids.remove(flow_id);
+                    self.oauth_browser_flow_providers.remove(flow_id);
+                    self.oauth_browser_flow_redirect_uris.remove(flow_id);
+                    self.oauth_browser_flow_expires_at_millis.remove(flow_id);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count - 1;
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -253,11 +291,15 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition AdmitOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input AdmitOAuthDeviceFlow { flow_id }
+                on input AdmitOAuthDeviceFlow { flow_id, provider, expires_at_millis, max_outstanding_flows }
                 guard "device_flow_absent" { self.oauth_device_flow_ids.contains(flow_id) == false }
+                guard "oauth_capacity_available" { self.oauth_outstanding_flow_count < max_outstanding_flows }
                 update {
                     self.oauth_device_flow_ids.insert(flow_id);
+                    self.oauth_device_flow_providers.insert(flow_id, provider);
+                    self.oauth_device_flow_expires_at_millis.insert(flow_id, expires_at_millis);
                     self.oauth_device_poll_ids.remove(flow_id);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count + 1;
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -265,8 +307,10 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition VerifyOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input VerifyOAuthDeviceFlow { flow_id }
+                on input VerifyOAuthDeviceFlow { flow_id, provider, now_millis }
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
+                guard "device_flow_provider_matches" { self.oauth_device_flow_providers.get_cloned(flow_id) == Some(provider) }
+                guard "device_flow_not_expired" { now_millis <= self.oauth_device_flow_expires_at_millis.get_cloned(flow_id).get("value") }
                 update {}
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -274,8 +318,10 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition BeginOAuthDevicePoll {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input BeginOAuthDevicePoll { flow_id }
+                on input BeginOAuthDevicePoll { flow_id, provider, now_millis }
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
+                guard "device_flow_provider_matches" { self.oauth_device_flow_providers.get_cloned(flow_id) == Some(provider) }
+                guard "device_flow_not_expired" { now_millis <= self.oauth_device_flow_expires_at_millis.get_cloned(flow_id).get("value") }
                 guard "device_poll_absent" { self.oauth_device_poll_ids.contains(flow_id) == false }
                 update {
                     self.oauth_device_poll_ids.insert(flow_id);
@@ -297,11 +343,16 @@ macro_rules! auth_catalog_machine_dsl {
 
             transition ConsumeOAuthDeviceFlow {
                 per_phase [Valid, Expiring, Refreshing, ReauthRequired]
-                on input ConsumeOAuthDeviceFlow { flow_id }
+                on input ConsumeOAuthDeviceFlow { flow_id, provider, now_millis }
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
+                guard "device_flow_provider_matches" { self.oauth_device_flow_providers.get_cloned(flow_id) == Some(provider) }
+                guard "device_flow_not_expired" { now_millis <= self.oauth_device_flow_expires_at_millis.get_cloned(flow_id).get("value") }
                 update {
                     self.oauth_device_flow_ids.remove(flow_id);
+                    self.oauth_device_flow_providers.remove(flow_id);
+                    self.oauth_device_flow_expires_at_millis.remove(flow_id);
                     self.oauth_device_poll_ids.remove(flow_id);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count - 1;
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }
@@ -313,7 +364,10 @@ macro_rules! auth_catalog_machine_dsl {
                 guard "device_flow_present" { self.oauth_device_flow_ids.contains(flow_id) }
                 update {
                     self.oauth_device_flow_ids.remove(flow_id);
+                    self.oauth_device_flow_providers.remove(flow_id);
+                    self.oauth_device_flow_expires_at_millis.remove(flow_id);
                     self.oauth_device_poll_ids.remove(flow_id);
+                    self.oauth_outstanding_flow_count = self.oauth_outstanding_flow_count - 1;
                 }
                 to Valid
                 emit EmitLifecycleEvent { new_state: self.lifecycle_phase }

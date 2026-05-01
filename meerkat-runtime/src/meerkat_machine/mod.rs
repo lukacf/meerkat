@@ -104,92 +104,89 @@ impl BlobStore for UnavailableBlobStore {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct AuthLeaseHandleWithOAuthRelease {
-    inner: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
-    oauth_lifecycle: Arc<crate::handles::RuntimeAuthLeaseHandle>,
+struct UnavailableOAuthFlowAuthority;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl UnavailableOAuthFlowAuthority {
+    fn rejected(operation: &'static str) -> meerkat_auth_core::oauth_flow::OAuthFlowError {
+        meerkat_auth_core::oauth_flow::OAuthFlowError::LifecycleRejected {
+            operation,
+            detail: "custom auth lease handle does not provide a runtime OAuth flow authority"
+                .to_string(),
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl meerkat_core::handles::AuthLeaseHandle for AuthLeaseHandleWithOAuthRelease {
-    fn acquire_lease(
+impl meerkat_auth_core::oauth_flow::OAuthFlowAuthority for UnavailableOAuthFlowAuthority {
+    fn start(
         &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        expires_at: u64,
-    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
-    {
-        self.inner.acquire_lease(lease_key, expires_at)
+        _target: meerkat_core::ConnectionRef,
+        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
+        _redirect_uri: String,
+        _pkce_verifier: String,
+    ) -> Result<String, meerkat_auth_core::oauth_flow::OAuthFlowError> {
+        Err(Self::rejected("admit_oauth_browser_flow"))
     }
 
-    fn mark_expiring(
+    fn verify(
         &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.inner.mark_expiring(lease_key)
+        _state: &str,
+        _target: &meerkat_core::ConnectionRef,
+        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
+        _redirect_uri: &str,
+    ) -> Result<
+        meerkat_auth_core::oauth_flow::OAuthFlowRecord,
+        meerkat_auth_core::oauth_flow::OAuthFlowError,
+    > {
+        Err(Self::rejected("verify_oauth_browser_flow"))
     }
 
-    fn begin_refresh(
+    fn consume(
         &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.inner.begin_refresh(lease_key)
+        _state: &str,
+        _target: &meerkat_core::ConnectionRef,
+        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
+        _redirect_uri: &str,
+    ) -> Result<
+        meerkat_auth_core::oauth_flow::OAuthFlowRecord,
+        meerkat_auth_core::oauth_flow::OAuthFlowError,
+    > {
+        Err(Self::rejected("consume_oauth_browser_flow"))
     }
 
-    fn complete_refresh(
+    fn admit_device_code(
         &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        new_expires_at: u64,
-        now: u64,
-    ) -> Result<meerkat_core::handles::AuthLeaseTransition, meerkat_core::handles::DslTransitionError>
-    {
-        self.inner.complete_refresh(lease_key, new_expires_at, now)
+        _target: meerkat_core::ConnectionRef,
+        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
+        _device_code: String,
+        _expires_in: std::time::Duration,
+    ) -> Result<(), meerkat_auth_core::oauth_flow::OAuthFlowError> {
+        Err(Self::rejected("admit_oauth_device_flow"))
     }
 
-    fn refresh_failed(
+    fn verify_device_code(
         &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        permanent: bool,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.inner.refresh_failed(lease_key, permanent)
+        _device_code: &str,
+        _target: &meerkat_core::ConnectionRef,
+        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
+    ) -> Result<
+        meerkat_auth_core::oauth_flow::OAuthDeviceFlowRecord,
+        meerkat_auth_core::oauth_flow::OAuthFlowError,
+    > {
+        Err(Self::rejected("verify_oauth_device_flow"))
     }
 
-    fn mark_reauth_required(
+    fn begin_device_code_poll(
         &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.inner.mark_reauth_required(lease_key)
-    }
-
-    fn release_lease(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.inner.release_lease(lease_key)?;
-        self.oauth_lifecycle.release_lease(lease_key)?;
-        Ok(())
-    }
-
-    fn release_credential_lifecycle(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.inner.release_credential_lifecycle(lease_key)
-    }
-
-    fn restore_auth_lifecycle_snapshot(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-        snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
-        expires_at: Option<u64>,
-    ) -> Result<(), meerkat_core::handles::DslTransitionError> {
-        self.inner
-            .restore_auth_lifecycle_snapshot(lease_key, snapshot, expires_at)
-    }
-
-    fn snapshot(
-        &self,
-        lease_key: &meerkat_core::handles::LeaseKey,
-    ) -> meerkat_core::handles::AuthLeaseSnapshot {
-        self.inner.snapshot(lease_key)
+        _device_code: &str,
+        _target: &meerkat_core::ConnectionRef,
+        _provider: meerkat_auth_core::oauth_flow::OAuthProviderIdentity,
+    ) -> Result<
+        meerkat_auth_core::oauth_flow::OAuthDevicePollLease,
+        meerkat_auth_core::oauth_flow::OAuthFlowError,
+    > {
+        Err(Self::rejected("begin_oauth_device_poll"))
     }
 }
 
@@ -795,20 +792,35 @@ impl MeerkatMachine {
                 self.set_runtime_auth_lease_handle(runtime_handle);
                 return;
             }
-            let oauth_lifecycle = Arc::new(crate::handles::RuntimeAuthLeaseHandle::new());
             *self
                 .oauth_flows
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Arc::new(crate::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
-                    std::time::Duration::from_secs(10 * 60),
-                    Arc::clone(&oauth_lifecycle),
-                ));
-            Arc::new(AuthLeaseHandleWithOAuthRelease {
-                inner: handle,
-                oauth_lifecycle,
-            }) as Arc<dyn meerkat_core::handles::AuthLeaseHandle>
+                Arc::new(UnavailableOAuthFlowAuthority);
+            handle
         };
+        *self
+            .auth_lease
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = handle;
+    }
+
+    /// Install a custom credential lifecycle handle together with an explicit
+    /// OAuth login-flow authority.
+    ///
+    /// This is the opt-in seam for tests/embedders that intentionally want a
+    /// non-runtime credential handle. The plain setter does not silently create
+    /// a second hidden AuthMachine authority for OAuth flow membership.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_auth_lease_handle_with_oauth_flow_authority(
+        &self,
+        handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+        oauth_flows: Arc<dyn meerkat_auth_core::oauth_flow::OAuthFlowAuthority>,
+    ) {
+        *self
+            .oauth_flows
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = oauth_flows;
         *self
             .auth_lease
             .write()

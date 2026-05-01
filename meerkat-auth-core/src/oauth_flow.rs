@@ -430,6 +430,7 @@ pub trait OAuthDevicePollLifecycle: Send + Sync {
         &self,
         target: &ConnectionRef,
         device_code: &str,
+        provider: OAuthProviderIdentity,
     ) -> Result<(), OAuthFlowError>;
 
     fn expire_device_flow(
@@ -567,7 +568,7 @@ impl OAuthDevicePollLease {
         verified?;
 
         if let Some(lifecycle) = &self.lifecycle {
-            lifecycle.consume_device_flow(&self.target, &self.device_code)?;
+            lifecycle.consume_device_flow(&self.target, &self.device_code, self.provider)?;
         }
 
         let result = {
@@ -686,6 +687,18 @@ impl OAuthFlowRegistry {
             device_flows: Arc::new(Mutex::new(HashMap::new())),
             next_device_poll_lease_id: AtomicU64::new(1),
         }
+    }
+
+    pub fn max_outstanding(&self) -> usize {
+        self.max_outstanding
+    }
+
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    pub fn new_state() -> Result<String, OAuthFlowError> {
+        new_state_token()
     }
 
     pub fn start(
@@ -821,6 +834,29 @@ impl OAuthFlowRegistry {
         ))
     }
 
+    pub fn insert_browser_flow_with_pruned(
+        &self,
+        state: String,
+        target: ConnectionRef,
+        provider: OAuthProviderIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+    ) -> OAuthPrunedFlows {
+        let record = OAuthFlowRecord {
+            target,
+            provider,
+            redirect_uri,
+            pkce_verifier,
+            created_at: Instant::now(),
+        };
+        let mut flows = self.flows.lock();
+        let mut device_flows = self.device_flows.lock();
+        let expired_browser = take_expired_locked(&mut flows, self.ttl);
+        let expired_device = take_expired_device_locked(&mut device_flows);
+        flows.insert(state, record);
+        OAuthPrunedFlows::from_expired(expired_browser, expired_device)
+    }
+
     pub fn admit_device_code_with_pruned(
         &self,
         target: ConnectionRef,
@@ -839,6 +875,44 @@ impl OAuthFlowRegistry {
             return Err(OAuthFlowError::CapacityExceeded {
                 max_outstanding: self.max_outstanding,
             });
+        }
+        let now = Instant::now();
+        let expires_at = now
+            .checked_add(expires_in)
+            .ok_or(OAuthFlowError::DeviceExpiryOutOfRange)?;
+        let record = OAuthDeviceFlowRecord {
+            target,
+            provider,
+            device_code: device_code.clone(),
+            created_at: now,
+            expires_at,
+        };
+        device_flows.insert(
+            device_code,
+            OAuthDeviceFlowState {
+                record,
+                poll_lease: None,
+            },
+        );
+        Ok(OAuthPrunedFlows::from_expired(
+            expired_browser,
+            expired_device,
+        ))
+    }
+
+    pub fn admit_device_code_with_pruned_without_capacity(
+        &self,
+        target: ConnectionRef,
+        provider: OAuthProviderIdentity,
+        device_code: String,
+        expires_in: Duration,
+    ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
+        let mut flows = self.flows.lock();
+        let mut device_flows = self.device_flows.lock();
+        let expired_browser = take_expired_locked(&mut flows, self.ttl);
+        let expired_device = take_expired_device_locked(&mut device_flows);
+        if device_flows.contains_key(&device_code) {
+            return Err(OAuthFlowError::DeviceCodeAlreadyAdmitted);
         }
         let now = Instant::now();
         let expires_at = now
@@ -1901,6 +1975,7 @@ mod tests {
             &self,
             _target: &ConnectionRef,
             _device_code: &str,
+            _provider: OAuthProviderIdentity,
         ) -> Result<(), OAuthFlowError> {
             Err(OAuthFlowError::LifecycleRejected {
                 operation: "consume_oauth_device_flow",

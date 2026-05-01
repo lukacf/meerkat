@@ -240,6 +240,31 @@ impl RuntimeAuthLeaseHandle {
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((transition, max_outstanding_flows)) = match &input {
+            auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
+                max_outstanding_flows,
+                ..
+            } => Some(("AdmitOAuthBrowserFlow", *max_outstanding_flows)),
+            auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
+                max_outstanding_flows,
+                ..
+            } => Some(("AdmitOAuthDeviceFlow", *max_outstanding_flows)),
+            _ => None,
+        } {
+            let outstanding = guard
+                .authorities
+                .values()
+                .map(|authority| authority.state.oauth_outstanding_flow_count)
+                .fold(0u64, u64::saturating_add);
+            if outstanding >= max_outstanding_flows {
+                return Err(DslTransitionError::guard_rejected(
+                    context,
+                    format!(
+                        "transition {transition} guard oauth_global_capacity_available failed: {outstanding} outstanding OAuth flows >= {max_outstanding_flows} max"
+                    ),
+                ));
+            }
+        }
         let (from_phase, to_phase) = {
             let entry = if create_if_missing {
                 guard
@@ -528,20 +553,15 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .get(lease_key)
             .map(|authority| map_phase(authority.state.lifecycle_phase))
             .unwrap_or(AuthLeasePhase::Released);
-        let existing_oauth = guard.authorities.get(lease_key).map(|authority| {
-            (
-                authority.state.oauth_browser_flow_ids.clone(),
-                authority.state.oauth_device_flow_ids.clone(),
-                authority.state.oauth_device_poll_ids.clone(),
-            )
+        let existing_oauth = guard
+            .authorities
+            .get(lease_key)
+            .map(|authority| authority.state.clone());
+        let has_oauth_membership = existing_oauth.as_ref().is_some_and(|state| {
+            !state.oauth_browser_flow_ids.is_empty()
+                || !state.oauth_device_flow_ids.is_empty()
+                || !state.oauth_device_poll_ids.is_empty()
         });
-        let has_oauth_membership = existing_oauth.as_ref().is_some_and(
-            |(browser_flow_ids, device_flow_ids, device_poll_ids)| {
-                !browser_flow_ids.is_empty()
-                    || !device_flow_ids.is_empty()
-                    || !device_poll_ids.is_empty()
-            },
-        );
 
         if !snapshot.credential_present
             || snapshot.phase.is_none()
@@ -549,16 +569,23 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         {
             guard.credential_published_at_millis.remove(lease_key);
             if has_oauth_membership {
-                let (oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids) =
-                    existing_oauth.unwrap_or_default();
+                let oauth = existing_oauth.unwrap_or_default();
                 guard.authorities.insert(
                     lease_key.clone(),
                     auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState {
                         lifecycle_phase: auth_dsl::AuthLifecyclePhase::ReauthRequired,
                         credential_present: false,
-                        oauth_browser_flow_ids,
-                        oauth_device_flow_ids,
-                        oauth_device_poll_ids,
+                        oauth_browser_flow_ids: oauth.oauth_browser_flow_ids,
+                        oauth_browser_flow_providers: oauth.oauth_browser_flow_providers,
+                        oauth_browser_flow_redirect_uris: oauth.oauth_browser_flow_redirect_uris,
+                        oauth_browser_flow_expires_at_millis: oauth
+                            .oauth_browser_flow_expires_at_millis,
+                        oauth_device_flow_ids: oauth.oauth_device_flow_ids,
+                        oauth_device_flow_providers: oauth.oauth_device_flow_providers,
+                        oauth_device_flow_expires_at_millis: oauth
+                            .oauth_device_flow_expires_at_millis,
+                        oauth_device_poll_ids: oauth.oauth_device_poll_ids,
+                        oauth_outstanding_flow_count: oauth.oauth_outstanding_flow_count,
                         ..Default::default()
                     }),
                 );
@@ -596,17 +623,22 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         } else {
             Some(expires_at)
         };
-        let (oauth_browser_flow_ids, oauth_device_flow_ids, oauth_device_poll_ids) =
-            existing_oauth.unwrap_or_default();
+        let oauth = existing_oauth.unwrap_or_default();
         guard.authorities.insert(
             lease_key.clone(),
             auth_dsl::AuthMachineAuthority::from_state(auth_dsl::AuthMachineState {
                 lifecycle_phase: restore_phase(phase),
                 expires_at,
                 credential_present: true,
-                oauth_browser_flow_ids,
-                oauth_device_flow_ids,
-                oauth_device_poll_ids,
+                oauth_browser_flow_ids: oauth.oauth_browser_flow_ids,
+                oauth_browser_flow_providers: oauth.oauth_browser_flow_providers,
+                oauth_browser_flow_redirect_uris: oauth.oauth_browser_flow_redirect_uris,
+                oauth_browser_flow_expires_at_millis: oauth.oauth_browser_flow_expires_at_millis,
+                oauth_device_flow_ids: oauth.oauth_device_flow_ids,
+                oauth_device_flow_providers: oauth.oauth_device_flow_providers,
+                oauth_device_flow_expires_at_millis: oauth.oauth_device_flow_expires_at_millis,
+                oauth_device_poll_ids: oauth.oauth_device_poll_ids,
+                oauth_outstanding_flow_count: oauth.oauth_outstanding_flow_count,
                 ..Default::default()
             }),
         );

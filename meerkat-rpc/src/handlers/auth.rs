@@ -2294,6 +2294,7 @@ mod tests {
             &self,
             _target: &ConnectionRef,
             _device_code: &str,
+            _provider: OAuthProviderIdentity,
         ) -> Result<(), OAuthFlowError> {
             Err(OAuthFlowError::LifecycleRejected {
                 operation: "consume_oauth_device_flow",
@@ -2960,7 +2961,11 @@ mod tests {
                         "test should reach the default OAuth flow capacity before 2048 starts"
                     );
                 }
-                Err(OAuthFlowError::CapacityExceeded { .. }) => break,
+                Err(OAuthFlowError::CapacityExceeded { .. })
+                | Err(OAuthFlowError::LifecycleRejected {
+                    operation: "admit_oauth_browser_flow",
+                    ..
+                }) => break,
                 Err(err) => panic!("unexpected OAuth flow admission error: {err}"),
             }
         }
@@ -2984,7 +2989,10 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("oauth state registry is at capacity"),
+                .contains("oauth flow lifecycle transition rejected")
+                || error
+                    .message
+                    .contains("oauth state registry is at capacity"),
             "expected runtime OAuth authority failure before TokenStore access, got `{}`",
             error.message
         );
@@ -3504,9 +3512,19 @@ mod tests {
     #[tokio::test]
     async fn ready_device_commit_failure_keeps_flow_retryable() {
         let runtime = test_runtime_with_config(config_with_openai_managed_store_binding());
+        let oauth_lifecycle = Arc::new(meerkat_runtime::handles::RuntimeAuthLeaseHandle::new());
+        let oauth_authority = Arc::new(
+            meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                std::time::Duration::from_secs(600),
+                oauth_lifecycle,
+            ),
+        );
         runtime
             .runtime_adapter()
-            .set_auth_lease_handle(Arc::new(RejectingAuthLeaseHandle));
+            .set_auth_lease_handle_with_oauth_flow_authority(
+                Arc::new(RejectingAuthLeaseHandle),
+                oauth_authority,
+            );
         let store = runtime.token_store().expect("test token store");
         let connection_ref = ConnectionRef {
             realm: meerkat_core::RealmId::parse("dev").unwrap(),

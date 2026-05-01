@@ -1894,6 +1894,7 @@ mod tests {
             &self,
             _target: &ConnectionRef,
             _device_code: &str,
+            _provider: meerkat_providers::oauth_flow::OAuthProviderIdentity,
         ) -> Result<(), OAuthFlowError> {
             Err(OAuthFlowError::LifecycleRejected {
                 operation: "consume_oauth_device_flow",
@@ -3111,9 +3112,19 @@ mod tests {
             .await
             .unwrap();
         let auth_lease: Arc<dyn AuthLeaseHandle> = Arc::new(RejectingAuthLeaseHandle);
+        let oauth_lifecycle = Arc::new(meerkat_runtime::handles::RuntimeAuthLeaseHandle::new());
+        let oauth_authority = Arc::new(
+            meerkat_runtime::handles::RuntimeOAuthFlowHandle::new_with_auth_lease(
+                std::time::Duration::from_secs(600),
+                oauth_lifecycle,
+            ),
+        );
         state
             .runtime_adapter
-            .set_auth_lease_handle(Arc::clone(&auth_lease));
+            .set_auth_lease_handle_with_oauth_flow_authority(
+                Arc::clone(&auth_lease),
+                oauth_authority,
+            );
         state.auth_lease = auth_lease;
         state.token_store = Arc::new(EphemeralTokenStore::new());
         let authority = state.oauth_flow_authority();

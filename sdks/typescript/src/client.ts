@@ -104,6 +104,7 @@ import type {
   PeerCorrelationId,
   PeerId,
   PeerResponseTerminalOptions,
+  KeepAlivePolicy,
   RunResult,
   RuntimeTurnMetadata,
   Schedule,
@@ -127,6 +128,7 @@ import type {
   SkillRuntimeDiagnostics,
   SpawnManySpec,
   SpawnSpec,
+  TurnMetadataOverride,
   UpdateScheduleRequest,
   TurnOptions,
   Usage,
@@ -205,15 +207,15 @@ function setIfDefined<T extends object, K extends keyof T>(
 type RuntimeTurnMetadataPayload = NonNullable<MobTurnStartParams["turn_metadata"]>;
 
 function turnKeepAliveOverride(
-  keepAlive: boolean | undefined,
+  keepAlive: TurnMetadataOverride<KeepAlivePolicy> | undefined,
 ): Record<string, unknown> | undefined {
   if (keepAlive === undefined) return undefined;
-  if (!keepAlive) return { action: "clear" };
+  if (keepAlive.action === "clear") return { action: "clear" };
   return {
     action: "set",
     value: {
-      policy: "pinned",
-      ttl_secs: 30,
+      policy: keepAlive.value.policy,
+      ttl_secs: keepAlive.value.ttlSecs,
     },
   };
 }
@@ -1617,6 +1619,7 @@ export class MeerkatClient {
       profileName?: string;
       runtimeMode?: string;
       backend?: string;
+      turnMetadata?: RuntimeTurnMetadata;
     },
   ): Promise<{
     output?: string;
@@ -1632,6 +1635,7 @@ export class MeerkatClient {
       role_name: roleName,
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
+      turn_metadata: runtimeTurnMetadataPayload(options?.turnMetadata),
     });
     const resultIdentity =
       typeof result.agent_identity === "string" && result.agent_identity.length > 0
@@ -1672,6 +1676,7 @@ export class MeerkatClient {
       forkContext?: Record<string, unknown>;
       runtimeMode?: string;
       backend?: string;
+      turnMetadata?: RuntimeTurnMetadata;
     },
   ): Promise<{
     output?: string;
@@ -1689,6 +1694,7 @@ export class MeerkatClient {
       fork_context: options?.forkContext,
       runtime_mode: options?.runtimeMode,
       backend: options?.backend,
+      turn_metadata: runtimeTurnMetadataPayload(options?.turnMetadata),
     });
     const resultIdentity =
       typeof result.agent_identity === "string" && result.agent_identity.length > 0

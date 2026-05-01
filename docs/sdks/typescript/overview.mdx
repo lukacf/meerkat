@@ -272,12 +272,17 @@ interface RuntimeTurnMetadata {
   skillReferences?: SkillRef[];
   flowToolOverlay?: TurnToolOverlay;
   additionalInstructions?: string[];
-  keepAlive?: boolean;
+  keepAlive?: TurnMetadataOverride<KeepAlivePolicy>;
 }
 
 type TurnMetadataOverride<T> =
   | { action: "set"; value: T }
   | { action: "clear" };
+
+interface KeepAlivePolicy {
+  policy: "pinned" | "policy_driven";
+  ttlSecs: number;
+}
 ```
 
 ---

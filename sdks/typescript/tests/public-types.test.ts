@@ -55,7 +55,10 @@ const publicRuntimeTurnMetadata: RuntimeTurnMetadata = {
     { sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" },
   ],
   additionalInstructions: ["stay concise"],
-  keepAlive: true,
+  keepAlive: {
+    action: "set",
+    value: { policy: "pinned", ttlSecs: 30 },
+  },
 };
 
 const publicSessionOptions: SessionOptions = {
@@ -211,7 +214,10 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
     skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
     flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
     additionalInstructions: ["stay concise"],
-    keepAlive: true,
+    keepAlive: {
+      action: "set",
+      value: { policy: "pinned", ttlSecs: 30 },
+    },
     model: "gpt-test",
     provider: "openai",
     providerParams: { action: "set", value: { temperature: 0.2 } },

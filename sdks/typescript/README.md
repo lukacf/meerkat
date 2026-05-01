@@ -115,16 +115,16 @@ Creates a new session and immediately runs the first turn with the given prompt.
 | `options.enableShell` | `boolean` | `false` | Enable the shell tool (requires `enableBuiltins`). |
 | `options.enableMemory` | `boolean` | `false` | Enable semantic memory (memory_search tool + compaction indexing). |
 | `options.enableMob` | `boolean` | `false` | Enable mob orchestration helpers. |
-| `options.commsName` | `string` | `undefined` | Agent name for comms (required when `turnMetadata.keepAlive` is `true`). |
+| `options.commsName` | `string` | `undefined` | Agent name for comms (required when `turnMetadata.keepAlive.action` is `"set"`). |
 | `options.peerMeta` | `Record<string, unknown>` | `undefined` | Metadata advertised to peer comms surfaces. |
 | `options.budgetLimits` | `Record<string, unknown>` | `undefined` | Runtime budget limits for the session. |
 | `options.turnMetadata` | `RuntimeTurnMetadata` | `undefined` | Canonical first-turn runtime metadata carrier. |
 | `options.turnMetadata.model` | `string` | Server default (typically `claude-sonnet-4-5`) | LLM model name (e.g. `"gpt-5.2"`, `"gemini-3-flash-preview"`, `"claude-opus-4-6"`). |
 | `options.turnMetadata.provider` | `string` | Resolved from the model registry | Force a specific provider (`"anthropic"`, `"openai"`, `"gemini"`). |
-| `options.turnMetadata.providerParams` | `Record<string, unknown>` | `undefined` | Provider-specific parameters (e.g. thinking config). |
+| `options.turnMetadata.providerParams` | `TurnMetadataOverride<Record<string, unknown>>` | `undefined` | Provider-specific parameters (e.g. thinking config). |
 | `options.turnMetadata.skillReferences` | `SkillRef[]` | `undefined` | Canonical structured skill references for the first turn. |
 | `options.turnMetadata.additionalInstructions` | `string[]` | `undefined` | Extra instruction blocks appended to the system prompt. |
-| `options.turnMetadata.keepAlive` | `boolean` | `false` | Run in keep-alive mode for inter-agent comms. |
+| `options.turnMetadata.keepAlive` | `TurnMetadataOverride<KeepAlivePolicy>` | `undefined` | Run in keep-alive mode for inter-agent comms. |
 | `options.labels` | `Record<string, string>` | `undefined` | Session labels used for filtering and metadata. |
 | `options.appContext` | `unknown` | `undefined` | Opaque app context passed to custom builders. |
 | `options.shellEnv` | `Record<string, string>` | `undefined` | Per-session shell environment variables. |

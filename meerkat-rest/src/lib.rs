@@ -1770,10 +1770,74 @@ async fn mob_event_stream(
 // Mob parity endpoints
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "mob")]
+fn apply_helper_turn_metadata(
+    options: &mut meerkat_mob::HelperOptions,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
+) -> Result<(), String> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: RuntimeTurnMetadata = turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err("mob helper turn_metadata.handling_mode is not supported".to_string());
+    }
+    if metadata.skill_references.is_some() {
+        return Err("mob helper turn_metadata.skill_references is not supported".to_string());
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err("mob helper turn_metadata.flow_tool_overlay is not supported".to_string());
+    }
+    if metadata.provider.is_some() {
+        return Err("mob helper turn_metadata.provider is not supported".to_string());
+    }
+    if metadata.keep_alive.is_some() {
+        return Err("mob helper turn_metadata.keep_alive is not supported".to_string());
+    }
+    if metadata.render_metadata.is_some() {
+        return Err("mob helper turn_metadata.render_metadata is not supported".to_string());
+    }
+    if metadata.additional_instructions.is_some() {
+        return Err(
+            "mob helper turn_metadata.additional_instructions is not supported".to_string(),
+        );
+    }
+
+    if let Some(model) = metadata.model {
+        options.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        options.provider_params_override = match provider_params {
+            TurnMetadataOverride::Set(params) => Some(params.to_legacy_provider_value()),
+            TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob helper turn_metadata.provider_params clear is not supported".to_string(),
+                );
+            }
+        };
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        options.connection_ref = match connection_ref {
+            TurnMetadataOverride::Set(connection_ref) => Some(connection_ref),
+            TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob helper turn_metadata.connection_ref clear is not supported".to_string(),
+                );
+            }
+        };
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[cfg(feature = "mob")]
+#[serde(deny_unknown_fields)]
 struct SpawnHelperRequest {
     prompt: String,
+    #[serde(default)]
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     agent_identity: Option<String>,
     #[serde(default)]
@@ -1800,6 +1864,8 @@ async fn mob_spawn_helper(
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
+    apply_helper_turn_metadata(&mut options, req.turn_metadata)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     options.runtime_mode = req.runtime_mode;
     options.backend = req.backend;
     let result = state
@@ -1815,9 +1881,12 @@ async fn mob_spawn_helper(
 
 #[derive(Debug, Deserialize)]
 #[cfg(feature = "mob")]
+#[serde(deny_unknown_fields)]
 struct ForkHelperRequest {
     source_member_id: String,
     prompt: String,
+    #[serde(default)]
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     agent_identity: Option<String>,
     #[serde(default)]
@@ -1883,6 +1952,8 @@ async fn mob_fork_helper(
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
+    apply_helper_turn_metadata(&mut options, req.turn_metadata)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     options.runtime_mode = req.runtime_mode;
     options.backend = req.backend;
     let result = state

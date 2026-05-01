@@ -188,20 +188,6 @@ def _skill_keys_to_wire(refs: Any | None) -> list[dict[str, str]] | None:
     return wire_refs
 
 
-def _turn_keep_alive_override(keep_alive: bool | None) -> dict[str, Any] | None:
-    if keep_alive is None:
-        return None
-    if not keep_alive:
-        return {"action": "clear"}
-    return {
-        "action": "set",
-        "value": {
-            "policy": "pinned",
-            "ttl_secs": 30,
-        },
-    }
-
-
 def _runtime_provider_wire(provider: str | None) -> str | None:
     if provider is None:
         return None
@@ -279,6 +265,23 @@ def _runtime_provider_params_override(
     return wire
 
 
+def _turn_metadata_override(field: str, value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"turn_metadata.{field} must be a tagged override object")
+    action = value.get("action")
+    if action == "clear":
+        if set(value) != {"action"}:
+            raise TypeError(f"turn_metadata.{field} clear override must only contain action")
+        return {"action": "clear"}
+    if action == "set":
+        if set(value) != {"action", "value"}:
+            raise TypeError(
+                f"turn_metadata.{field} set override must contain only action and value"
+            )
+        return {"action": "set", "value": value["value"]}
+    raise TypeError(f"turn_metadata.{field} must be a tagged override object")
+
+
 def _runtime_turn_metadata(
     turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -307,10 +310,8 @@ def _runtime_turn_metadata(
         metadata["additional_instructions"] = additional_instructions
 
     keep_alive = source.get("keep_alive")
-    if isinstance(keep_alive, bool):
-        metadata["keep_alive"] = _turn_keep_alive_override(keep_alive)
-    elif keep_alive is not None:
-        metadata["keep_alive"] = keep_alive
+    if keep_alive is not None:
+        metadata["keep_alive"] = _turn_metadata_override("keep_alive", keep_alive)
 
     if source.get("model") is not None:
         metadata["model"] = source["model"]
@@ -320,20 +321,14 @@ def _runtime_turn_metadata(
 
     if source.get("provider_params") is not None:
         provider_params = source["provider_params"]
-        if isinstance(provider_params, dict) and "action" in provider_params:
-            metadata["provider_params"] = provider_params
-        else:
-            metadata["provider_params"] = {
-                "action": "set",
-                "value": _runtime_provider_params_override(provider_params, provider),
-            }
+        override = _turn_metadata_override("provider_params", provider_params)
+        if override["action"] == "set":
+            override["value"] = _runtime_provider_params_override(override["value"], provider)
+        metadata["provider_params"] = override
 
     if source.get("connection_ref") is not None:
         connection_ref = source["connection_ref"]
-        if isinstance(connection_ref, dict) and "action" in connection_ref:
-            metadata["connection_ref"] = connection_ref
-        else:
-            metadata["connection_ref"] = {"action": "set", "value": connection_ref}
+        metadata["connection_ref"] = _turn_metadata_override("connection_ref", connection_ref)
 
     return metadata or None
 
@@ -1802,15 +1797,20 @@ class MeerkatClient:
         role_name: str | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> MobHelperResult:
-        result = await self._request("mob/spawn_helper", {
+        params: dict[str, Any] = {
             "mob_id": mob_id,
             "prompt": prompt,
             "agent_identity": agent_identity,
             "role_name": role_name,
             "runtime_mode": runtime_mode,
             "backend": backend,
-        })
+        }
+        metadata = _runtime_turn_metadata(turn_metadata)
+        if metadata is not None:
+            params["turn_metadata"] = metadata
+        result = await self._request("mob/spawn_helper", params)
         member_ref = result.get("member_ref")
         if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
@@ -1840,8 +1840,9 @@ class MeerkatClient:
         fork_context: dict[str, Any] | None = None,
         runtime_mode: str | None = None,
         backend: str | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> MobHelperResult:
-        result = await self._request("mob/fork_helper", {
+        params: dict[str, Any] = {
             "mob_id": mob_id,
             "source_member_id": source_member_id,
             "prompt": prompt,
@@ -1850,7 +1851,11 @@ class MeerkatClient:
             "fork_context": fork_context,
             "runtime_mode": runtime_mode,
             "backend": backend,
-        })
+        }
+        metadata = _runtime_turn_metadata(turn_metadata)
+        if metadata is not None:
+            params["turn_metadata"] = metadata
+        result = await self._request("mob/fork_helper", params)
         member_ref = result.get("member_ref")
         if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(

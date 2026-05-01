@@ -153,8 +153,19 @@ class ConnectionRefSetOverride(TypedDict):
     value: WireConnectionRef | dict[str, str]
 
 
+class KeepAlivePolicy(TypedDict):
+    policy: Literal["pinned", "policy_driven"]
+    ttl_secs: int
+
+
+class KeepAliveSetOverride(TypedDict):
+    action: Literal["set"]
+    value: KeepAlivePolicy | dict[str, Any]
+
+
 ProviderParamsOverride = ProviderParamsSetOverride | ClearTurnMetadataOverride
 ConnectionRefOverride = ConnectionRefSetOverride | ClearTurnMetadataOverride
+KeepAliveOverride = KeepAliveSetOverride | ClearTurnMetadataOverride
 
 
 class RuntimeTurnMetadata(TypedDict, total=False):
@@ -164,7 +175,7 @@ class RuntimeTurnMetadata(TypedDict, total=False):
     provider: str
     provider_params: ProviderParamsOverride
     connection_ref: ConnectionRefOverride
-    keep_alive: bool | dict[str, Any]
+    keep_alive: KeepAliveOverride
     skill_references: list[SkillRef]
     flow_tool_overlay: dict[str, Any]
     additional_instructions: list[str] | list[dict[str, str]]

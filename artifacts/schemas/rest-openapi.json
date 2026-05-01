@@ -3861,6 +3861,16 @@
           },
           "source_member_id": {
             "type": "string"
+          },
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -5117,6 +5127,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "turn_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireRuntimeTurnMetadata"
               },
               {
                 "type": "null"

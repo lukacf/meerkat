@@ -93,9 +93,12 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
         {
             "provider": "openai",
             "provider_params": {
-                "temperature": 0.2,
-                "reasoning": {"effort": "medium"},
-                "foo": "bar",
+                "action": "set",
+                "value": {
+                    "temperature": 0.2,
+                    "reasoning": {"effort": "medium"},
+                    "foo": "bar",
+                },
             },
         }
     )
@@ -119,7 +122,7 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
     custom_meta = _runtime_turn_metadata(
         {
             "provider": "openai-compatible",
-            "provider_params": {"foo": "bar"},
+            "provider_params": {"action": "set", "value": {"foo": "bar"}},
         }
     )
     assert custom_meta is not None
@@ -129,6 +132,14 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
         "key": "provider_params",
         "body": "{\"foo\":\"bar\"}",
     }
+
+    for field, value in [
+        ("keep_alive", True),
+        ("provider_params", {"foo": "bar"}),
+        ("connection_ref", {"realm": "dev", "binding": "default_openai"}),
+    ]:
+        with pytest.raises(TypeError, match=field):
+            _runtime_turn_metadata({field: value})
 
 
 def test_runtime_turn_metadata_skill_refs_use_plain_skill_keys():
@@ -1724,7 +1735,10 @@ async def test_session_turn_and_stream_use_single_turn_metadata_carrier():
         "next",
         turn_metadata={
             "additional_instructions": ["Follow policy A."],
-            "keep_alive": True,
+            "keep_alive": {
+                "action": "set",
+                "value": {"policy": "pinned", "ttl_secs": 30},
+            },
             "model": "claude-sonnet-4-6",
             "provider": "anthropic",
             "provider_params": {
@@ -1743,7 +1757,7 @@ async def test_session_turn_and_stream_use_single_turn_metadata_carrier():
         "stream it",
         turn_metadata={
             "additional_instructions": ["Follow policy B."],
-            "keep_alive": False,
+            "keep_alive": {"action": "clear"},
             "model": "gpt-5.4",
             "provider": "openai",
             "provider_params": {"action": "clear"},
@@ -1752,7 +1766,10 @@ async def test_session_turn_and_stream_use_single_turn_metadata_carrier():
     assert stream_handle == "stream-handle"
     assert session_calls[0][0] == "turn"
     assert session_calls[0][3]["turn_metadata"]["additional_instructions"] == ["Follow policy A."]
-    assert session_calls[0][3]["turn_metadata"]["keep_alive"] is True
+    assert session_calls[0][3]["turn_metadata"]["keep_alive"] == {
+        "action": "set",
+        "value": {"policy": "pinned", "ttl_secs": 30},
+    }
     assert session_calls[1][0] == "stream"
     assert session_calls[1][3]["turn_metadata"]["additional_instructions"] == ["Follow policy B."]
     assert session_calls[1][3]["turn_metadata"]["model"] == "gpt-5.4"
@@ -1845,7 +1862,10 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_turn_metadata():
             ],
             "flow_tool_overlay": {"allowed_tools": ["read"], "blocked_tools": []},
             "additional_instructions": ["stay concise"],
-            "keep_alive": True,
+            "keep_alive": {
+                "action": "set",
+                "value": {"policy": "pinned", "ttl_secs": 30},
+            },
             "model": "gpt-test",
             "provider": "openai",
             "provider_params": {
@@ -1889,8 +1909,14 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_turn_metadata():
                         "action": "set",
                         "value": {
                             "temperature": 0.2,
-                            "reasoning": {"effort": "medium"},
-                            "foo": "bar",
+                            "provider_tag": {
+                                "provider": "unknown",
+                                "bag": {
+                                    "namespace": "openai",
+                                    "key": "provider_params",
+                                    "body": "{\"reasoning\":{\"effort\":\"medium\"},\"foo\":\"bar\"}",
+                                },
+                            },
                         },
                     },
                     "connection_ref": {"action": "clear"},
@@ -2481,8 +2507,29 @@ async def test_mob_helper_and_respawn_paths_use_identity_native_receipts() -> No
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    helper = await client.spawn_mob_helper("mob-1", "help", role_name="worker")
-    forked = await client.fork_mob_helper("mob-1", "agent-a", "help", role_name="worker")
+    helper = await client.spawn_mob_helper(
+        "mob-1",
+        "help",
+        role_name="worker",
+        turn_metadata={
+            "connection_ref": {
+                "action": "set",
+                "value": {"realm": "dev", "binding": "default_openai"},
+            }
+        },
+    )
+    forked = await client.fork_mob_helper(
+        "mob-1",
+        "agent-a",
+        "help",
+        role_name="worker",
+        turn_metadata={
+            "connection_ref": {
+                "action": "set",
+                "value": {"realm": "dev", "binding": "default_openai"},
+            }
+        },
+    )
     respawned = await client.respawn_mob_member("mob-1", "agent-a")
 
     # App-facing receipts expose only `member_ref`; binding-era
@@ -2506,6 +2553,18 @@ async def test_mob_helper_and_respawn_paths_use_identity_native_receipts() -> No
         "mob/fork_helper",
         "mob/respawn",
     ]
+    assert calls[0][1]["turn_metadata"] == {
+        "connection_ref": {
+            "action": "set",
+            "value": {"realm": "dev", "binding": "default_openai"},
+        }
+    }
+    assert calls[1][1]["turn_metadata"] == {
+        "connection_ref": {
+            "action": "set",
+            "value": {"realm": "dev", "binding": "default_openai"},
+        }
+    }
 
 
 @pytest.mark.asyncio

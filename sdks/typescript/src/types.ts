@@ -237,12 +237,17 @@ export type TurnMetadataOverride<T> =
   | { readonly action: "set"; readonly value: T }
   | { readonly action: "clear" };
 
+export interface KeepAlivePolicy {
+  readonly policy: "pinned" | "policy_driven";
+  readonly ttlSecs: number;
+}
+
 /** Canonical runtime metadata carrier for session creation and turn starts. */
 export interface RuntimeTurnMetadata {
   readonly skillReferences?: SkillRef[];
   readonly flowToolOverlay?: TurnToolOverlay;
   readonly additionalInstructions?: string[];
-  readonly keepAlive?: boolean;
+  readonly keepAlive?: TurnMetadataOverride<KeepAlivePolicy>;
   readonly model?: string;
   readonly provider?: string;
   readonly providerParams?: TurnMetadataOverride<Record<string, unknown>>;

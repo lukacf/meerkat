@@ -188,6 +188,71 @@ fn apply_spawn_turn_metadata(
     Ok(())
 }
 
+fn apply_helper_turn_metadata(
+    options: &mut meerkat_mob::HelperOptions,
+    turn_metadata: Option<WireRuntimeTurnMetadata>,
+) -> Result<(), String> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err("mob helper turn_metadata.handling_mode is not supported".to_string());
+    }
+    if metadata.skill_references.is_some() {
+        return Err("mob helper turn_metadata.skill_references is not supported".to_string());
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err("mob helper turn_metadata.flow_tool_overlay is not supported".to_string());
+    }
+    if metadata.provider.is_some() {
+        return Err("mob helper turn_metadata.provider is not supported".to_string());
+    }
+    if metadata.keep_alive.is_some() {
+        return Err("mob helper turn_metadata.keep_alive is not supported".to_string());
+    }
+    if metadata.render_metadata.is_some() {
+        return Err("mob helper turn_metadata.render_metadata is not supported".to_string());
+    }
+    if metadata.additional_instructions.is_some() {
+        return Err(
+            "mob helper turn_metadata.additional_instructions is not supported".to_string(),
+        );
+    }
+
+    if let Some(model) = metadata.model {
+        options.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        options.provider_params_override = match provider_params {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
+                Some(params.to_legacy_provider_value())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob helper turn_metadata.provider_params clear is not supported".to_string(),
+                );
+            }
+        };
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        options.connection_ref = match connection_ref {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
+                Some(connection_ref)
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob helper turn_metadata.connection_ref clear is not supported".to_string(),
+                );
+            }
+        };
+    }
+
+    Ok(())
+}
+
 fn runtime_binding_from_wire(
     binding: meerkat_contracts::WireRuntimeBinding,
 ) -> Result<meerkat_mob::RuntimeBinding, String> {
@@ -1160,9 +1225,12 @@ pub async fn handle_flow_cancel(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobSpawnHelperParams {
     pub mob_id: String,
     pub prompt: String,
+    #[serde(default)]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     pub agent_identity: Option<String>,
     #[serde(default)]
@@ -1195,6 +1263,9 @@ pub async fn handle_spawn_helper(
     if let Some(role) = params.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
+    if let Err(err) = apply_helper_turn_metadata(&mut options, params.turn_metadata) {
+        return invalid_params(id, err);
+    }
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;
     match state
@@ -1225,10 +1296,13 @@ pub async fn handle_spawn_helper(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MobForkHelperParams {
     pub mob_id: String,
     pub source_member_id: String,
     pub prompt: String,
+    #[serde(default)]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default)]
     pub agent_identity: Option<String>,
     #[serde(default)]
@@ -1266,6 +1340,9 @@ pub async fn handle_fork_helper(
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role) = params.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
+    }
+    if let Err(err) = apply_helper_turn_metadata(&mut options, params.turn_metadata) {
+        return invalid_params(id, err);
     }
     options.runtime_mode = params.runtime_mode;
     options.backend = params.backend;

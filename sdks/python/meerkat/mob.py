@@ -328,12 +328,14 @@ class Mob:
         *,
         agent_identity: str | None = None,
         role_name: str | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> MobHelperResult:
         return await self._client.spawn_mob_helper(
             self.id,
             prompt,
             agent_identity=agent_identity,
             role_name=role_name,
+            turn_metadata=turn_metadata,
         )
 
     async def fork_helper(
@@ -344,6 +346,7 @@ class Mob:
         agent_identity: str | None = None,
         role_name: str | None = None,
         fork_context: dict[str, Any] | None = None,
+        turn_metadata: RuntimeTurnMetadata | dict[str, Any] | None = None,
     ) -> MobHelperResult:
         return await self._client.fork_mob_helper(
             self.id,
@@ -352,6 +355,7 @@ class Mob:
             agent_identity=agent_identity,
             role_name=role_name,
             fork_context=fork_context,
+            turn_metadata=turn_metadata,
         )
 
     async def wire(self, member: str, peer: str | dict[str, Any]) -> None:

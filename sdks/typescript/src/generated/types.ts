@@ -418,6 +418,7 @@ export interface MobSpawnHelperParams {
   prompt: string;
   role_name?: string;
   runtime_mode?: WireMobRuntimeMode;
+  turn_metadata?: WireRuntimeTurnMetadata;
 }
 
 export interface MobForkHelperParams {
@@ -429,6 +430,7 @@ export interface MobForkHelperParams {
   role_name?: string;
   runtime_mode?: WireMobRuntimeMode;
   source_member_id: string;
+  turn_metadata?: WireRuntimeTurnMetadata;
 }
 
 export interface MobHelperResult {

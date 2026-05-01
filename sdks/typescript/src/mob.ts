@@ -12,6 +12,7 @@ import type {
   MobSpawnResult,
   MobSpawnManyResultEntry,
   MobStatus,
+  RuntimeTurnMetadata,
   SpawnManySpec,
   SpawnSpec,
 } from "./types.js";
@@ -189,7 +190,12 @@ export class Mob {
 
   async spawnHelper(
     prompt: string,
-    options?: { agentIdentity?: string; roleName?: string; profileName?: string },
+    options?: {
+      agentIdentity?: string;
+      roleName?: string;
+      profileName?: string;
+      turnMetadata?: RuntimeTurnMetadata;
+    },
   ): Promise<MobHelperResult> {
     return this.client.spawnMobHelper(this.mobId, prompt, options);
   }
@@ -202,6 +208,7 @@ export class Mob {
       roleName?: string;
       profileName?: string;
       forkContext?: Record<string, unknown>;
+      turnMetadata?: RuntimeTurnMetadata;
     },
   ): Promise<MobHelperResult> {
     return this.client.forkMobHelper(this.mobId, sourceMemberId, prompt, options);

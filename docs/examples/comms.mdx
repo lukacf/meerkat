@@ -68,7 +68,12 @@ Keep-alive sessions stay resident so later comms or external events can wake the
   <Tab title="TypeScript">
     ```typescript
     const session = await client.createSession("You are a coordinator.", {
-      turnMetadata: { keepAlive: true },
+      turnMetadata: {
+        keepAlive: {
+          action: "set",
+          value: { policy: "pinned", ttlSecs: 30 },
+        },
+      },
       commsName: "agent-a",
     });
     ```

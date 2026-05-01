@@ -8,12 +8,13 @@
 //! These catch silent renames and accidental field removals.
 
 use meerkat_contracts::{
-    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeCapabilities,
-    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
-    RealtimeClientFrame, RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeReconnectPolicy,
-    RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent, WireRunResult,
-    WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary, WireUsage,
+    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, MobForkHelperParams,
+    MobSpawnHelperParams, RealtimeCapabilities, RealtimeChannelRole, RealtimeChannelState,
+    RealtimeChannelStatus, RealtimeChannelTarget, RealtimeClientFrame, RealtimeEvent,
+    RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
+    RealtimeOutputChunk, RealtimeOutputKind, RealtimeReconnectPolicy, RealtimeServerFrame,
+    RealtimeTurningMode, WireError, WireEvent, WireRunResult, WireSessionHistory, WireSessionInfo,
+    WireSessionMessage, WireSessionSummary, WireUsage,
 };
 use meerkat_core::{
     AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookPatch, HookPoint,
@@ -818,6 +819,47 @@ fn core_create_params_minimal_deserialize() {
     assert!(params.labels.is_none());
     assert!(params.app_context.is_none());
     assert!(params.shell_env.is_none());
+}
+
+#[test]
+fn mob_helper_params_use_turn_metadata_connection_carrier() {
+    let spawn: MobSpawnHelperParams = serde_json::from_value(serde_json::json!({
+        "mob_id": "mob-1",
+        "prompt": "help",
+        "turn_metadata": {
+            "connection_ref": {
+                "action": "set",
+                "value": { "realm": "dev", "binding": "default_openai" }
+            }
+        }
+    }))
+    .expect("spawn helper params should accept canonical turn_metadata");
+    assert!(spawn.turn_metadata.is_some());
+
+    let fork: MobForkHelperParams = serde_json::from_value(serde_json::json!({
+        "mob_id": "mob-1",
+        "source_member_id": "worker-1",
+        "prompt": "help",
+        "turn_metadata": {
+            "connection_ref": {
+                "action": "set",
+                "value": { "realm": "dev", "binding": "default_openai" }
+            }
+        }
+    }))
+    .expect("fork helper params should accept canonical turn_metadata");
+    assert!(fork.turn_metadata.is_some());
+
+    let err = serde_json::from_value::<MobSpawnHelperParams>(serde_json::json!({
+        "mob_id": "mob-1",
+        "prompt": "help",
+        "connection_ref": { "realm": "dev", "binding": "default_openai" }
+    }))
+    .expect_err("helper connection overrides must live inside turn_metadata");
+    assert!(
+        err.to_string().contains("connection_ref"),
+        "unexpected error: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

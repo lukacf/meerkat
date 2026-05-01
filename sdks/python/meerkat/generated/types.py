@@ -567,6 +567,7 @@ class MobSpawnHelperParams:
     backend: Optional[WireMobBackendKind] = None
     role_name: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    turn_metadata: Optional[WireRuntimeTurnMetadata] = None
 
 
 @dataclass
@@ -580,6 +581,7 @@ class MobForkHelperParams:
     fork_context: Optional[Any] = None
     role_name: Optional[str] = None
     runtime_mode: Optional[WireMobRuntimeMode] = None
+    turn_metadata: Optional[WireRuntimeTurnMetadata] = None
 
 
 @dataclass

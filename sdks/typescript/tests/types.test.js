@@ -961,7 +961,7 @@ describe("Session wrappers", () => {
       turnMetadata: {
         skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
         additionalInstructions: ["a"],
-        keepAlive: true,
+        keepAlive: { action: "set", value: { policy: "pinned", ttlSecs: 30 } },
         model: "m",
         provider: "openai",
         providerParams: {
@@ -974,7 +974,7 @@ describe("Session wrappers", () => {
     client._startTurnStreaming("s1", "hello", {
       turnMetadata: {
         additionalInstructions: ["a"],
-        keepAlive: true,
+        keepAlive: { action: "set", value: { policy: "pinned", ttlSecs: 30 } },
         model: "m",
         provider: "openai-compatible",
         providerParams: { action: "set", value: { foo: "bar" } },
@@ -1593,7 +1593,7 @@ describe("Parity wrappers", () => {
           skillReferences: [{ sourceUuid: "00000000-0000-4000-8000-000000000001", skillName: "read" }],
           flowToolOverlay: { allowedTools: ["read"], blockedTools: [] },
           additionalInstructions: ["stay concise"],
-          keepAlive: true,
+          keepAlive: { action: "set", value: { policy: "pinned", ttlSecs: 30 } },
           model: "gpt-test",
           provider: "openai",
           providerParams: {
@@ -1775,12 +1775,27 @@ describe("Parity wrappers", () => {
       };
     };
 
-    const spawnByRole = await client.spawnMobHelper("mob-1", "help", { roleName: "worker" });
+    const helperTurnMetadata = {
+      connectionRef: {
+        action: "set",
+        value: { realm: "dev", binding: "default_openai" },
+      },
+    };
+    const spawnByRole = await client.spawnMobHelper("mob-1", "help", {
+      roleName: "worker",
+      turnMetadata: helperTurnMetadata,
+    });
     const spawnByProfile = await client.spawnMobHelper("mob-1", "help", { profileName: "legacy-worker" });
     const forkByRole = await client.forkMobHelper("mob-1", "a", "help", { roleName: "worker" });
     const forkByProfile = await client.forkMobHelper("mob-1", "a", "help", { profileName: "legacy-worker" });
 
     assert.equal(calls[0].params.role_name, "worker");
+    assert.deepEqual(calls[0].params.turn_metadata, {
+      connection_ref: {
+        action: "set",
+        value: { realm: "dev", binding: "default_openai" },
+      },
+    });
     assert.equal(calls[1].params.role_name, "legacy-worker");
     assert.equal(calls[2].params.role_name, "worker");
     assert.equal(calls[3].params.role_name, "legacy-worker");

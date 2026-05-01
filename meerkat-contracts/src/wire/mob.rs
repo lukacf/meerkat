@@ -1492,6 +1492,8 @@ pub struct MobSpawnHelperParams {
     pub mob_id: String,
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role_name: Option<String>,
@@ -1509,6 +1511,8 @@ pub struct MobForkHelperParams {
     pub mob_id: String,
     pub source_member_id: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

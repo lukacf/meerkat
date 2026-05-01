@@ -527,7 +527,7 @@
           "FILE:@@//meerkat-tools/Cargo.toml a8aaeadc09ca73e40e22de101289e7271d93481a6d06cef97464d193916276e6",
           "FILE:@@//meerkat-mcp/Cargo.toml 780df611c521814efdbb5dd5396c18c5ca746bee3b05bae48ebdedaa67b6ea3a",
           "FILE:@@//meerkat-mcp-server/Cargo.toml 73b7d598926a9aaa6e6d767d734d988b840f3873830f3d016679ebf1ddf1e053",
-          "FILE:@@//meerkat/Cargo.toml dbcff7d487e3e79f93f40ba7e53d9ba1183f320f43757d43402b7e6bcafc546d",
+          "FILE:@@//meerkat/Cargo.toml 8d2ba766c6193c9aa9a15c2d780eb32f85c8dcc2dc85680cdf249fb5a563e877",
           "FILE:@@//meerkat-hooks/Cargo.toml 6da56c7c41d606a48e54f21de2c6d15e5b21f73180d0a1c757275aae14edecab",
           "FILE:@@//meerkat-memory/Cargo.toml a203ffd94d2c168d0518a064d59fa749edff5d0fe5cd1ad15f919765c932093e",
           "FILE:@@//meerkat-session/Cargo.toml c302a5e4d5b12d0f5ac1f827415c0aa4f17601e78a108e4bcfe25db6cd9e831b",

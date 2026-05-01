@@ -156,6 +156,7 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("link_name")
         && !source.contains("extern \"Rust\"")
         && !source.contains("#[repr(C)]")
+        && !source.contains("#[repr(transparent)]")
         && !source.contains("NonZeroUsize")
         && !source.contains("pub unsafe fn")
         && !source.contains("pub const unsafe fn")
@@ -166,6 +167,7 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("words: [u64; 4]")
         && source.matches("pub fn ").count() == 1
         && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
+        && source.contains("guard_type: TypeId")
         && source.contains("source_type: TypeId")
         && source.contains("inventory::collect!(AgentFactoryBuildAuthorityRegistration)")
         && source.contains("registrations.next().is_some()")
@@ -520,6 +522,142 @@ inventory = "0.3"
 }
 
 #[test]
+fn downstream_direct_authority_dep_cannot_steal_inventory_factory_policy_finalizer()
+-> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_direct_authority_dep_cannot_steal_inventory_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-direct-authority-inventory-steal"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat = {{ path = "{}", default-features = false }}
+meerkat-agent-build-authority = {{ path = "{}" }}
+meerkat-core = {{ path = "{}" }}
+inventory = "0.3"
+"#,
+            repo_root().join("meerkat").display(),
+            repo_root().join("meerkat-agent-build-authority").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!(
+            "fixtures/agent_builder_policy/downstream_inventory_steal_authority_forged_factory_policy.rs"
+        ),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream inventory-steal fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("assertion failed")
+            || stderr.contains("InvalidBuildAuthority")
+            || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("cannot transmute")
+            || stderr.contains("private"),
+        "downstream inventory-steal fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn downstream_direct_authority_dep_without_facade_cannot_register_factory_policy_finalizer()
+-> std::io::Result<()> {
+    if std::env::var_os("MEERKAT_DOWNSTREAM_CANARY_SKIP_CARGO").is_some() {
+        return Ok(());
+    }
+
+    if run_in_configured_bazel_child(
+        "downstream_direct_authority_dep_without_facade_cannot_register_factory_policy_finalizer",
+        bazel_cargo_check_env(),
+    )? {
+        return Ok(());
+    }
+
+    let temp = tempfile::tempdir()?;
+    let src_dir = temp.path().join("src");
+    fs::create_dir_all(&src_dir)?;
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "agent-builder-policy-downstream-direct-authority-no-facade"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+meerkat-agent-build-authority = {{ path = "{}" }}
+meerkat-core = {{ path = "{}" }}
+inventory = "0.3"
+"#,
+            repo_root().join("meerkat-agent-build-authority").display(),
+            repo_root().join("meerkat-core").display()
+        ),
+    )?;
+    fs::write(
+        src_dir.join("main.rs"),
+        include_str!(
+            "fixtures/agent_builder_policy/downstream_no_facade_registration_forged_factory_policy.rs"
+        ),
+    )?;
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(cargo)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", temp.path().join("target"))
+        .output()?;
+    assert!(
+        !output.status.success(),
+        "downstream no-facade forged-registration fixture unexpectedly compiled and ran; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("assertion failed")
+            || stderr.contains("InvalidBuildAuthority")
+            || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("cannot transmute")
+            || stderr.contains("private"),
+        "downstream no-facade fixture failed for the wrong reason:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn core_agent_builder_does_not_expose_public_build_bypass() {
     let builder = repo_file("meerkat-core/src/agent/builder.rs");
 
@@ -687,6 +825,23 @@ fn authority_build_scripts_do_not_leak_factory_seal_metadata() {
          dependency metadata; direct downstream dependents can read the same \
          DEP_* values"
     );
+}
+
+#[test]
+fn facade_cargo_does_not_feature_unify_standalone_builder_by_default() {
+    let cargo = repo_file("meerkat/Cargo.toml");
+
+    for line in cargo.lines() {
+        if line.trim_start().starts_with("meerkat-core") {
+            assert!(
+                !line.contains("standalone-agent-builder"),
+                "the facade Cargo graph must not enable \
+                 meerkat-core/standalone-agent-builder through its normal or \
+                 dev meerkat-core dependency; standalone use must remain an \
+                 explicit facade feature"
+            );
+        }
+    }
 }
 
 #[test]

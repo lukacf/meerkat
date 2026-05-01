@@ -1276,7 +1276,11 @@ mod scenario_09_session_service {
 // SCENARIO 10: Memory compaction + semantic recall
 // ============================================================================
 
-#[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+#[cfg(all(
+    feature = "memory-store-session",
+    feature = "session-compaction",
+    feature = "standalone-agent-builder"
+))]
 mod scenario_10_memory {
     use super::*;
 

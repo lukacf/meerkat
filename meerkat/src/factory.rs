@@ -19,7 +19,12 @@ use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
+struct AgentFactoryBuildAuthorityGuard;
 struct AgentFactoryBuildAuthoritySource;
+
+fn agent_factory_build_authority_guard_type() -> TypeId {
+    TypeId::of::<AgentFactoryBuildAuthorityGuard>()
+}
 
 fn agent_factory_build_authority_source_type() -> TypeId {
     TypeId::of::<AgentFactoryBuildAuthoritySource>()
@@ -27,35 +32,61 @@ fn agent_factory_build_authority_source_type() -> TypeId {
 
 #[allow(unsafe_code)]
 const fn agent_factory_build_authority_registration(
+    guard_type: fn() -> TypeId,
     source_type: fn() -> TypeId,
 ) -> meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration {
-    // SAFETY: registration is a transparent wrapper around a source-type
-    // provider function. The provider returns a marker type private to this
-    // factory module.
+    #[allow(dead_code)]
+    #[derive(Clone, Copy)]
+    struct RegistrationRepr {
+        guard_type: fn() -> TypeId,
+        source_type: fn() -> TypeId,
+    }
+
+    // SAFETY: the facade owns both marker providers, and both markers are
+    // private to this factory module. The authority crate intentionally keeps
+    // the registration representation opaque to downstream dependents.
     unsafe {
         std::mem::transmute::<
-            fn() -> TypeId,
+            RegistrationRepr,
             meerkat_agent_build_authority::AgentFactoryBuildAuthorityRegistration,
-        >(source_type)
+        >(RegistrationRepr {
+            guard_type,
+            source_type,
+        })
     }
 }
 
 inventory::submit! {
-    agent_factory_build_authority_registration(agent_factory_build_authority_source_type)
+    agent_factory_build_authority_registration(
+        agent_factory_build_authority_guard_type,
+        agent_factory_build_authority_source_type,
+    )
 }
 
 #[allow(unsafe_code)]
 fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    let source_type = agent_factory_build_authority_source_type();
+    #[allow(dead_code)]
+    #[derive(Clone, Copy)]
+    struct AuthorityRepr {
+        guard_type: TypeId,
+        source_type: TypeId,
+    }
 
-    // SAFETY: `AgentFactoryBuildAuthority` is a transparent wrapper over a
-    // `TypeId`. The source type is private to this module and registered once
-    // above, so downstream code cannot mirror the accepted value through public
-    // source constants.
+    let guard_type = agent_factory_build_authority_guard_type();
+    let source_type = agent_factory_build_authority_source_type();
+    let authority = AuthorityRepr {
+        guard_type,
+        source_type,
+    };
+
+    // SAFETY: the authority crate validates both private marker TypeIds
+    // against the single facade registration above. The concrete authority
+    // representation is intentionally opaque to downstream dependents.
     unsafe {
-        std::mem::transmute::<TypeId, meerkat_agent_build_authority::AgentFactoryBuildAuthority>(
-            source_type,
-        )
+        std::mem::transmute::<
+            AuthorityRepr,
+            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
+        >(authority)
     }
 }
 

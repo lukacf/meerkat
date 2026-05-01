@@ -12,7 +12,7 @@
  *     can install an OAuth-backed resolver callback that hands Meerkat a
  *     typed lease envelope per structural connection reference.
  *   - `withConnectionRef` — convenience helper that wires an existing
- *     session config with a connection reference for `createSession`.
+ *     session config with a first-turn connection reference for `createSession`.
  *
  * The WASM runtime's session-creation path (plan §4d.wasm.2) takes
  * credentials either from bootstrap-time realm config (populated via
@@ -22,7 +22,12 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import type { ConnectionRef, SessionConfig } from './types.js';
+import type {
+  ConnectionRef,
+  RuntimeTurnMetadata,
+  SessionConfig,
+  TurnMetadataOverride,
+} from './types.js';
 
 /** Canonical WASM external-auth resolver handle for host-owned browser auth. */
 export const WASM_EXTERNAL_AUTH_RESOLVER_HANDLE = 'wasm_host' as const;
@@ -375,9 +380,16 @@ export function clearExternalAuthResolver(wasm: {
 export function withConnectionRef<T extends SessionConfig>(
   connectionRef: ConnectionRef,
   config: T,
-): T & { connectionRef: ConnectionRef } {
+): T & {
+  turnMetadata: RuntimeTurnMetadata & {
+    connectionRef: TurnMetadataOverride<ConnectionRef>;
+  };
+} {
   return {
     ...config,
-    connectionRef,
+    turnMetadata: {
+      ...config.turnMetadata,
+      connectionRef: { action: 'set', value: connectionRef },
+    },
   };
 }

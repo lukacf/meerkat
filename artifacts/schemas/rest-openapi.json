@@ -8564,12 +8564,6 @@
           "peer_meta": {
             "$ref": "#/components/schemas/JsonValue"
           },
-          "preload_skills": {
-            "items": {
-              "$ref": "#/components/schemas/SkillKey"
-            },
-            "type": "array"
-          },
           "prompt": {
             "oneOf": [
               {

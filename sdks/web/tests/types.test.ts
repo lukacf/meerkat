@@ -59,11 +59,16 @@ const fullConfig: RuntimeConfig = {
 
 const sessionConfig: SessionConfig = {
   model: 'claude-sonnet-4-5',
-  connectionRef: { realm: 'default', binding: 'anthropic' },
+  turnMetadata: {
+    connectionRef: {
+      action: 'set',
+      value: { realm: 'default', binding: 'anthropic' },
+    },
+    additionalInstructions: [{ kind: 'host', body: 'Be concise.' }],
+  },
   systemPrompt: 'You are helpful.',
   maxTokens: 1024,
   labels: { env: 'test' },
-  additionalInstructions: ['Be concise.'],
 };
 
 // ─── Auth RPC helpers ───────────────────────────────────────────

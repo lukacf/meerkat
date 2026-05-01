@@ -44,6 +44,34 @@ export interface ConnectionRef {
   profile?: string;
 }
 
+/** Runtime turn metadata override for fields that can be set or cleared. */
+export type TurnMetadataOverride<T> =
+  | { action: 'set'; value: T }
+  | { action: 'clear' };
+
+/** Keep-alive policy for a materialized session. */
+export interface KeepAlivePolicy {
+  ttlSecs: number;
+  policy: 'pinned' | 'policy_driven';
+}
+
+/** Additional typed instruction attached to the first turn. */
+export interface TurnInstruction {
+  kind: 'user' | 'system' | 'host';
+  body: string;
+}
+
+/** Canonical first-turn runtime metadata carrier for direct sessions. */
+export interface RuntimeTurnMetadata {
+  model?: string;
+  provider?: string;
+  providerParams?: TurnMetadataOverride<Record<string, unknown>>;
+  connectionRef?: TurnMetadataOverride<ConnectionRef>;
+  keepAlive?: TurnMetadataOverride<KeepAlivePolicy>;
+  skillReferences?: SkillKey[];
+  additionalInstructions?: TurnInstruction[];
+}
+
 /** Configuration for creating a direct (non-mob) session.
  *
  * Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
@@ -54,20 +82,16 @@ export interface ConnectionRef {
 export interface SessionConfig {
   /** LLM model identifier. */
   model: string;
-  /** Optional structural auth binding reference. */
-  connectionRef?: ConnectionRef;
+  /** Canonical first-turn runtime metadata. */
+  turnMetadata?: RuntimeTurnMetadata;
   /** System prompt. */
   systemPrompt?: string;
   /** Max tokens per response. Default: 4096. */
   maxTokens?: number;
   /** Enable comms for this session. */
   commsName?: string;
-  /** Whether this session runs in keep-alive mode. */
-  keepAlive?: boolean;
   /** Application-defined labels. */
   labels?: Record<string, string>;
-  /** Additional instruction sections appended to the system prompt. */
-  additionalInstructions?: string[];
   /** Opaque application context. */
   appContext?: unknown;
 }

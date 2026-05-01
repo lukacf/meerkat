@@ -173,10 +173,9 @@ fn recovery_initial_turn_metadata(
 
     let mut metadata = turn_metadata.unwrap_or_default();
     if let Some(preload_skills) = preload_skills {
-        metadata
-            .skill_references
-            .get_or_insert_with(Vec::new)
-            .extend(preload_skills);
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = Some(preload_skills);
+        }
     }
     if let Some(additional_instructions) = additional_instructions {
         let instructions = additional_instructions
@@ -189,11 +188,8 @@ fn recovery_initial_turn_metadata(
                 })
             })
             .collect::<Vec<_>>();
-        if !instructions.is_empty() {
-            metadata
-                .additional_instructions
-                .get_or_insert_with(Vec::new)
-                .extend(instructions);
+        if !instructions.is_empty() && metadata.additional_instructions.is_none() {
+            metadata.additional_instructions = Some(instructions);
         }
     }
     if keep_alive && metadata.keep_alive.is_none() {
@@ -924,7 +920,8 @@ mod tests {
 
         assert_eq!(
             metadata.skill_references,
-            Some(vec![skill_key("metadata-skill"), skill])
+            Some(vec![skill_key("metadata-skill")]),
+            "canonical skill references must not be mutated by split recovery state"
         );
         assert_eq!(
             metadata.keep_alive,
@@ -935,11 +932,26 @@ mod tests {
         );
         let instructions = metadata
             .additional_instructions
-            .expect("instructions should be folded into metadata");
-        assert_eq!(instructions.len(), 2);
+            .expect("canonical instructions should be preserved");
+        assert_eq!(instructions.len(), 1);
         assert_eq!(instructions[0].body, "metadata instruction");
-        assert_eq!(instructions[1].kind, TurnInstructionKind::Host);
-        assert_eq!(instructions[1].body, "persisted instruction");
+
+        let metadata_from_split = recovery_initial_turn_metadata(
+            Some(RuntimeTurnMetadata::default()),
+            Some(vec![skill.clone()]),
+            Some(vec!["persisted instruction".to_string(), " ".to_string()]),
+            true,
+            true,
+        )
+        .expect("runtime-owned recovery metadata from split compatibility state");
+
+        assert_eq!(metadata_from_split.skill_references, Some(vec![skill]));
+        let instructions = metadata_from_split.additional_instructions.expect(
+            "split compatibility instructions should be folded when canonical field absent",
+        );
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].kind, TurnInstructionKind::Host);
+        assert_eq!(instructions[0].body, "persisted instruction");
 
         assert!(
             recovery_initial_turn_metadata(

@@ -25,7 +25,7 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
       "method": "session/create",
       "params": {
         "prompt": "What is the capital of France?",
-        "model": "claude-sonnet-4-6"
+        "turn_metadata": { "model": "claude-sonnet-4-6" }
       }
     }
     ```
@@ -34,14 +34,14 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
     ```bash
     curl -X POST http://localhost:8080/sessions \
       -H "Content-Type: application/json" \
-      -d '{"prompt": "What is the capital of France?", "model": "claude-sonnet-4-6"}'
+      -d '{"prompt": "What is the capital of France?", "turn_metadata": {"model": "claude-sonnet-4-6"}}'
     ```
   </Tab>
   <Tab title="MCP">
     ```json
     {
       "prompt": "What is the capital of France?",
-      "model": "claude-sonnet-4-6"
+      "turn_metadata": { "model": "claude-sonnet-4-6" }
     }
     ```
     Called via the `meerkat_run` tool.
@@ -75,8 +75,8 @@ Rust examples use the runtime-backed `SessionService` path, which is the same ca
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     }).await?;
@@ -505,9 +505,14 @@ Cancel an in-flight turn. No-op if the session is idle.
       "method": "session/create",
       "params": {
         "prompt": "Hello",
-        "model": "gpt-5.2",
-        "provider": "openai",
-        "provider_params": { "reasoning_effort": "high" }
+        "turn_metadata": {
+          "model": "gpt-5.2",
+          "provider": "openai",
+          "provider_params": {
+            "action": "set",
+            "value": { "temperature": 0.7 }
+          }
+        }
       }
     }
     ```
@@ -516,15 +521,17 @@ Cancel an in-flight turn. No-op if the session is idle.
     ```bash
     curl -X POST http://localhost:8080/sessions \
       -H "Content-Type: application/json" \
-      -d '{"prompt":"Explain monads","model":"gpt-5.2","provider":"openai","provider_params":{"temperature":0.7}}'
+      -d '{"prompt":"Explain monads","turn_metadata":{"model":"gpt-5.2","provider":"openai","provider_params":{"action":"set","value":{"temperature":0.7}}}}'
     ```
   </Tab>
   <Tab title="MCP">
     ```json
     {
       "prompt": "Hello",
-      "model": "gpt-5.2",
-      "provider": "openai"
+      "turn_metadata": {
+        "model": "gpt-5.2",
+        "provider": "openai"
+      }
     }
     ```
     Called via the `meerkat_run` tool.
@@ -556,11 +563,20 @@ Cancel an in-flight turn. No-op if the session is idle.
         system_prompt: None,
         max_tokens: None,
         event_tx: None,
-        skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: Some(SessionBuildOptions {
-            provider: Some(Provider::OpenAi),
-            provider_params: Some(json!({"temperature": 0.7})),
+            initial_turn_metadata: Some(RuntimeTurnMetadata {
+                model: Some(ModelId::new("gpt-5.2")),
+                provider: Some(Provider::OpenAI),
+                provider_params: Some(TurnMetadataOverride::Set(
+                    ProviderParamsOverride {
+                        temperature: Some(0.7),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }),
             ..Default::default()
         }),
         labels: None,

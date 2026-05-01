@@ -4,6 +4,7 @@ import type {
   RuntimeConfig,
   InitResult,
   SessionConfig,
+  RuntimeTurnMetadata,
   MobDefinition,
   JsonSchema,
   ToolCallback,
@@ -33,19 +34,44 @@ function toWasmConfig(config: RuntimeConfig): Record<string, unknown> {
   };
 }
 
+function metadataOverrideToWasm<T>(
+  override: { action: 'set'; value: T } | { action: 'clear' } | undefined,
+  mapValue: (value: T) => unknown = (value) => value,
+): unknown {
+  if (!override) return undefined;
+  if (override.action === 'clear') return { action: 'clear' };
+  return { action: 'set', value: mapValue(override.value) };
+}
+
+function turnMetadataToWasm(
+  metadata: RuntimeTurnMetadata | undefined,
+  defaultModel: string,
+): Record<string, unknown> {
+  return {
+    model: metadata?.model ?? defaultModel,
+    provider: metadata?.provider,
+    provider_params: metadataOverrideToWasm(metadata?.providerParams),
+    connection_ref: metadataOverrideToWasm(metadata?.connectionRef),
+    keep_alive: metadataOverrideToWasm(metadata?.keepAlive, (value) => ({
+      ttl_secs: value.ttlSecs,
+      policy: value.policy,
+    })),
+    skill_references: metadata?.skillReferences,
+    additional_instructions: metadata?.additionalInstructions,
+  };
+}
+
 function sessionToWasm(config: SessionConfig): Record<string, unknown> {
   // Plan §4d.wasm.2 + §6.13: per-session api_key / base_url fields are
   // deleted. Credentials come from bootstrap-populated config.realm or
   // the host's registered external-auth resolver.
   return {
     model: config.model,
-    connection_ref: config.connectionRef,
+    turn_metadata: turnMetadataToWasm(config.turnMetadata, config.model),
     system_prompt: config.systemPrompt,
     max_tokens: config.maxTokens,
     comms_name: config.commsName,
-    keep_alive: config.keepAlive,
     labels: config.labels,
-    additional_instructions: config.additionalInstructions,
     app_context: config.appContext,
   };
 }

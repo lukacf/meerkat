@@ -585,13 +585,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                     ("enable_memory", bool_schema()),
                     ("enable_mob", bool_schema()),
                     ("budget_limits", json_value.clone()),
-                    (
-                        "preload_skills",
-                        serde_json::json!({
-                            "type": "array",
-                            "items": schema_ref("SkillKey")
-                        }),
-                    ),
                     ("labels", labels),
                     ("app_context", json_value.clone()),
                     (
@@ -1841,6 +1834,7 @@ mod tests {
             "model",
             "provider",
             "provider_params",
+            "preload_skills",
         ] {
             assert!(
                 !properties.contains_key(split_field),

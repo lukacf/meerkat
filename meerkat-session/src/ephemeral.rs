@@ -736,25 +736,47 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     }
 
     fn fallback_llm_identity_from_create_request(req: &CreateSessionRequest) -> SessionLlmIdentity {
-        let provider = req
+        let metadata = req
             .build
             .as_ref()
-            .and_then(|build| build.provider)
-            .or_else(|| meerkat_core::Provider::infer_from_model(&req.model))
+            .and_then(|build| build.initial_turn_metadata.as_ref());
+        let model = metadata
+            .and_then(|metadata| metadata.model.as_ref())
+            .map(|model| model.as_str().to_string())
+            .unwrap_or_else(|| req.model.clone());
+        let provider = metadata
+            .and_then(|metadata| metadata.provider)
+            .or_else(|| req.build.as_ref().and_then(|build| build.provider))
+            .or_else(|| meerkat_core::Provider::infer_from_model(&model))
             .unwrap_or(meerkat_core::Provider::Other);
-        let provider_params = req
-            .build
-            .as_ref()
-            .and_then(|build| build.provider_params.clone());
-        SessionLlmIdentity {
-            model: req.model.clone(),
-            provider,
-            self_hosted_server_id: None,
-            provider_params,
-            connection_ref: req
+        let provider_params = match metadata.and_then(|metadata| metadata.provider_params.as_ref())
+        {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params)) => {
+                Some(params.to_legacy_provider_value())
+            }
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => None,
+            None => req
+                .build
+                .as_ref()
+                .and_then(|build| build.provider_params.clone()),
+        };
+        let connection_ref = match metadata.and_then(|metadata| metadata.connection_ref.as_ref()) {
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                connection_ref,
+            )) => Some(connection_ref.clone()),
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear) => None,
+            None => req
                 .build
                 .as_ref()
                 .and_then(|build| build.connection_ref.clone()),
+        };
+
+        SessionLlmIdentity {
+            model,
+            provider,
+            self_hosted_server_id: None,
+            provider_params,
+            connection_ref,
         }
     }
 
@@ -4061,6 +4083,64 @@ mod inline_video_admission_tests {
                 .expect("validated identities lock poisoned"),
             vec![durable_identity]
         );
+    }
+
+    #[test]
+    fn fallback_identity_uses_canonical_initial_turn_metadata() {
+        let provider_params = meerkat_core::lifecycle::run_primitive::ProviderParamsOverride {
+            temperature: Some(0.4),
+            ..Default::default()
+        };
+        let expected_params = provider_params.to_legacy_provider_value();
+        let connection_ref = meerkat_core::ConnectionRef {
+            realm: meerkat_core::connection::RealmId::parse("default")
+                .expect("valid realm fixture"),
+            binding: meerkat_core::connection::BindingId::parse("openai")
+                .expect("valid binding fixture"),
+            profile: None,
+        };
+        let request = CreateSessionRequest {
+            model: "request-model-should-not-win".to_string(),
+            prompt: ContentInput::Text("defer".to_string()),
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                initial_turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(
+                            "metadata-model",
+                        )),
+                        provider: Some(Provider::OpenAI),
+                        provider_params: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                                provider_params,
+                            ),
+                        ),
+                        connection_ref: Some(
+                            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                                connection_ref.clone(),
+                            ),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            }),
+            labels: None,
+        };
+
+        let identity =
+            EphemeralSessionService::<BuilderIdentityProbe>::fallback_llm_identity_from_create_request(
+                &request,
+            );
+
+        assert_eq!(identity.model, "metadata-model");
+        assert_eq!(identity.provider, Provider::OpenAI);
+        assert_eq!(identity.provider_params, Some(expected_params));
+        assert_eq!(identity.connection_ref, Some(connection_ref));
     }
 
     #[tokio::test]

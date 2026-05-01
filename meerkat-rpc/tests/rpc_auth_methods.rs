@@ -69,24 +69,32 @@ fn every_auth_rpc_method_round_trips_through_envelope() {
     }
 }
 
-/// session.create envelope accepts a `connection_ref` field nested
-/// inside the params. Parses cleanly without flattening or discarding
-/// the field.
+/// session.create envelope accepts a canonical `turn_metadata.connection_ref`
+/// field nested inside the params. Parses cleanly without flattening or
+/// discarding the field.
 #[test]
-fn session_create_envelope_preserves_connection_ref() {
+fn session_create_envelope_preserves_turn_metadata_connection_ref() {
     let envelope = dispatch(
         "session.create",
         json!({
-            "model": "claude-sonnet-4-5",
             "prompt": "hi",
-            "connection_ref": {"realm_id": "realm-x", "binding_id": "bind-y"}
+            "turn_metadata": {
+                "model": "claude-sonnet-4-5",
+                "connection_ref": {
+                    "action": "set",
+                    "value": {"realm": "realm-x", "binding": "bind-y"}
+                }
+            }
         }),
     );
 
     let params = envelope.get("params").expect("params present");
     let cref = params
+        .get("turn_metadata")
+        .expect("turn_metadata preserved in params")
         .get("connection_ref")
-        .expect("connection_ref preserved in params");
-    assert_eq!(cref["realm_id"], "realm-x");
-    assert_eq!(cref["binding_id"], "bind-y");
+        .expect("connection_ref preserved in turn_metadata");
+    assert_eq!(cref["action"], "set");
+    assert_eq!(cref["value"]["realm"], "realm-x");
+    assert_eq!(cref["value"]["binding"], "bind-y");
 }

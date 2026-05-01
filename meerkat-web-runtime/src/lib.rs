@@ -162,10 +162,10 @@ struct MobDefinitionHeader {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionConfig {
     model: String,
-    /// Optional structural connection reference. When set, overrides the
-    /// default provider-match from bootstrap-populated `config.realm`.
+    /// Canonical first-turn runtime metadata. When set, overrides model,
+    /// provider, auth binding, keep-alive, and first-turn instructions.
     #[serde(default)]
-    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
+    turn_metadata: Option<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>,
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
@@ -173,15 +173,9 @@ struct SessionConfig {
     /// Enable comms for this session (registers in InprocRegistry).
     #[serde(default)]
     comms_name: Option<String>,
-    /// Whether this session stays alive after the initial turn (enables comms drain loop).
-    #[serde(default)]
-    keep_alive: bool,
     /// Application-defined labels (flow through mob spawn, not used at create_session level).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BTreeMap<String, String>>,
-    /// Additional instruction sections appended to the system prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_context: Option<serde_json::Value>,
@@ -1189,8 +1183,7 @@ fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
     handle
 }
 
-fn build_session_request_with_connection_ref(
-    connection_ref: Option<&meerkat_contracts::WireConnectionRef>,
+fn build_session_request(
     model: &str,
     config: &SessionConfig,
     system_prompt: Option<String>,
@@ -1207,14 +1200,31 @@ fn build_session_request_with_connection_ref(
         .map_err(|e| err_js("invalid_config", &e))?;
 
     let mut build_config = AgentBuildConfig::new(model);
-    if let Some(conn) = connection_ref {
-        build_config.connection_ref = Some(conn.clone().into());
+    let mut initial_turn_metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        config
+            .turn_metadata
+            .clone()
+            .map(Into::into)
+            .unwrap_or_default();
+    match initial_turn_metadata.model.as_ref() {
+        Some(metadata_model) if metadata_model.as_str() != model => {
+            return Err(err_js(
+                "invalid_config",
+                "turn_metadata.model must match session model",
+            ));
+        }
+        Some(_) => {}
+        None => {
+            initial_turn_metadata.model = Some(
+                meerkat_core::lifecycle::run_primitive::ModelId::new(model.to_string()),
+            );
+        }
     }
     if let Some(name) = config.comms_name.clone() {
         build_config.comms_name = Some(name);
-        build_config.keep_alive = config.keep_alive;
     }
-    build_config.additional_instructions = config.additional_instructions.clone();
+    build_config.initial_turn_metadata =
+        (!initial_turn_metadata.is_empty()).then_some(initial_turn_metadata);
     build_config.app_context = config.app_context.clone();
 
     Ok(meerkat_core::service::CreateSessionRequest {
@@ -1230,20 +1240,25 @@ fn build_session_request_with_connection_ref(
     })
 }
 
+fn session_config_requests_keep_alive(config: &SessionConfig) -> bool {
+    matches!(
+        config
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.keep_alive.as_ref()),
+        Some(meerkat_contracts::wire::runtime::WireTurnMetadataOverride::Set(_))
+    )
+}
+
 fn create_runtime_backed_session(
     config: SessionConfig,
     system_prompt: Option<String>,
     mob_id: String,
 ) -> Result<u32, JsValue> {
     let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
-    let keep_alive = config.comms_name.is_some() && config.keep_alive;
+    let keep_alive = config.comms_name.is_some() && session_config_requests_keep_alive(&config);
     let model = config.model.clone();
-    let request = build_session_request_with_connection_ref(
-        config.connection_ref.as_ref(),
-        &model,
-        &config,
-        system_prompt,
-    )?;
+    let request = build_session_request(&model, &config, system_prompt)?;
 
     let created = futures::executor::block_on(session_service.create_session(request))
         .map_err(err_session)?;
@@ -2475,13 +2490,16 @@ mod tests {
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
         merge_runtime_system_context_state, parse_mobpack, poll_subscription,
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    use super::{
+        SessionConfig, build_service_infrastructure, build_session_request,
+        populate_realm_from_api_keys,
+    };
     #[cfg(target_arch = "wasm32")]
     use super::{
         append_system_context, create_session_simple, destroy_session, get_session_state,
         init_runtime_from_config,
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    use super::{build_service_infrastructure, populate_realm_from_api_keys};
     #[cfg(not(target_arch = "wasm32"))]
     use super::{helper_result_payload, spawn_member_result_payload, spawn_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
@@ -2546,6 +2564,64 @@ capabilities = [{capability_values}]
                 .expect("test binding id"),
             profile: None,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn direct_session_config_uses_canonical_initial_turn_metadata() {
+        let config: SessionConfig = serde_json::from_value(json!({
+            "model": "claude-sonnet-4-5",
+            "comms_name": "browser-agent",
+            "turn_metadata": {
+                "connection_ref": {
+                    "action": "set",
+                    "value": { "realm": "default", "binding": "default_anthropic" }
+                },
+                "keep_alive": {
+                    "action": "set",
+                    "value": { "ttl_secs": 30, "policy": "pinned" }
+                },
+                "additional_instructions": [
+                    { "kind": "host", "body": "Use browser context." }
+                ]
+            }
+        }))
+        .expect("session config with turn metadata");
+
+        let request =
+            build_session_request("claude-sonnet-4-5", &config, None).expect("build request");
+        let build = request.build.expect("session build options");
+
+        assert!(build.provider.is_none());
+        assert!(build.provider_params.is_none());
+        assert!(build.connection_ref.is_none());
+        assert!(!build.keep_alive);
+        assert!(build.additional_instructions.is_none());
+
+        let metadata = build
+            .initial_turn_metadata
+            .expect("first-turn metadata should be canonical carrier");
+        assert_eq!(
+            metadata.model.as_ref().map(|model| model.as_str()),
+            Some("claude-sonnet-4-5")
+        );
+        let connection_ref = metadata
+            .connection_ref
+            .as_ref()
+            .and_then(|override_value| override_value.as_set())
+            .expect("connection_ref metadata");
+        assert_eq!(connection_ref.realm.as_str(), "default");
+        assert_eq!(connection_ref.binding.as_str(), "default_anthropic");
+        assert!(metadata.keep_alive.is_some());
+        assert_eq!(
+            metadata
+                .additional_instructions
+                .as_ref()
+                .and_then(|instructions| instructions.first())
+                .map(|instruction| instruction.body.as_str()),
+            Some("Use browser context.")
+        );
     }
 
     #[cfg(target_arch = "wasm32")]

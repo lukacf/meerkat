@@ -295,6 +295,14 @@ impl CoreExecutor for PersistentRuntimeExecutor {
         }
 
         if primitive.is_context_only_apply_without_turn() {
+            if primitive
+                .build_only_overrides()
+                .is_some_and(|overrides| !overrides.is_empty())
+            {
+                return Err(CoreExecutorError::apply_failed_primitive_rejected(
+                    BUILD_ONLY_RECOVERY_OVERRIDE_ERROR,
+                ));
+            }
             let RunPrimitive::StagedInput(staged) = &primitive else {
                 unreachable!("context-only apply without turn only matches staged primitives");
             };
@@ -1304,6 +1312,52 @@ mod tests {
             .await
             .expect("discard live session");
         adapter.unregister_session(&result.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_runtime_executor_rejects_context_only_build_only_overrides() {
+        use meerkat_core::lifecycle::InputId;
+        use meerkat_core::lifecycle::RunId;
+        use meerkat_core::lifecycle::run_primitive::{
+            ConversationContextAppend, RuntimeBuildOnlyTurnOverrides, RuntimeExecutionKind,
+            RuntimeTurnMetadata, StagedRunInput,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter) = build_test_service(&temp).await;
+        let mut executor =
+            PersistentRuntimeExecutor::new(service, adapter, meerkat_core::SessionId::new());
+        let primitive = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+            appends: Vec::new(),
+            context_appends: vec![ConversationContextAppend {
+                key: "ctx-build-only".to_string(),
+                content: CoreRenderable::Text {
+                    text: "context-only runtime context".to_string(),
+                },
+            }],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                ..Default::default()
+            }),
+            build_only_overrides: Some(RuntimeBuildOnlyTurnOverrides {
+                system_prompt: Some("must not be dropped".to_string()),
+                ..Default::default()
+            }),
+        });
+
+        let error = executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect_err("context-only runtime applies must reject build-only overrides");
+
+        assert!(
+            error
+                .to_string()
+                .contains(BUILD_ONLY_RECOVERY_OVERRIDE_ERROR),
+            "unexpected rejection reason: {error}"
+        );
     }
 
     #[tokio::test]

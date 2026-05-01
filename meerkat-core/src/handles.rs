@@ -245,6 +245,11 @@ pub enum RequestTransitionError {
     /// No tracked request with this key.
     #[error("request not tracked")]
     NotFound,
+    /// The transport request has not been bound to its machine lifecycle
+    /// authority, so semantic terminal/cancel/complete decisions are not
+    /// available.
+    #[error("request lifecycle authority not bound")]
+    AuthorityUnavailable,
     /// The request is already in a terminal phase; the requested transition is
     /// rejected rather than silently overwriting prior state.
     #[error("request already terminal (phase = {current})")]
@@ -348,7 +353,7 @@ pub trait SurfaceRequestLifecycleHandle: Send + Sync {
         &self,
         key: &str,
         outcome: SurfaceRequestTerminalOutcome,
-    ) -> SurfaceRequestTerminalDisposition;
+    ) -> Result<SurfaceRequestTerminalDisposition, RequestTransitionError>;
 
     fn phase(&self, key: &str) -> Option<SurfaceRequestPhase>;
 
@@ -358,7 +363,7 @@ pub trait SurfaceRequestLifecycleHandle: Send + Sync {
 
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError>;
 
-    fn finish_unpublished(&self, key: &str) -> CompleteTransition;
+    fn finish_unpublished(&self, key: &str) -> Result<CompleteTransition, RequestTransitionError>;
 
     fn remove(&self, key: &str);
 }

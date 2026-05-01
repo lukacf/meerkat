@@ -166,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let tool_name = name.clone();
                         let request_id_for_task = request_id.clone();
                         let request_key_for_task = request_key.clone();
+                        let terminal_context = context.clone();
                         let handle = tokio::spawn(async move {
                             let terminal = match get_state().await {
                                 Ok(state) => match tools::handle_tool_call(
@@ -176,18 +177,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Some(progress_notifier),
                                     Some(context),
                                 ).await {
-                                    Ok(result) => RequestTerminal::respond_without_publish(json!({
+                                    Ok(result) => terminal_context.classify_success_terminal(json!({
                                         "jsonrpc": "2.0",
                                         "id": request_id_for_task,
                                         "result": result
                                     })),
-                                    Err(err) => RequestTerminal::respond_without_publish(json!({
+                                    Err(err) => terminal_context.classify_failure_terminal(json!({
                                         "jsonrpc": "2.0",
                                         "id": request_id_for_task,
                                         "error": {"code": err.code, "message": err.message}
                                     })),
                                 },
-                                Err(err) => RequestTerminal::respond_without_publish(json!({
+                                Err(err) => terminal_context.classify_failure_terminal(json!({
                                     "jsonrpc": "2.0",
                                     "id": request_id_for_task,
                                     "error": {"code": -32603, "message": err}

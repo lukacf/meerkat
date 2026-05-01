@@ -62,21 +62,46 @@ pub struct RequestTerminal<T> {
 
 #[derive(Debug)]
 enum RequestTerminalKind<T> {
-    /// Inline terminal. Cancellation requests are ignored for this response,
-    /// matching the pre-tracking behavior of ordinary RPC requests.
+    /// Inline terminal classified by the lifecycle authority. Cancellation
+    /// requests are ignored for this response because the machine classified
+    /// the tracked request as inline.
     Inline(T),
+    /// Inline terminal for untracked observation work. Supplying a tracked key
+    /// with this terminal is rejected so public callers cannot bypass
+    /// lifecycle classification.
+    UntrackedInline(T),
+    /// Unpublished terminal for untracked work. Supplying a tracked key with
+    /// this terminal is rejected so public callers cannot bypass machine
+    /// terminal classification for tracked successes.
+    UntrackedRespondWithoutPublish(T),
+    /// Failure produced before a session-owned lifecycle authority could be
+    /// bound. This may only carry a failed terminal; successful terminals still
+    /// fail closed without authority.
+    PreAuthorityFailure(T),
     /// Committed terminal. The request's side effects have been persisted and
     /// the client must observe the result; late cancel does not override this.
     Publish(T),
     /// Uncommitted terminal. Side effects did not land; a late cancel can
     /// supersede this via [`CompleteOutcome::SupersededByCancel`].
     RespondWithoutPublish(T),
+    /// Semantic classification failed because the request lifecycle authority
+    /// rejected the transition or was unavailable.
+    LifecycleError {
+        error: RequestTransitionError,
+        payload: T,
+    },
 }
 
 impl<T> RequestTerminal<T> {
+    pub fn inline(payload: T) -> Self {
+        Self {
+            kind: RequestTerminalKind::UntrackedInline(payload),
+        }
+    }
+
     pub fn respond_without_publish(payload: T) -> Self {
         Self {
-            kind: RequestTerminalKind::RespondWithoutPublish(payload),
+            kind: RequestTerminalKind::UntrackedRespondWithoutPublish(payload),
         }
     }
 
@@ -85,7 +110,11 @@ impl<T> RequestTerminal<T> {
     }
 
     pub fn is_respond_without_publish(&self) -> bool {
-        matches!(self.kind, RequestTerminalKind::RespondWithoutPublish(_))
+        matches!(
+            self.kind,
+            RequestTerminalKind::RespondWithoutPublish(_)
+                | RequestTerminalKind::UntrackedRespondWithoutPublish(_)
+        )
     }
 
     /// Borrow the terminal payload without exposing whether it was classified as
@@ -93,16 +122,12 @@ impl<T> RequestTerminal<T> {
     pub fn payload(&self) -> &T {
         match &self.kind {
             RequestTerminalKind::Inline(payload)
+            | RequestTerminalKind::UntrackedInline(payload)
+            | RequestTerminalKind::UntrackedRespondWithoutPublish(payload)
+            | RequestTerminalKind::PreAuthorityFailure(payload)
             | RequestTerminalKind::Publish(payload)
-            | RequestTerminalKind::RespondWithoutPublish(payload) => payload,
-        }
-    }
-
-    fn into_payload(self) -> T {
-        match self.kind {
-            RequestTerminalKind::Inline(payload)
-            | RequestTerminalKind::Publish(payload)
-            | RequestTerminalKind::RespondWithoutPublish(payload) => payload,
+            | RequestTerminalKind::RespondWithoutPublish(payload)
+            | RequestTerminalKind::LifecycleError { payload, .. } => payload,
         }
     }
 }
@@ -169,9 +194,10 @@ impl RequestContext {
         lock_or_recover(&self.entry.lifecycle).clone()
     }
 
-    /// Bind this transport request to the session-owned lifecycle authority
-    /// that canonically owns its semantic request state.
-    pub async fn bind_lifecycle(
+    /// Bind this transport request to a lifecycle authority already minted by
+    /// the runtime. This stays private so public surfaces cannot inject a
+    /// fake lifecycle handle and mint classified success terminals.
+    async fn bind_lifecycle(
         &self,
         lifecycle: Arc<dyn SurfaceRequestLifecycleHandle>,
     ) -> Result<(), RequestAlreadyExists> {
@@ -249,24 +275,37 @@ impl RequestContext {
         outcome: SurfaceRequestTerminalOutcome,
         response: T,
     ) -> RequestTerminal<T> {
-        let disposition = self.bound_lifecycle().map_or_else(
-            || match outcome {
-                SurfaceRequestTerminalOutcome::Succeeded => {
-                    SurfaceRequestTerminalDisposition::Inline
-                }
-                SurfaceRequestTerminalOutcome::Failed => {
-                    SurfaceRequestTerminalDisposition::RespondWithoutPublish
-                }
-            },
-            |lifecycle| lifecycle.classify_terminal(&self.entry.lifecycle_key, outcome),
-        );
+        let Some(lifecycle) = self.bound_lifecycle() else {
+            if matches!(outcome, SurfaceRequestTerminalOutcome::Failed) {
+                return RequestTerminal {
+                    kind: RequestTerminalKind::PreAuthorityFailure(response),
+                };
+            }
+            return RequestTerminal {
+                kind: RequestTerminalKind::LifecycleError {
+                    error: RequestTransitionError::AuthorityUnavailable,
+                    payload: response,
+                },
+            };
+        };
+        let disposition = match lifecycle.classify_terminal(&self.entry.lifecycle_key, outcome) {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                return RequestTerminal {
+                    kind: RequestTerminalKind::LifecycleError {
+                        error,
+                        payload: response,
+                    },
+                };
+            }
+        };
         match disposition {
             SurfaceRequestTerminalDisposition::Publish => RequestTerminal {
                 kind: RequestTerminalKind::Publish(response),
             },
-            SurfaceRequestTerminalDisposition::RespondWithoutPublish => {
-                RequestTerminal::respond_without_publish(response)
-            }
+            SurfaceRequestTerminalDisposition::RespondWithoutPublish => RequestTerminal {
+                kind: RequestTerminalKind::RespondWithoutPublish(response),
+            },
             SurfaceRequestTerminalDisposition::Inline => RequestTerminal {
                 kind: RequestTerminalKind::Inline(response),
             },
@@ -468,10 +507,23 @@ impl SurfaceRequestMechanics {
         Some((entry, lifecycle))
     }
 
+    fn require_bound_lifecycle(
+        &self,
+        key: &str,
+    ) -> Result<(Arc<RequestEntry>, Arc<dyn SurfaceRequestLifecycleHandle>), RequestTransitionError>
+    {
+        let entry = lock_or_recover(&self.entries)
+            .get(key)
+            .cloned()
+            .ok_or(RequestTransitionError::NotFound)?;
+        let lifecycle = lock_or_recover(&entry.lifecycle)
+            .clone()
+            .ok_or(RequestTransitionError::AuthorityUnavailable)?;
+        Ok((entry, lifecycle))
+    }
+
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
-        let Some((entry, lifecycle)) = self.bound_lifecycle(key) else {
-            return Err(RequestTransitionError::NotFound);
-        };
+        let (entry, lifecycle) = self.require_bound_lifecycle(key)?;
         match lifecycle.publish_and_complete(&entry.lifecycle_key) {
             Ok(()) => {
                 lock_or_recover(&self.entries).remove(key);
@@ -481,27 +533,12 @@ impl SurfaceRequestMechanics {
         }
     }
 
-    async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
-        let maybe_bound = self.bound_lifecycle(key);
-        let transition = maybe_bound.as_ref().map_or_else(
-            || {
-                let outcome = lock_or_recover(&self.entries).get(key).map_or(
-                    CompleteOutcome::Completed,
-                    |entry| {
-                        if entry.pending_cancel.load(Ordering::Acquire) {
-                            CompleteOutcome::SupersededByCancel
-                        } else {
-                            CompleteOutcome::Completed
-                        }
-                    },
-                );
-                meerkat_core::handles::CompleteTransition {
-                    outcome,
-                    run_unpublished_cleanup: true,
-                }
-            },
-            |(entry, lifecycle)| lifecycle.finish_unpublished(&entry.lifecycle_key),
-        );
+    async fn finish_unpublished(
+        &self,
+        key: &str,
+    ) -> Result<CompleteOutcome, RequestTransitionError> {
+        let (entry, lifecycle) = self.require_bound_lifecycle(key)?;
+        let transition = lifecycle.finish_unpublished(&entry.lifecycle_key)?;
         let cleanup = if transition.run_unpublished_cleanup {
             lock_or_recover(&self.entries)
                 .remove(key)
@@ -514,7 +551,7 @@ impl SurfaceRequestMechanics {
         if let Some(cleanup) = cleanup {
             cleanup().await;
         }
-        transition.outcome
+        Ok(transition.outcome)
     }
 
     fn is_empty(&self) -> bool {
@@ -657,7 +694,7 @@ impl SurfaceRequestExecutor {
             Err(RequestTransitionError::AlreadyTerminal {
                 current: SurfaceRequestPhase::Cancelled,
             }) => {
-                let _ = self.finish_unpublished(key).await;
+                let _ = self.finish_unpublished(key).await?;
                 Ok(PublishOutcome::CancelledBeforePublish)
             }
             Err(err) => Err(err),
@@ -671,9 +708,12 @@ impl SurfaceRequestExecutor {
     /// * `Cancelled`: cancel already won the race. Cleanup is still run
     ///   (the surface still needs the invariants restored), and the caller
     ///   is told to write a cancel response instead of the task's terminal.
-    /// * `Published`/`Completed`: terminal reached via another path;
-    ///   returns `Completed` idempotently with no side effect.
-    pub async fn finish_unpublished(&self, key: &str) -> CompleteOutcome {
+    /// * Missing/terminal entries are rejected by the lifecycle authority
+    ///   rather than completed locally.
+    pub async fn finish_unpublished(
+        &self,
+        key: &str,
+    ) -> Result<CompleteOutcome, RequestTransitionError> {
         self.mechanics.finish_unpublished(key).await
     }
 
@@ -688,7 +728,19 @@ impl SurfaceRequestExecutor {
         terminal: RequestTerminal<T>,
     ) -> RequestTerminalResolution<T> {
         let Some(key) = key else {
-            return RequestTerminalResolution::Emit(terminal.into_payload());
+            return match terminal.kind {
+                RequestTerminalKind::LifecycleError { error, .. } => {
+                    RequestTerminalResolution::LifecycleError(error)
+                }
+                RequestTerminalKind::Inline(payload)
+                | RequestTerminalKind::UntrackedInline(payload)
+                | RequestTerminalKind::UntrackedRespondWithoutPublish(payload)
+                | RequestTerminalKind::PreAuthorityFailure(payload)
+                | RequestTerminalKind::Publish(payload)
+                | RequestTerminalKind::RespondWithoutPublish(payload) => {
+                    RequestTerminalResolution::Emit(payload)
+                }
+            };
         };
 
         match terminal.kind {
@@ -696,16 +748,43 @@ impl SurfaceRequestExecutor {
                 self.mechanics.remove(key);
                 RequestTerminalResolution::Emit(payload)
             }
+            RequestTerminalKind::UntrackedInline(_) => {
+                self.mechanics.remove(key);
+                RequestTerminalResolution::LifecycleError(
+                    RequestTransitionError::AuthorityUnavailable,
+                )
+            }
+            RequestTerminalKind::UntrackedRespondWithoutPublish(_) => {
+                self.mechanics.remove(key);
+                RequestTerminalResolution::LifecycleError(
+                    RequestTransitionError::AuthorityUnavailable,
+                )
+            }
+            RequestTerminalKind::PreAuthorityFailure(payload) => {
+                self.mechanics.remove(key);
+                RequestTerminalResolution::Emit(payload)
+            }
             RequestTerminalKind::Publish(payload) => match self.publish_or_cancelled(key).await {
                 Ok(PublishOutcome::Published) => RequestTerminalResolution::Emit(payload),
                 Ok(PublishOutcome::CancelledBeforePublish) => RequestTerminalResolution::Cancelled,
-                Err(err) => RequestTerminalResolution::LifecycleError(err),
+                Err(err) => {
+                    self.mechanics.remove(key);
+                    RequestTerminalResolution::LifecycleError(err)
+                }
             },
             RequestTerminalKind::RespondWithoutPublish(payload) => {
                 match self.finish_unpublished(key).await {
-                    CompleteOutcome::Completed => RequestTerminalResolution::Emit(payload),
-                    CompleteOutcome::SupersededByCancel => RequestTerminalResolution::Cancelled,
+                    Ok(CompleteOutcome::Completed) => RequestTerminalResolution::Emit(payload),
+                    Ok(CompleteOutcome::SupersededByCancel) => RequestTerminalResolution::Cancelled,
+                    Err(err) => {
+                        self.mechanics.remove(key);
+                        RequestTerminalResolution::LifecycleError(err)
+                    }
                 }
+            }
+            RequestTerminalKind::LifecycleError { error, .. } => {
+                self.mechanics.remove(key);
+                RequestTerminalResolution::LifecycleError(error)
             }
         }
     }
@@ -796,6 +875,7 @@ mod tests {
     fn request_context_delegates_terminal_classification_to_machine_kind() {
         let source = include_str!("request_execution.rs");
         for forbidden in [
+            concat!("pub async fn bind", "_lifecycle"),
             concat!("for_", "rpc_method"),
             concat!("for_", "mcp_tool_call"),
             concat!("\"", "turn", "/start", "\""),
@@ -1015,9 +1095,8 @@ mod tests {
                 executor
                     .resolve_terminal(
                         Some(cancel_observation_context.key()),
-                        RequestTerminal::respond_without_publish(format!(
-                            "{surface}-stale-observation"
-                        )),
+                        cancel_observation_context
+                            .classify_success_terminal(format!("{surface}-stale-observation")),
                     )
                     .await,
                 RequestTerminalResolution::Cancelled
@@ -1076,7 +1155,7 @@ mod tests {
                     RequestTerminal::respond_without_publish("late-observation"),
                 )
                 .await,
-            RequestTerminalResolution::Emit("late-observation")
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable)
         );
         assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
     }
@@ -1144,9 +1223,152 @@ mod tests {
         );
         assert_eq!(
             executor.finish_unpublished("machine-owned").await,
-            CompleteOutcome::SupersededByCancel
+            Ok(CompleteOutcome::SupersededByCancel)
         );
         assert_eq!(executor.phase("machine-owned"), None);
+    }
+
+    #[tokio::test]
+    async fn unbound_runtime_executor_fails_closed_without_lifecycle_authority() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+        let context = begin_test_request_with_kind(
+            &executor,
+            "unbound-machine-request",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        let terminal = context.classify_success_terminal("must-not-publish");
+        assert!(
+            matches!(
+                &terminal.kind,
+                RequestTerminalKind::LifecycleError {
+                    error: RequestTransitionError::AuthorityUnavailable,
+                    ..
+                }
+            ),
+            "unbound production requests must not fall back to surface-local terminal policy"
+        );
+        assert_eq!(
+            executor.publish_and_complete(context.key()),
+            Err(RequestTransitionError::AuthorityUnavailable)
+        );
+        assert_eq!(
+            executor.finish_unpublished(context.key()).await,
+            Err(RequestTransitionError::AuthorityUnavailable)
+        );
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(context.key()), terminal)
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable)
+        );
+        assert_eq!(executor.phase(context.key()), None);
+        assert!(
+            executor
+                .try_begin_request(
+                    "unbound-machine-request",
+                    SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .is_ok(),
+            "lifecycle-error terminals must remove the local request entry so request ids can retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_inline_terminal_cannot_bypass_tracked_lifecycle_authority() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+        let context = begin_test_request_with_kind(
+            &executor,
+            "forged-inline",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(context.key()), RequestTerminal::inline("forged"))
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable),
+            "public inline terminals are only valid for untracked observations"
+        );
+        assert_eq!(executor.phase(context.key()), None);
+        assert_eq!(
+            executor
+                .resolve_terminal(None, RequestTerminal::inline("untracked"))
+                .await,
+            RequestTerminalResolution::Emit("untracked")
+        );
+    }
+
+    #[tokio::test]
+    async fn public_unpublished_terminal_cannot_bypass_tracked_lifecycle_authority() {
+        let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
+        let context = begin_test_request_with_kind(
+            &executor,
+            "forged-unpublished",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        assert_eq!(
+            executor
+                .resolve_terminal(
+                    Some(context.key()),
+                    RequestTerminal::respond_without_publish("forged")
+                )
+                .await,
+            RequestTerminalResolution::LifecycleError(RequestTransitionError::AuthorityUnavailable),
+            "public unpublished terminals are only valid for untracked work"
+        );
+        assert_eq!(executor.phase(context.key()), None);
+        assert_eq!(
+            executor
+                .resolve_terminal(None, RequestTerminal::respond_without_publish("untracked"))
+                .await,
+            RequestTerminalResolution::Emit("untracked")
+        );
+    }
+
+    #[tokio::test]
+    async fn unbound_failure_terminal_preserves_payload_without_publication_authority() {
+        let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(1), &runtime_adapter);
+        let context = begin_test_request_with_kind(
+            &executor,
+            "unbound-validation-error",
+            SurfaceRequestKind::SessionTurn,
+            noop_request_action(),
+        );
+
+        let terminal = context.classify_failure_terminal("invalid params");
+        assert!(
+            matches!(terminal.kind, RequestTerminalKind::PreAuthorityFailure(_)),
+            "pre-binding failures should abort the local entry without granting publish authority"
+        );
+        assert_eq!(
+            executor
+                .resolve_terminal(Some(context.key()), terminal)
+                .await,
+            RequestTerminalResolution::Emit("invalid params")
+        );
+        assert_eq!(executor.phase(context.key()), None);
+        assert!(
+            executor
+                .try_begin_request(
+                    "unbound-validation-error",
+                    SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .is_ok(),
+            "pre-authority failures must remove the local entry so the request id can retry"
+        );
     }
 
     #[tokio::test]
@@ -1187,8 +1409,8 @@ mod tests {
             &self,
             _key: &str,
             _outcome: SurfaceRequestTerminalOutcome,
-        ) -> SurfaceRequestTerminalDisposition {
-            SurfaceRequestTerminalDisposition::Inline
+        ) -> Result<SurfaceRequestTerminalDisposition, RequestTransitionError> {
+            Ok(SurfaceRequestTerminalDisposition::Inline)
         }
 
         fn phase(&self, _key: &str) -> Option<SurfaceRequestPhase> {
@@ -1213,12 +1435,15 @@ mod tests {
             Err(RequestTransitionError::NotFound)
         }
 
-        fn finish_unpublished(&self, _key: &str) -> CompleteTransition {
+        fn finish_unpublished(
+            &self,
+            _key: &str,
+        ) -> Result<CompleteTransition, RequestTransitionError> {
             self.finish_count.fetch_add(1, Ordering::SeqCst);
-            CompleteTransition {
+            Ok(CompleteTransition {
                 outcome: CompleteOutcome::Completed,
                 run_unpublished_cleanup: false,
-            }
+            })
         }
 
         fn remove(&self, _key: &str) {}
@@ -1278,7 +1503,7 @@ mod tests {
 
         assert_eq!(
             executor.finish_unpublished(context.key()).await,
-            CompleteOutcome::Completed
+            Err(RequestTransitionError::NotFound)
         );
         assert_eq!(
             cleanup_count.load(Ordering::SeqCst),
@@ -1306,8 +1531,8 @@ mod tests {
         let first = executor.finish_unpublished("req-1").await;
         let second = executor.finish_unpublished("req-1").await;
 
-        assert_eq!(first, CompleteOutcome::Completed);
-        assert_eq!(second, CompleteOutcome::Completed);
+        assert_eq!(first, Ok(CompleteOutcome::Completed));
+        assert_eq!(second, Err(RequestTransitionError::NotFound));
         assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
     }
 
@@ -1331,7 +1556,7 @@ mod tests {
             .expect("publish must succeed on Pending");
         let outcome = executor.finish_unpublished("req-2").await;
 
-        assert_eq!(outcome, CompleteOutcome::Completed);
+        assert_eq!(outcome, Err(RequestTransitionError::NotFound));
         assert_eq!(cleanup_count.load(Ordering::SeqCst), 0);
     }
 
@@ -1433,7 +1658,10 @@ mod tests {
                 noop_request_action(),
             )
             .expect("first registration should succeed");
-        let _ = executor.finish_unpublished("reuse-key").await;
+        executor
+            .finish_unpublished("reuse-key")
+            .await
+            .expect("first request should finish");
         let result = executor.try_begin_request(
             "reuse-key",
             SurfaceRequestKind::InlineObservation,
@@ -1559,7 +1787,7 @@ mod tests {
         // Task completion arriving after cancel yields the typed "superseded"
         // outcome — no shell-side late-cancel rewriting.
         let outcome = executor.finish_unpublished("cancel-then-finish").await;
-        assert_eq!(outcome, CompleteOutcome::SupersededByCancel);
+        assert_eq!(outcome, Ok(CompleteOutcome::SupersededByCancel));
         assert_eq!(
             cleanup_count.load(Ordering::SeqCst),
             1,

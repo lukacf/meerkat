@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::RpcRequestLifecycleRule;
+
 #[derive(Debug, Clone, Copy)]
 pub struct RpcMethodCatalogOptions {
     pub runtime_available: bool,
@@ -51,6 +53,8 @@ pub struct RpcMethodDescriptor {
     pub params_type: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_type: Option<&'static str>,
+    #[serde(skip_serializing)]
+    pub request_lifecycle: RpcRequestLifecycleRule,
 }
 
 impl RpcMethodDescriptor {
@@ -60,6 +64,7 @@ impl RpcMethodDescriptor {
             description,
             params_type: None,
             result_type: None,
+            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
         }
     }
 
@@ -74,6 +79,7 @@ impl RpcMethodDescriptor {
             description,
             params_type: Some(params_type),
             result_type: Some(result_type),
+            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
         }
     }
 
@@ -87,7 +93,13 @@ impl RpcMethodDescriptor {
             description,
             params_type: None,
             result_type: Some(result_type),
+            request_lifecycle: RpcRequestLifecycleRule::INLINE_OBSERVATION,
         }
+    }
+
+    const fn with_request_lifecycle(mut self, request_lifecycle: RpcRequestLifecycleRule) -> Self {
+        self.request_lifecycle = request_lifecycle;
+        self
     }
 }
 
@@ -99,7 +111,8 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Create session + run first turn",
             "CreateSessionParams",
             "WireRunResult | DeferredCreateResult",
-        ),
+        )
+        .with_request_lifecycle(RpcRequestLifecycleRule::SessionCreateInitialTurn),
         RpcMethodDescriptor::typed(
             "session/list",
             "List active sessions",
@@ -129,7 +142,8 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "Start a new turn on existing session",
             "StartTurnParams",
             "WireRunResult",
-        ),
+        )
+        .with_request_lifecycle(RpcRequestLifecycleRule::SESSION_TURN),
         RpcMethodDescriptor::typed(
             "turn/interrupt",
             "Cancel in-flight turn",
@@ -603,7 +617,8 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Start a turn on a mob member by identity",
                 "MobTurnStartParams",
                 "WireRunResult",
-            ),
+            )
+            .with_request_lifecycle(RpcRequestLifecycleRule::SESSION_TURN),
             RpcMethodDescriptor::typed(
                 "mob/member_status",
                 "Get live status for a mob member",
@@ -813,6 +828,11 @@ pub fn rpc_notification_names(options: RpcMethodCatalogOptions) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use crate::{
+        mcp_tool_surface_request_kind, mcp_tracked_surface_request_kind, rpc_surface_request_kind,
+        rpc_tracked_surface_request_kind, rpc_tracked_surface_request_kind_for_options,
+    };
+    use meerkat_core::handles::SurfaceRequestKind;
 
     #[test]
     fn documented_surface_keeps_live_runtime_and_mob_methods() {
@@ -877,6 +897,93 @@ mod tests {
                 "runtime/session control noun must not be advertised by public catalogs: {retired}"
             );
         }
+    }
+
+    #[test]
+    fn rpc_catalog_owns_request_lifecycle_rules() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        let descriptor = |name: &str| {
+            methods
+                .iter()
+                .find(|descriptor| descriptor.name == name)
+                .expect("descriptor should exist")
+        };
+
+        assert_eq!(
+            descriptor("turn/start").request_lifecycle.resolve(None),
+            SurfaceRequestKind::SessionTurn
+        );
+        assert_eq!(
+            descriptor("mob/turn_start").request_lifecycle.resolve(None),
+            SurfaceRequestKind::SessionTurn
+        );
+        assert_eq!(
+            descriptor("session/create")
+                .request_lifecycle
+                .resolve(Some(r#"{"initial_turn":"deferred"}"#)),
+            SurfaceRequestKind::InlineObservation
+        );
+        assert_eq!(
+            rpc_surface_request_kind(
+                "session/create",
+                Some(r#"{"initial_turn":"run_immediately"}"#),
+            ),
+            SurfaceRequestKind::SessionCreateWithTurn
+        );
+        assert_eq!(
+            rpc_surface_request_kind("session/list", None),
+            SurfaceRequestKind::InlineObservation
+        );
+        assert_eq!(rpc_tracked_surface_request_kind("session/list", None), None);
+        assert_eq!(
+            rpc_tracked_surface_request_kind("turn/start", None),
+            Some(SurfaceRequestKind::SessionTurn)
+        );
+    }
+
+    #[test]
+    fn rpc_lifecycle_tracking_respects_catalog_options() {
+        assert_eq!(
+            rpc_tracked_surface_request_kind_for_options(
+                RpcMethodCatalogOptions {
+                    mob_enabled: false,
+                    ..RpcMethodCatalogOptions::documented_surface()
+                },
+                "mob/turn_start",
+                None,
+            ),
+            None,
+            "feature-gated mob methods must not be tracked when absent from the live RPC surface"
+        );
+        assert_eq!(
+            rpc_tracked_surface_request_kind_for_options(
+                RpcMethodCatalogOptions::documented_surface(),
+                "mob/turn_start",
+                None,
+            ),
+            Some(SurfaceRequestKind::SessionTurn)
+        );
+    }
+
+    #[test]
+    fn mcp_tool_catalog_owns_request_lifecycle_rules() {
+        assert_eq!(
+            mcp_tool_surface_request_kind("meerkat_run"),
+            SurfaceRequestKind::SessionCreateWithTurn
+        );
+        assert_eq!(
+            mcp_tool_surface_request_kind("meerkat_resume"),
+            SurfaceRequestKind::SessionTurn
+        );
+        assert_eq!(
+            mcp_tool_surface_request_kind("meerkat_sessions"),
+            SurfaceRequestKind::InlineObservation
+        );
+        assert_eq!(mcp_tracked_surface_request_kind("meerkat_sessions"), None);
+        assert_eq!(
+            mcp_tracked_surface_request_kind("meerkat_resume"),
+            Some(SurfaceRequestKind::SessionTurn)
+        );
     }
 
     #[test]

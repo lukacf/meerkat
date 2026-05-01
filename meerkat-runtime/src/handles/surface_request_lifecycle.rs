@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use meerkat_core::handles::{
-    CancelActionInstallDecision, CancelOutcome, CancelTransition, CompleteOutcome,
-    CompleteTransition, RequestAlreadyExists, RequestTransitionError, SurfaceRequestKind,
+    CancelActionInstallDecision, CancelOutcome, CancelTransition, CompleteTransition,
+    RequestAlreadyExists, RequestTransitionError, SurfaceRequestKind,
     SurfaceRequestLifecycleHandle, SurfaceRequestPhase, SurfaceRequestTerminalDisposition,
     SurfaceRequestTerminalOutcome,
 };
@@ -110,24 +110,18 @@ impl RuntimeSurfaceRequestLifecycleHandle {
     fn transition_from_finish_effects(
         key: &str,
         effects: &[mm_dsl::MeerkatMachineEffect],
-    ) -> CompleteTransition {
-        effects
-            .iter()
-            .find_map(|effect| match effect {
-                mm_dsl::MeerkatMachineEffect::SurfaceRequestUnpublishedFinished {
-                    request_id,
-                    outcome,
-                    run_unpublished_cleanup,
-                } if request_id == key => Some(CompleteTransition {
-                    outcome: (*outcome).into(),
-                    run_unpublished_cleanup: *run_unpublished_cleanup,
-                }),
-                _ => None,
-            })
-            .unwrap_or(CompleteTransition {
-                outcome: CompleteOutcome::Completed,
-                run_unpublished_cleanup: false,
-            })
+    ) -> Option<CompleteTransition> {
+        effects.iter().find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::SurfaceRequestUnpublishedFinished {
+                request_id,
+                outcome,
+                run_unpublished_cleanup,
+            } if request_id == key => Some(CompleteTransition {
+                outcome: (*outcome).into(),
+                run_unpublished_cleanup: *run_unpublished_cleanup,
+            }),
+            _ => None,
+        })
     }
 }
 
@@ -152,16 +146,20 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
         &self,
         key: &str,
         outcome: SurfaceRequestTerminalOutcome,
-    ) -> SurfaceRequestTerminalDisposition {
-        let Ok(effects) = self.dsl.apply_input_with_effects(
-            mm_dsl::MeerkatMachineInput::ClassifySurfaceRequestTerminal {
-                request_id: key.to_owned(),
-                outcome: outcome.into(),
-            },
-            "SurfaceRequestLifecycleHandle::classify_terminal",
-        ) else {
-            return SurfaceRequestTerminalDisposition::Inline;
-        };
+    ) -> Result<SurfaceRequestTerminalDisposition, RequestTransitionError> {
+        if self.dsl_phase(key).is_none() {
+            return Err(RequestTransitionError::NotFound);
+        }
+        let effects = self
+            .dsl
+            .apply_input_with_effects(
+                mm_dsl::MeerkatMachineInput::ClassifySurfaceRequestTerminal {
+                    request_id: key.to_owned(),
+                    outcome: outcome.into(),
+                },
+                "SurfaceRequestLifecycleHandle::classify_terminal",
+            )
+            .map_err(|_| self.map_transition_error(key))?;
 
         effects
             .iter()
@@ -172,7 +170,7 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
                 } if request_id == key => Some((*disposition).into()),
                 _ => None,
             })
-            .unwrap_or(SurfaceRequestTerminalDisposition::Inline)
+            .ok_or_else(|| self.map_transition_error(key))
     }
 
     fn phase(&self, key: &str) -> Option<SurfaceRequestPhase> {
@@ -195,6 +193,12 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
     }
 
     fn cancel_request(&self, key: &str) -> CancelTransition {
+        if self.dsl_phase(key).is_none() {
+            return CancelTransition {
+                outcome: CancelOutcome::NotFound,
+                fire_cancel_action: false,
+            };
+        }
         match self.dsl.apply_input_with_effects(
             mm_dsl::MeerkatMachineInput::CancelSurfaceRequest {
                 request_id: key.to_owned(),
@@ -210,6 +214,9 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
     }
 
     fn publish_and_complete(&self, key: &str) -> Result<(), RequestTransitionError> {
+        if self.dsl_phase(key).is_none() {
+            return Err(RequestTransitionError::NotFound);
+        }
         self.dsl
             .apply_input(
                 mm_dsl::MeerkatMachineInput::PublishSurfaceRequest {
@@ -220,19 +227,21 @@ impl SurfaceRequestLifecycleHandle for RuntimeSurfaceRequestLifecycleHandle {
             .map_err(|_| self.map_transition_error(key))
     }
 
-    fn finish_unpublished(&self, key: &str) -> CompleteTransition {
-        match self.dsl.apply_input_with_effects(
-            mm_dsl::MeerkatMachineInput::FinishSurfaceRequestUnpublished {
-                request_id: key.to_owned(),
-            },
-            "SurfaceRequestLifecycleHandle::finish_unpublished",
-        ) {
-            Ok(effects) => Self::transition_from_finish_effects(key, &effects),
-            Err(_) => CompleteTransition {
-                outcome: CompleteOutcome::Completed,
-                run_unpublished_cleanup: false,
-            },
+    fn finish_unpublished(&self, key: &str) -> Result<CompleteTransition, RequestTransitionError> {
+        if self.dsl_phase(key).is_none() {
+            return Err(RequestTransitionError::NotFound);
         }
+        let effects = self
+            .dsl
+            .apply_input_with_effects(
+                mm_dsl::MeerkatMachineInput::FinishSurfaceRequestUnpublished {
+                    request_id: key.to_owned(),
+                },
+                "SurfaceRequestLifecycleHandle::finish_unpublished",
+            )
+            .map_err(|_| self.map_transition_error(key))?;
+        Self::transition_from_finish_effects(key, &effects)
+            .ok_or_else(|| self.map_transition_error(key))
     }
 
     fn remove(&self, key: &str) {
@@ -302,5 +311,42 @@ mod tests {
         let decision = handle.cancel_action_install_decision("request");
         assert_eq!(decision.phase, Some(SurfaceRequestPhase::Cancelled));
         assert!(!decision.fire_cancel_action);
+    }
+
+    #[test]
+    fn terminal_classification_fails_closed_for_unknown_request() {
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
+
+        assert_eq!(
+            handle.classify_terminal("missing", SurfaceRequestTerminalOutcome::Succeeded),
+            Err(RequestTransitionError::NotFound)
+        );
+    }
+
+    #[test]
+    fn publish_and_cancel_fail_closed_for_unknown_request() {
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
+
+        assert_eq!(
+            handle.publish_and_complete("missing"),
+            Err(RequestTransitionError::NotFound)
+        );
+        assert_eq!(
+            handle.cancel_request("missing"),
+            CancelTransition {
+                outcome: CancelOutcome::NotFound,
+                fire_cancel_action: false
+            }
+        );
+    }
+
+    #[test]
+    fn unpublished_finish_fails_closed_for_unknown_request() {
+        let handle = RuntimeSurfaceRequestLifecycleHandle::standalone();
+
+        assert_eq!(
+            handle.finish_unpublished("missing"),
+            Err(RequestTransitionError::NotFound)
+        );
     }
 }

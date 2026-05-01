@@ -13,6 +13,7 @@ use meerkat::surface::{
     RequestTerminal, RequestTerminalResolution, SurfaceRequestExecutor, SurfaceRequestKind,
     noop_request_action,
 };
+use meerkat_contracts::rpc_tracked_surface_request_kind_for_options;
 use tokio::io::{AsyncBufRead, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -370,7 +371,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         F: FnOnce(RpcRequest, meerkat::surface::RequestContext) -> Fut + Send + 'static,
         Fut: Future<Output = Option<RpcResponse>> + Send + 'static,
     {
-        let kind = tracked_rpc_request_kind(request)?;
+        let kind = self.tracked_rpc_request_kind(request)?;
         let id = request.id.clone()?;
         let request_key = request_key(&id);
         let context = match self.request_executor.try_begin_request(
@@ -415,6 +416,17 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             request_key,
             task: handle,
         })
+    }
+
+    fn tracked_rpc_request_kind(&self, request: &RpcRequest) -> Option<SurfaceRequestKind> {
+        rpc_tracked_surface_request_kind_for_options(
+            self.router.method_catalog_options(),
+            request.method.as_str(),
+            request
+                .params
+                .as_deref()
+                .map(serde_json::value::RawValue::get),
+        )
     }
 
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
@@ -487,27 +499,6 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
 
 fn request_key(id: &RpcId) -> String {
     serde_json::to_string(id).unwrap_or_else(|_| format!("{id:?}"))
-}
-
-fn tracked_rpc_request_kind(request: &RpcRequest) -> Option<SurfaceRequestKind> {
-    match request.method.as_str() {
-        "turn/start" | "mob/turn_start" => Some(SurfaceRequestKind::SessionTurn),
-        "session/create" => {
-            let deferred = request
-                .params
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
-                .and_then(|value| {
-                    value
-                        .get("initial_turn")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .is_some_and(|initial_turn| initial_turn == "deferred");
-            (!deferred).then_some(SurfaceRequestKind::SessionCreateWithTurn)
-        }
-        _ => None,
-    }
 }
 
 fn request_cancel_target(params: Option<&serde_json::value::RawValue>) -> Option<String> {
@@ -710,6 +701,76 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pre_binding_rpc_failure_preserves_protocol_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(Arc::clone(&output));
+        let mut server = RpcServer::new(reader, writer, runtime, config_store);
+        let request_id = RpcId::Num(11);
+        let request_key = request_key(&request_id);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(request_id.clone()),
+            method: "turn/start".to_string(),
+            params: Some(raw_params(serde_json::json!({}))),
+        };
+
+        let spawned = server
+            .spawn_tracked_request_with_dispatch(&request, |request, _context| async move {
+                Some(RpcResponse::error(
+                    request.id.clone(),
+                    crate::error::INVALID_PARAMS,
+                    "missing session_id",
+                ))
+            })
+            .expect("tracked RPC method should be admitted");
+        let SpawnedTrackedRequest::Tracked { task, .. } = spawned else {
+            panic!("turn/start should be tracked under the default RPC surface");
+        };
+        let response = tokio::time::timeout(Duration::from_secs(2), server.long_running_rx.recv())
+            .await
+            .expect("tracked response should arrive")
+            .expect("tracked response channel should stay open");
+        task.await.expect("synthetic dispatch task should complete");
+
+        assert!(server.write_long_running_response(response).await);
+        assert_eq!(server.request_executor.phase(&request_key), None);
+        let bytes = output.lock().expect("output lock").clone();
+        let line = String::from_utf8(bytes).expect("output should be utf8");
+        let response: RpcResponse =
+            serde_json::from_str(line.trim()).expect("response should parse");
+        assert_eq!(response.id, Some(request_id));
+        let error = response.error.expect("expected protocol error");
+        assert_eq!(error.code, crate::error::INVALID_PARAMS);
+        assert_eq!(error.message, "missing session_id");
+    }
+
+    #[cfg(not(feature = "mob"))]
+    #[tokio::test]
+    async fn rpc_tracking_uses_router_feature_surface_for_mob_methods() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, config_store) = build_test_runtime(&temp);
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = BufReader::new(std::io::Cursor::new(Vec::new()));
+        let writer = SharedBufferWriter(output);
+        let server = RpcServer::new(reader, writer, runtime, config_store);
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RpcId::Num(12)),
+            method: "mob/turn_start".to_string(),
+            params: Some(raw_params(serde_json::json!({"mob_id": "mob-1"}))),
+        };
+
+        assert_eq!(
+            server.tracked_rpc_request_kind(&request),
+            None,
+            "mob/turn_start must not be admitted into lifecycle tracking when the router was built without mob support"
+        );
+    }
+
     #[test]
     fn rpc_request_context_grants_publish_authority_from_typed_admission() {
         let executor = SurfaceRequestExecutor::new_standalone(Duration::from_millis(1));
@@ -833,8 +894,15 @@ mod tests {
                 noop_request_action(),
             )
             .expect("test request key should be unique");
+        let session_id = meerkat_core::SessionId::new();
+        server
+            .router
+            .runtime_adapter()
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("test runtime bindings should prepare");
         context
-            .bind_lifecycle(meerkat_runtime::handles::standalone_surface_request_lifecycle_handle())
+            .bind_runtime_session(server.router.runtime_adapter().as_ref(), &session_id)
             .await
             .expect("test lifecycle should bind");
 

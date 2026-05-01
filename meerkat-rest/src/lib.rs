@@ -2977,7 +2977,7 @@ async fn create_session_inner(
     };
     if let Some(ctx) = req_ctx.as_ref()
         && let Err(err) = ctx
-            .bind_lifecycle(Arc::clone(&bindings.surface_request_lifecycle))
+            .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
             .await
     {
         return failed_terminal(
@@ -3818,11 +3818,92 @@ async fn continue_session_inner(
         );
     }
 
-    // Apply staged MCP operations at the turn boundary.
-    // MCP boundary appends text-only system notices; extract a String for it,
-    // then fold any additions back into the final ContentInput.
+    // Bind request lifecycle authority and install cancel behavior before
+    // applying any turn-boundary side effects.
     #[allow(unused_mut)]
     let mut turn_prompt = req.prompt.clone();
+    let requires_rebuild = rest_continue_requires_rebuild(&req);
+    if requires_rebuild && loaded_session.is_none() {
+        drop(caller_event_tx);
+        drain_event_forwarder(&session_id, forward_task).await;
+        return failed_terminal(
+            req_ctx.as_ref(),
+            ApiError::NotFound(format!("Session not found: {session_id}")),
+        );
+    }
+    let prepared_bindings = if requires_rebuild {
+        let bindings = match state
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let message = format!("failed to prepare runtime bindings: {e}");
+                drop(caller_event_tx);
+                drain_event_forwarder(&session_id, forward_task).await;
+                return failed_terminal(req_ctx.as_ref(), ApiError::Internal(message));
+            }
+        };
+        if let Some(ctx) = req_ctx.as_ref()
+            && let Err(err) = ctx
+                .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
+                .await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::Internal(format!("request lifecycle rejected session binding: {err}")),
+            );
+        }
+        Some(bindings)
+    } else {
+        ensure_rest_session_runtime_executor(state, &session_id).await;
+        if let Some(ctx) = req_ctx.as_ref()
+            && let Err(err) = ctx
+                .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
+                .await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::Internal(format!("request lifecycle rejected session binding: {err}")),
+            );
+        }
+        None
+    };
+    if let Some(ctx) = req_ctx.as_ref() {
+        let cancel_adapter = state.runtime_adapter.clone();
+        let cancel_sid = session_id.clone();
+        let phase = ctx
+            .install_cancel_action_or_cancelled(request_action(move || {
+                let adapter = cancel_adapter.clone();
+                let sid = cancel_sid.clone();
+                async move {
+                    let _ = adapter
+                        .hard_cancel_current_run(&sid, "REST request cancelled")
+                        .await;
+                }
+            }))
+            .await;
+
+        if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled
+            || ctx.cancel_already_requested()
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::RequestCancelled { details: None },
+            );
+        }
+    }
+
+    // Apply staged MCP operations at the turn boundary. MCP boundary appends
+    // text-only system notices; extract a String for it, then fold any
+    // additions back into the final ContentInput.
     #[cfg(feature = "mcp")]
     {
         let mut mcp_text = String::new();
@@ -3847,43 +3928,23 @@ async fn continue_session_inner(
     }
 
     let adapter = state.runtime_adapter.clone();
-    let final_result = if rest_continue_requires_rebuild(&req) {
-        let session = match loaded_session {
-            Some(s) => s,
-            None => {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
-                    req_ctx.as_ref(),
-                    ApiError::NotFound(format!("Session not found: {session_id}")),
-                );
-            }
-        };
-        let bindings = match state
-            .runtime_adapter
-            .prepare_bindings(session_id.clone())
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                let message = format!("failed to prepare runtime bindings: {e}");
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(req_ctx.as_ref(), ApiError::Internal(message));
-            }
-        };
-        if let Some(ctx) = req_ctx.as_ref()
-            && let Err(err) = ctx
-                .bind_lifecycle(Arc::clone(&bindings.surface_request_lifecycle))
-                .await
-        {
+    let final_result = if requires_rebuild {
+        let Some(session) = loaded_session else {
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return failed_terminal(
                 req_ctx.as_ref(),
-                ApiError::Internal(format!("request lifecycle rejected session binding: {err}")),
+                ApiError::NotFound(format!("Session not found: {session_id}")),
             );
-        }
+        };
+        let Some(bindings) = prepared_bindings else {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return failed_terminal(
+                req_ctx.as_ref(),
+                ApiError::Internal("request lifecycle bindings were not prepared".to_string()),
+            );
+        };
         let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
             session
                 .session_metadata()
@@ -4007,7 +4068,7 @@ async fn continue_session_inner(
         };
 
         // Rebuilt session now exists — install cleanup to archive it if cancel
-        // fires before the turn starts, and interrupt as the running cancel action.
+        // fires before the turn starts.
         if let Some(ctx) = req_ctx.as_ref() {
             let cleanup_svc = state.session_service.clone();
             let cleanup_adapter = state.runtime_adapter.clone();
@@ -4021,31 +4082,6 @@ async fn continue_session_inner(
                     adapter.unregister_session(&sid).await;
                 }
             }));
-
-            let cancel_adapter = state.runtime_adapter.clone();
-            let cancel_sid = session_id.clone();
-            let phase = ctx
-                .install_cancel_action_or_cancelled(request_action(move || {
-                    let adapter = cancel_adapter.clone();
-                    let sid = cancel_sid.clone();
-                    async move {
-                        let _ = adapter
-                            .hard_cancel_current_run(&sid, "REST request cancelled")
-                            .await;
-                    }
-                }))
-                .await;
-
-            // If cancel raced with install, install_cancel_action already ran
-            // the newly installed action; bail out with a cancelled terminal.
-            if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
-                    req_ctx.as_ref(),
-                    ApiError::RequestCancelled { details: None },
-                );
-            }
         }
 
         #[cfg(feature = "comms")]
@@ -4105,19 +4141,6 @@ async fn continue_session_inner(
             }),
         }
     } else {
-        ensure_rest_session_runtime_executor(state, &session_id).await;
-        if let Some(ctx) = req_ctx.as_ref()
-            && let Err(err) = ctx
-                .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
-                .await
-        {
-            drop(caller_event_tx);
-            drain_event_forwarder(&session_id, forward_task).await;
-            return failed_terminal(
-                req_ctx.as_ref(),
-                ApiError::Internal(format!("request lifecycle rejected session binding: {err}")),
-            );
-        }
         #[cfg(feature = "comms")]
         {
             let comms_rt = state.session_service.comms_runtime(&session_id).await;
@@ -4171,34 +4194,6 @@ async fn continue_session_inner(
             drop(caller_event_tx);
             drain_event_forwarder(&session_id, forward_task).await;
             return failed_terminal(req_ctx.as_ref(), ApiError::BadRequest(err));
-        }
-
-        // Install cancel action: interrupt the session.
-        if let Some(ctx) = req_ctx.as_ref() {
-            let cancel_adapter = state.runtime_adapter.clone();
-            let cancel_sid = session_id.clone();
-            let phase = ctx
-                .install_cancel_action_or_cancelled(request_action(move || {
-                    let adapter = cancel_adapter.clone();
-                    let sid = cancel_sid.clone();
-                    async move {
-                        let _ = adapter
-                            .hard_cancel_current_run(&sid, "REST request cancelled")
-                            .await;
-                    }
-                }))
-                .await;
-
-            // If cancel raced with install, install_cancel_action already ran
-            // the newly installed action; bail out with a cancelled terminal.
-            if phase == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-                drop(caller_event_tx);
-                drain_event_forwarder(&session_id, forward_task).await;
-                return failed_terminal(
-                    req_ctx.as_ref(),
-                    ApiError::RequestCancelled { details: None },
-                );
-            }
         }
 
         let input =
@@ -6709,6 +6704,45 @@ mod tests {
         assert!(rest_continue_requires_rebuild(&req));
     }
 
+    #[test]
+    fn test_continue_session_binds_lifecycle_before_mcp_boundary() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn continue_session_inner")
+            .expect("continue_session_inner should exist");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("/// SSE endpoint")
+                    .expect("continue_session_inner should end before SSE endpoint")];
+        let apply_mcp = body
+            .find("apply_mcp_boundary")
+            .expect("continue_session_inner should apply MCP turn boundary");
+        let bind_rebuild = body
+            .find(".bind_runtime_session")
+            .expect("rebuild continue path should bind runtime session lifecycle");
+        let bind_live = body[bind_rebuild + 1..]
+            .find(".bind_runtime_session")
+            .map(|offset| bind_rebuild + 1 + offset)
+            .expect("live continue path should bind runtime session lifecycle");
+        let install_cancel = body
+            .find(".install_cancel_action_or_cancelled")
+            .expect("continue path should install cancel action");
+
+        assert!(
+            bind_rebuild < apply_mcp,
+            "rebuild continue must bind request lifecycle before MCP staged side effects"
+        );
+        assert!(
+            bind_live < apply_mcp,
+            "live continue must bind request lifecycle before MCP staged side effects"
+        );
+        assert!(
+            install_cancel < apply_mcp,
+            "continue must install cancel action before MCP staged side effects"
+        );
+    }
+
     #[tokio::test]
     async fn test_continue_session_invalid_keep_alive_is_side_effect_free() {
         use axum::body::Body;
@@ -7647,8 +7681,22 @@ mod tests {
             );
         }
 
+        fn session_response_fixture(text: &str) -> Json<SessionResponse> {
+            Json(SessionResponse {
+                session_id: SessionId::new(),
+                session_ref: None,
+                text: text.to_string(),
+                turns: 1,
+                tool_calls: 0,
+                usage: UsageResponse::default(),
+                structured_output: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+            })
+        }
+
         #[tokio::test]
-        async fn test_publish_terminal_after_cancel_returns_request_cancelled() {
+        async fn test_success_publish_terminal_after_cancel_returns_request_cancelled() {
             let executor =
                 SurfaceRequestExecutor::new_standalone(std::time::Duration::from_millis(1));
             let ctx = executor
@@ -7666,8 +7714,8 @@ mod tests {
 
             let terminal = committed_terminal(
                 Some(&ctx),
-                Err(ApiError::Internal(
-                    "publish response must not leak after cancel".to_string(),
+                Ok(session_response_fixture(
+                    "publish response must not leak after cancel",
                 )),
             );
             let result = with_request_lifecycle(&executor, Some(ctx), terminal).await;
@@ -7765,6 +7813,43 @@ mod tests {
             assert_eq!(executor.phase("rest-early-error"), None);
         }
 
+        #[tokio::test]
+        async fn test_unbound_tracked_error_terminal_preserves_rest_error() {
+            let runtime_adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+            let executor = SurfaceRequestExecutor::new_with_machine(
+                std::time::Duration::from_millis(1),
+                &runtime_adapter,
+            );
+            let ctx = executor
+                .try_begin_request(
+                    "rest-unbound-validation-error",
+                    meerkat::surface::SurfaceRequestKind::SessionTurn,
+                    noop_request_action(),
+                )
+                .expect("test request key should be unique");
+
+            let terminal = failed_terminal(
+                Some(&ctx),
+                ApiError::BadRequest("tracked pre-binding error".to_string()),
+            );
+            let result = with_request_lifecycle(&executor, Some(ctx), terminal).await;
+
+            assert!(
+                matches!(result, Err(ApiError::BadRequest(message)) if message == "tracked pre-binding error")
+            );
+            assert_eq!(executor.phase("rest-unbound-validation-error"), None);
+            assert!(
+                executor
+                    .try_begin_request(
+                        "rest-unbound-validation-error",
+                        meerkat::surface::SurfaceRequestKind::SessionTurn,
+                        noop_request_action(),
+                    )
+                    .is_ok(),
+                "pre-binding REST errors must remove the request entry so the request id can retry"
+            );
+        }
+
         #[derive(Clone)]
         struct RequestLifecycleProbeState {
             executor: SurfaceRequestExecutor,
@@ -7784,15 +7869,15 @@ mod tests {
             }
             let terminal = committed_terminal(
                 ctx.as_ref(),
-                Err(ApiError::Internal(
-                    "publish response must not cross HTTP after cancel".to_string(),
+                Ok(session_response_fixture(
+                    "publish response must not cross HTTP after cancel",
                 )),
             );
             with_request_lifecycle(&state.executor, ctx, terminal).await
         }
 
         #[tokio::test]
-        async fn test_publish_terminal_after_cancel_returns_http_499() {
+        async fn test_success_publish_terminal_after_cancel_returns_http_499() {
             let app = Router::new()
                 .route("/probe", post(publish_after_cancel_probe))
                 .with_state(RequestLifecycleProbeState {

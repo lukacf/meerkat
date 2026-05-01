@@ -6,7 +6,7 @@ use meerkat::surface::{
     RequestTransitionError, StdioJsonWriter, SurfaceRequestExecutor, SurfaceRequestKind,
     noop_request_action, spawn_stdio_json_writer,
 };
-use meerkat_contracts::ErrorCode;
+use meerkat_contracts::{ErrorCode, mcp_tracked_surface_request_kind};
 use meerkat_core::{RealmConfig, RealmSelection, RuntimeBootstrap};
 use meerkat_store::RealmBackend;
 use serde_json::{Value, json};
@@ -64,7 +64,7 @@ impl From<RealmBackendArg> for RealmBackend {
 }
 
 struct ToolCompletion {
-    request_key: String,
+    request_key: Option<String>,
     terminal: RequestTerminal<Value>,
 }
 
@@ -198,12 +198,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .unwrap_or_else(|| json!({}));
 
-                        let context =
-                            match begin_mcp_tool_request(
-                                &request_executor,
-                                request_key.clone(),
-                                meerkat_mcp_server::mcp_tool_surface_request_kind(&name),
-                            ) {
+                        let context = match mcp_tracked_surface_request_kind(&name)
+                            .map(|kind| {
+                                begin_mcp_tool_request(&request_executor, request_key.clone(), kind)
+                            })
+                            .transpose()
+                        {
                                 Ok(context) => context,
                                 Err(BeginMcpToolRequestError::AlreadyExists) => {
                                     if writer.send(duplicate_request_response(request_id)).await.is_err() {
@@ -266,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &tool_name,
                                     &arguments,
                                     Some(notifier),
-                                    Some(context),
+                                    context,
                                 )
                                 .await
                             },
@@ -343,14 +343,15 @@ fn spawn_mcp_tool_completion_with_dispatch<F, Fut>(
     request_key: String,
     request_id: Value,
     tool_name: String,
-    context: RequestContext,
+    context: Option<RequestContext>,
     dispatch: F,
 ) -> tokio::task::JoinHandle<()>
 where
-    F: FnOnce(String, RequestContext) -> Fut + Send + 'static,
+    F: FnOnce(String, Option<RequestContext>) -> Fut + Send + 'static,
     Fut: Future<Output = Result<Value, meerkat_mcp_server::ToolCallError>> + Send + 'static,
 {
     let terminal_context = context.clone();
+    let tracked_request_key = terminal_context.as_ref().map(|_| request_key);
     tokio::spawn(async move {
         let terminal = match dispatch(tool_name, context).await {
             Ok(result) => {
@@ -359,7 +360,10 @@ where
                     "id": request_id,
                     "result": result
                 });
-                terminal_context.classify_success_terminal(response)
+                match terminal_context.as_ref() {
+                    Some(context) => context.classify_success_terminal(response),
+                    None => RequestTerminal::inline(response),
+                }
             }
             Err(err) => {
                 let mut error = json!({
@@ -369,16 +373,20 @@ where
                 if let Some(data) = err.data {
                     error["data"] = data;
                 }
-                terminal_context.classify_failure_terminal(json!({
+                let response = json!({
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "error": error
-                }))
+                });
+                match terminal_context.as_ref() {
+                    Some(context) => context.classify_failure_terminal(response),
+                    None => RequestTerminal::inline(response),
+                }
             }
         };
         let _ = completion_tx
             .send(ToolCompletion {
-                request_key,
+                request_key: tracked_request_key,
                 terminal,
             })
             .await;
@@ -408,14 +416,14 @@ async fn write_tool_completion(
 ) -> bool {
     let cancel_id = completion.terminal.payload().get("id").cloned();
     let to_write = match request_executor
-        .resolve_terminal(Some(&completion.request_key), completion.terminal)
+        .resolve_terminal(completion.request_key.as_deref(), completion.terminal)
         .await
     {
         RequestTerminalResolution::Emit(response) => response,
         RequestTerminalResolution::Cancelled => request_cancelled_response(cancel_id),
         RequestTerminalResolution::LifecycleError(err) => {
             tracing::warn!(
-                request_key = %completion.request_key,
+                request_key = ?completion.request_key,
                 error = %err,
                 "request lifecycle rejected publish response"
             );
@@ -487,7 +495,7 @@ mod tests {
             request_key.clone(),
             request_id,
             "meerkat_run".to_string(),
-            context,
+            Some(context),
             |tool_name, _context| async move {
                 assert_eq!(tool_name, "meerkat_run");
                 Ok(json!({"ok": true}))
@@ -500,11 +508,148 @@ mod tests {
                 .expect("tool completion should arrive")
                 .expect("tool completion channel should stay open");
         handle.await.expect("synthetic tool task should complete");
-        assert_eq!(completion.request_key, request_key);
+        assert_eq!(
+            completion.request_key.as_deref(),
+            Some(request_key.as_str())
+        );
         assert!(
             !completion.terminal.is_publish(),
             "raw meerkat_run tool name must not grant committed publish authority without typed admission"
         );
+    }
+
+    #[tokio::test]
+    async fn inline_mcp_tool_completion_does_not_require_session_lifecycle_binding() {
+        use tokio::io::AsyncReadExt;
+
+        let (transport, mut output) = tokio::io::duplex(4096);
+        let (writer, writer_task) = spawn_stdio_json_writer(transport, 8);
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_millis(1),
+            &meerkat_runtime::MeerkatMachine::ephemeral(),
+        );
+        let request_id = json!(2);
+        let (completion_tx, mut completion_rx) = mpsc::channel(1);
+
+        assert_eq!(
+            mcp_tracked_surface_request_kind("meerkat_sessions"),
+            None,
+            "inline MCP observation tools must not be admitted into an unbound request lifecycle"
+        );
+        let handle = spawn_mcp_tool_completion_with_dispatch(
+            completion_tx,
+            request_key(&request_id),
+            request_id,
+            "meerkat_sessions".to_string(),
+            None,
+            |tool_name, context| async move {
+                assert_eq!(tool_name, "meerkat_sessions");
+                assert!(context.is_none());
+                Ok(json!({"sessions": []}))
+            },
+        );
+
+        let completion =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+                .await
+                .expect("tool completion should arrive")
+                .expect("tool completion channel should stay open");
+        handle.await.expect("synthetic tool task should complete");
+        assert!(completion.request_key.is_none());
+        assert!(
+            write_tool_completion(&writer, &request_executor, completion).await,
+            "inline completion should write successfully"
+        );
+
+        drop(writer);
+        writer_task
+            .await
+            .expect("writer task should join")
+            .expect("writer task should succeed");
+
+        let mut buf = String::new();
+        output
+            .read_to_string(&mut buf)
+            .await
+            .expect("output should read");
+        let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["result"]["sessions"], json!([]));
+        assert!(response.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn pre_binding_mcp_failure_preserves_tool_error() {
+        use tokio::io::AsyncReadExt;
+
+        let (transport, mut output) = tokio::io::duplex(4096);
+        let (writer, writer_task) = spawn_stdio_json_writer(transport, 8);
+        let request_executor = SurfaceRequestExecutor::new_with_machine(
+            tokio::time::Duration::from_millis(1),
+            &meerkat_runtime::MeerkatMachine::ephemeral(),
+        );
+        let request_id = json!(3);
+        let request_key = request_key(&request_id);
+        let context = begin_mcp_tool_request(
+            &request_executor,
+            request_key.clone(),
+            SurfaceRequestKind::SessionCreateWithTurn,
+        )
+        .expect("tracked MCP request should begin");
+        let (completion_tx, mut completion_rx) = mpsc::channel(1);
+
+        let handle = spawn_mcp_tool_completion_with_dispatch(
+            completion_tx,
+            request_key.clone(),
+            request_id,
+            "meerkat_run".to_string(),
+            Some(context),
+            |tool_name, context| async move {
+                assert_eq!(tool_name, "meerkat_run");
+                assert!(context.is_some());
+                Err(meerkat_mcp_server::ToolCallError {
+                    code: -32602,
+                    message: "Invalid arguments: missing prompt".to_string(),
+                    data: None,
+                })
+            },
+        );
+
+        let completion =
+            tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+                .await
+                .expect("tool completion should arrive")
+                .expect("tool completion channel should stay open");
+        handle.await.expect("synthetic tool task should complete");
+        assert_eq!(
+            completion.request_key.as_deref(),
+            Some(request_key.as_str())
+        );
+        assert!(
+            write_tool_completion(&writer, &request_executor, completion).await,
+            "pre-binding failure completion should write successfully"
+        );
+        assert_eq!(request_executor.phase(&request_key), None);
+
+        drop(writer);
+        writer_task
+            .await
+            .expect("writer task should join")
+            .expect("writer task should succeed");
+
+        let mut buf = String::new();
+        output
+            .read_to_string(&mut buf)
+            .await
+            .expect("output should read");
+        let response: Value = serde_json::from_str(buf.trim()).expect("response should parse");
+        assert_eq!(response["id"], 3);
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(
+            response["error"]["message"],
+            "Invalid arguments: missing prompt"
+        );
+        assert!(response.get("result").is_none());
     }
 
     #[test]
@@ -597,7 +742,7 @@ mod tests {
                 &writer,
                 &request_executor,
                 ToolCompletion {
-                    request_key: request_key.clone(),
+                    request_key: Some(request_key.clone()),
                     terminal,
                 },
             )

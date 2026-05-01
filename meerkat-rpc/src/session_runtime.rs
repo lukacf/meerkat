@@ -7496,6 +7496,7 @@ mod tests {
     }
 
     /// set_mob_tools writes through to the builder, so sessions get mob tools.
+    #[cfg(feature = "mob")]
     #[tokio::test]
     async fn set_mob_tools_delivers_tools_to_created_sessions() {
         let temp = tempfile::tempdir().unwrap();

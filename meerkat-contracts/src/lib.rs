@@ -9,6 +9,7 @@ pub mod capability;
 pub mod error;
 pub mod event_catalog;
 pub mod protocol;
+pub mod request_lifecycle;
 pub mod rest_catalog;
 pub mod rpc_catalog;
 pub mod session_locator;
@@ -27,6 +28,13 @@ pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
 pub use event_catalog::KNOWN_AGENT_EVENT_TYPES;
 pub use meerkat_core::{ExecutionPlacement, ExecutionPlacementIdentity};
 pub use protocol::Protocol;
+pub use request_lifecycle::{
+    MCP_TOOL_REQUEST_LIFECYCLE_CATALOG, McpToolRequestLifecycleCatalog,
+    McpToolRequestLifecycleDescriptor, RpcRequestLifecycleRule, mcp_tool_surface_request_kind,
+    mcp_tracked_surface_request_kind, rpc_surface_request_kind,
+    rpc_surface_request_kind_for_options, rpc_tracked_surface_request_kind,
+    rpc_tracked_surface_request_kind_for_options,
+};
 pub use rest_catalog::{
     RestOperationDescriptor, RestPathDescriptor, rest_documented_paths, rest_path_catalog,
 };

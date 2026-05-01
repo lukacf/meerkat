@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use meerkat_contracts::RpcMethodCatalogOptions;
 use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
@@ -421,6 +422,22 @@ impl MethodRouter {
     /// Get a reference to the runtime adapter for session registration.
     pub fn runtime_adapter(&self) -> &Arc<meerkat_runtime::MeerkatMachine> {
         &self.runtime_adapter
+    }
+
+    /// Catalog options for the RPC surface this router actually serves under
+    /// the current feature set.
+    pub fn method_catalog_options(&self) -> RpcMethodCatalogOptions {
+        RpcMethodCatalogOptions {
+            runtime_available: cfg!(not(feature = "mini-surface")),
+            mob_enabled: cfg!(feature = "mob"),
+            mcp_enabled: cfg!(all(feature = "mcp", not(feature = "mini-surface"))),
+            comms_enabled: cfg!(feature = "comms"),
+            blob_enabled: cfg!(not(feature = "mini-surface")),
+            session_events_enabled: cfg!(not(feature = "mini-surface")),
+            session_streams_enabled: cfg!(not(feature = "mini-surface")),
+            schedule_enabled: cfg!(all(feature = "schedule", not(feature = "mini-surface"))),
+            skills_enabled: cfg!(not(feature = "mini-surface")),
+        }
     }
 
     /// Get a reference to the mob state for authoritative inspection (testing).

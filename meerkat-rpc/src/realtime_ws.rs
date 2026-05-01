@@ -4417,17 +4417,15 @@ mod tests {
 
     #[test]
     fn realtime_socket_binding_has_expected_variants() {
-        // W3-H / dogma #4: exhaustive-match lock-in. After the γ migration
-        // the socket-binding enum has three variants — SessionPrimary /
-        // SessionObserver for standalone-session channels and
-        // MobMemberPrimary for identity-anchored channels that survive
-        // respawn rotation through MobMachine binding authority. New
-        // variants must update this proof and the binding resolver /
-        // is_primary helpers together.
+        // W3-H / dogma #4: exhaustive-match lock-in. The socket-binding enum
+        // has standalone session variants plus the mob-member variant when the
+        // mob feature is enabled. New variants must update this proof and the
+        // binding resolver / is_primary helpers together.
         fn _proof(binding: RealtimeSocketBinding) {
             match binding {
                 RealtimeSocketBinding::SessionPrimary { .. } => {}
                 RealtimeSocketBinding::SessionObserver { .. } => {}
+                #[cfg(feature = "mob")]
                 RealtimeSocketBinding::MobMemberPrimary { .. } => {}
             }
         }

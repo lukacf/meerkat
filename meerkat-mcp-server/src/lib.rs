@@ -1420,11 +1420,7 @@ pub fn tools_list() -> Vec<Value> {
 }
 
 pub fn mcp_tool_surface_request_kind(name: &str) -> meerkat::surface::SurfaceRequestKind {
-    match name {
-        "meerkat_run" => meerkat::surface::SurfaceRequestKind::SessionCreateWithTurn,
-        "meerkat_resume" => meerkat::surface::SurfaceRequestKind::SessionTurn,
-        _ => meerkat::surface::SurfaceRequestKind::CancellableObservation,
-    }
+    meerkat_contracts::mcp_tool_surface_request_kind(name)
 }
 
 /// Handle a tools/call request
@@ -2727,7 +2723,7 @@ async fn handle_meerkat_run(
 
     if let Some(context) = request_context.as_ref() {
         context
-            .bind_lifecycle(Arc::clone(&bindings.surface_request_lifecycle))
+            .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
             .await
             .map_err(|err| {
                 ToolCallError::internal(format!(
@@ -3017,7 +3013,7 @@ async fn handle_meerkat_resume(
 
     if let Some(context) = request_context.as_ref() {
         context
-            .bind_lifecycle(Arc::clone(&resume_bindings.surface_request_lifecycle))
+            .bind_runtime_session(state.runtime_adapter.as_ref(), &session_id)
             .await
             .map_err(|err| {
                 ToolCallError::internal(format!(

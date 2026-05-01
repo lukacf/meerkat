@@ -123,7 +123,7 @@ fn session_turn_admission_kernel_cancel_boundary_allowed_while_attached() {
             &state,
             &KernelInput {
                 variant: input("CancelAfterBoundary"),
-                fields: BTreeMap::new(),
+                fields: BTreeMap::from([(field("reason"), KernelValue::String("test".into()))]),
             },
         )
         .expect("attached sessions should accept cancel-after-boundary as a self-loop");

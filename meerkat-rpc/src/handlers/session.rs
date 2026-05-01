@@ -386,14 +386,16 @@ pub async fn handle_create(
     }
 
     if let Some(context) = request_context.as_ref() {
-        let runtime_for_cancel = Arc::clone(&runtime);
+        let runtime_adapter_for_cancel = Arc::clone(runtime_adapter);
         let session_id_for_cancel = session_id.clone();
         let install = context
             .install_cancel_action_or_cancelled(request_action(move || {
-                let runtime = Arc::clone(&runtime_for_cancel);
+                let runtime_adapter = Arc::clone(&runtime_adapter_for_cancel);
                 let session_id = session_id_for_cancel.clone();
                 async move {
-                    let _ = runtime.interrupt(&session_id).await;
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "RPC request cancelled")
+                        .await;
                 }
             }))
             .await;

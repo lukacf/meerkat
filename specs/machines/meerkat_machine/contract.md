@@ -162,14 +162,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `SetPeerIngressContext`(keep_alive: Bool)
 - `NotifyDrainExited`(reason: DrainExitReason)
 - `InterruptCurrentRun`
-- `CancelAfterBoundary`
+- `CancelAfterBoundary`(reason: String)
 - `StagePersistentFilter`(filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness>)
 - `RequestDeferredTools`(authorities: Map<String, ToolVisibilityWitness>)
 - `PublishCommittedVisibleSet`(active_filter: ToolFilter, staged_filter: ToolFilter, active_requested_deferred_names: Set<String>, staged_requested_deferred_names: Set<String>, active_deferred_authorities: Map<String, ToolVisibilityWitness>, staged_deferred_authorities: Map<String, ToolVisibilityWitness>, active_visibility_revision: u64, staged_visibility_revision: u64)
 - `Recover`
 - `Retire`(session_id: SessionId)
 - `Reset`
-- `StopRuntimeExecutor`
+- `StopRuntimeExecutor`(reason: String)
 - `RuntimeExecutorExited`
 - `Destroy`(session_id: SessionId)
 - `EnsureSessionWithExecutor`(session_id: SessionId)
@@ -380,6 +380,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `WakeInterrupt`
 - `CommittedVisibleSetPublished`(revision: u64)
 - `RuntimeNotice`(kind: RuntimeNoticeKind, detail: String)
+- `RuntimeEffectFact`(kind: RuntimeEffectKind, reason: String)
 - `ModelRoutingStatusChanged`(topology_epoch: u64)
 - `SwitchTurnDenied`(request_id: String, reason: RoutingDenialReason)
 - `SwitchTurnPersistentReconfigureRequested`(request_id: String, target_model: String)
@@ -1353,14 +1354,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `CancelAfterBoundaryAttached`
 - From: `Attached`
-- On: `CancelAfterBoundary`()
-- Emits: `RequestCancellationAtBoundary`
+- On: `CancelAfterBoundary`(reason)
+- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
 - To: `Attached`
 
 ### `CancelAfterBoundary`
 - From: `Running`
-- On: `CancelAfterBoundary`()
-- Emits: `RequestCancellationAtBoundary`
+- On: `CancelAfterBoundary`(reason)
+- Emits: `RequestCancellationAtBoundary`, `RuntimeEffectFact`
 - To: `Running`
 
 ### `BoundaryAppliedPublish`
@@ -1473,20 +1474,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `StopRuntimeExecutorUnbound`
 - From: `Initializing`, `Idle`, `Retired`
-- On: `StopRuntimeExecutor`()
-- Emits: `RuntimeNotice`
+- On: `StopRuntimeExecutor`(reason)
+- Emits: `RuntimeNotice`, `RuntimeEffectFact`
 - To: `Stopped`
 
 ### `StopRuntimeExecutorAttached`
 - From: `Attached`
-- On: `StopRuntimeExecutor`()
-- Emits: `RuntimeNotice`
+- On: `StopRuntimeExecutor`(reason)
+- Emits: `RuntimeNotice`, `RuntimeEffectFact`
 - To: `Attached`
 
 ### `StopRuntimeExecutorRunning`
 - From: `Running`
-- On: `StopRuntimeExecutor`()
-- Emits: `RuntimeNotice`
+- On: `StopRuntimeExecutor`(reason)
+- Emits: `RuntimeNotice`, `RuntimeEffectFact`
 - To: `Running`
 
 ### `RuntimeExecutorExitedFromAttached`
@@ -1866,7 +1867,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `request_immediate_processing`
   - `interrupt_yielding`
-- Emits: `IngressAccepted`, `PostAdmissionSignal`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`, `RuntimeEffectFact`
 - To: `Running`
 
 ### `AcceptWithCompletionRunningImmediate`
@@ -1876,7 +1877,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `request_immediate_processing`
   - `interrupt_yielding`
-- Emits: `IngressAccepted`, `PostAdmissionSignal`
+- Emits: `IngressAccepted`, `PostAdmissionSignal`, `RuntimeEffectFact`
 - To: `Running`
 
 ### `AcceptWithoutWakeIdle`

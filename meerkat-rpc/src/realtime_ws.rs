@@ -1239,7 +1239,10 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: RealtimeWsState) {
                                                             if let Err(error) = state
                                                                 .runtime
                                                                 .runtime_adapter()
-                                                                .interrupt_current_run(&session_id)
+                                                                .hard_cancel_current_run(
+                                                                    &session_id,
+                                                                    "realtime channel interrupt",
+                                                                )
                                                                 .await
                                                             {
                                                                 let _ = send_server_frame(
@@ -4242,7 +4245,6 @@ mod tests {
     use meerkat_core::lifecycle::core_executor::{
         CoreApplyOutput, CoreExecutor, CoreExecutorError,
     };
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::types::{SessionId, StopReason};
@@ -4278,7 +4280,17 @@ mod tests {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }

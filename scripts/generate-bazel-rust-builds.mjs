@@ -461,6 +461,8 @@ packageRunfileLabels.sort();
 
 function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatrixLabels) {
   const lines = [
+    `load("@rules_shell//shell:sh_test.bzl", "sh_test")`,
+    ``,
     `# Root package marker for Bazel module extension labels.`,
     ``,
     `filegroup(`,
@@ -545,6 +547,16 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
     `        allow_empty = True,`,
     `    ) + ${listExpr(packageRunfileLabels, 8)},`,
     `    visibility = ["//visibility:public"],`,
+    `)`,
+    ``,
+    `sh_test(`,
+    `    name = "audit_effect_authority_test",`,
+    `    srcs = ["scripts/audit-effect-authority.sh"],`,
+    `    data = [":workspace_runfiles"],`,
+    `    size = "small",`,
+    `    tags = [`,
+    `        "fast",`,
+    `    ],`,
     `)`,
     ``,
   ];

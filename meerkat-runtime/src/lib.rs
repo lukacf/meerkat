@@ -50,6 +50,7 @@ pub mod composition;
 pub(crate) mod control_plane;
 pub mod driver;
 pub mod durability;
+pub(crate) mod effect;
 #[doc(hidden)]
 pub mod generated;
 pub mod handles;

@@ -36,8 +36,9 @@ use meerkat_contracts::{
 };
 use meerkat_core::ToolResult;
 use meerkat_core::lifecycle::RunId;
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorError, CoreExecutorInterruptHandle,
+};
 use meerkat_core::lifecycle::run_primitive::RunPrimitive;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::session::ToolCategoryOverride;
@@ -260,7 +261,11 @@ impl CoreExecutor for NeverAppliedExecutor {
         unreachable!("P3.1 session-target websocket tests never drive apply()")
     }
 
-    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }
@@ -2377,8 +2382,26 @@ async fn channel_interrupt_routes_to_runtime_control_for_active_session() {
         cancel_calls: Arc<AtomicUsize>,
     }
 
+    struct BlockingExecutorInterruptHandle {
+        cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for BlockingExecutorInterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(Arc::new(BlockingExecutorInterruptHandle {
+                cancel_calls: Arc::clone(&self.cancel_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -2400,10 +2423,17 @@ async fn channel_interrupt_routes_to_runtime_control_for_active_session() {
             ))
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::CancelCurrentRun { .. }) {
-                self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }

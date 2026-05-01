@@ -12,7 +12,8 @@ mod schedule_host;
 use meerkat::SessionStore;
 use meerkat::surface::{
     RequestContext, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
-    build_recovered_session, prepare_surface_session, request_action,
+    build_recovered_session, install_prepared_runtime_interrupt_handle, prepare_surface_session,
+    request_action,
 };
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
@@ -35,6 +36,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -625,6 +627,14 @@ impl MeerkatMcpState {
     /// Test constructor that accepts an injected store (avoids opening redb at platform data dir).
     #[cfg(test)]
     pub(crate) async fn new_with_store(store: Arc<dyn SessionStore>) -> Self {
+        Self::new_with_store_and_runtime_store(store, None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_with_store_and_runtime_store(
+        store: Arc<dyn SessionStore>,
+        runtime_store: Option<Arc<dyn meerkat_runtime::RuntimeStore>>,
+    ) -> Self {
         let bootstrap = RuntimeBootstrap::default();
         let locator = match bootstrap.realm.resolve_locator() {
             Ok(locator) => locator,
@@ -684,7 +694,7 @@ impl MeerkatMcpState {
         let (service, runtime_adapter) = meerkat::surface::build_runtime_backed_service(
             builder,
             100,
-            PersistenceBundle::new(store, None, blob_store),
+            PersistenceBundle::new(store, runtime_store, blob_store),
         );
         let service = Arc::new(service);
 
@@ -1252,6 +1262,21 @@ fn request_cancelled_tool_error() -> ToolCallError {
         "request cancelled before start",
         None,
     )
+}
+
+async fn reject_if_cancelled_before_mcp_service_admission<F>(
+    request_context: Option<&RequestContext>,
+    cleanup: F,
+) -> Result<(), ToolCallError>
+where
+    F: Future<Output = ()>,
+{
+    if request_context.is_some_and(RequestContext::cancel_already_requested) {
+        cleanup.await;
+        Err(request_cancelled_tool_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1899,13 +1924,58 @@ async fn handle_meerkat_interrupt(
         meerkat::SessionId::parse(&input.session_id).map_err(invalid_session_id_message)?;
     state
         .service
-        .interrupt(&session_id)
+        .read(&session_id)
         .await
         .map_err(|e| format!("Failed to interrupt session: {e}"))?;
+    match state
+        .runtime_adapter
+        .hard_cancel_current_run(&session_id, "MCP session interrupt")
+        .await
+    {
+        Ok(()) => {}
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state })
+            if interrupt_not_ready_is_noop(state) => {}
+        Err(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        })
+        | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
+            if let Some(runtime_state) = state
+                .service
+                .persisted_runtime_state(&session_id)
+                .await
+                .map_err(|e| format!("Failed to interrupt session: {e}"))?
+                && persisted_runtime_state_blocks_interrupt_noop(runtime_state)
+            {
+                return Err(format!(
+                    "Failed to interrupt session: runtime is not interruptible while {runtime_state}"
+                ));
+            }
+        }
+        Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
+            return Err(format!(
+                "Failed to interrupt session: runtime is not interruptible while {state}"
+            ));
+        }
+        Err(e) => return Err(format!("Failed to interrupt session: {e}")),
+    }
     Ok(wrap_tool_payload(json!({
         "session_id": session_id.to_string(),
         "interrupted": true
     })))
+}
+
+fn interrupt_not_ready_is_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Idle | meerkat_runtime::RuntimeState::Attached
+    )
+}
+
+fn persisted_runtime_state_blocks_interrupt_noop(state: meerkat_runtime::RuntimeState) -> bool {
+    matches!(
+        state,
+        meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
+    )
 }
 
 async fn handle_meerkat_sessions(
@@ -2656,6 +2726,13 @@ async fn handle_meerkat_run(
     let session = prepared_session.session;
     let session_id = prepared_session.session_id;
     let bindings = prepared_session.bindings;
+    install_prepared_runtime_interrupt_handle(&state.service, &state.runtime_adapter, &session_id)
+        .await
+        .map_err(|e| {
+            ToolCallError::internal(format!(
+                "failed to install prepared interrupt handle for session {session_id}: {e}"
+            ))
+        })?;
     let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
         McpRouter::new_with_surface_handle(Arc::clone(&bindings.external_tool_surface)),
     ));
@@ -2664,14 +2741,16 @@ async fn handle_meerkat_run(
         .map_err(ToolCallError::internal)?;
 
     if let Some(context) = request_context.as_ref() {
-        let service = state.service.clone();
+        let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
             .install_cancel_action_or_cancelled(request_action(move || {
-                let service = service.clone();
+                let runtime_adapter = runtime_adapter.clone();
                 let session_id = session_id_for_cancel.clone();
                 async move {
-                    let _ = service.interrupt(&session_id).await;
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
+                        .await;
                 }
             }))
             .await;
@@ -2789,6 +2868,13 @@ async fn handle_meerkat_run(
         input.enable_mob,
     ));
 
+    reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
+        let _ = state.service.archive(&session_id).await;
+        state.runtime_adapter.unregister_session(&session_id).await;
+        ingress.clear_session(&session_id).await;
+    })
+    .await?;
+
     let req = CreateSessionRequest {
         model,
         prompt: input.prompt.into(),
@@ -2856,14 +2942,16 @@ async fn handle_meerkat_resume(
         .map_err(|err| ToolCallError::invalid_params(invalid_session_id_message(err)))?;
 
     if let Some(context) = request_context.as_ref() {
-        let service = state.service.clone();
+        let runtime_adapter = state.runtime_adapter.clone();
         let session_id_for_cancel = session_id.clone();
         let install = context
             .install_cancel_action_or_cancelled(request_action(move || {
-                let service = service.clone();
+                let runtime_adapter = runtime_adapter.clone();
                 let session_id = session_id_for_cancel.clone();
                 async move {
-                    let _ = service.interrupt(&session_id).await;
+                    let _ = runtime_adapter
+                        .hard_cancel_current_run(&session_id, "MCP request cancelled")
+                        .await;
                 }
             }))
             .await;
@@ -2925,6 +3013,11 @@ async fn handle_meerkat_resume(
         ));
     }
 
+    let runtime_entry_existed_before_prepare = state
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .is_some();
     let resume_bindings = state
         .runtime_adapter
         .prepare_bindings(session_id.clone())
@@ -2932,6 +3025,13 @@ async fn handle_meerkat_resume(
         .map_err(|e| {
             ToolCallError::internal(format!(
                 "failed to prepare bindings for session {session_id}: {e}"
+            ))
+        })?;
+    install_prepared_runtime_interrupt_handle(&state.service, &state.runtime_adapter, &session_id)
+        .await
+        .map_err(|e| {
+            ToolCallError::internal(format!(
+                "failed to install prepared interrupt handle for session {session_id}: {e}"
             ))
         })?;
 
@@ -3030,6 +3130,14 @@ async fn handle_meerkat_resume(
     };
 
     let mut session_rematerialized = false;
+
+    reject_if_cancelled_before_mcp_service_admission(request_context.as_ref(), async {
+        if !runtime_entry_existed_before_prepare {
+            state.runtime_adapter.unregister_session(&session_id).await;
+        }
+    })
+    .await?;
+
     let result = if needs_rebuild {
         match state.service.create_session(create_req).await {
             Ok(_) => {
@@ -3218,8 +3326,11 @@ mod tests {
     use super::*;
     use futures::stream;
     use meerkat::Session;
-    use meerkat::surface::{SurfaceRequestExecutor, noop_request_action};
+    use meerkat::surface::{
+        CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
+    };
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::{Duration, timeout};
 
     fn unwrap_payload(value: Value) -> Value {
@@ -4537,6 +4648,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_request_cancel_after_action_install_rejects_before_service_admission() {
+        use meerkat::surface::CancelOutcome;
+
+        let executor = SurfaceRequestExecutor::new(Duration::from_millis(1));
+        let context = executor.begin_request("req-cancel-before-admission", noop_request_action());
+        let install = context
+            .install_cancel_action_or_cancelled(noop_request_action())
+            .await;
+        assert_eq!(install, CancelActionInstallOutcome::Installed);
+
+        let outcome = executor.cancel_request(context.key()).await;
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleaned_for_gate = Arc::clone(&cleaned);
+        let err = reject_if_cancelled_before_mcp_service_admission(Some(&context), async move {
+            cleaned_for_gate.store(true, Ordering::SeqCst);
+        })
+        .await
+        .expect_err("cancel after action install must reject before service admission");
+
+        assert_eq!(
+            err.code,
+            meerkat_contracts::ErrorCode::RequestCancelled.jsonrpc_code()
+        );
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "pre-admission cancel gate must run cleanup"
+        );
+    }
+
+    #[tokio::test]
     async fn test_handle_meerkat_blob_get_returns_payload() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
@@ -4881,18 +5024,15 @@ mod tests {
             read_payload["state"]["session_id"]
         );
 
-        let interrupt_err = Box::pin(handle_tools_call(
+        let interrupted = Box::pin(handle_tools_call(
             &state,
             "meerkat_interrupt",
             &json!({ "session_id": read_payload["session_id"] }),
         ))
         .await
-        .expect_err("interrupt should fail for non-running persisted session");
-        assert!(
-            interrupt_err
-                .message
-                .contains("Failed to interrupt session")
-        );
+        .expect("interrupt should no-op for non-running persisted session");
+        let interrupted_payload = unwrap_payload(interrupted);
+        assert_eq!(interrupted_payload["interrupted"], true);
 
         let archived = Box::pin(handle_tools_call(
             &state,
@@ -4903,6 +5043,83 @@ mod tests {
         .expect("archive call should succeed");
         let archived_payload = unwrap_payload(archived);
         assert_eq!(archived_payload["archived"], true);
+    }
+
+    #[test]
+    fn test_mcp_interrupt_not_ready_noop_is_only_idle_or_attached() {
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Idle
+        ));
+        assert!(interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Attached
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Destroyed
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Retired
+        ));
+        assert!(!interrupt_not_ready_is_noop(
+            meerkat_runtime::RuntimeState::Stopped
+        ));
+        assert!(persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Retired
+        ));
+        assert!(persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Stopped
+        ));
+        assert!(!persisted_runtime_state_blocks_interrupt_noop(
+            meerkat_runtime::RuntimeState::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_interrupt_rejects_cold_persisted_stopped_runtime() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let state = MeerkatMcpState::new_with_store_and_runtime_store(
+            store,
+            Some(Arc::clone(&runtime_store)),
+        )
+        .await;
+        let created = state
+            .service
+            .create_session(CreateSessionRequest {
+                model: "gpt-5.4".to_string(),
+                prompt: "seed".to_string().into(),
+                system_prompt: None,
+                max_tokens: Some(32),
+                event_tx: None,
+                initial_turn: InitialTurnPolicy::Defer,
+                deferred_prompt_policy: DeferredPromptPolicy::Discard,
+                build: Some(SessionBuildOptions {
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        Arc::new(TestClient::default()),
+                    )),
+                    ..Default::default()
+                }),
+                labels: None,
+            })
+            .await
+            .expect("runtime-backed MCP service should create deferred session");
+        runtime_store
+            .persist_runtime_state(
+                &meerkat_runtime::LogicalRuntimeId::for_session(&created.session_id),
+                meerkat_runtime::RuntimeState::Stopped,
+            )
+            .await
+            .expect("runtime state should persist");
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_interrupt",
+            &json!({ "session_id": created.session_id }),
+        ))
+        .await
+        .expect_err("persisted stopped runtime must reject cold interrupt no-op");
+
+        assert!(err.message.contains("stopped"));
     }
 
     #[tokio::test]

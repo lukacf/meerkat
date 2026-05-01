@@ -227,7 +227,7 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
 
     async fn interrupt_member(&self) -> Result<BridgeAck, MobError> {
         self.machine
-            .interrupt_current_run(&self.session_id)
+            .cancel_after_boundary(&self.session_id)
             .await
             .map_err(|error| {
                 MobError::Internal(format!("local interrupt_member failed: {error}"))
@@ -284,6 +284,14 @@ impl MobBoundMemberRuntimeBridge for LocalMobRuntimeBridge {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+        CoreExecutorInterruptHandle,
+    };
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+    use meerkat_core::lifecycle::{RunApplyBoundary, RunBoundaryReceipt, RunId};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     #[tokio::test]
     async fn local_bridge_observe_returns_idle_for_registered_session() {
@@ -309,6 +317,159 @@ mod tests {
 
         assert_eq!(report.inputs_abandoned, 0);
         assert_eq!(report.inputs_pending_drain, 0);
+    }
+
+    #[tokio::test]
+    async fn local_bridge_interrupt_member_uses_boundary_cancel_not_hard_cancel() {
+        struct BoundaryHandle {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutorBoundaryHandle for BoundaryHandle {
+            async fn cancel_after_boundary(
+                &self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct InterruptHandle {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutorInterruptHandle for InterruptHandle {
+            async fn hard_cancel_current_run(
+                &self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct BlockingExecutor {
+            boundary_calls: Arc<AtomicUsize>,
+            interrupt_calls: Arc<AtomicUsize>,
+            apply_started: Arc<Notify>,
+            apply_finished: Arc<Notify>,
+            allow_finish: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl CoreExecutor for BlockingExecutor {
+            fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+                Some(Arc::new(BoundaryHandle {
+                    calls: Arc::clone(&self.boundary_calls),
+                }))
+            }
+
+            fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+                Some(Arc::new(InterruptHandle {
+                    calls: Arc::clone(&self.interrupt_calls),
+                }))
+            }
+
+            async fn apply(
+                &mut self,
+                run_id: RunId,
+                primitive: RunPrimitive,
+            ) -> Result<CoreApplyOutput, CoreExecutorError> {
+                self.apply_started.notify_waiters();
+                self.allow_finish.notified().await;
+                self.apply_finished.notify_waiters();
+                Ok(CoreApplyOutput {
+                    receipt: RunBoundaryReceipt {
+                        run_id,
+                        boundary: RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                        sequence: 0,
+                    },
+                    session_snapshot: None,
+                    terminal: None,
+                })
+            }
+
+            async fn cancel_after_boundary(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+
+            async fn stop_runtime_executor(
+                &mut self,
+                _reason: String,
+            ) -> Result<(), CoreExecutorError> {
+                Ok(())
+            }
+        }
+
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        let boundary_calls = Arc::new(AtomicUsize::new(0));
+        let interrupt_calls = Arc::new(AtomicUsize::new(0));
+        let apply_started = Arc::new(Notify::new());
+        let apply_finished = Arc::new(Notify::new());
+        let allow_finish = Arc::new(Notify::new());
+
+        machine
+            .register_session_with_executor(
+                session_id.clone(),
+                Box::new(BlockingExecutor {
+                    boundary_calls: Arc::clone(&boundary_calls),
+                    interrupt_calls: Arc::clone(&interrupt_calls),
+                    apply_started: Arc::clone(&apply_started),
+                    apply_finished: Arc::clone(&apply_finished),
+                    allow_finish: Arc::clone(&allow_finish),
+                }),
+            )
+            .await;
+
+        let input =
+            meerkat_runtime::input::Input::Prompt(meerkat_runtime::input::PromptInput::new(
+                "local bridge running turn",
+                Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        handling_mode: Some(HandlingMode::Steer),
+                        ..Default::default()
+                    },
+                ),
+            ));
+        let (outcome, _completion) = machine
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("attached prompt should be accepted");
+        assert!(outcome.is_accepted());
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), apply_started.notified())
+            .await
+            .expect("attached prompt should start running");
+
+        let bridge = LocalMobRuntimeBridge::new(Arc::clone(&machine), session_id);
+        let ack = bridge.interrupt_member().await.unwrap();
+
+        assert!(ack.ok);
+        assert_eq!(
+            boundary_calls.load(Ordering::SeqCst),
+            1,
+            "local bridge interrupt must use cooperative boundary authority"
+        );
+        assert_eq!(
+            interrupt_calls.load(Ordering::SeqCst),
+            0,
+            "local bridge interrupt must not mint user hard-cancel authority"
+        );
+
+        allow_finish.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(1), apply_finished.notified())
+            .await
+            .expect("attached prompt should finish after release");
     }
 
     #[tokio::test]

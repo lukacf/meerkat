@@ -8,8 +8,10 @@ use std::time::Duration;
 use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason};
 use chrono::Utc;
 use meerkat_core::agent::{CommsCapabilityError, CommsRuntime};
-use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
-use meerkat_core::lifecycle::run_control::RunControlCommand;
+use meerkat_core::lifecycle::core_executor::{
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
+};
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -560,7 +562,17 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -1235,7 +1247,17 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -3126,7 +3148,18 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3271,7 +3304,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3359,8 +3403,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission currently routes one control command through the executor seam while requesting immediate processing"
+        0,
+        "attached steered admission should not route a queued executor control command while requesting immediate processing"
     );
 
     allow_finish.notify_waiters();
@@ -3435,7 +3479,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3548,8 +3603,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission should still route one control command through the executor seam"
+        0,
+        "attached steered admission should not route a queued executor control command"
     );
 
     allow_finish.notify_waiters();
@@ -3681,7 +3736,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -3790,7 +3856,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
         "wait_all should track the live operation while attached steered work is active"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(control_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control_calls.load(Ordering::SeqCst), 0);
 
     registry
         .complete_operation(
@@ -3896,7 +3962,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
+        0,
         "isolated attached steered completion should not emit extra executor control commands"
     );
 }
@@ -3938,7 +4004,18 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -4045,7 +4122,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
         "wait_all should track the live operation while attached steered work is active"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(control_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control_calls.load(Ordering::SeqCst), 0);
 
     let runtime_id = runtime_id_for_session(&session_id);
     crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
@@ -4134,14 +4211,14 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
 }
 
 #[tokio::test]
-async fn interrupt_current_run_returns_not_ready_without_attached_loop() {
+async fn hard_cancel_current_run_returns_not_ready_without_attached_loop() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
     adapter.register_session(session_id.clone()).await;
 
     let err = adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "idle hard-cancel probe")
         .await
         .expect_err("interrupt should reject when no attached loop exists");
     match err {
@@ -4172,7 +4249,68 @@ async fn cancel_after_boundary_returns_not_ready_without_attached_loop() {
 }
 
 #[tokio::test]
-async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finishes() {
+async fn hard_cancel_current_run_uses_prepared_session_interrupt_handle_before_executor_attach() {
+    struct CountingInterruptHandle {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for CountingInterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bindings = adapter
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare runtime bindings");
+    adapter
+        .install_prepared_session_interrupt_handle(
+            &session_id,
+            Arc::new(CountingInterruptHandle {
+                calls: Arc::clone(&calls),
+            }),
+        )
+        .await
+        .expect("install prepared interrupt handle");
+
+    bindings
+        .turn_state
+        .start_conversation_run(
+            RunId::new(),
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+            meerkat_core::turn_execution_authority::ContentShape::Conversation,
+            false,
+            false,
+            0,
+        )
+        .expect("simulate service-owned first turn");
+
+    let running = adapter
+        .meerkat_machine_spine_snapshot(&session_id)
+        .await
+        .expect("prepared session should exist");
+    assert_eq!(running.control.phase, RuntimeState::Running);
+
+    adapter
+        .hard_cancel_current_run(&session_id, "user interrupt during materialization")
+        .await
+        .expect("prepared session interrupt should reach provisional live handle");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "hard cancel must reach the pre-attachment service-owned turn"
+    );
+}
+
+#[tokio::test]
+async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_apply() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
         cancel_calls: Arc<AtomicUsize>,
@@ -4181,8 +4319,26 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
         allow_finish: Arc<Notify>,
     }
 
+    struct InterruptHandle {
+        cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorInterruptHandle for InterruptHandle {
+        async fn hard_cancel_current_run(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
+        fn interrupt_handle(&self) -> Option<Arc<dyn CoreExecutorInterruptHandle>> {
+            Some(Arc::new(InterruptHandle {
+                cancel_calls: Arc::clone(&self.cancel_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -4207,10 +4363,17 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::CancelCurrentRun { .. }) {
-                self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4237,7 +4400,7 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
         .await;
 
     let input = Input::Prompt(crate::input::PromptInput::new(
-        "attached steered deferred interrupt",
+        "attached steered live interrupt",
         Some(
             meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                 handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
@@ -4289,9 +4452,9 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     );
 
     adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "attached live hard-cancel probe")
         .await
-        .expect("interrupt should enqueue against the attached loop");
+        .expect("interrupt should use the attached live interrupt handle");
 
     let after_interrupt = adapter
         .meerkat_machine_spine_snapshot(&session_id)
@@ -4300,7 +4463,7 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     assert_eq!(
         after_interrupt.control.phase,
         RuntimeState::Running,
-        "interrupt should stay deferred while the attached executor is still inside apply()"
+        "live interrupt should not mutate queued runtime state while apply() is blocked"
     );
     assert_eq!(
         after_interrupt.control.current_run_id,
@@ -4318,8 +4481,8 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     );
     assert_eq!(
         cancel_calls.load(Ordering::SeqCst),
-        0,
-        "cancel should remain queued until apply returns"
+        1,
+        "hard cancel should reach the live interrupt handle immediately"
     );
 
     allow_finish.notify_waiters();
@@ -4344,7 +4507,6 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
                 && snapshot.control.current_run_id.is_none()
                 && snapshot.inputs.current_run_id.is_none()
                 && snapshot.completion_waiters.waiter_count == 0
-                && cancel_calls.load(Ordering::SeqCst) == 1
             {
                 break snapshot;
             }
@@ -4352,7 +4514,7 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
         }
     })
     .await
-    .expect("attached runtime should eventually return to Attached after queued cancel drains");
+    .expect("attached runtime should eventually return to Attached after apply finishes");
     assert!(settled.inputs.queue.is_empty());
     assert!(settled.inputs.steer_queue.is_empty());
     assert_eq!(settled.completion_waiters.input_count, 0);
@@ -4361,27 +4523,47 @@ async fn interrupt_current_run_on_attached_runtime_is_deferred_until_apply_finis
     assert_eq!(
         apply_calls.load(Ordering::SeqCst),
         1,
-        "queued cancel should not replay the already-running attached steered turn"
+        "live interrupt should not replay the already-running attached steered turn"
     );
     assert_eq!(
         cancel_calls.load(Ordering::SeqCst),
         1,
-        "queued cancel should reach the executor exactly once after apply finishes"
+        "live interrupt should reach the executor exactly once"
     );
 }
 
 #[tokio::test]
-async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finishes() {
+async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_effect() {
     struct BlockingExecutor {
         apply_calls: Arc<AtomicUsize>,
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
         boundary_cancel_calls: Arc<AtomicUsize>,
         apply_started: Arc<Notify>,
         apply_finished: Arc<Notify>,
         allow_finish: Arc<Notify>,
     }
 
+    struct BoundaryHandle {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for BoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.live_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(BoundaryHandle {
+                live_boundary_cancel_calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
         async fn apply(
             &mut self,
             run_id: RunId,
@@ -4406,10 +4588,18 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::CancelAfterBoundary { .. }) {
-                self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4417,6 +4607,7 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
     let apply_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
     let apply_started = Arc::new(Notify::new());
     let apply_finished = Arc::new(Notify::new());
@@ -4427,6 +4618,7 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
             session_id.clone(),
             Box::new(BlockingExecutor {
                 apply_calls: Arc::clone(&apply_calls),
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
                 boundary_cancel_calls: Arc::clone(&boundary_cancel_calls),
                 apply_started: Arc::clone(&apply_started),
                 apply_finished: Arc::clone(&apply_finished),
@@ -4468,9 +4660,14 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
     assert_eq!(after_request.control.phase, RuntimeState::Running);
     assert!(after_request.control.current_run_id.is_some());
     assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        1,
+        "public boundary cancel should also call the live boundary handle while apply is in flight"
+    );
+    assert_eq!(
         boundary_cancel_calls.load(Ordering::SeqCst),
         0,
-        "boundary cancel should remain queued until apply returns"
+        "in-loop boundary cancel should remain queued until apply returns"
     );
 
     allow_finish.notify_waiters();
@@ -4511,7 +4708,153 @@ async fn cancel_after_boundary_on_attached_runtime_is_deferred_until_apply_finis
 }
 
 #[tokio::test]
-async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
+async fn cancel_after_boundary_live_wake_is_not_blocked_by_full_effect_channel() {
+    struct BlockingExecutor {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+        queued_boundary_cancel_calls: Arc<AtomicUsize>,
+        apply_started: Arc<Notify>,
+        allow_finish: Arc<Notify>,
+    }
+
+    struct BoundaryHandle {
+        live_boundary_cancel_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutorBoundaryHandle for BoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.live_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for BlockingExecutor {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(BoundaryHandle {
+                live_boundary_cancel_calls: Arc::clone(&self.live_boundary_cancel_calls),
+            }))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+
+            Ok(CoreApplyOutput {
+                receipt: RunBoundaryReceipt {
+                    run_id,
+                    boundary: RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_boundary_cancel_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let live_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let queued_boundary_cancel_calls = Arc::new(AtomicUsize::new(0));
+    let apply_started = Arc::new(Notify::new());
+    let allow_finish = Arc::new(Notify::new());
+
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                live_boundary_cancel_calls: Arc::clone(&live_boundary_cancel_calls),
+                queued_boundary_cancel_calls: Arc::clone(&queued_boundary_cancel_calls),
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let input = Input::Prompt(crate::input::PromptInput::new(
+        "attached steered saturated boundary cancel",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("attached steered prompt should be accepted");
+    assert!(outcome.is_accepted());
+    let completion_handle =
+        completion_handle.expect("attached steered prompt should expose a completion waiter");
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("attached steered prompt should request immediate processing");
+
+    for _ in 0..16 {
+        adapter
+            .cancel_after_boundary(&session_id)
+            .await
+            .expect("boundary cancel should enqueue until the effect channel is full");
+    }
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        16,
+        "each queued boundary cancel should deliver the live wake first"
+    );
+    assert_eq!(
+        queued_boundary_cancel_calls.load(Ordering::SeqCst),
+        0,
+        "runtime loop is still blocked inside apply, so queued effects have not drained"
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        adapter.cancel_after_boundary(&session_id),
+    )
+    .await
+    .expect("live boundary cancel must not wait for capacity in the bounded effect channel")
+    .expect("live boundary cancel should succeed after best-effort enqueue");
+    assert_eq!(
+        live_boundary_cancel_calls.load(Ordering::SeqCst),
+        17,
+        "saturated effect channel must not prevent the live cooperative wake"
+    );
+
+    allow_finish.notify_waiters();
+    match completion_handle.wait().await {
+        CompletionOutcome::CompletedWithoutResult => {}
+        other => panic!("expected attached queued prompt to complete normally, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
     struct BlockingThenImmediateExecutor {
         apply_calls: Arc<AtomicUsize>,
         interrupt_calls: Arc<AtomicUsize>,
@@ -4560,14 +4903,22 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::InterruptYielding) {
-                self.interrupt_calls.fetch_add(1, Ordering::SeqCst);
-                self.events
-                    .lock()
-                    .expect("events mutex poisoned")
-                    .push("interrupt_yielding");
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.interrupt_calls.fetch_add(1, Ordering::SeqCst);
+            self.events
+                .lock()
+                .expect("events mutex poisoned")
+                .push("interrupt_yielding");
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4765,17 +5116,15 @@ async fn running_peer_message_interrupt_yielding_drains_before_next_apply() {
 }
 
 #[tokio::test]
-async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
-    struct LiveControlHandle {
+async fn service_peer_admission_uses_live_cancel_after_boundary() {
+    struct LiveBoundaryHandle {
         calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
-    impl meerkat_core::lifecycle::CoreExecutorControl for LiveControlHandle {
-        async fn control(&self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::InterruptYielding) {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-            }
+    impl CoreExecutorBoundaryHandle for LiveBoundaryHandle {
+        async fn cancel_after_boundary(&self, _reason: String) -> Result<(), CoreExecutorError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -4790,8 +5139,8 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
 
     #[async_trait::async_trait]
     impl CoreExecutor for BlockingExecutor {
-        fn control_handle(&self) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorControl>> {
-            Some(Arc::new(LiveControlHandle {
+        fn boundary_handle(&self) -> Option<Arc<dyn CoreExecutorBoundaryHandle>> {
+            Some(Arc::new(LiveBoundaryHandle {
                 calls: Arc::clone(&self.live_control_calls),
             }))
         }
@@ -4818,10 +5167,18 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::InterruptYielding) {
-                self.queued_control_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.queued_control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -4903,12 +5260,12 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
     assert_eq!(
         live_control_calls.load(Ordering::SeqCst),
         1,
-        "service ext Ingest should signal the live out-of-band control handle while apply is blocked"
+        "service ext Ingest should signal the live boundary handle while apply is blocked"
     );
     assert_eq!(
         queued_control_calls.load(Ordering::SeqCst),
         0,
-        "ordered runtime-loop control still cannot drain until apply returns"
+        "ordered runtime-loop boundary effect still cannot drain until apply returns"
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
 
@@ -4923,7 +5280,7 @@ async fn service_accept_input_interrupt_yielding_uses_live_control_handle() {
         }
     })
     .await
-    .expect("queued control should still drain after apply returns");
+    .expect("queued boundary effect should still drain after apply returns");
 }
 
 #[tokio::test]
@@ -4963,11 +5320,20 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -5081,8 +5447,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "attached steered admission should still route one control command through the executor seam"
+        0,
+        "attached steered admission should not route a queued executor control command"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5091,12 +5457,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "attached steered deferred stop".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "attached steered deferred stop")
         .await
         .expect("stop should queue against the attached loop");
 
@@ -5140,8 +5501,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        1,
-        "the explicit stop command should still be queued instead of reaching the executor mid-apply"
+        0,
+        "the explicit stop command should stay queued instead of reaching the executor mid-apply"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5256,8 +5617,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
     );
     assert_eq!(
         control_calls.load(Ordering::SeqCst),
-        2,
-        "one admission control plus one deferred stop command should reach the attached executor"
+        1,
+        "only the deferred stop command should reach the attached executor"
     );
     assert_eq!(
         stop_calls.load(Ordering::SeqCst),
@@ -5295,7 +5656,18 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -5424,12 +5796,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop test".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop test")
         .await
         .expect("stop should terminate active completion waiters");
 
@@ -5491,10 +5858,18 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -5554,12 +5929,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop attached-loop completion waiter".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop attached-loop completion waiter")
         .await
         .expect("stop should terminate queued completion waiters through the live control seam");
 
@@ -5691,7 +6061,17 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -5830,7 +6210,18 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -6010,7 +6401,18 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7219,7 +7621,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7488,7 +7901,18 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -7766,7 +8190,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -8006,7 +8441,18 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -8711,7 +9157,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -8917,7 +9374,18 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -9386,7 +9854,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -9572,7 +10051,18 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -9798,12 +10288,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop wait_all test".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop wait_all test")
         .await
         .expect("stop should preserve the active wait_all carrier");
 
@@ -9959,12 +10444,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop steered split lifetimes".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop steered split lifetimes")
         .await
         .expect("stop should clear steered completion waiters while preserving wait_all");
 
@@ -10116,12 +10596,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop split lifetimes".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop split lifetimes")
         .await
         .expect("stop should split completion and wait_all lifetimes");
 
@@ -10244,10 +10719,18 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -10324,12 +10807,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop attached-loop wait_all".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop attached-loop wait_all")
         .await
         .expect("stop should preserve the active wait_all carrier through the live control seam");
 
@@ -10434,10 +10912,18 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::StopRuntimeExecutor { .. }) {
-                self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -10531,12 +11017,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
     );
 
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "stop attached-loop split lifetimes".into(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "stop attached-loop split lifetimes")
         .await
         .expect("stop should split completion and wait_all lifetimes on attached runtimes");
 
@@ -11092,7 +11573,17 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -11343,7 +11834,18 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.control_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             self.control_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -11709,7 +12211,7 @@ async fn unregister_session_rejects_unknown_session() {
 }
 
 #[tokio::test]
-async fn interrupt_current_run_rejects_destroyed_session() {
+async fn hard_cancel_current_run_rejects_destroyed_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
 
@@ -11721,7 +12223,7 @@ async fn interrupt_current_run_rejects_destroyed_session() {
         .expect("destroy should succeed");
 
     let err = adapter
-        .interrupt_current_run(&session_id)
+        .hard_cancel_current_run(&session_id, "destroyed hard-cancel probe")
         .await
         .expect_err("interrupt should reject a destroyed session");
     assert!(
@@ -11765,12 +12267,7 @@ async fn stop_runtime_executor_rejects_destroyed_session() {
         .expect("destroy should succeed");
 
     let err = adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "test".to_string(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "test".to_string())
         .await
         .expect_err("stop_runtime_executor should reject a destroyed session");
     assert!(
@@ -11908,12 +12405,7 @@ async fn ingest_rejects_stopped_session() {
     // Stop the session by driving it through retire → stop.
     let runtime_id = runtime_id_for_session(&session_id);
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "test stop".to_string(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "test stop".to_string())
         .await
         .expect("stop should succeed");
 
@@ -11943,12 +12435,7 @@ async fn retire_rejection_from_stopped_surfaces_dsl_authority() {
 
     // First stop
     adapter
-        .stop_runtime_executor(
-            &session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "test".to_string(),
-            },
-        )
+        .stop_runtime_executor(&session_id, "test".to_string())
         .await
         .expect("stop should succeed");
 
@@ -13812,7 +14299,17 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -13920,7 +14417,17 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -14065,7 +14572,17 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -14170,7 +14687,17 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
             })
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -14363,10 +14890,18 @@ async fn reconfigure_live_topology_drives_running_session_to_boundary_and_rebind
             })
         }
 
-        async fn control(&mut self, command: RunControlCommand) -> Result<(), CoreExecutorError> {
-            if matches!(command, RunControlCommand::CancelAfterBoundary { .. }) {
-                self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
-            }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.boundary_cancel_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }
@@ -15104,12 +15639,7 @@ impl RuntimeParityFixture {
         }
         let _ = self
             .adapter
-            .stop_runtime_executor(
-                &self.session_id,
-                RunControlCommand::StopRuntimeExecutor {
-                    reason: "runtime parity cleanup".to_string(),
-                },
-            )
+            .stop_runtime_executor(&self.session_id, "runtime parity cleanup".to_string())
             .await;
         let _ =
             crate::traits::RuntimeControlPlane::destroy(self.adapter.as_ref(), &self.runtime_id)
@@ -15141,7 +15671,11 @@ impl CoreExecutor for RuntimeParityNoopExecutor {
         })
     }
 
-    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }
@@ -15174,7 +15708,11 @@ impl CoreExecutor for RuntimeParityBlockingExecutor {
         })
     }
 
-    async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+    async fn cancel_after_boundary(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
         Ok(())
     }
 }
@@ -16612,12 +17150,7 @@ async fn meerkat_stop_runtime_executor_clears_silent_intent_overrides() {
 
     fixture
         .adapter
-        .stop_runtime_executor(
-            &fixture.session_id,
-            RunControlCommand::StopRuntimeExecutor {
-                reason: "clear silent intents".into(),
-            },
-        )
+        .stop_runtime_executor(&fixture.session_id, "clear silent intents")
         .await
         .expect("stop runtime executor should succeed");
 
@@ -17012,12 +17545,7 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
         RuntimeParityPhase::Stopped => {
             adapter.register_session(session_id.clone()).await;
             adapter
-                .stop_runtime_executor(
-                    &session_id,
-                    RunControlCommand::StopRuntimeExecutor {
-                        reason: "runtime parity stopped fixture".to_string(),
-                    },
-                )
+                .stop_runtime_executor(&session_id, "runtime parity stopped fixture".to_string())
                 .await
                 .expect("stopped fixture should stop");
             wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Stopped).await;
@@ -17168,9 +17696,7 @@ fn runtime_parity_probe_command(
             reason: DrainExitReason::Dismissed,
         },
         RuntimeParityProbeInput::InterruptCurrentRun => {
-            MeerkatMachineCommand::InterruptCurrentRun {
-                session_id: fixture.session_id.clone(),
-            }
+            unreachable!("user interrupt probes use MeerkatMachine::hard_cancel_current_run")
         }
         RuntimeParityProbeInput::CancelAfterBoundary => {
             MeerkatMachineCommand::CancelAfterBoundary {
@@ -17277,9 +17803,7 @@ fn runtime_parity_probe_command(
         RuntimeParityProbeInput::StopRuntimeExecutor => {
             MeerkatMachineCommand::StopRuntimeExecutor {
                 session_id: fixture.session_id.clone(),
-                command: RunControlCommand::StopRuntimeExecutor {
-                    reason: "runtime parity probe".to_string(),
-                },
+                reason: "runtime parity probe".to_string(),
             }
         }
         RuntimeParityProbeInput::Destroy => MeerkatMachineCommand::Destroy {
@@ -17446,6 +17970,13 @@ async fn execute_runtime_parity_probe(
         .await
         .map(MeerkatMachineCommandResult::LlmReconfigured)
         .map_err(MeerkatMachineCommandError::from)
+    } else if matches!(probe, RuntimeParityProbeInput::InterruptCurrentRun) {
+        fixture
+            .adapter
+            .hard_cancel_current_run(&fixture.session_id, "runtime parity probe interrupt")
+            .await
+            .map(|()| MeerkatMachineCommandResult::Unit)
+            .map_err(MeerkatMachineCommandError::from)
     } else {
         fixture
             .adapter

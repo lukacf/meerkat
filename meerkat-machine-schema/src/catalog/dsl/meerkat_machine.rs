@@ -859,6 +859,15 @@ pub enum RuntimeNoticeKind {
     Recover,
 }
 
+/// Closed classifier for runtime-loop executor effects emitted as neutral DSL
+/// facts before `meerkat-runtime` converts them to sealed executable effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeEffectKind {
+    #[default]
+    CancelAfterBoundary,
+    StopRuntimeExecutor,
+}
+
 /// Typed reason classifier for the `TurnRunCancelled` effect. Closed set of
 /// cancellation-observation origins emitted when a turn's cancellation
 /// request lands at an observable boundary. Replaces the former literal-
@@ -1831,7 +1840,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             SetPeerIngressContext { keep_alive: bool },
             NotifyDrainExited { reason: Enum<DrainExitReason> },
             InterruptCurrentRun,
-            CancelAfterBoundary,
+            CancelAfterBoundary { reason: String },
             StagePersistentFilter { filter: ToolFilter, witnesses: Map<String, ToolVisibilityWitness> },
             RequestDeferredTools { authorities: Map<String, ToolVisibilityWitness> },
             PublishCommittedVisibleSet {
@@ -1847,7 +1856,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             Recover,
             Retire { session_id: SessionId },
             Reset,
-            StopRuntimeExecutor,
+            StopRuntimeExecutor { reason: String },
             RuntimeExecutorExited,
             Destroy { session_id: SessionId },
             // Absorbed inputs
@@ -2308,6 +2317,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             // consumers — they surface through structured logging / traces
             // as human-readable context.
             RuntimeNotice { kind: Enum<RuntimeNoticeKind>, detail: String },
+            RuntimeEffectFact { kind: Enum<RuntimeEffectKind>, reason: String },
             ModelRoutingStatusChanged { topology_epoch: u64 },
             SwitchTurnDenied { request_id: String, reason: Enum<RoutingDenialReason> },
             SwitchTurnPersistentReconfigureRequested { request_id: String, target_model: String },
@@ -2462,6 +2472,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition WakeInterrupt => local,
         disposition CommittedVisibleSetPublished => external,
         disposition RuntimeNotice => external,
+        disposition RuntimeEffectFact => local,
         disposition ModelRoutingStatusChanged => external,
         disposition SwitchTurnDenied => external,
         disposition SwitchTurnPersistentReconfigureRequested => local,
@@ -3338,18 +3349,20 @@ macro_rules! meerkat_catalog_machine_dsl {
 
         // 11. CancelAfterBoundary: Attached + Running self-loops
         transition CancelAfterBoundaryAttached {
-            on input CancelAfterBoundary
+            on input CancelAfterBoundary { reason }
             guard { self.lifecycle_phase == Phase::Attached }
             update {}
             to Attached
             emit RequestCancellationAtBoundary
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
         }
         transition CancelAfterBoundary {
-            on input CancelAfterBoundary
+            on input CancelAfterBoundary { reason }
             guard { self.lifecycle_phase == Phase::Running }
             update {}
             to Running
             emit RequestCancellationAtBoundary
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: reason }
         }
 
         // 12. BoundaryAppliedPublish: Running self-loop (signal)
@@ -3675,7 +3688,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         // 16. StopRuntimeExecutor: different behavior per phase
         // Unbound (Initializing, Idle, Retired) → Stopped
         transition StopRuntimeExecutorUnbound {
-            on input StopRuntimeExecutor
+            on input StopRuntimeExecutor { reason }
             guard {
                 self.lifecycle_phase == Phase::Initializing
                 || self.lifecycle_phase == Phase::Idle
@@ -3688,26 +3701,29 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Stopped
             emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::StopRuntimeExecutor, reason: reason }
         }
         // Attached → Attached (self-loop)
         transition StopRuntimeExecutorAttached {
-            on input StopRuntimeExecutor
+            on input StopRuntimeExecutor { reason }
             guard { self.lifecycle_phase == Phase::Attached }
             update {
                 self.silent_intent_overrides = EmptySet;
             }
             to Attached
             emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::StopRuntimeExecutor, reason: reason }
         }
         // Running → Running (self-loop)
         transition StopRuntimeExecutorRunning {
-            on input StopRuntimeExecutor
+            on input StopRuntimeExecutor { reason }
             guard { self.lifecycle_phase == Phase::Running }
             update {
                 self.silent_intent_overrides = EmptySet;
             }
             to Running
             emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::StopRuntimeExecutor, reason: reason }
         }
 
         // RuntimeExecutorExited: async finalization of the stop-runtime path.
@@ -4092,6 +4108,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit IngressAccepted
             emit PostAdmissionSignal { signal: PostAdmissionSignalKind::InterruptYielding }
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: "peer admission requested cooperative boundary cancel" }
         }
         // Running + immediate (immediate=true, interrupt_yielding=false)
         transition AcceptWithCompletionRunningImmediate {
@@ -4104,6 +4121,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit IngressAccepted
             emit PostAdmissionSignal { signal: PostAdmissionSignalKind::RequestImmediateProcessing }
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::CancelAfterBoundary, reason: "peer admission requested cooperative boundary cancel" }
         }
 
         // 26. AcceptWithoutWake: Idle/Attached/Running self-loops

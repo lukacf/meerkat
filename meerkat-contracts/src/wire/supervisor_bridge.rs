@@ -200,6 +200,7 @@ pub enum BridgeCommand {
     DeliverMemberInput(BridgeDeliveryPayload),
     ObserveMember(BridgeSupervisorPayload),
     InterruptMember(BridgeSupervisorPayload),
+    HardCancelMember(BridgeHardCancelPayload),
     RetireMember(BridgeSupervisorPayload),
     DestroyMember(BridgeSupervisorPayload),
     WireMember(BridgePeerWiringPayload),
@@ -217,6 +218,7 @@ impl BridgeCommand {
             | Self::InterruptMember(payload)
             | Self::RetireMember(payload)
             | Self::DestroyMember(payload) => payload.protocol_version,
+            Self::HardCancelMember(payload) => payload.protocol_version,
             Self::DeliverMemberInput(payload) => payload.protocol_version,
             Self::WireMember(payload) | Self::UnwireMember(payload) => payload.protocol_version,
         }
@@ -631,6 +633,20 @@ pub struct BridgeSupervisorPayload {
     pub protocol_version: BridgeProtocolVersion,
 }
 
+/// Explicit hard-cancel command payload.
+///
+/// `InterruptMember` is the cooperative boundary-break path. This payload is
+/// intentionally separate so supervisors cannot accidentally collapse boundary
+/// cancellation and immediate user/session interrupt authority onto one wire
+/// command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeHardCancelPayload {
+    pub supervisor: BridgePeerSpec,
+    pub epoch: u64,
+    pub protocol_version: BridgeProtocolVersion,
+    pub reason: String,
+}
+
 /// One-time bootstrap proof exchanged between a mob supervisor and a
 /// member runtime on initial bind.
 ///
@@ -723,6 +739,8 @@ pub struct BridgeCapabilities {
     #[serde(default)]
     pub interrupt_member: bool,
     #[serde(default)]
+    pub hard_cancel_member: bool,
+    #[serde(default)]
     pub retire_member: bool,
     #[serde(default)]
     pub destroy_member: bool,
@@ -741,6 +759,7 @@ impl Default for BridgeCapabilities {
             deliver_member_input: false,
             observe_member: false,
             interrupt_member: false,
+            hard_cancel_member: false,
             retire_member: false,
             destroy_member: false,
             wire_member: false,
@@ -944,6 +963,15 @@ mod tests {
         }
     }
 
+    fn sample_hard_cancel_payload() -> BridgeHardCancelPayload {
+        BridgeHardCancelPayload {
+            supervisor: sample_peer_spec(),
+            epoch: 42,
+            protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+            reason: "test hard cancel".to_string(),
+        }
+    }
+
     fn sample_wiring_payload() -> BridgePeerWiringPayload {
         BridgePeerWiringPayload {
             supervisor: sample_peer_spec(),
@@ -1058,6 +1086,12 @@ mod tests {
     #[test]
     fn bridge_command_interrupt_member_round_trip() {
         let cmd = BridgeCommand::InterruptMember(sample_supervisor_payload());
+        assert_command_round_trip(&cmd);
+    }
+
+    #[test]
+    fn bridge_command_hard_cancel_member_round_trip() {
+        let cmd = BridgeCommand::HardCancelMember(sample_hard_cancel_payload());
         assert_command_round_trip(&cmd);
     }
 
@@ -1238,6 +1272,7 @@ mod tests {
         assert!(capabilities.deliver_member_input);
         assert!(capabilities.observe_member);
         assert!(capabilities.interrupt_member);
+        assert!(!capabilities.hard_cancel_member);
         assert!(capabilities.retire_member);
         assert!(capabilities.destroy_member);
         assert!(capabilities.wire_member);
@@ -1482,6 +1517,7 @@ mod tests {
                     "deliver_member_input": false,
                     "observe_member": false,
                     "interrupt_member": false,
+                    "hard_cancel_member": false,
                     "retire_member": false,
                     "destroy_member": false,
                     "wire_member": false,

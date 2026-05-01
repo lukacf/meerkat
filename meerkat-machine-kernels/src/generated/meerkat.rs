@@ -2520,6 +2520,56 @@ impl std::fmt::Display for RunId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RuntimeEffectKind {
+    #[default]
+    #[serde(rename = "CancelAfterBoundary")]
+    CancelAfterBoundary,
+    #[serde(rename = "StopRuntimeExecutor")]
+    StopRuntimeExecutor,
+}
+impl RuntimeEffectKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CancelAfterBoundary => "CancelAfterBoundary",
+            Self::StopRuntimeExecutor => "StopRuntimeExecutor",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RuntimeEffectKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "CancelAfterBoundary" => Ok(Self::CancelAfterBoundary),
+            "StopRuntimeExecutor" => Ok(Self::StopRuntimeExecutor),
+            other => Err(format!("invalid RuntimeEffectKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RuntimeEffectKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RuntimeEffectKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RuntimeNoticeKind {
     #[default]
     #[serde(rename = "Drain")]
@@ -3929,7 +3979,9 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InterruptCurrentRun {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct CancelAfterBoundary {}
+    pub struct CancelAfterBoundary {
+        pub reason: String,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StagePersistentFilter {
         pub filter: ToolFilter,
@@ -3959,7 +4011,9 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Reset {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct StopRuntimeExecutor {}
+    pub struct StopRuntimeExecutor {
+        pub reason: String,
+    }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeExecutorExited {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5405,6 +5459,11 @@ pub mod effects {
         pub detail: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RuntimeEffectFact {
+        pub kind: RuntimeEffectKind,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ModelRoutingStatusChanged {
         pub topology_epoch: u64,
     }
@@ -5661,6 +5720,7 @@ pub enum Effect {
     WakeInterrupt(effects::WakeInterrupt),
     CommittedVisibleSetPublished(effects::CommittedVisibleSetPublished),
     RuntimeNotice(effects::RuntimeNotice),
+    RuntimeEffectFact(effects::RuntimeEffectFact),
     ModelRoutingStatusChanged(effects::ModelRoutingStatusChanged),
     SwitchTurnDenied(effects::SwitchTurnDenied),
     SwitchTurnPersistentReconfigureRequested(effects::SwitchTurnPersistentReconfigureRequested),
@@ -5738,6 +5798,7 @@ pub enum EffectKind {
     WakeInterrupt,
     CommittedVisibleSetPublished,
     RuntimeNotice,
+    RuntimeEffectFact,
     ModelRoutingStatusChanged,
     SwitchTurnDenied,
     SwitchTurnPersistentReconfigureRequested,

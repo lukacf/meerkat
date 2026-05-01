@@ -1629,7 +1629,6 @@ mod scenario_22_runtime_host_comms {
     use super::*;
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError};
-    use meerkat_core::lifecycle::run_control::RunControlCommand;
     use meerkat_core::lifecycle::run_primitive::RunPrimitive;
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
     use meerkat_core::service::{
@@ -1717,7 +1716,17 @@ mod scenario_22_runtime_host_comms {
             ))
         }
 
-        async fn control(&mut self, _command: RunControlCommand) -> Result<(), CoreExecutorError> {
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
     }

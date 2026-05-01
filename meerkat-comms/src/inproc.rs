@@ -237,16 +237,31 @@ impl InprocRegistry {
         name: &str,
         expected_pubkey: &PubKey,
     ) -> Option<(PubKey, InboxSender)> {
+        if expected_pubkey.is_zero() {
+            return None;
+        }
         let state = self.state.read();
+        let mut found = None;
+        let mut pubkey_registrations = 0;
         for namespace_state in state.namespaces.values() {
+            if namespace_state.peers.contains_key(expected_pubkey) {
+                pubkey_registrations += 1;
+            }
             if let Some(&pubkey) = namespace_state.names.get(name)
                 && pubkey == *expected_pubkey
                 && let Some(peer) = namespace_state.peers.get(&pubkey)
             {
-                return Some((peer.pubkey, peer.sender.clone()));
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((peer.pubkey, peer.sender.clone()));
             }
         }
-        None
+        if pubkey_registrations == 1 {
+            found
+        } else {
+            None
+        }
     }
 
     /// Look up an inproc peer by pubkey.
@@ -1193,6 +1208,159 @@ mod tests {
         assert!(
             matches!(result_mismatch, Err(InprocSendError::PeerNotFound(_))),
             "must reject when resolved pubkey doesn't match expected: {result_mismatch:?}"
+        );
+    }
+
+    #[test]
+    fn test_send_cross_namespace_rejects_duplicate_name_pubkey_across_namespaces() {
+        let registry = InprocRegistry::new();
+        let sender_kp = make_keypair();
+        let target_key = make_keypair();
+        let target_pubkey = target_key.public_key();
+        let (mut inbox_a, sender_a) = Inbox::new();
+        let (mut inbox_b, sender_b) = Inbox::new();
+
+        registry.register_with_meta_in_namespace(
+            "mob:alpha",
+            "ambassador",
+            target_pubkey,
+            sender_a,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            "mob:beta",
+            "ambassador",
+            target_pubkey,
+            sender_b,
+            PeerMeta::default(),
+        );
+
+        let result = registry.send_cross_namespace(
+            &sender_kp,
+            "ambassador",
+            &target_pubkey,
+            MessageKind::Request {
+                intent: "test".into(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+            false,
+        );
+
+        assert!(
+            matches!(result, Err(InprocSendError::PeerNotFound(_))),
+            "same name/pubkey across namespaces must fail closed instead of picking a namespace: {result:?}"
+        );
+        assert!(
+            inbox_a.try_drain().is_empty(),
+            "must not deliver to the first duplicate namespace"
+        );
+        assert!(
+            inbox_b.try_drain().is_empty(),
+            "must not deliver to the second duplicate namespace"
+        );
+    }
+
+    #[test]
+    fn test_send_cross_namespace_rejects_duplicate_pubkey_with_different_names_across_namespaces() {
+        let registry = InprocRegistry::new();
+        let sender_kp = make_keypair();
+        let target_key = make_keypair();
+        let target_pubkey = target_key.public_key();
+        let (mut alpha_inbox, alpha_sender) = Inbox::new();
+        let (mut beta_inbox, beta_sender) = Inbox::new();
+
+        registry.register_with_meta_in_namespace(
+            "mob:alpha",
+            "ambassador",
+            target_pubkey,
+            alpha_sender,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            "mob:beta",
+            "observer",
+            target_pubkey,
+            beta_sender,
+            PeerMeta::default(),
+        );
+
+        let result = registry.send_cross_namespace(
+            &sender_kp,
+            "ambassador",
+            &target_pubkey,
+            MessageKind::Request {
+                intent: "test".into(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+            false,
+        );
+
+        assert!(
+            matches!(result, Err(InprocSendError::PeerNotFound(_))),
+            "duplicate pubkey across namespaces must fail closed even when display names differ: {result:?}"
+        );
+        assert!(
+            alpha_inbox.try_drain().is_empty(),
+            "must not deliver to the named namespace when canonical pubkey is ambiguous"
+        );
+        assert!(
+            beta_inbox.try_drain().is_empty(),
+            "must not deliver to the differently named duplicate namespace"
+        );
+    }
+
+    #[test]
+    fn test_send_cross_namespace_with_id_rejects_duplicate_pubkey_with_different_names_across_namespaces()
+    {
+        let registry = InprocRegistry::new();
+        let sender_kp = make_keypair();
+        let target_key = make_keypair();
+        let target_pubkey = target_key.public_key();
+        let (mut alpha_inbox, alpha_sender) = Inbox::new();
+        let (mut beta_inbox, beta_sender) = Inbox::new();
+        let envelope_id = Uuid::new_v4();
+
+        registry.register_with_meta_in_namespace(
+            "mob:alpha",
+            "ambassador",
+            target_pubkey,
+            alpha_sender,
+            PeerMeta::default(),
+        );
+        registry.register_with_meta_in_namespace(
+            "mob:beta",
+            "observer",
+            target_pubkey,
+            beta_sender,
+            PeerMeta::default(),
+        );
+
+        let result = registry.send_cross_namespace_with_id(
+            &sender_kp,
+            "ambassador",
+            &target_pubkey,
+            envelope_id,
+            MessageKind::Request {
+                intent: "test".into(),
+                params: serde_json::json!({}),
+                handling_mode: None,
+            },
+            false,
+        );
+
+        assert!(
+            matches!(result, Err(InprocSendError::PeerNotFound(_))),
+            "duplicate pubkey across namespaces must fail closed on send_cross_namespace_with_id: {result:?}"
+        );
+        assert!(
+            alpha_inbox.try_drain().is_empty(),
+            "must not deliver the caller-chosen envelope id to the named namespace"
+        );
+        assert!(
+            beta_inbox.try_drain().is_empty(),
+            "must not deliver the caller-chosen envelope id to the differently named duplicate namespace"
         );
     }
 }

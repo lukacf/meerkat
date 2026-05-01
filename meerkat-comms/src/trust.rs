@@ -274,6 +274,10 @@ impl<'de> Deserialize<'de> for TrustedPeer {
         peer.validate().map_err(serde::de::Error::custom)?;
         Ok(peer)
     }
+
+    pub(crate) fn has_raw_sendable_identity(&self) -> bool {
+        self.validate().is_ok()
+    }
 }
 
 /// Collection of trusted peers.
@@ -302,6 +306,10 @@ impl TrustedPeers {
     /// Returns the number of trusted peers.
     pub fn len(&self) -> usize {
         self.peers.len()
+    }
+
+    pub(crate) fn retain_raw_sendable_identities(&mut self) {
+        self.peers.retain(|peer| peer.validate().is_ok());
     }
 
     /// Load trusted peers from a JSON file, or return empty if not found.

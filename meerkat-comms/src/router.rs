@@ -120,11 +120,12 @@ pub struct Router {
 impl Router {
     pub fn new(
         keypair: Keypair,
-        trusted_peers: TrustedPeers,
+        mut trusted_peers: TrustedPeers,
         config: CommsConfig,
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
+        trusted_peers.retain_raw_sendable_identities();
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
@@ -144,6 +145,7 @@ impl Router {
         inbox_sender: InboxSender,
         require_peer_auth: bool,
     ) -> Self {
+        trusted_peers.write().retain_raw_sendable_identities();
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,

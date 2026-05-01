@@ -1,8 +1,8 @@
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use meerkat_comms::{
     CommsConfig, Inbox, InboxItem, InprocRegistry, Keypair, MessageKind, PeerMeta, Router,
-    SendError, TrustedPeer, TrustedPeers,
+    PubKey, SendError, TrustedPeer, TrustedPeers,
 };
 
 static INPROC_REGISTRY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
@@ -14,6 +14,175 @@ fn message(body: &str) -> MessageKind {
         blocks: None,
         handling_mode: None,
     }
+}
+
+fn zero_pubkey() -> PubKey {
+    PubKey::new([0u8; 32])
+}
+
+fn raw_zero_trusted_peer(name: &str) -> TrustedPeer {
+    TrustedPeer {
+        name: name.to_string(),
+        pubkey: zero_pubkey(),
+        addr: format!("inproc://{name}"),
+        meta: PeerMeta::default(),
+    }
+}
+
+fn register_zero_pubkey_inproc_target(registry: &InprocRegistry, name: &str) -> Inbox {
+    let (inbox, sender) = Inbox::new();
+    registry.register_with_meta_in_namespace("", name, zero_pubkey(), sender, PeerMeta::default());
+    inbox
+}
+
+#[tokio::test]
+async fn router_new_raw_zero_pubkey_trust_is_not_sendable() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_name = format!("raw-zero-router-new-{suffix}");
+    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::new(
+        Keypair::generate(),
+        TrustedPeers {
+            peers: vec![raw_zero_trusted_peer(&target_name)],
+        },
+        CommsConfig::default(),
+        router_inbox_sender,
+        true,
+    );
+
+    let dest = zero_pubkey().to_peer_id();
+    let result = router.send(dest, message("raw zero should not send")).await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "raw Router::new zero-pubkey trust must not be sendable: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "zero-pubkey registry target must not receive from raw Router::new trust"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn router_with_shared_peers_raw_zero_pubkey_trust_is_not_sendable() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_name = format!("raw-zero-router-shared-{suffix}");
+    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
+    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers {
+        peers: vec![raw_zero_trusted_peer(&target_name)],
+    }));
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::with_shared_peers(
+        Keypair::generate(),
+        trusted_peers,
+        CommsConfig::default(),
+        router_inbox_sender,
+        true,
+    );
+
+    let dest = zero_pubkey().to_peer_id();
+    let result = router.send(dest, message("raw zero should not send")).await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "raw Router::with_shared_peers zero-pubkey trust must not be sendable: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "zero-pubkey registry target must not receive from raw shared trust"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn router_send_filters_late_shared_raw_zero_pubkey_trust_mutation() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_name = format!("raw-zero-router-late-shared-{suffix}");
+    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
+    let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::with_shared_peers(
+        Keypair::generate(),
+        trusted_peers.clone(),
+        CommsConfig::default(),
+        router_inbox_sender,
+        true,
+    );
+    trusted_peers
+        .write()
+        .peers
+        .push(raw_zero_trusted_peer(&target_name));
+
+    let dest = zero_pubkey().to_peer_id();
+    let result = router
+        .send(dest, message("late raw zero should not send"))
+        .await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "late shared zero-pubkey trust mutation must not become sendable: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "zero-pubkey registry target must not receive from late shared trust mutation"
+    );
+
+    registry.clear();
+}
+
+#[tokio::test]
+async fn router_add_trusted_peer_raw_zero_pubkey_trust_is_not_sendable() {
+    let _lock = INPROC_REGISTRY_LOCK.lock().await;
+    let registry = InprocRegistry::global();
+    registry.clear();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let target_name = format!("raw-zero-router-add-{suffix}");
+    let mut target_inbox = register_zero_pubkey_inproc_target(registry, &target_name);
+    let (_, router_inbox_sender) = Inbox::new();
+    let router = Router::new(
+        Keypair::generate(),
+        TrustedPeers::new(),
+        CommsConfig::default(),
+        router_inbox_sender,
+        true,
+    );
+    assert!(
+        router
+            .add_trusted_peer(raw_zero_trusted_peer(&target_name))
+            .is_err(),
+        "raw Router::add_trusted_peer zero-pubkey trust must be rejected"
+    );
+
+    let dest = zero_pubkey().to_peer_id();
+    let result = router.send(dest, message("raw zero should not send")).await;
+
+    assert!(
+        matches!(result, Err(SendError::PeerNotFound(peer_id)) if peer_id == dest),
+        "raw Router::add_trusted_peer zero-pubkey trust must not be sendable: {result:?}"
+    );
+    assert!(
+        target_inbox.try_drain().is_empty(),
+        "zero-pubkey registry target must not receive from raw add_trusted_peer trust"
+    );
+
+    registry.clear();
 }
 
 #[tokio::test]

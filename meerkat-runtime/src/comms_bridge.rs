@@ -602,7 +602,7 @@ mod tests {
                 assert_eq!(peer.body, "[COMMS MESSAGE from event:webhook]\nhello");
                 match peer.header.source {
                     InputOrigin::Peer { peer_id, .. } => {
-                        assert_eq!(peer_id, test_peer_id().as_str())
+                        assert_eq!(peer_id, test_peer_id().as_str());
                     }
                     other => panic!("Expected peer source, got {other:?}"),
                 }
@@ -946,8 +946,7 @@ mod tests {
         };
         assert!(
             text.contains("from Peer One"),
-            "terminal prompt should use display identity: {}",
-            text
+            "terminal prompt should use display identity: {text}",
         );
     }
 

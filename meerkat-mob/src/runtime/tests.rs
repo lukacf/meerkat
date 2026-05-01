@@ -5824,7 +5824,7 @@ async fn test_external_member_spawn_rejects_bind_peer_id_pubkey_mismatch() {
             matches!(
                 &event.kind,
                 MobEventKind::MemberSpawned(spawned)
-                    if spawned.agent_identity == AgentIdentity::from("w-ext")
+                    if spawned.agent_identity.as_str() == "w-ext"
             )
         }),
         "rejected bind response must not append a member spawn event"

@@ -2933,26 +2933,26 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         "test probe should observe the store after durable destroyed commit",
     );
 
-    let sessions = adapter.sessions.read().await;
-    let entry = sessions
-        .get(&session_id)
-        .expect("destroy keeps the session entry available for terminal snapshots");
-    assert_eq!(
-        entry.control_snapshot().phase,
-        RuntimeState::Destroyed,
-        "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
-    );
-    let authority = entry
-        .dsl_authority
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(
-        crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
-        RuntimeState::Destroyed,
-        "durable destroyed state must not race ahead of canonical DSL destroy truth",
-    );
-    drop(authority);
-    drop(sessions);
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("destroy keeps the session entry available for terminal snapshots");
+        assert_eq!(
+            entry.control_snapshot().phase,
+            RuntimeState::Destroyed,
+            "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
+        );
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority),
+            RuntimeState::Destroyed,
+            "durable destroyed state must not race ahead of canonical DSL destroy truth",
+        );
+    }
 
     store.release_destroy_commit.notify_waiters();
     let report = tokio::time::timeout(Duration::from_secs(2), destroy_task)

@@ -1414,7 +1414,9 @@ pub enum OperationKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meerkat_machine_schema::identity::{FieldId, InputVariantId, PhaseId, SignalVariantId};
+    use meerkat_machine_schema::identity::{
+        FieldId, InputVariantId, NamedTypeBinding, PhaseId, RustTypeAtom, SignalVariantId,
+    };
 
     fn fid(s: &str) -> FieldId {
         FieldId::parse(s).expect("valid field slug")
@@ -1430,6 +1432,41 @@ mod tests {
 
     fn assert_phase_eq(dsl_phase: impl std::fmt::Debug, kernel_phase: &PhaseId) {
         assert_eq!(format!("{:?}", dsl_phase), kernel_phase.as_str());
+    }
+
+    fn assert_tool_filter_binding_covers_structural_variants(bindings: &[NamedTypeBinding]) {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name.as_str() == "ToolFilter")
+            .expect("ToolFilter binding");
+        let RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } = &binding.rust
+        else {
+            panic!("ToolFilter binding must use TypePathEnum metadata");
+        };
+
+        assert!(
+            unit_variants
+                .iter()
+                .any(|variant| variant.as_str() == "All"),
+            "ToolFilter binding must cover the All unit variant"
+        );
+        for expected in ["Allow", "Deny"] {
+            let variant = structural_variants
+                .iter()
+                .find(|variant| variant.variant.as_str() == expected)
+                .unwrap_or_else(|| panic!("ToolFilter binding must cover {expected} payloads"));
+            assert!(
+                variant
+                    .fields
+                    .iter()
+                    .any(|field| field.name.as_str() == "names"),
+                "ToolFilter::{expected} binding must carry the names payload"
+            );
+        }
     }
 
     // ---- Direction 1: runtime dispatch works ----
@@ -1575,7 +1612,6 @@ mod tests {
         // B-4 (`c0cb12071`) made `MachineSchema.named_types` validation-
         // gated; catalogs populate via `with_named_types`, DSL macro
         // emits `vec![]`, so the test fixture must populate inline.
-        use meerkat_machine_schema::identity::NamedTypeBinding;
         let mut schema = MeerkatMachineState::schema();
         schema.named_types = vec![
             NamedTypeBinding::u64("BoundarySequence"),
@@ -1597,14 +1633,23 @@ mod tests {
             NamedTypeBinding::string("SessionLlmIdentity"),
             NamedTypeBinding::string("SessionToolVisibilityDelta"),
             NamedTypeBinding::string("SessionToolVisibilityState"),
-            NamedTypeBinding::type_path_enum(
+            NamedTypeBinding::type_path_enum_with_structural_variants(
                 "ToolFilter",
                 "crate::meerkat_machine::ToolFilter",
                 &["All"],
+                vec![
+                    meerkat_machine_schema::TypePathEnumStructuralVariant::string_set(
+                        "Allow", "names",
+                    ),
+                    meerkat_machine_schema::TypePathEnumStructuralVariant::string_set(
+                        "Deny", "names",
+                    ),
+                ],
             ),
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_field_presence_set(
                 "ToolVisibilityWitness",
                 "crate::meerkat_machine::ToolVisibilityWitness",
+                &["stable_owner_key", "last_seen_provenance"],
             ),
             NamedTypeBinding::string("WorkId"),
             // PeerEndpoint etc. are type_path bindings in the catalog;
@@ -1616,6 +1661,7 @@ mod tests {
             NamedTypeBinding::string("PeerId"),
             NamedTypeBinding::string("PeerAddress"),
         ];
+        assert_tool_filter_binding_covers_structural_variants(&schema.named_types);
         schema
             .validate()
             .expect("meerkat machine schema should validate");
@@ -1703,14 +1749,23 @@ mod tests {
             meerkat_machine_schema::identity::NamedTypeBinding::string(
                 "SessionToolVisibilityState",
             ),
-            meerkat_machine_schema::identity::NamedTypeBinding::type_path_enum(
+            meerkat_machine_schema::identity::NamedTypeBinding::type_path_enum_with_structural_variants(
                 "ToolFilter",
                 "crate::meerkat_machine::ToolFilter",
                 &["All"],
+                vec![
+                    meerkat_machine_schema::TypePathEnumStructuralVariant::string_set(
+                        "Allow", "names",
+                    ),
+                    meerkat_machine_schema::TypePathEnumStructuralVariant::string_set(
+                        "Deny", "names",
+                    ),
+                ],
             ),
-            meerkat_machine_schema::identity::NamedTypeBinding::type_path(
+            meerkat_machine_schema::identity::NamedTypeBinding::type_path_field_presence_set(
                 "ToolVisibilityWitness",
                 "crate::meerkat_machine::ToolVisibilityWitness",
+                &["stable_owner_key", "last_seen_provenance"],
             ),
             meerkat_machine_schema::identity::NamedTypeBinding::string("WorkId"),
             meerkat_machine_schema::identity::NamedTypeBinding::string("PeerEndpoint"),
@@ -1718,6 +1773,7 @@ mod tests {
             meerkat_machine_schema::identity::NamedTypeBinding::string("PeerId"),
             meerkat_machine_schema::identity::NamedTypeBinding::string("PeerAddress"),
         ];
+        assert_tool_filter_binding_covers_structural_variants(&schema.named_types);
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         // Run the same sequence through both dispatchers:

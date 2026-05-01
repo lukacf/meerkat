@@ -2852,7 +2852,8 @@ fn string_literal_matches_named_type(
             | RustTypeAtom::U32
             | RustTypeAtom::U16
             | RustTypeAtom::U8
-            | RustTypeAtom::Bool,
+            | RustTypeAtom::Bool
+            | RustTypeAtom::TypePathFieldPresenceSet { .. },
         )
         | None => false,
     }

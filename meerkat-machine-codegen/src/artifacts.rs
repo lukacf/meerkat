@@ -2518,13 +2518,13 @@ fn render_default_domain_assignment(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeRef::Named(name) => render_named_domain_assignment(
+        TypeRef::Named(name) => render_named_type_domain_assignment(
             name.as_str(),
             sample_cardinality,
             named_samples,
             named_bindings,
         ),
-        TypeRef::Enum(name) => render_named_domain_assignment(
+        TypeRef::Enum(name) => render_enum_type_domain_assignment(
             name.as_str(),
             sample_cardinality,
             named_samples,
@@ -2598,56 +2598,92 @@ fn render_default_domain_assignment(
     }
 }
 
-fn render_named_domain_assignment(
+fn render_named_type_domain_assignment(
     name: impl AsRef<str>,
     sample_cardinality: usize,
     named_samples: &BTreeMap<String, BTreeSet<String>>,
     named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
 ) -> String {
+    use meerkat_machine_schema::RustTypeAtom;
+
     let name = name.as_ref();
-    if named_type_uses_nat_domain(named_bindings, name) {
-        return if sample_cardinality > 1 {
-            "{1, 2}".into()
-        } else {
-            "{1}".into()
-        };
-    }
+    match require_named_binding(named_bindings, name) {
+        RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8 => {
+            if sample_cardinality > 1 {
+                "{1, 2}".into()
+            } else {
+                "{1}".into()
+            }
+        }
+        RustTypeAtom::Bool => "{TRUE, FALSE}".into(),
+        RustTypeAtom::StringEnum { variants } => {
+            format!(
+                "{{{}}}",
+                string_enum_variant_samples(name, variants).join(", ")
+            )
+        }
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => format!(
+            "{{{}}}",
+            type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality)
+                .join(", ")
+        ),
+        RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => format!(
+            "{{{}}}",
+            field_presence_set_samples(fields, sample_cardinality).join(", ")
+        ),
+        RustTypeAtom::String | RustTypeAtom::TypePath(_) => {
+            if sample_cardinality == 0 {
+                return "{}".into();
+            }
 
-    if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
-        return format!("{{{}}}", samples.join(", "));
-    }
+            if let Some(rendered) =
+                collected_sample_literals(name, sample_cardinality, named_samples)
+            {
+                return format!("{{{}}}", rendered.join(", "));
+            }
 
-    if let Some(samples) = type_path_enum_binding_samples(named_bindings, name, sample_cardinality)
-    {
-        return format!("{{{}}}", samples.join(", "));
+            let values = (1..=sample_cardinality.max(1))
+                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{values}}}")
+        }
     }
+}
 
-    if sample_cardinality == 0 {
-        return "{}".into();
+fn render_enum_type_domain_assignment(
+    name: impl AsRef<str>,
+    sample_cardinality: usize,
+    _named_samples: &BTreeMap<String, BTreeSet<String>>,
+    named_bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> String {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    let name = name.as_ref();
+    match require_named_binding(named_bindings, name) {
+        RustTypeAtom::StringEnum { variants } => {
+            format!(
+                "{{{}}}",
+                string_enum_variant_samples(name, variants).join(", ")
+            )
+        }
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => format!(
+            "{{{}}}",
+            type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality)
+                .join(", ")
+        ),
+        other => panic!(
+            "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
+        ),
     }
-
-    if let Some(samples) = known_named_domain_samples(name, sample_cardinality) {
-        let rendered = samples
-            .into_iter()
-            .map(tla_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        return format!("{{{rendered}}}");
-    }
-
-    if let Some(samples) = known_structural_named_domain_samples(name, sample_cardinality) {
-        return format!("{{{}}}", samples.join(", "));
-    }
-
-    if let Some(rendered) = collected_sample_literals(name, sample_cardinality, named_samples) {
-        return format!("{{{}}}", rendered.join(", "));
-    }
-
-    let values = (1..=sample_cardinality.max(1))
-        .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{{{values}}}")
 }
 
 fn sample_values(
@@ -2680,74 +2716,13 @@ fn sample_values(
                 vec!["1".into()]
             }
         }
-        TypeRef::Enum(name) if named_type_uses_nat_domain(named_bindings, name.as_str()) => {
-            if sample_cardinality > 1 {
-                vec!["1".into(), "2".into()]
-            } else {
-                vec!["1".into()]
-            }
-        }
         TypeRef::Named(name) => {
             let name = name.as_str();
-            if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
-                return samples;
-            }
-            if let Some(samples) =
-                type_path_enum_binding_samples(named_bindings, name, sample_cardinality)
-            {
-                return samples;
-            }
-            if sample_cardinality == 0 {
-                return Vec::new();
-            }
-            if let Some(samples) = known_structural_named_domain_samples(name, sample_cardinality) {
-                return samples;
-            }
-            if let Some(samples) = named_samples.get(name) {
-                let limit = sample_cardinality.max(1);
-                let rendered = samples
-                    .iter()
-                    .take(limit)
-                    .map(tla_string)
-                    .collect::<Vec<_>>();
-                if !rendered.is_empty() {
-                    return rendered;
-                }
-            }
-            (1..=sample_cardinality.max(1))
-                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
-                .collect()
+            sample_values_for_named_type(name, sample_cardinality, named_samples, named_bindings)
         }
         TypeRef::Enum(name) => {
             let name = name.as_str();
-            if let Some(samples) = string_enum_binding_samples(named_bindings, name) {
-                return samples;
-            }
-            if let Some(samples) =
-                type_path_enum_binding_samples(named_bindings, name, sample_cardinality)
-            {
-                return samples;
-            }
-            if sample_cardinality == 0 {
-                return Vec::new();
-            }
-            if let Some(samples) = known_named_domain_samples(name, sample_cardinality) {
-                return samples.into_iter().map(tla_string).collect();
-            }
-            if let Some(samples) = named_samples.get(name) {
-                let limit = sample_cardinality.max(1);
-                let rendered = samples
-                    .iter()
-                    .take(limit)
-                    .map(tla_string)
-                    .collect::<Vec<_>>();
-                if !rendered.is_empty() {
-                    return rendered;
-                }
-            }
-            (1..=sample_cardinality.max(1))
-                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
-                .collect()
+            sample_values_for_enum_type(name, sample_cardinality, named_bindings)
         }
         TypeRef::Option(inner) => {
             let mut values = vec![format!(
@@ -2786,92 +2761,131 @@ fn sample_values(
     }
 }
 
-fn known_named_domain_samples(name: &str, sample_cardinality: usize) -> Option<Vec<&'static str>> {
-    let samples = match name {
-        "FlowNodeKind" => &["Loop", "Step"][..],
-        "ExternalToolSurfaceFailureCause" => {
-            return Some(vec![
-                "PendingFailed",
-                "SurfaceDraining",
-                "SurfaceUnavailable",
-            ]);
+fn sample_values_for_named_type(
+    name: &str,
+    sample_cardinality: usize,
+    named_samples: &BTreeMap<String, BTreeSet<String>>,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    match require_named_binding(bindings, name) {
+        RustTypeAtom::U64 | RustTypeAtom::U32 | RustTypeAtom::U16 | RustTypeAtom::U8 => {
+            if sample_cardinality > 1 {
+                vec!["1".into(), "2".into()]
+            } else {
+                vec!["1".into()]
+            }
         }
-        _ => return None,
-    };
-    Some(
-        samples
-            .iter()
-            .copied()
-            .take(sample_cardinality.max(1))
-            .collect(),
-    )
-}
-
-fn known_structural_named_domain_samples(
-    name: &str,
-    sample_cardinality: usize,
-) -> Option<Vec<String>> {
-    if name != "ToolVisibilityWitness" {
-        return None;
-    }
-
-    let stable_owner_key = tla_string("stable_owner_key");
-    let last_seen_provenance = tla_string("last_seen_provenance");
-    let samples = [
-        format!("{{{stable_owner_key}}}"),
-        format!("{{{last_seen_provenance}}}"),
-        format!("{{{stable_owner_key}, {last_seen_provenance}}}"),
-    ];
-
-    Some(
-        samples
-            .into_iter()
-            .take(sample_cardinality.max(1))
-            .collect(),
-    )
-}
-
-fn string_enum_binding_samples(
-    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
-    name: &str,
-) -> Option<Vec<String>> {
-    use meerkat_machine_schema::RustTypeAtom;
-
-    match bindings.get(name) {
-        Some(RustTypeAtom::StringEnum { variants }) => Some(
-            variants
-                .iter()
-                .map(|variant| tla_string(string_enum_wire_label(name, variant.as_str())))
-                .collect(),
-        ),
-        _ => None,
-    }
-}
-
-fn type_path_enum_binding_samples(
-    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
-    name: &str,
-    sample_cardinality: usize,
-) -> Option<Vec<String>> {
-    use meerkat_machine_schema::RustTypeAtom;
-
-    match bindings.get(name) {
-        Some(RustTypeAtom::TypePathEnum {
+        RustTypeAtom::Bool => vec!["TRUE".into(), "FALSE".into()],
+        RustTypeAtom::StringEnum { variants } => string_enum_variant_samples(name, variants),
+        RustTypeAtom::TypePathEnum {
             unit_variants,
             structural_variants,
             ..
-        }) => {
-            let mut samples = unit_variants
-                .iter()
-                .map(|variant| tla_string(variant.as_str()))
-                .collect::<Vec<_>>();
-            samples.extend(structural_variants.iter().flat_map(|variant| {
-                render_type_path_enum_structural_samples(variant, sample_cardinality)
-            }));
-            Some(samples)
+        } => type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality),
+        RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => {
+            field_presence_set_samples(fields, sample_cardinality)
         }
-        _ => None,
+        RustTypeAtom::String | RustTypeAtom::TypePath(_) => {
+            if sample_cardinality == 0 {
+                return Vec::new();
+            }
+            if let Some(samples) = named_samples.get(name) {
+                let limit = sample_cardinality.max(1);
+                let rendered = samples
+                    .iter()
+                    .take(limit)
+                    .map(tla_string)
+                    .collect::<Vec<_>>();
+                if !rendered.is_empty() {
+                    return rendered;
+                }
+            }
+            (1..=sample_cardinality.max(1))
+                .map(|idx| tla_string(format!("{}_{}", tla_ident(name).to_lowercase(), idx)))
+                .collect()
+        }
     }
+}
+
+fn sample_values_for_enum_type(
+    name: &str,
+    sample_cardinality: usize,
+    bindings: &BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+) -> Vec<String> {
+    use meerkat_machine_schema::RustTypeAtom;
+
+    match require_named_binding(bindings, name) {
+        RustTypeAtom::StringEnum { variants } => string_enum_variant_samples(name, variants),
+        RustTypeAtom::TypePathEnum {
+            unit_variants,
+            structural_variants,
+            ..
+        } => type_path_enum_variant_samples(unit_variants, structural_variants, sample_cardinality),
+        other => panic!(
+            "generated enum domain `{name}` requires StringEnum or TypePathEnum binding, found {other:?}"
+        ),
+    }
+}
+
+fn require_named_binding<'a>(
+    bindings: &'a BTreeMap<String, meerkat_machine_schema::RustTypeAtom>,
+    name: &str,
+) -> &'a meerkat_machine_schema::RustTypeAtom {
+    bindings
+        .get(name)
+        .unwrap_or_else(|| panic!("missing NamedTypeBinding for generated domain `{name}`"))
+}
+
+fn string_enum_variant_samples(
+    name: &str,
+    variants: &[meerkat_machine_schema::identity::EnumVariantId],
+) -> Vec<String> {
+    variants
+        .iter()
+        .map(|variant| tla_string(string_enum_wire_label(name, variant.as_str())))
+        .collect()
+}
+
+fn type_path_enum_variant_samples(
+    unit_variants: &[meerkat_machine_schema::identity::EnumVariantId],
+    structural_variants: &[TypePathEnumStructuralVariant],
+    sample_cardinality: usize,
+) -> Vec<String> {
+    let mut samples = unit_variants
+        .iter()
+        .map(|variant| tla_string(variant.as_str()))
+        .collect::<Vec<_>>();
+    samples.extend(
+        structural_variants.iter().flat_map(|variant| {
+            render_type_path_enum_structural_samples(variant, sample_cardinality)
+        }),
+    );
+    samples
+}
+
+fn field_presence_set_samples(
+    fields: &[meerkat_machine_schema::identity::FieldId],
+    sample_cardinality: usize,
+) -> Vec<String> {
+    if sample_cardinality == 0 {
+        return Vec::new();
+    }
+    let limit = sample_cardinality.max(1);
+    let rendered_fields = fields
+        .iter()
+        .map(|field| tla_string(field.as_str()))
+        .collect::<Vec<_>>();
+    let mut samples = rendered_fields
+        .iter()
+        .take(limit)
+        .map(|field| format!("{{{field}}}"))
+        .collect::<Vec<_>>();
+    if limit > rendered_fields.len() && rendered_fields.len() >= 2 {
+        samples.push(format!("{{{}}}", rendered_fields.join(", ")));
+    }
+    samples
 }
 
 fn render_type_path_enum_structural_samples(
@@ -2955,11 +2969,39 @@ fn named_type_uses_nat_domain(
 fn collect_machine_named_bindings(
     schema: &MachineSchema,
 ) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
+    assert_machine_named_bindings_match_canonical(schema);
     schema
         .named_types
         .iter()
         .map(|binding| (binding.name.as_str().to_owned(), binding.rust.clone()))
         .collect()
+}
+
+fn assert_machine_named_bindings_match_canonical(schema: &MachineSchema) {
+    let Some(canonical) = canonical_machine_schemas()
+        .into_iter()
+        .find(|canonical| canonical.machine == schema.machine)
+    else {
+        return;
+    };
+
+    for binding in &schema.named_types {
+        let Some(canonical_binding) = canonical
+            .named_types
+            .iter()
+            .find(|candidate| candidate.name == binding.name)
+        else {
+            continue;
+        };
+        assert!(
+            canonical_binding
+                .rust
+                .has_same_composition_domain_shape(&binding.rust),
+            "generated machine `{}` named-type `{}` binding must match canonical domain shape",
+            schema.machine,
+            binding.name
+        );
+    }
 }
 
 /// Merge every machine's named-type bindings into one map for
@@ -2970,6 +3012,7 @@ fn collect_composition_named_bindings<'a>(
 ) -> BTreeMap<String, meerkat_machine_schema::RustTypeAtom> {
     let mut merged: BTreeMap<String, meerkat_machine_schema::RustTypeAtom> = BTreeMap::new();
     for machine in machines_by_instance {
+        assert_machine_named_bindings_match_canonical(machine);
         for binding in &machine.named_types {
             let slug = binding.name.as_str().to_owned();
             if let Some(existing) = merged.get(&slug) {
@@ -2992,14 +3035,17 @@ mod tests {
     use meerkat_machine_schema::catalog::dsl::{
         dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
     };
+    use meerkat_machine_schema::identity::MachineId;
 
     #[test]
     #[should_panic(
         expected = "composition named-type `AgentRuntimeId` binding must agree across machine schemas"
     )]
     fn composition_named_binding_merge_rejects_divergent_domain_shapes() {
-        let meerkat = meerkat_machine();
+        let mut meerkat = meerkat_machine();
+        meerkat.machine = MachineId::parse("CompositionMergeLeft").expect("test machine id");
         let mut mob = mob_machine();
+        mob.machine = MachineId::parse("CompositionMergeRight").expect("test machine id");
         let binding = mob
             .named_types
             .iter_mut()

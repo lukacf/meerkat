@@ -529,7 +529,18 @@ mod tests {
             }
         }
 
-        let schema = OccurrenceLifecycleMachineState::schema();
+        let mut schema = OccurrenceLifecycleMachineState::schema();
+        schema.named_types = vec![
+            meerkat_machine_schema::identity::NamedTypeBinding::string("ClaimToken"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("DeliveryReceipt"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string_enum(
+                "OccurrenceFailureClass",
+                &["Timeout", "TargetUnavailable", "InternalError"],
+            ),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("OccurrenceId"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("OccurrenceLifecycleState"),
+            meerkat_machine_schema::identity::NamedTypeBinding::string("ScheduleId"),
+        ];
         let kernel = meerkat_machine_kernels::test_oracle::GeneratedMachineKernel::new(schema);
 
         let mut auth = OccurrenceLifecycleMachineAuthority::new();

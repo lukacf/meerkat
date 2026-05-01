@@ -552,9 +552,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string_enum("TurnCancellationReason", &["Observed"]),
-            NamedTypeBinding::type_path(
+            NamedTypeBinding::type_path_field_presence_set(
                 "ToolVisibilityWitness",
                 "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness",
+                &["stable_owner_key", "last_seen_provenance"],
             ),
             NamedTypeBinding::string_enum(
                 "TurnPhase",

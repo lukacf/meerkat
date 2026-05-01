@@ -1202,8 +1202,33 @@ fn validate_named_type_binding_payload(
             validate_named_variant_domain(binding.name.as_str(), &variants)?;
             validate_type_path_enum_structural_variants(binding.name.as_str(), structural_variants)
         }
+        RustTypeAtom::TypePathFieldPresenceSet { fields, .. } => {
+            validate_type_path_field_presence_set(binding.name.as_str(), fields)
+        }
         _ => Ok(()),
     }
+}
+
+fn validate_type_path_field_presence_set(
+    name: &str,
+    fields: &[FieldId],
+) -> Result<(), MachineSchemaError> {
+    if fields.is_empty() {
+        return Err(MachineSchemaError::InvalidStringEnumBinding {
+            name: name.to_owned(),
+            reason: "field-presence named-type binding must define at least one field".to_owned(),
+        });
+    }
+    let mut seen: IndexSet<&str> = IndexSet::new();
+    for field in fields {
+        if !seen.insert(field.as_str()) {
+            return Err(MachineSchemaError::InvalidStringEnumBinding {
+                name: name.to_owned(),
+                reason: format!("field-presence binding defines duplicate field `{field}`"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_type_path_enum_structural_variants(

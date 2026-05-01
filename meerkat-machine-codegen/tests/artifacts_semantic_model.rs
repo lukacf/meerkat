@@ -3,6 +3,7 @@ use meerkat_machine_codegen::{render_machine_ci_cfg, render_machine_semantic_mod
 use meerkat_machine_schema::catalog::dsl::{
     dsl_meerkat_machine as meerkat_machine, dsl_mob_machine as mob_machine,
 };
+use meerkat_machine_schema::{NamedTypeBinding, RustTypeAtom};
 
 fn tool_filter_values_line(rendered: &str) -> &str {
     rendered
@@ -101,6 +102,76 @@ fn meerkat_deep_cfg_uses_closed_tool_filter_domain() {
         !rendered.contains("toolfilter_2"),
         "deep ToolFilterValues must not fall back to generated placeholder strings:\n{rendered}"
     );
+}
+
+#[test]
+#[should_panic(expected = "missing NamedTypeBinding for generated domain `FlowNodeKind`")]
+fn mob_ci_cfg_fails_closed_when_closed_enum_binding_is_missing() {
+    let mut schema = mob_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "FlowNodeKind");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MobMachine` named-type `FlowNodeKind` binding must match canonical domain shape"
+)]
+fn mob_ci_cfg_fails_closed_when_closed_enum_binding_changes_shape() {
+    let mut schema = mob_machine();
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "FlowNodeKind")
+        .expect("FlowNodeKind binding");
+    binding.rust = RustTypeAtom::String;
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "missing NamedTypeBinding for generated domain `ExternalToolSurfaceFailureCause`"
+)]
+fn meerkat_ci_cfg_fails_closed_when_external_tool_failure_binding_is_missing() {
+    let mut schema = meerkat_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ExternalToolSurfaceFailureCause");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(expected = "missing NamedTypeBinding for generated domain `ToolVisibilityWitness`")]
+fn meerkat_ci_cfg_fails_closed_when_structural_named_binding_is_missing() {
+    let mut schema = meerkat_machine();
+    schema
+        .named_types
+        .retain(|binding| binding.name.as_str() != "ToolVisibilityWitness");
+
+    let _ = render_machine_ci_cfg(&schema, false);
+}
+
+#[test]
+#[should_panic(
+    expected = "generated machine `MeerkatMachine` named-type `ToolVisibilityWitness` binding must match canonical domain shape"
+)]
+fn meerkat_ci_cfg_fails_closed_when_structural_named_binding_changes_shape() {
+    let mut schema = meerkat_machine();
+    let binding = schema
+        .named_types
+        .iter_mut()
+        .find(|binding| binding.name.as_str() == "ToolVisibilityWitness")
+        .expect("ToolVisibilityWitness binding");
+    *binding = NamedTypeBinding {
+        name: binding.name.clone(),
+        rust: RustTypeAtom::String,
+    };
+
+    let _ = render_machine_ci_cfg(&schema, false);
 }
 
 #[test]

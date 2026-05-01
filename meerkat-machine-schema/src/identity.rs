@@ -344,6 +344,12 @@ pub enum RustTypeAtom {
     },
     /// Fully-qualified Rust type path, e.g. `"crate::domain::MySpecialType"`.
     TypePath(String),
+    /// Fully-qualified Rust struct type path whose model domain is represented
+    /// as finite sets of present field names.
+    TypePathFieldPresenceSet {
+        path: String,
+        fields: Vec<FieldId>,
+    },
     /// Fully-qualified Rust enum type path with explicit unit variants that
     /// can appear as DSL named-variant literals.
     TypePathEnum {
@@ -370,6 +376,16 @@ impl RustTypeAtom {
 
         match (self, other) {
             (Self::TypePath(_), Self::TypePath(_)) => true,
+            (
+                Self::TypePathFieldPresenceSet {
+                    fields: left_fields,
+                    ..
+                },
+                Self::TypePathFieldPresenceSet {
+                    fields: right_fields,
+                    ..
+                },
+            ) => left_fields == right_fields,
             (
                 Self::TypePathEnum {
                     unit_variants: left_units,
@@ -454,6 +470,33 @@ impl NamedTypeBinding {
             #[allow(clippy::expect_used)]
             name: NamedTypeId::parse(name).expect("valid named-type slug"),
             rust: RustTypeAtom::TypePath(rust_path.into()),
+        }
+    }
+
+    /// Construct a binding whose Rust representation is a fully-qualified type
+    /// path and whose generated model domain is finite field-presence sets.
+    pub fn type_path_field_presence_set(
+        name: &str,
+        rust_path: impl Into<String>,
+        fields: &[&str],
+    ) -> Self {
+        assert!(
+            !fields.is_empty(),
+            "field-presence named-type bindings require at least one field"
+        );
+        Self {
+            #[allow(clippy::expect_used)]
+            name: NamedTypeId::parse(name).expect("valid named-type slug"),
+            rust: RustTypeAtom::TypePathFieldPresenceSet {
+                path: rust_path.into(),
+                fields: fields
+                    .iter()
+                    .map(|field| {
+                        #[allow(clippy::expect_used)]
+                        FieldId::parse(*field).expect("valid field-presence slug")
+                    })
+                    .collect(),
+            },
         }
     }
 

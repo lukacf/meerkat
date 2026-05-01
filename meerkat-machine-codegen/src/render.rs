@@ -1265,7 +1265,9 @@ fn render_rust_type_atom(atom: &meerkat_machine_schema::RustTypeAtom) -> String 
         RustTypeAtom::Bool => "bool".to_string(),
         RustTypeAtom::String => "String".to_string(),
         RustTypeAtom::StringEnum { .. } => "String".to_string(),
-        RustTypeAtom::TypePath(path) | RustTypeAtom::TypePathEnum { path, .. } => path
+        RustTypeAtom::TypePath(path)
+        | RustTypeAtom::TypePathFieldPresenceSet { path, .. }
+        | RustTypeAtom::TypePathEnum { path, .. } => path
             .strip_prefix("crate::catalog::")
             .map(|suffix| format!("meerkat_machine_schema::catalog::{suffix}"))
             .unwrap_or_else(|| path.clone()),
@@ -1282,7 +1284,9 @@ fn render_named_type_definition(
 
     let rust_name = rust_ident(name);
     match atom {
-        RustTypeAtom::TypePath(_) | RustTypeAtom::TypePathEnum { .. } => {
+        RustTypeAtom::TypePath(_)
+        | RustTypeAtom::TypePathFieldPresenceSet { .. }
+        | RustTypeAtom::TypePathEnum { .. } => {
             pushln!(
                 out,
                 "pub type {} = {};",

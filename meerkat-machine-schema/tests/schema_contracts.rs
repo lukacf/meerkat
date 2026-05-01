@@ -193,10 +193,14 @@ fn meerkat_deferred_tool_witness_named_type_is_structural_authority() {
 
     assert_eq!(
         binding.rust,
-        RustTypeAtom::TypePath(
-            "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness".to_string()
-        ),
-        "deferred-tool authority must be bound to the typed witness projection, not String"
+        RustTypeAtom::TypePathFieldPresenceSet {
+            path: "crate::catalog::dsl::meerkat_machine::ToolVisibilityWitness".to_string(),
+            fields: vec![
+                FieldId::parse("stable_owner_key").expect("field"),
+                FieldId::parse("last_seen_provenance").expect("field"),
+            ],
+        },
+        "deferred-tool authority must be bound to the typed witness projection and field-presence domain, not String"
     );
 }
 

@@ -24,9 +24,7 @@ fn fabricated<T>() -> T {
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
-extern "C" fn __meerkat_agent_factory_build_authority_validate(
-    authority: *const c_void,
-) -> bool {
+extern "C" fn __meerkat_agent_factory_build_authority_validate(authority: *const c_void) -> bool {
     !authority.is_null()
 }
 

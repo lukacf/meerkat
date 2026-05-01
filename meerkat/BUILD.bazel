@@ -61,7 +61,6 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -141,7 +140,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -248,7 +246,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -339,7 +336,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -434,7 +430,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -525,7 +520,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -618,7 +612,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -712,7 +705,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -804,7 +796,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -896,7 +887,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -992,7 +982,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1083,7 +1072,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1174,7 +1162,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1267,7 +1254,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1362,7 +1348,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1453,7 +1438,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1545,7 +1529,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",
@@ -1640,7 +1623,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-anthropic:meerkat_anthropic",
         "//meerkat-client:meerkat_client",
         "//meerkat-comms:meerkat_comms",

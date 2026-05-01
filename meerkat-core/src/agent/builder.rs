@@ -69,8 +69,6 @@ pub struct AgentBuilder {
 /// required before crossing into core agent construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AgentBuildPolicyError {
-    #[error("factory policy build requires canonical factory authority")]
-    InvalidBuildAuthority,
     #[error("factory policy build requires an explicit session")]
     MissingSession,
     #[error("factory policy build requires session metadata")]
@@ -86,9 +84,16 @@ pub enum AgentBuildPolicyError {
 /// This is the production construction seam. It refuses to build unless the
 /// surrounding factory has attached durable session metadata, durable
 /// build-state metadata, and a runtime turn-state handle to the builder.
+///
+/// # Safety
+///
+/// Callers must be the canonical facade factory after it has run provider,
+/// runtime, auth, session, and tool policy composition. This function is public
+/// only as a crate boundary bridge between `meerkat` and `meerkat-core`; it is
+/// not a standalone construction API.
 #[doc(hidden)]
-pub async fn build_agent_after_factory_policy<C, T, S>(
-    authority: meerkat_agent_build_authority::AgentFactoryBuildAuthority,
+#[allow(unsafe_code)]
+pub async unsafe fn build_agent_after_factory_policy<C, T, S>(
     builder: AgentBuilder,
     client: Arc<C>,
     tools: Arc<T>,
@@ -99,9 +104,6 @@ where
     T: AgentToolDispatcher + ?Sized,
     S: AgentSessionStore + ?Sized,
 {
-    if !authority.is_canonical_factory_authority() {
-        return Err(AgentBuildPolicyError::InvalidBuildAuthority);
-    }
     builder.validate_factory_policy()?;
     Ok(builder.build_inner(client, tools, store).await)
 }
@@ -284,7 +286,16 @@ impl AgentBuilder {
     }
 
     #[cfg(all(not(test), feature = "standalone-agent-builder"))]
-    pub async fn build_standalone<C, T, S>(
+    /// Build a standalone low-level agent after the caller has explicitly opted
+    /// out of facade/factory policy.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own all policy normally composed by `AgentFactory`,
+    /// including durable session metadata, runtime state handles, hook/tool
+    /// wiring, auth leases, and persistence semantics.
+    #[allow(unsafe_code)]
+    pub async unsafe fn build_standalone<C, T, S>(
         self,
         _authority: standalone_build_authority::StandaloneAgentBuildAuthority,
         client: Arc<C>,

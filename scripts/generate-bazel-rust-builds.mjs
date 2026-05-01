@@ -40,7 +40,6 @@ const packageLabel = (pkg) => `//${relative(root, packageDir(pkg))}:${crateName(
 const crateName = (name) => name.replaceAll("-", "_");
 const q = (value) => JSON.stringify(value);
 const coreAgentFactoryBuildLabel = "//meerkat-core:meerkat_core_agent_factory_build";
-const authorityLabel = "//meerkat-agent-build-authority:meerkat_agent_build_authority";
 
 function defaultFeatures(pkg) {
   return pkg.features?.default ?? [];
@@ -856,7 +855,7 @@ for (const pkg of localPackages.values()) {
     rules.push(`${rule}(\n${attrs.join("\n")}\n)`);
     if (rule === "rust_library") {
       if (isCorePublicLibrary) {
-        const internalDeps = [...new Set([...targetDeps, authorityLabel])].sort();
+        const internalDeps = [...new Set(targetDeps)].sort();
         const internalDepsExpr = internalDeps.length
           ? `${listExpr(internalDeps)} + ${externalNormal}`
           : externalNormal;

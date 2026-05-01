@@ -301,9 +301,12 @@ async fn build_agent(
 
     #[allow(unsafe_code)]
     let standalone_authority = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-    builder
-        .build_standalone(standalone_authority, client, tools, store)
-        .await
+    #[allow(unsafe_code)]
+    unsafe {
+        builder
+            .build_standalone(standalone_authority, client, tools, store)
+            .await
+    }
 }
 
 fn test_hooks() -> TestHookEngine {

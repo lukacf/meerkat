@@ -24,11 +24,12 @@ fn forged_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthori
     let authority = AgentFactoryBuildAuthorityRepr {
         guard_type: TypeId::of::<ForgedAuthorityGuard>(),
         source_type: TypeId::of::<ForgedAuthoritySource>(),
-        witness_type: meerkat_agent_build_authority::AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE(),
+        witness_type: TypeId::of::<ForgedAuthoritySource>(),
     };
 
     // SAFETY: this fixture mirrors the current three-TypeId authority layout
-    // and uses the public witness oracle that the finalizer currently accepts.
+    // and repeats the forged source TypeId as the witness, which the stale
+    // finalizer validation currently accepts.
     unsafe {
         std::mem::transmute::<
             AgentFactoryBuildAuthorityRepr,

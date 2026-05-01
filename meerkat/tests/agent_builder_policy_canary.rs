@@ -121,7 +121,7 @@ fn is_test_source(path: &Path) -> bool {
 
 fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
     let Some(pos) = source.find("pub async fn build_standalone") else {
-        return true;
+        return source.contains("pub async unsafe fn build_standalone");
     };
     let cfg_window = source[..pos]
         .lines()
@@ -133,22 +133,19 @@ fn public_standalone_build_is_cfg_gated(source: &str) -> bool {
         || source.contains("StandaloneAgentBuildAuthority")
 }
 
-fn public_factory_policy_finalizer_requires_authority_before_builder(source: &str) -> bool {
+fn public_factory_policy_finalizer_is_unsafe_bridge(source: &str) -> bool {
     let Some(pos) = source.find("pub async fn build_agent_after_factory_policy") else {
-        return true;
+        let Some(pos) = source.find("pub async unsafe fn build_agent_after_factory_policy") else {
+            return false;
+        };
+        let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
+        return signature_window.contains("builder: AgentBuilder")
+            && !signature_window.contains("AgentFactoryBuildAuthority");
     };
     let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
-    signature_window.contains("meerkat_agent_build_authority::AgentFactoryBuildAuthority")
-        && signature_window.find("authority:").unwrap_or(usize::MAX)
-            < signature_window.find("builder: AgentBuilder").unwrap_or(0)
-}
-
-fn public_factory_policy_finalizer_requires_typed_authority(source: &str) -> bool {
-    let Some(pos) = source.find("pub async fn build_agent_after_factory_policy") else {
-        return true;
-    };
-    let signature_window = source[pos..].lines().take(8).collect::<Vec<_>>().join("\n");
-    signature_window.contains("meerkat_agent_build_authority::AgentFactoryBuildAuthority")
+    signature_window.contains("pub async unsafe fn build_agent_after_factory_policy")
+        && signature_window.contains("builder: AgentBuilder")
+        && !signature_window.contains("AgentFactoryBuildAuthority")
 }
 
 fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
@@ -163,15 +160,13 @@ fn factory_authority_crate_exposes_no_minting_api(source: &str) -> bool {
         && !source.contains("pub const unsafe fn")
         && !source.contains("pub fn new")
         && !source.contains("pub fn mint")
+        && !source.contains("is_canonical_factory_authority")
         && !source.contains("CANONICAL_AUTHORITY")
         && !source.contains("AuthoritySeal")
         && !source.contains("words: [u64; 4]")
         && !source.contains("__meerkat_agent_factory_build_authority_validate")
-        && source.matches("pub fn ").count() == 1
-        && source.contains("pub fn is_canonical_factory_authority(&self) -> bool")
-        && source.contains("guard_type: TypeId")
-        && source.contains("source_type: TypeId")
-        && source.contains("witness_type: TypeId")
+        && source.matches("pub fn ").count() == 0
+        && !source.contains("TypeId")
         && !source.contains("AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE")
         && !source.contains("AgentFactoryBuildAuthorityRegistration")
         && !source.contains("inventory::collect!")
@@ -258,6 +253,8 @@ meerkat-core = {{ path = "{}" }}
     assert!(
         stderr.contains("build_agent_after_factory_policy")
             && (stderr.contains("this function takes")
+                || stderr.contains("unsafe function")
+                || stderr.contains("requires unsafe")
                 || stderr.contains("expected")
                 || stderr.contains("AgentFactoryBuildAuthority")
                 || stderr.contains("not found")
@@ -387,7 +384,11 @@ meerkat-core = {{ path = "{}" }}
     assert!(
         stderr.contains("__meerkat_agent_factory_build_authority_new")
             || stderr.contains("mint_agent_factory_build_authority")
-            || stderr.contains("link_name"),
+            || stderr.contains("link_name")
+            || stderr.contains("this function takes")
+            || stderr.contains("unsafe function")
+            || stderr.contains("requires unsafe")
+            || stderr.contains("no method named"),
         "downstream direct-authority fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -452,9 +453,12 @@ meerkat-core = {{ path = "{}" }}
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("transmute")
-            || stderr.contains("AGENT_FACTORY_BUILD_AUTHORITY_WITNESS_TYPE")
-            || stderr.contains("not found")
             || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("this function takes")
+            || stderr.contains("unsafe function")
+            || stderr.contains("requires unsafe")
+            || stderr.contains("no method named")
+            || stderr.contains("InvalidBuildAuthority")
             || stderr.contains("assertion failed"),
         "downstream direct-authority transmute fixture failed for the wrong reason:\n{stderr}"
     );
@@ -518,7 +522,11 @@ meerkat-core = {{ path = "{}" }}
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         (stderr.contains("assertion failed") && stderr.contains("is_canonical_factory_authority"))
-            || stderr.contains("InvalidBuildAuthority"),
+            || stderr.contains("InvalidBuildAuthority")
+            || stderr.contains("this function takes")
+            || stderr.contains("unsafe function")
+            || stderr.contains("requires unsafe")
+            || stderr.contains("no method named"),
         "downstream validator-symbol fixture failed for the wrong reason:\n{stderr}"
     );
     Ok(())
@@ -577,6 +585,9 @@ meerkat-core = {{ path = "{}", features = ["standalone-agent-builder"] }}
     assert!(
         stderr.contains("standalone-agent-builder")
             || stderr.contains("build_standalone")
+            || stderr.contains("this function takes")
+            || stderr.contains("unsafe function")
+            || stderr.contains("requires unsafe")
             || stderr.contains("feature"),
         "downstream standalone-feature fixture failed for the wrong reason:\n{stderr}"
     );
@@ -644,6 +655,10 @@ inventory = "0.3"
         stderr.contains("assertion failed")
             || stderr.contains("InvalidBuildAuthority")
             || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("this function takes")
+            || stderr.contains("unsafe function")
+            || stderr.contains("requires unsafe")
+            || stderr.contains("no method named")
             || stderr.contains("cannot transmute between types of different sizes")
             || stderr.contains("cannot find type")
             || stderr.contains("not found in")
@@ -715,6 +730,10 @@ inventory = "0.3"
         stderr.contains("assertion failed")
             || stderr.contains("InvalidBuildAuthority")
             || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("this function takes")
+            || stderr.contains("unsafe function")
+            || stderr.contains("requires unsafe")
+            || stderr.contains("no method named")
             || stderr.contains("cannot find type")
             || stderr.contains("not found in")
             || stderr.contains("private"),
@@ -783,6 +802,10 @@ inventory = "0.3"
         stderr.contains("assertion failed")
             || stderr.contains("InvalidBuildAuthority")
             || stderr.contains("is_canonical_factory_authority")
+            || stderr.contains("this function takes")
+            || stderr.contains("unsafe function")
+            || stderr.contains("requires unsafe")
+            || stderr.contains("no method named")
             || stderr.contains("cannot find type")
             || stderr.contains("not found in")
             || stderr.contains("private"),
@@ -808,19 +831,16 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
          standalone construction must be test/embedding opt-in"
     );
     assert!(
-        public_factory_policy_finalizer_requires_authority_before_builder(&builder),
-        "the factory-policy finalizer must require typed facade authority before \
-         accepting an AgentBuilder; downstream callers must not be able to enter \
-         the finalizer with only public SessionMetadata, SessionBuildState, and a \
-         public turn-state handle"
+        builder.contains("pub async unsafe fn build_standalone"),
+        "the feature-gated standalone builder must be an explicit unsafe \
+         escape hatch; downstream safe code must not bypass AgentFactory by \
+         fabricating the private standalone authority argument"
     );
     assert!(
-        public_factory_policy_finalizer_requires_typed_authority(&builder),
-        "the feature-gated factory-policy finalizer must require a typed \
-         authority that is not minted or re-exported from meerkat-core; a \
-         feature-unified downstream crate must not be able to call the \
-         finalizer with only public SessionMetadata, SessionBuildState, and \
-         a public turn-state handle"
+        public_factory_policy_finalizer_is_unsafe_bridge(&builder),
+        "the factory-policy finalizer must be an explicit unsafe crate-boundary \
+         bridge and must not accept a public concrete authority token that \
+         downstream callers can transmute or mint"
     );
     assert!(
         !builder.contains("pub async fn build_after_factory_policy"),
@@ -830,8 +850,9 @@ fn core_agent_builder_does_not_expose_public_build_bypass() {
     );
     assert!(
         builder.contains("validate_factory_policy()?")
-            && builder.contains("is_canonical_factory_authority()")
-            && builder.contains("AgentBuildPolicyError::InvalidBuildAuthority")
+            && builder.contains("pub async unsafe fn build_agent_after_factory_policy")
+            && !builder.contains("is_canonical_factory_authority()")
+            && !builder.contains("AgentBuildPolicyError::InvalidBuildAuthority")
             && !builder.contains("pub fn from_registered_source<A: 'static>")
             && !builder.contains("pub const fn canonical_factory")
             && !builder.contains("pub const fn test_harness")
@@ -1006,10 +1027,11 @@ fn public_bazel_core_target_does_not_expose_build_bypass_features() {
     let internal_core = bazel_target_block(&core_bazel, "meerkat_core_agent_factory_build")
         .expect("meerkat-core BUILD.bazel must contain a non-public AgentFactory core variant");
     assert!(
-        internal_core.contains("meerkat_agent_build_authority")
+        internal_core.contains("\"standalone-agent-builder\"")
+            && !internal_core.contains("meerkat_agent_build_authority")
             && !internal_core.contains("//visibility:public"),
-        "Bazel AgentFactory core bridge must be a non-public target carrying \
-         the authority dependency"
+        "Bazel AgentFactory core bridge must stay non-public and must not \
+         carry the retired authority dependency"
     );
 }
 

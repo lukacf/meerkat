@@ -2,7 +2,6 @@
 
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
-use std::any::TypeId;
 use std::collections::BTreeMap;
 #[cfg(feature = "skills")]
 use std::collections::BTreeSet;
@@ -18,47 +17,6 @@ use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
 use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
-
-struct AgentFactoryBuildAuthorityGuard;
-struct AgentFactoryBuildAuthoritySource;
-
-fn agent_factory_build_authority_guard_type() -> TypeId {
-    TypeId::of::<AgentFactoryBuildAuthorityGuard>()
-}
-
-fn agent_factory_build_authority_source_type() -> TypeId {
-    TypeId::of::<AgentFactoryBuildAuthoritySource>()
-}
-
-#[allow(unsafe_code)]
-fn agent_factory_build_authority() -> meerkat_agent_build_authority::AgentFactoryBuildAuthority {
-    #[allow(dead_code)]
-    #[derive(Clone, Copy)]
-    struct AuthorityRepr {
-        guard_type: TypeId,
-        source_type: TypeId,
-        witness_type: TypeId,
-    }
-
-    let guard_type = agent_factory_build_authority_guard_type();
-    let source_type = agent_factory_build_authority_source_type();
-    let witness_type = source_type;
-    let authority = AuthorityRepr {
-        guard_type,
-        source_type,
-        witness_type,
-    };
-
-    // SAFETY: the facade stamps private marker TypeIds plus a source-coupled
-    // witness. The concrete authority representation is intentionally opaque
-    // to downstream dependents.
-    unsafe {
-        std::mem::transmute::<
-            AuthorityRepr,
-            meerkat_agent_build_authority::AgentFactoryBuildAuthority,
-        >(authority)
-    }
-}
 
 /// Default system prompt for wasm32 builds.
 /// Mirrors `meerkat_core::prompt::DEFAULT_SYSTEM_PROMPT` which is gated
@@ -3916,14 +3874,18 @@ impl AgentFactory {
         // 13. Build agent. AgentFactory owns the policy composition above; core
         // validates that the durable policy metadata/runtime handle exists
         // before constructing the agent.
-        let mut agent = meerkat_core::agent::build_agent_after_factory_policy(
-            agent_factory_build_authority(),
-            builder,
-            llm_adapter,
-            tools,
-            store_adapter,
-        )
-        .await
+        // SAFETY: this is the canonical facade factory after provider,
+        // runtime, auth, session, tool, and metadata policy composition above.
+        #[allow(unsafe_code)]
+        let mut agent = unsafe {
+            meerkat_core::agent::build_agent_after_factory_policy(
+                builder,
+                llm_adapter,
+                tools,
+                store_adapter,
+            )
+            .await
+        }
         .map_err(|err| {
             BuildAgentError::Config(format!("AgentFactory policy validation failed: {err}"))
         })?;
@@ -4060,14 +4022,18 @@ mod tests {
             .model("mock-model")
             .max_tokens_per_turn(64)
             .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
-        let result = meerkat_core::agent::build_agent_after_factory_policy(
-            agent_factory_build_authority(),
-            builder,
-            llm_adapter,
-            tools,
-            store_adapter,
-        )
-        .await;
+        // SAFETY: this test exercises the canonical facade/core bridge after
+        // intentionally omitting required factory metadata.
+        #[allow(unsafe_code)]
+        let result = unsafe {
+            meerkat_core::agent::build_agent_after_factory_policy(
+                builder,
+                llm_adapter,
+                tools,
+                store_adapter,
+            )
+            .await
+        };
 
         assert!(
             matches!(

@@ -48,9 +48,7 @@ rust_library(
         package_name = "meerkat-core",
         proc_macro = True,
     ),
-    deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-    ] + all_crate_deps(
+    deps = all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
     ),
@@ -79,9 +77,7 @@ rust_library(
         package_name = "meerkat-core",
         proc_macro = True,
     ),
-    deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-    ] + all_crate_deps(
+    deps = all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
     ),
@@ -129,9 +125,7 @@ rust_test(
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
-    ] + all_crate_deps(
+    deps = all_crate_deps(
         package_name = "meerkat-core",
         normal = True,
         normal_dev = True,
@@ -181,7 +175,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -235,7 +228,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -286,7 +278,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -344,7 +335,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -396,7 +386,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -447,7 +436,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -501,7 +489,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -553,7 +540,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -605,7 +591,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -657,7 +642,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",
@@ -709,7 +693,6 @@ rust_test(
         proc_macro_dev = True,
     ),
     deps = [
-        "//meerkat-agent-build-authority:meerkat_agent_build_authority",
         "//meerkat-core:meerkat_core_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-core",

@@ -3155,6 +3155,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: first,
+                admission_committed_hook: None,
             },
         )
         .await
@@ -3183,6 +3184,7 @@ async fn deduplicated_accept_with_completion_emits_no_new_signal() {
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: duplicate,
+                admission_committed_hook: None,
             },
         )
         .await
@@ -17852,6 +17854,7 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled attached steer"),
+                admission_committed_hook: None,
             },
         )
         .await
@@ -17942,6 +17945,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: session_id.clone(),
                 input: runtime_parity_prompt("modeled idle queued admission"),
+                admission_committed_hook: None,
             },
         )
         .await
@@ -18142,6 +18146,7 @@ async fn modeled_meerkat_accept_with_completion_running_steer_signal_matches_run
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_steered_prompt("modeled running steer admission"),
+                admission_committed_hook: None,
             },
         )
         .await
@@ -18253,6 +18258,7 @@ async fn modeled_meerkat_accept_with_completion_running_interrupt_signal_matches
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_peer_message("modeled running interrupt admission"),
+                admission_committed_hook: None,
             },
         )
         .await
@@ -18720,6 +18726,7 @@ fn runtime_parity_probe_command(
             MeerkatMachineCommand::AcceptWithCompletion {
                 session_id: fixture.session_id.clone(),
                 input: runtime_parity_prompt("runtime parity accept with completion"),
+                admission_committed_hook: None,
             }
         }
         RuntimeParityProbeInput::AcceptWithoutWake => MeerkatMachineCommand::AcceptWithoutWake {

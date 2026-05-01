@@ -264,12 +264,27 @@ impl MeerkatMachine {
         input: Input,
     ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
     {
+        self.accept_input_with_completion_and_admission_hook(session_id, input, None)
+            .await
+    }
+
+    /// Accept an input and notify the caller at the exact runtime admission
+    /// commit point, before any later post-admission awaits or completion
+    /// waiting can be cancelled by a surface disconnect.
+    pub async fn accept_input_with_completion_and_admission_hook(
+        &self,
+        session_id: &SessionId,
+        input: Input,
+        on_admission_committed: Option<crate::RuntimeAdmissionCommittedHook>,
+    ) -> Result<(AcceptOutcome, Option<crate::completion::CompletionHandle>), RuntimeDriverError>
+    {
         match self
             .execute_meerkat_machine_command(
                 None,
                 MeerkatMachineCommand::AcceptWithCompletion {
                     session_id: session_id.clone(),
                     input,
+                    admission_committed_hook: on_admission_committed,
                 },
             )
             .await

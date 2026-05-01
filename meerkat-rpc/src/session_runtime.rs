@@ -67,6 +67,8 @@ use meerkat::{
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
 
+pub(crate) use meerkat_runtime::RuntimeAdmissionCommittedHook;
+
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
         CoreRenderable::Text { text } => text.clone(),
@@ -286,8 +288,6 @@ pub(crate) enum InterruptNoopTarget {
     Missing,
     NotInterruptible(RuntimeState),
 }
-
-pub(crate) type RuntimeAdmissionCommittedHook = Box<dyn FnOnce() + Send + 'static>;
 
 fn persisted_runtime_state_blocks_interrupt_noop(state: RuntimeState) -> bool {
     matches!(state, RuntimeState::Retired | RuntimeState::Stopped)
@@ -2274,10 +2274,10 @@ impl SessionRuntime {
         .await
     }
 
-    /// Variant of [`Self::start_turn_via_runtime`] that notifies the caller as
-    /// soon as the runtime accepts the input, before waiting for turn
-    /// completion. Surfaces use this to disarm create rollback cleanup at the
-    /// durable admission point.
+    /// Variant of [`Self::start_turn_via_runtime`] that notifies the caller at
+    /// the runtime's admission commit point, before `accept_input_with_completion`
+    /// returns or waits for turn completion. Surfaces use this to disarm create
+    /// rollback cleanup at the durable admission point.
     #[allow(clippy::too_many_arguments, unused_variables)]
     pub(crate) async fn start_turn_via_runtime_with_admission_hook(
         self: &Arc<Self>,
@@ -2288,7 +2288,7 @@ impl SessionRuntime {
         flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
-        mut on_admission_committed: Option<RuntimeAdmissionCommittedHook>,
+        on_admission_committed: Option<RuntimeAdmissionCommittedHook>,
     ) -> Result<RunResult, RuntimeTurnStartError> {
         use meerkat_runtime::accept::AcceptOutcome;
         use meerkat_runtime::input::{Input, PromptInput};
@@ -2442,13 +2442,14 @@ impl SessionRuntime {
 
         let (outcome, handle) = self
             .runtime_adapter
-            .accept_input_with_completion(session_id, input)
+            .accept_input_with_completion_and_admission_hook(
+                session_id,
+                input,
+                on_admission_committed,
+            )
             .await
             .map_err(runtime_accept_error_to_turn_start)?;
         let admission_committed = outcome.is_accepted();
-        if admission_committed && let Some(hook) = on_admission_committed.take() {
-            hook();
-        }
         // Forward events while waiting for completion
         // (Events are forwarded by the executor's forwarder task,
         // which is spawned inside SessionRuntimeExecutor::apply())

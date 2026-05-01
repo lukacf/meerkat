@@ -24,7 +24,11 @@ impl MeerkatMachine {
         command: MeerkatMachineCommand,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
         match command {
-            MeerkatMachineCommand::AcceptWithCompletion { session_id, input } => {
+            MeerkatMachineCommand::AcceptWithCompletion {
+                session_id,
+                input,
+                mut admission_committed_hook,
+            } => {
                 let (driver, completions, wake_tx, effect_tx, boundary_handle) = {
                     let sessions = self.sessions.read().await;
                     let entry = sessions
@@ -97,6 +101,9 @@ impl MeerkatMachine {
 
                     match &result {
                         AcceptOutcome::Accepted { input_id, .. } => {
+                            if let Some(hook) = admission_committed_hook.take() {
+                                hook();
+                            }
                             let accepted_input_id = input_id.clone();
                             let is_terminal = driver
                                 .as_driver()

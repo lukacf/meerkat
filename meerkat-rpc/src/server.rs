@@ -906,6 +906,116 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_session_create_finish_during_accept_admission_hook_preserves_admitted_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let stream_started = Arc::new(tokio::sync::Notify::new());
+        let (runtime, _config_store) = build_test_runtime_with_llm(
+            &temp,
+            Arc::new(HangingLlmClient {
+                stream_started: Arc::clone(&stream_started),
+            }),
+        );
+        let session_id = runtime
+            .create_session(
+                meerkat::AgentBuildConfig::new("claude-sonnet-4-5"),
+                None,
+                None,
+            )
+            .await
+            .expect("test session should be staged");
+        let runtime_adapter = runtime.runtime_adapter();
+        runtime_adapter
+            .ensure_session_with_executor(
+                session_id.clone(),
+                Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                    Arc::clone(&runtime),
+                    session_id.clone(),
+                )),
+            )
+            .await;
+
+        let request_executor =
+            SurfaceRequestExecutor::new_with_machine(Duration::from_millis(10), &runtime_adapter);
+        let request_key = "rpc-create-pre-return-admission".to_string();
+        let context = request_executor
+            .try_begin_request(
+                request_key.clone(),
+                SurfaceRequestKind::SessionTurn,
+                noop_request_action(),
+            )
+            .expect("test request key should be unique");
+        context
+            .bind_runtime_session(runtime_adapter.as_ref(), &session_id)
+            .await
+            .expect("request lifecycle should bind to the session authority");
+
+        let runtime_for_cleanup = Arc::clone(&runtime);
+        let session_id_for_cleanup = session_id.clone();
+        context.set_unpublished_cleanup(meerkat::surface::request_action(move || {
+            let runtime = Arc::clone(&runtime_for_cleanup);
+            let session_id = session_id_for_cleanup.clone();
+            async move {
+                let _ = runtime.archive_session(&session_id).await;
+            }
+        }));
+
+        let (hook_entered_tx, hook_entered_rx) = std::sync::mpsc::channel();
+        let (release_hook_tx, release_hook_rx) = std::sync::mpsc::channel();
+        let runtime_for_turn = Arc::clone(&runtime);
+        let session_id_for_turn = session_id.clone();
+        let context_for_hook = context.clone();
+        let (event_tx, _event_rx) = mpsc::channel::<
+            meerkat_core::EventEnvelope<meerkat_core::event::AgentEvent>,
+        >(NOTIFICATION_CHANNEL_CAPACITY);
+        let task = tokio::spawn(async move {
+            runtime_for_turn
+                .start_turn_via_runtime_with_admission_hook(
+                    &session_id_for_turn,
+                    meerkat_core::types::ContentInput::Text(
+                        "admit before accept returns".to_string(),
+                    ),
+                    event_tx,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(Box::new(move || {
+                        context_for_hook.disarm_unpublished_cleanup();
+                        hook_entered_tx
+                            .send(())
+                            .expect("test should observe admission hook");
+                        let _ = release_hook_rx.recv();
+                    })),
+                )
+                .await
+        });
+
+        hook_entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("runtime admission hook should run before accept returns");
+        request_executor
+            .finish_unpublished(&request_key)
+            .await
+            .expect("finishing the unpublished request should succeed");
+        assert_eq!(request_executor.phase(&request_key), None);
+
+        let sessions = runtime
+            .list_sessions_rich(meerkat_core::service::SessionQuery::default())
+            .await;
+        assert_eq!(
+            sessions.len(),
+            1,
+            "cleanup must already be disarmed while accept_input_with_completion is still inside the runtime admission hook"
+        );
+
+        task.abort();
+        release_hook_tx
+            .send(())
+            .expect("blocked admission hook should still be releasable");
+        let _ = task.await;
+    }
+
     #[tokio::test]
     async fn rpc_session_create_pre_admission_turn_failure_archives_pending_session() {
         let temp = tempfile::tempdir().unwrap();

@@ -46,6 +46,12 @@ use crate::traits::{
     RuntimeControlPlaneError, RuntimeDriverError,
 };
 
+/// Fast, non-blocking notification invoked by the runtime at the exact point an
+/// input admission commits. This is a machine-owned signal boundary; callers
+/// may clear surface-owned rollback mechanics here, but must not make semantic
+/// lifecycle decisions in the hook.
+pub type RuntimeAdmissionCommittedHook = Box<dyn FnOnce() + Send + 'static>;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeAttachmentStatus {
@@ -511,6 +517,7 @@ pub(crate) enum MeerkatMachineCommand {
     AcceptWithCompletion {
         session_id: SessionId,
         input: Input,
+        admission_committed_hook: Option<RuntimeAdmissionCommittedHook>,
     },
     AcceptWithoutWake {
         session_id: SessionId,

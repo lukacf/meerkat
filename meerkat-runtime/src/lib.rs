@@ -122,9 +122,9 @@ pub use meerkat_machine::{
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ImageOperationRoutingRequest, ImageOperationRoutingResult,
     ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, RealtimeAttachmentSignalAuthority,
-    RealtimeAttachmentStatus, ResolvedSessionLlmReconfigure, SessionLlmCapabilitySurface,
-    SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost, SessionLlmReconfigureReport,
-    SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
+    RealtimeAttachmentStatus, ResolvedSessionLlmReconfigure, RuntimeAdmissionCommittedHook,
+    SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
+    SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };
 #[doc(hidden)]
 pub use meerkat_machine_types::{

@@ -21,7 +21,9 @@ pub mod pkce;
 pub mod token_exchange;
 
 #[cfg(feature = "oauth")]
-pub use callback::{LoopbackHandle, LoopbackOutcome, run_loopback_callback};
+pub use callback::{
+    LoopbackBinding, LoopbackHandle, LoopbackOutcome, bind_loopback_callback, run_loopback_callback,
+};
 #[cfg(feature = "oauth")]
 pub use device_code::{
     DeviceCodeResponse, DevicePollOutcome, poll_device_code, request_device_code,

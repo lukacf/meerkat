@@ -133,7 +133,6 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
-            | crate::mob_destroying_session_ingress_feedback_input_patterns!()
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
@@ -303,6 +302,11 @@ impl MobMachineFlowAuthorityToken {
                     source,
                 ))
             }
+            crate::mob_destroying_session_ingress_feedback_input_patterns!() => {
+                Err(MobError::Internal(format!(
+                    "MobMachine input {input:?} is not a flow reducer authority input"
+                )))
+            }
             non_flow_reducer_authority_mob_machine_inputs!() => Err(MobError::Internal(format!(
                 "MobMachine input {input:?} is not a flow reducer authority input"
             ))),
@@ -322,6 +326,11 @@ impl MobMachineFlowAuthorityToken {
                 ),
                 MobMachineFlowAuthoritySource::MachineOwnedInput(input_catalog(input)?),
             )),
+            crate::mob_destroying_session_ingress_feedback_input_patterns!() => {
+                Err(MobError::Internal(format!(
+                    "MobMachine input {input:?} is not a body-frame seed authority input"
+                )))
+            }
             non_flow_reducer_authority_mob_machine_inputs!() => Err(MobError::Internal(format!(
                 "MobMachine input {input:?} is not a body-frame seed authority input"
             ))),
@@ -1199,7 +1208,6 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::UnwireMembers { .. }
             | mob_dsl::MobMachineInput::WireExternalPeer { .. }
             | mob_dsl::MobMachineInput::UnwireExternalPeer { .. }
-            | crate::mob_destroying_session_ingress_feedback_input_patterns!()
             | mob_dsl::MobMachineInput::SubmitWork { .. }
             | mob_dsl::MobMachineInput::CancelWork { .. }
             | mob_dsl::MobMachineInput::CancelAllWork { .. }
@@ -1236,6 +1244,11 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::KickoffResolveFailed { .. }
             | mob_dsl::MobMachineInput::KickoffCancelRequested { .. }
             | mob_dsl::MobMachineInput::KickoffClear { .. } => {
+                return Err(MobError::Internal(format!(
+                    "MobMachine input {input:?} is not a flow authority input"
+                )));
+            }
+            crate::mob_destroying_session_ingress_feedback_input_patterns!() => {
                 return Err(MobError::Internal(format!(
                     "MobMachine input {input:?} is not a flow authority input"
                 )));
@@ -3544,6 +3557,11 @@ fn input_catalog(input: &mob_dsl::MobMachineInput) -> Result<MobMachineCatalogIn
         }
         mob_dsl::MobMachineInput::AuthorizeLoopIterationReducerCommand { .. } => {
             Ok(MobMachineCatalogInput::AuthorizeLoopIterationReducerCommand)
+        }
+        crate::mob_destroying_session_ingress_feedback_input_patterns!() => {
+            Err(MobError::Internal(format!(
+                "MobMachine input {input:?} is not a flow reducer authority input"
+            )))
         }
         non_flow_reducer_authority_mob_machine_inputs!() => Err(MobError::Internal(format!(
             "MobMachine input {input:?} is not a flow reducer authority input"

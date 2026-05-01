@@ -217,6 +217,18 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         Ok(AuthLeaseTransition { generation })
     }
 
+    fn acquire_lease_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        expires_at: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        if self.snapshot(lease_key) != *expected {
+            return Ok(None);
+        }
+        self.acquire_lease(lease_key, expires_at).map(Some)
+    }
+
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         self.maybe_fail("mark_expiring")?;
         self.events
@@ -229,7 +241,10 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         Ok(())
     }
 
-    fn begin_refresh(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+    fn begin_refresh(
+        &self,
+        lease_key: &LeaseKey,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         self.maybe_fail("begin_refresh")?;
         self.events
             .lock()
@@ -238,7 +253,25 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         let mut snapshot = self.snapshot.lock().unwrap();
         snapshot.phase = Some(AuthLeasePhase::Refreshing);
         snapshot.generation = self.next_generation();
-        Ok(())
+        Ok(AuthLeaseTransition {
+            generation: snapshot.generation,
+        })
+    }
+
+    fn begin_refresh_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        if self.snapshot(lease_key) != *expected
+            || !matches!(
+                expected.phase,
+                Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+            )
+        {
+            return Ok(None);
+        }
+        self.begin_refresh(lease_key).map(Some)
     }
 
     fn complete_refresh(
@@ -264,6 +297,22 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         Ok(AuthLeaseTransition { generation })
     }
 
+    fn complete_refresh_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        if self.snapshot(lease_key) != *expected
+            || expected.phase != Some(AuthLeasePhase::Refreshing)
+        {
+            return Ok(None);
+        }
+        self.complete_refresh(lease_key, new_expires_at, now)
+            .map(Some)
+    }
+
     fn refresh_failed(
         &self,
         lease_key: &LeaseKey,
@@ -284,6 +333,21 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         Ok(())
     }
 
+    fn refresh_failed_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        permanent: bool,
+    ) -> Result<bool, DslTransitionError> {
+        if self.snapshot(lease_key) != *expected
+            || expected.phase != Some(AuthLeasePhase::Refreshing)
+        {
+            return Ok(false);
+        }
+        self.refresh_failed(lease_key, permanent)?;
+        Ok(true)
+    }
+
     fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         self.maybe_fail("mark_reauth_required")?;
         self.events
@@ -294,6 +358,23 @@ impl AuthLeaseHandle for RecordingAuthLeaseHandle {
         snapshot.phase = Some(AuthLeasePhase::ReauthRequired);
         snapshot.generation = self.next_generation();
         Ok(())
+    }
+
+    fn mark_reauth_required_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError> {
+        if self.snapshot(lease_key) != *expected
+            || !matches!(
+                expected.phase,
+                Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+            )
+        {
+            return Ok(false);
+        }
+        self.mark_reauth_required(lease_key)?;
+        Ok(true)
     }
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {

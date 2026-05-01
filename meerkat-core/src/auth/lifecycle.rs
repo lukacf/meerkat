@@ -132,7 +132,7 @@ fn restore_token_lifecycle_snapshot(
     match phase {
         AuthLeasePhase::Valid => Ok(()),
         AuthLeasePhase::Expiring => handle.mark_expiring(lease_key),
-        AuthLeasePhase::Refreshing => handle.begin_refresh(lease_key),
+        AuthLeasePhase::Refreshing => handle.begin_refresh(lease_key).map(|_| ()),
         AuthLeasePhase::ReauthRequired => handle.mark_reauth_required(lease_key),
         AuthLeasePhase::Released => Ok(()),
     }
@@ -219,12 +219,32 @@ mod tests {
             Ok(AuthLeaseTransition { generation: 1 })
         }
 
+        fn acquire_lease_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            expires_at: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            self.acquire_lease(lease_key, expires_at).map(Some)
+        }
+
         fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
             Ok(())
         }
 
-        fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
-            Ok(())
+        fn begin_refresh(
+            &self,
+            _lease_key: &LeaseKey,
+        ) -> Result<AuthLeaseTransition, DslTransitionError> {
+            Ok(AuthLeaseTransition { generation: 1 })
+        }
+
+        fn begin_refresh_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            self.begin_refresh(lease_key).map(Some)
         }
 
         fn complete_refresh(
@@ -236,6 +256,17 @@ mod tests {
             Ok(AuthLeaseTransition { generation: 1 })
         }
 
+        fn complete_refresh_if_snapshot(
+            &self,
+            lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            new_expires_at: u64,
+            now: u64,
+        ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+            self.complete_refresh(lease_key, new_expires_at, now)
+                .map(Some)
+        }
+
         fn refresh_failed(
             &self,
             _lease_key: &LeaseKey,
@@ -244,8 +275,28 @@ mod tests {
             Ok(())
         }
 
+        fn refresh_failed_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            _expected: &AuthLeaseSnapshot,
+            _permanent: bool,
+        ) -> Result<bool, DslTransitionError> {
+            Ok(false)
+        }
+
         fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
             Ok(())
+        }
+
+        fn mark_reauth_required_if_snapshot(
+            &self,
+            _lease_key: &LeaseKey,
+            expected: &AuthLeaseSnapshot,
+        ) -> Result<bool, DslTransitionError> {
+            Ok(matches!(
+                expected.phase,
+                Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+            ))
         }
 
         fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -353,6 +404,15 @@ mod tests {
             }
         }
 
+        async fn clear_if_current(
+            &self,
+            key: &TokenKey,
+            _expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            self.clear(key).await?;
+            Ok(true)
+        }
+
         async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
             Ok(Vec::new())
         }
@@ -386,6 +446,24 @@ mod tests {
 
         async fn clear(&self, _key: &TokenKey) -> Result<(), TokenStoreError> {
             Err(TokenStoreError::Unavailable("clear unavailable".into()))
+        }
+
+        async fn clear_if_current(
+            &self,
+            key: &TokenKey,
+            expected: &PersistedTokens,
+        ) -> Result<bool, TokenStoreError> {
+            if self
+                .tokens
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                != Some(expected)
+            {
+                return Ok(false);
+            }
+            self.clear(key).await?;
+            Ok(true)
         }
 
         async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {

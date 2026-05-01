@@ -167,15 +167,15 @@ fn peer_ingress_lifecycle_subject_signal_carries_candidate_not_selected_subject(
         .collect::<Vec<_>>();
 
     assert!(
-        fields.iter().any(|name| *name == "from_peer"),
+        fields.contains(&"from_peer"),
         "fallback peer identity should remain a typed input fact"
     );
     assert!(
-        fields.iter().any(|name| *name == "lifecycle_peer_param"),
+        fields.contains(&"lifecycle_peer_param"),
         "machine should receive the parsed lifecycle peer parameter candidate"
     );
     assert!(
-        !fields.iter().any(|name| *name == "lifecycle_peer"),
+        !fields.contains(&"lifecycle_peer"),
         "preselected lifecycle subjects must not cross the machine signal seam"
     );
 }

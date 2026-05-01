@@ -1059,17 +1059,46 @@ pub trait AuthLeaseHandle: Send + Sync {
         expires_at: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
+    /// Fire `AcquireAuthLease { lease_key, expires_at }` only when the current
+    /// projection exactly matches `expected`.
+    ///
+    /// Implementations must compare and transition atomically at the
+    /// AuthMachine-owner boundary. Returning `Ok(None)` means a newer lease fact
+    /// won the race and no state was changed.
+    fn acquire_lease_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        expires_at: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError>;
+
     /// Fire `MarkAuthExpiring { lease_key }` — only legal from `valid`.
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
 
     /// Fire `BeginAuthRefresh { lease_key }` — legal from `valid` or
-    /// `expiring`.
+    /// `expiring`. Returns the generation assigned by the accepted transition.
     ///
     /// Provides the DSL-level refresh dedup: once the binding is in
     /// `auth_refreshing_leases`, no concurrent `BeginAuthRefresh` is
     /// permitted until `CompleteAuthRefresh` or `AuthRefreshFailed` moves
     /// it back out.
-    fn begin_refresh(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
+    fn begin_refresh(
+        &self,
+        lease_key: &LeaseKey,
+    ) -> Result<AuthLeaseTransition, DslTransitionError>;
+
+    /// Fire `BeginAuthRefresh { lease_key }` only when the current projection
+    /// exactly matches `expected` and that expected phase is `Valid` or
+    /// `Expiring`.
+    ///
+    /// Implementations must compare and transition atomically at the
+    /// AuthMachine-owner boundary. Returning `Ok(None)` means a newer lease
+    /// fact won the race and no refresh ownership was claimed.
+    fn begin_refresh_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError>;
 
     /// Fire `CompleteAuthRefresh { lease_key, new_expires_at, now }` — only
     /// legal from `refreshing`. Returns the generation assigned by the accepted
@@ -1081,6 +1110,20 @@ pub trait AuthLeaseHandle: Send + Sync {
         now: u64,
     ) -> Result<AuthLeaseTransition, DslTransitionError>;
 
+    /// Fire `CompleteAuthRefresh { lease_key, new_expires_at, now }` only when
+    /// the current projection exactly matches `expected` and that expected
+    /// phase is `Refreshing`.
+    ///
+    /// Returning `Ok(None)` means the owner refresh snapshot lost a race and no
+    /// state was changed.
+    fn complete_refresh_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError>;
+
     /// Fire `AuthRefreshFailed { lease_key, permanent }` — only legal from
     /// `refreshing`. `permanent=true` routes to `reauth_required` and emits a
     /// reauth notice; `permanent=false` routes back to `expiring`.
@@ -1090,8 +1133,35 @@ pub trait AuthLeaseHandle: Send + Sync {
         permanent: bool,
     ) -> Result<(), DslTransitionError>;
 
+    /// Fire `AuthRefreshFailed { lease_key, permanent }` only when the current
+    /// projection exactly matches `expected` and that expected phase is
+    /// `Refreshing`.
+    ///
+    /// This is the owner-refresh rollback path's race-safe transition: a failed
+    /// token-store save must unblock waiters for this owner's refresh without
+    /// failing a newer owner refresh that won a concurrent race.
+    fn refresh_failed_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        permanent: bool,
+    ) -> Result<bool, DslTransitionError>;
+
     /// Fire `MarkReauthRequired { lease_key }` — any known state → reauth.
     fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError>;
+
+    /// Fire `MarkReauthRequired { lease_key }` only when the current projection
+    /// exactly matches `expected` and that expected phase is `Valid` or
+    /// `Expiring`.
+    ///
+    /// This is the no-refresh/material-loss path's race-safe transition: it must
+    /// not convert another owner's concurrent `Refreshing` lease to
+    /// `ReauthRequired`. Returning `Ok(false)` means no state was changed.
+    fn mark_reauth_required_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError>;
 
     /// Fire `ReleaseAuthLease { lease_key }` — removes the binding from all
     /// sets and the expiry map.

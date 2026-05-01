@@ -205,7 +205,7 @@ impl GoogleCodeAssistOAuthRuntime {
         self.refresh_access_token().await
     }
 
-    pub async fn refresh_access_token(
+    pub async fn refresh_access_token_without_save(
         &self,
     ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
         let persisted = self
@@ -244,6 +244,13 @@ impl GoogleCodeAssistOAuthRuntime {
                 }),
             )
             .await?;
+        Ok(refreshed)
+    }
+
+    pub async fn refresh_access_token(
+        &self,
+    ) -> Result<PersistedTokens, GoogleCodeAssistOAuthError> {
+        let refreshed = self.refresh_access_token_without_save().await?;
         self.save(&refreshed).await?;
         Ok(refreshed)
     }

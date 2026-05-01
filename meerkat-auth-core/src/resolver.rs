@@ -19,7 +19,9 @@ use meerkat_core::auth::{
     PersistedAuthMode, PersistedTokens, TokenKey, lease_snapshot_expires_at_datetime,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, LeaseKey};
+use meerkat_core::handles::{
+    AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, AuthLeaseSnapshot, LeaseKey,
+};
 use meerkat_core::{
     AnthropicAuthMetadata, AuthError, AuthLease, AuthMetadata, AuthMetadataDefaults,
     AuthRouteHints, CredentialSourceSpec, GoogleAuthMetadata, HttpAuthorizationRequest,
@@ -237,17 +239,17 @@ pub fn refresh_allowed(binding: &ValidatedBinding) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedOauthRefreshLifecycle {
     Untracked,
-    AuthMachine,
+    AuthMachine(AuthLeaseSnapshot),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedOauthAccess {
     Cached {
-        access: String,
+        tokens: PersistedTokens,
         expires_at: Option<DateTime<Utc>>,
     },
     Refresh {
@@ -256,7 +258,19 @@ pub enum ManagedOauthAccess {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn resolve_managed_oauth_access(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedOauthRefreshCompletion {
+    pub expires_at: Option<DateTime<Utc>>,
+    lease_snapshot: Option<AuthLeaseSnapshot>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const MANAGED_OAUTH_REFRESH_WAIT_POLL_MS: u64 = 10;
+#[cfg(not(target_arch = "wasm32"))]
+const MANAGED_OAUTH_REFRESH_WAIT_TIMEOUT_SECS: u64 = 30;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn resolve_managed_oauth_access(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
     persisted: &PersistedTokens,
@@ -266,119 +280,442 @@ pub fn resolve_managed_oauth_access(
     };
 
     let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
-    let mut snapshot = handle.snapshot(&lease_key);
-    if snapshot.phase.is_none() {
-        handle
-            .acquire_lease(
-                &lease_key,
-                managed_oauth_token_expires_at_epoch_secs(persisted),
-            )
-            .map_err(|e| {
-                ProviderAuthError::SourceResolutionFailed(format!(
-                    "AuthMachine lifecycle acquire failed: {e}"
-                ))
-            })?;
-        snapshot = handle.snapshot(&lease_key);
-    }
+    let token_key = TokenKey::from_connection_ref(&binding.connection_ref);
+    let refresh_wait_deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(MANAGED_OAUTH_REFRESH_WAIT_TIMEOUT_SECS);
 
-    match snapshot.phase {
-        Some(AuthLeasePhase::Valid) if snapshot_expires_at_is_fresh(env, snapshot.expires_at) => {
-            if let Some(access) = persisted.primary_secret.clone() {
-                return Ok(ManagedOauthAccess::Cached {
-                    access,
-                    expires_at: lease_snapshot_expires_at_datetime(&snapshot),
-                });
-            }
-            if !refresh_allowed(binding) {
-                return Err(ProviderAuthError::Auth(AuthError::Expired));
-            }
-            if let Err(err) = handle.begin_refresh(&lease_key) {
-                match handle.snapshot(&lease_key).phase {
-                    Some(AuthLeasePhase::Refreshing) => {}
-                    Some(AuthLeasePhase::ReauthRequired) => {
+    loop {
+        let mut snapshot = handle.snapshot(&lease_key);
+        if snapshot.phase.is_none() {
+            let observed = reload_managed_oauth_tokens(env, binding, &token_key).await?;
+            let Some(_) = acquire_managed_oauth_lease_if_snapshot(
+                handle.as_ref(),
+                &lease_key,
+                &snapshot,
+                managed_oauth_token_expires_at_epoch_secs(&observed),
+            )?
+            else {
+                continue;
+            };
+            snapshot = handle.snapshot(&lease_key);
+        }
+
+        match snapshot.phase {
+            Some(AuthLeasePhase::Valid)
+                if snapshot_expires_at_is_fresh(env, snapshot.expires_at) =>
+            {
+                let Some(observed) = load_managed_oauth_tokens(env, &token_key).await? else {
+                    if mark_managed_oauth_reauth_required_for_snapshot(
+                        handle.as_ref(),
+                        &lease_key,
+                        &snapshot,
+                    )? {
                         return Err(ProviderAuthError::Auth(AuthError::Expired));
                     }
-                    _ => {
-                        return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                            "AuthMachine lifecycle begin_refresh failed: {err}"
-                        )));
-                    }
+                    continue;
+                };
+                if handle.snapshot(&lease_key) != snapshot {
+                    continue;
                 }
-            }
-            Ok(ManagedOauthAccess::Refresh {
-                lifecycle: ManagedOauthRefreshLifecycle::AuthMachine,
-            })
-        }
-        Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => {
-            if !refresh_allowed(binding) {
-                return Err(ProviderAuthError::Auth(AuthError::Expired));
-            }
-            if let Err(err) = handle.begin_refresh(&lease_key) {
-                match handle.snapshot(&lease_key).phase {
-                    Some(AuthLeasePhase::Refreshing) => {}
-                    Some(AuthLeasePhase::ReauthRequired) => {
+                let token_matches_lease =
+                    managed_oauth_tokens_match_lease_snapshot(&observed, &snapshot);
+                if token_matches_lease && observed.primary_secret.is_some() {
+                    return Ok(ManagedOauthAccess::Cached {
+                        tokens: observed,
+                        expires_at: lease_snapshot_expires_at_datetime(&snapshot),
+                    });
+                }
+                if !refresh_allowed(binding) {
+                    if mark_managed_oauth_reauth_required_for_snapshot(
+                        handle.as_ref(),
+                        &lease_key,
+                        &snapshot,
+                    )? {
                         return Err(ProviderAuthError::Auth(AuthError::Expired));
                     }
-                    _ => {
-                        return Err(ProviderAuthError::SourceResolutionFailed(format!(
-                            "AuthMachine lifecycle begin_refresh failed: {err}"
-                        )));
+                    continue;
+                }
+                match begin_managed_oauth_refresh(handle.as_ref(), &lease_key, &snapshot) {
+                    Ok(Some(lifecycle)) => {
+                        return Ok(ManagedOauthAccess::Refresh { lifecycle });
                     }
+                    Ok(None) => continue,
+                    Err(err) => match handle.snapshot(&lease_key).phase {
+                        Some(AuthLeasePhase::Refreshing) => {
+                            wait_for_managed_oauth_owner_refresh(
+                                handle.as_ref(),
+                                &lease_key,
+                                refresh_wait_deadline,
+                            )
+                            .await?;
+                        }
+                        Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => continue,
+                        Some(AuthLeasePhase::ReauthRequired) => {
+                            return Err(ProviderAuthError::Auth(AuthError::Expired));
+                        }
+                        _ => {
+                            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                                "AuthMachine lifecycle begin_refresh failed: {err}"
+                            )));
+                        }
+                    },
                 }
             }
-            Ok(ManagedOauthAccess::Refresh {
-                lifecycle: ManagedOauthRefreshLifecycle::AuthMachine,
-            })
-        }
-        Some(AuthLeasePhase::Refreshing) => {
-            if !refresh_allowed(binding) {
+            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => {
+                if !refresh_allowed(binding) {
+                    if mark_managed_oauth_reauth_required_for_snapshot(
+                        handle.as_ref(),
+                        &lease_key,
+                        &snapshot,
+                    )? {
+                        return Err(ProviderAuthError::Auth(AuthError::Expired));
+                    }
+                    continue;
+                }
+                match begin_managed_oauth_refresh(handle.as_ref(), &lease_key, &snapshot) {
+                    Ok(Some(lifecycle)) => {
+                        return Ok(ManagedOauthAccess::Refresh { lifecycle });
+                    }
+                    Ok(None) => continue,
+                    Err(err) => match handle.snapshot(&lease_key).phase {
+                        Some(AuthLeasePhase::Refreshing) => {
+                            wait_for_managed_oauth_owner_refresh(
+                                handle.as_ref(),
+                                &lease_key,
+                                refresh_wait_deadline,
+                            )
+                            .await?;
+                        }
+                        Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => continue,
+                        Some(AuthLeasePhase::ReauthRequired) => {
+                            return Err(ProviderAuthError::Auth(AuthError::Expired));
+                        }
+                        _ => {
+                            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                                "AuthMachine lifecycle begin_refresh failed: {err}"
+                            )));
+                        }
+                    },
+                }
+            }
+            Some(AuthLeasePhase::Refreshing) => {
+                if !refresh_allowed(binding) {
+                    return Err(ProviderAuthError::Auth(AuthError::Expired));
+                }
+                wait_for_managed_oauth_owner_refresh(
+                    handle.as_ref(),
+                    &lease_key,
+                    refresh_wait_deadline,
+                )
+                .await?;
+            }
+            Some(AuthLeasePhase::ReauthRequired | AuthLeasePhase::Released) | None => {
                 return Err(ProviderAuthError::Auth(AuthError::Expired));
             }
-            Ok(ManagedOauthAccess::Refresh {
-                lifecycle: ManagedOauthRefreshLifecycle::AuthMachine,
-            })
-        }
-        Some(AuthLeasePhase::ReauthRequired | AuthLeasePhase::Released) | None => {
-            Err(ProviderAuthError::Auth(AuthError::Expired))
         }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn complete_managed_oauth_refresh(
+fn acquire_managed_oauth_lease_if_snapshot(
+    handle: &dyn meerkat_core::handles::AuthLeaseHandle,
+    lease_key: &LeaseKey,
+    expected: &meerkat_core::handles::AuthLeaseSnapshot,
+    expires_at: u64,
+) -> Result<Option<meerkat_core::handles::AuthLeaseTransition>, ProviderAuthError> {
+    handle
+        .acquire_lease_if_snapshot(lease_key, expected, expires_at)
+        .map_err(|e| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle conditional acquire failed: {e}"
+            ))
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn begin_managed_oauth_refresh(
+    handle: &dyn meerkat_core::handles::AuthLeaseHandle,
+    lease_key: &LeaseKey,
+    from_snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+) -> Result<Option<ManagedOauthRefreshLifecycle>, ProviderAuthError> {
+    let Some(transition) = handle
+        .begin_refresh_if_snapshot(lease_key, from_snapshot)
+        .map_err(|err| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle begin_refresh failed: {err}"
+            ))
+        })?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ManagedOauthRefreshLifecycle::AuthMachine(
+        AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Refreshing),
+            expires_at: from_snapshot.expires_at,
+            generation: transition.generation,
+        },
+    )))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type ManagedOauthRefreshOwner = (
+    Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
+    LeaseKey,
+    AuthLeaseSnapshot,
+);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_oauth_refresh_owner_guard(
     env: &ResolverEnvironment,
     binding: &ValidatedBinding,
-    lifecycle: ManagedOauthRefreshLifecycle,
-    refreshed: &PersistedTokens,
-) -> Result<Option<DateTime<Utc>>, ProviderAuthError> {
-    if lifecycle == ManagedOauthRefreshLifecycle::Untracked {
-        return Ok(refreshed.expires_at);
-    }
+    lifecycle: &ManagedOauthRefreshLifecycle,
+) -> Result<Option<ManagedOauthRefreshOwner>, ProviderAuthError> {
+    let ManagedOauthRefreshLifecycle::AuthMachine(refreshing_snapshot) = lifecycle else {
+        return Ok(None);
+    };
     let handle = env.auth_lease_handle.as_ref().ok_or_else(|| {
         ProviderAuthError::SourceResolutionFailed(
             "AuthMachine refresh lifecycle missing auth lease handle".into(),
         )
     })?;
     let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
-    if let Err(err) = handle.complete_refresh(
+    Ok(Some((
+        Arc::clone(handle),
+        lease_key,
+        refreshing_snapshot.clone(),
+    )))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_managed_oauth_owner_refresh(
+    handle: &dyn meerkat_core::handles::AuthLeaseHandle,
+    lease_key: &LeaseKey,
+    deadline: tokio::time::Instant,
+) -> Result<(), ProviderAuthError> {
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
+                "managed OAuth auth lease {lease_key} remained refreshing for {MANAGED_OAUTH_REFRESH_WAIT_TIMEOUT_SECS}s"
+            ))));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(
+            MANAGED_OAUTH_REFRESH_WAIT_POLL_MS,
+        ))
+        .await;
+
+        match handle.snapshot(lease_key).phase {
+            Some(AuthLeasePhase::Refreshing) => continue,
+            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => {
+                return Ok(());
+            }
+            Some(AuthLeasePhase::ReauthRequired) => {
+                return Err(ProviderAuthError::Auth(AuthError::Expired));
+            }
+            Some(AuthLeasePhase::Released) | None => {
+                return Err(ProviderAuthError::Auth(AuthError::Expired));
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn load_managed_oauth_tokens(
+    env: &ResolverEnvironment,
+    token_key: &TokenKey,
+) -> Result<Option<PersistedTokens>, ProviderAuthError> {
+    let store = env.token_store.as_ref().ok_or_else(|| {
+        ProviderAuthError::SourceResolutionFailed(
+            "managed OAuth owner refresh completed but TokenStore is unavailable".into(),
+        )
+    })?;
+    store
+        .load(token_key)
+        .await
+        .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn reload_managed_oauth_tokens(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    token_key: &TokenKey,
+) -> Result<PersistedTokens, ProviderAuthError> {
+    load_managed_oauth_tokens(env, token_key)
+        .await?
+        .ok_or_else(|| interactive_login_error(binding))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mark_managed_oauth_reauth_required_for_snapshot(
+    handle: &dyn meerkat_core::handles::AuthLeaseHandle,
+    lease_key: &LeaseKey,
+    expected: &meerkat_core::handles::AuthLeaseSnapshot,
+) -> Result<bool, ProviderAuthError> {
+    handle
+        .mark_reauth_required_if_snapshot(lease_key, expected)
+        .map_err(|e| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle conditional mark_reauth_required failed: {e}"
+            ))
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn mark_managed_oauth_refresh_failed_for_snapshot(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    expected: &meerkat_core::handles::AuthLeaseSnapshot,
+    permanent: bool,
+) -> Result<bool, ProviderAuthError> {
+    let Some(handle) = env.auth_lease_handle.as_ref() else {
+        return Ok(false);
+    };
+    let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+    handle
+        .refresh_failed_if_snapshot(&lease_key, expected, permanent)
+        .map_err(|e| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle conditional refresh_failed failed: {e}"
+            ))
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn save_and_complete_managed_oauth_refresh(
+    env: &ResolverEnvironment,
+    binding: &ValidatedBinding,
+    token_key: &TokenKey,
+    lifecycle: ManagedOauthRefreshLifecycle,
+    refreshed: &PersistedTokens,
+) -> Result<ManagedOauthRefreshCompletion, ProviderAuthError> {
+    let store = match env.token_store.as_ref() {
+        Some(store) => store,
+        None => {
+            if let ManagedOauthRefreshLifecycle::AuthMachine(refreshing_snapshot) = &lifecycle {
+                let _ = mark_managed_oauth_refresh_failed_for_snapshot(
+                    env,
+                    binding,
+                    refreshing_snapshot,
+                    false,
+                );
+            }
+            return Err(ProviderAuthError::SourceResolutionFailed(
+                "managed OAuth refresh completed but TokenStore is unavailable".into(),
+            ));
+        }
+    };
+
+    let Some((handle, lease_key, refreshing_snapshot)) =
+        managed_oauth_refresh_owner_guard(env, binding, &lifecycle)?
+    else {
+        store
+            .save(token_key, refreshed)
+            .await
+            .map_err(|save_error| {
+                ProviderAuthError::SourceResolutionFailed(format!(
+                    "TokenStore save failed for untracked managed OAuth refresh: {save_error}"
+                ))
+            })?;
+        return Ok(ManagedOauthRefreshCompletion {
+            expires_at: refreshed.expires_at,
+            lease_snapshot: None,
+        });
+    };
+
+    if handle.snapshot(&lease_key) != refreshing_snapshot {
+        return Err(ProviderAuthError::SourceResolutionFailed(
+            "AuthMachine lifecycle changed before managed OAuth refreshed tokens could be saved"
+                .into(),
+        ));
+    }
+
+    if let Err(save_error) = store.save(token_key, refreshed).await {
+        mark_managed_oauth_refresh_failed_for_snapshot(env, binding, &refreshing_snapshot, false)
+            .map_err(|mark_error| {
+            ProviderAuthError::SourceResolutionFailed(format!(
+                "TokenStore save failed before AuthMachine refresh completion: {save_error}; \
+                     AuthMachine conditional refresh-failure rollback failed: {mark_error}"
+            ))
+        })?;
+        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "TokenStore save failed before AuthMachine refresh completion: {save_error}"
+        )));
+    }
+
+    if handle.snapshot(&lease_key) != refreshing_snapshot {
+        let cleared =
+            clear_managed_oauth_refreshed_tokens_if_current(store, token_key, refreshed).await?;
+        return Err(ProviderAuthError::SourceResolutionFailed(format!(
+            "AuthMachine lifecycle changed while managed OAuth refreshed tokens were saved; \
+             stale_token_cleared={cleared}"
+        )));
+    }
+
+    let refreshed_expires_at = managed_oauth_token_expires_at_epoch_secs(refreshed);
+    let transition = match handle.complete_refresh_if_snapshot(
         &lease_key,
-        managed_oauth_token_expires_at_epoch_secs(refreshed),
+        &refreshing_snapshot,
+        refreshed_expires_at,
         epoch_secs((env.now)()),
     ) {
-        let snapshot = handle.snapshot(&lease_key);
-        if matches!(snapshot.phase, Some(AuthLeasePhase::Valid))
-            && snapshot_expires_at_is_fresh(env, snapshot.expires_at)
-        {
-            return Ok(lease_snapshot_expires_at_datetime(&snapshot).or(refreshed.expires_at));
+        Ok(Some(transition)) => transition,
+        Ok(None) => {
+            let cleared =
+                clear_managed_oauth_refreshed_tokens_if_current(store, token_key, refreshed)
+                    .await?;
+            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle changed before managed OAuth refresh completion; \
+                 stale_token_cleared={cleared}"
+            )));
         }
-        return Err({
+        Err(err) => {
+            let cleared =
+                clear_managed_oauth_refreshed_tokens_if_current(store, token_key, refreshed)
+                    .await?;
+            let rollback_marked = mark_managed_oauth_refresh_failed_for_snapshot(
+                env,
+                binding,
+                &refreshing_snapshot,
+                false,
+            )?;
+            return Err(ProviderAuthError::SourceResolutionFailed(format!(
+                "AuthMachine lifecycle complete_refresh failed after managed OAuth refreshed tokens \
+                 were saved; stale_token_cleared={cleared}; rollback_marked={rollback_marked}: {err}"
+            )));
+        }
+    };
+
+    let snapshot = AuthLeaseSnapshot {
+        phase: Some(AuthLeasePhase::Valid),
+        expires_at: lease_expires_at_snapshot_arg(refreshed_expires_at),
+        generation: transition.generation,
+    };
+    Ok(ManagedOauthRefreshCompletion {
+        expires_at: lease_snapshot_expires_at_datetime(&snapshot).or(refreshed.expires_at),
+        lease_snapshot: Some(snapshot),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn clear_managed_oauth_refreshed_tokens_if_current(
+    store: &Arc<dyn meerkat_core::auth::TokenStore>,
+    token_key: &TokenKey,
+    refreshed: &PersistedTokens,
+) -> Result<bool, ProviderAuthError> {
+    store
+        .clear_if_current(token_key, refreshed)
+        .await
+        .map_err(|clear_error| {
             ProviderAuthError::SourceResolutionFailed(format!(
-                "AuthMachine lifecycle complete_refresh failed: {err}"
+                "stale managed OAuth TokenStore cleanup failed: {clear_error}"
             ))
-        });
-    }
-    let snapshot = handle.snapshot(&lease_key);
-    Ok(lease_snapshot_expires_at_datetime(&snapshot).or(refreshed.expires_at))
+        })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lease_expires_at_snapshot_arg(expires_at: u64) -> Option<u64> {
+    (expires_at != u64::MAX).then_some(expires_at)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -388,18 +725,11 @@ pub fn fail_managed_oauth_refresh(
     lifecycle: ManagedOauthRefreshLifecycle,
     permanent: bool,
 ) -> Result<(), ProviderAuthError> {
-    if lifecycle == ManagedOauthRefreshLifecycle::Untracked {
-        return Ok(());
-    }
-    let Some(handle) = env.auth_lease_handle.as_ref() else {
+    let ManagedOauthRefreshLifecycle::AuthMachine(refreshing_snapshot) = lifecycle else {
         return Ok(());
     };
-    let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
-    handle.refresh_failed(&lease_key, permanent).map_err(|e| {
-        ProviderAuthError::SourceResolutionFailed(format!(
-            "AuthMachine lifecycle refresh_failed failed: {e}"
-        ))
-    })
+    mark_managed_oauth_refresh_failed_for_snapshot(env, binding, &refreshing_snapshot, permanent)?;
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -431,12 +761,12 @@ fn resolve_untracked_managed_oauth_access(
         .expires_at
         .is_none_or(|exp| exp - (env.now)() > chrono::Duration::seconds(60))
     {
-        let access = persisted
+        persisted
             .primary_secret
-            .clone()
+            .as_ref()
             .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
         return Ok(ManagedOauthAccess::Cached {
-            access,
+            tokens: persisted.clone(),
             expires_at: persisted.expires_at,
         });
     }
@@ -465,6 +795,15 @@ fn epoch_secs(ts: DateTime<Utc>) -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 fn managed_oauth_token_expires_at_epoch_secs(tokens: &PersistedTokens) -> u64 {
     tokens.expires_at.map(epoch_secs).unwrap_or(u64::MAX)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn managed_oauth_tokens_match_lease_snapshot(
+    tokens: &PersistedTokens,
+    snapshot: &meerkat_core::handles::AuthLeaseSnapshot,
+) -> bool {
+    let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
+    managed_oauth_token_expires_at_epoch_secs(tokens) == snapshot_expires_at
 }
 
 #[cfg(not(target_arch = "wasm32"))]

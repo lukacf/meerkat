@@ -197,6 +197,47 @@ async fn file_clear_removes_entry_and_parent_survives() {
 }
 
 #[tokio::test]
+async fn file_clear_if_current_only_clears_matching_material() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = FileTokenStore::new(temp.path().to_path_buf());
+    let key = k("dev", "x");
+    let old = PersistedTokens::api_key("old");
+    let new = PersistedTokens::api_key("new");
+
+    store.save(&key, &new).await.unwrap();
+    assert!(
+        !store.clear_if_current(&key, &old).await.unwrap(),
+        "mismatched token material must not be cleared"
+    );
+    assert_eq!(store.load(&key).await.unwrap(), Some(new.clone()));
+
+    assert!(
+        store.clear_if_current(&key, &new).await.unwrap(),
+        "matching token material should be cleared"
+    );
+    assert_eq!(store.load(&key).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn file_clear_if_current_respects_newer_cross_instance_material() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = FileTokenStore::new(temp.path().to_path_buf());
+    let second = FileTokenStore::new(temp.path().to_path_buf());
+    let key = k("dev", "x");
+    let old = PersistedTokens::api_key("old");
+    let new = PersistedTokens::api_key("new");
+
+    first.save(&key, &old).await.unwrap();
+    second.save(&key, &new).await.unwrap();
+
+    assert!(
+        !first.clear_if_current(&key, &old).await.unwrap(),
+        "a stale cleanup from another store instance must not clear newer material"
+    );
+    assert_eq!(first.load(&key).await.unwrap(), Some(new));
+}
+
+#[tokio::test]
 async fn file_list_returns_all_realms_and_bindings() {
     let temp = tempfile::tempdir().unwrap();
     let store = FileTokenStore::new(temp.path().to_path_buf());

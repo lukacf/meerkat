@@ -237,7 +237,9 @@ impl AnthropicOAuthRuntime {
         self.refresh_access_token().await
     }
 
-    pub async fn refresh_access_token(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
+    pub async fn refresh_access_token_without_save(
+        &self,
+    ) -> Result<PersistedTokens, AnthropicOAuthError> {
         let persisted = self
             .load_persisted()
             .await?
@@ -273,6 +275,11 @@ impl AnthropicOAuthRuntime {
             )
             .await?;
 
+        Ok(refreshed)
+    }
+
+    pub async fn refresh_access_token(&self) -> Result<PersistedTokens, AnthropicOAuthError> {
+        let refreshed = self.refresh_access_token_without_save().await?;
         self.save_persisted(&refreshed).await?;
         Ok(refreshed)
     }

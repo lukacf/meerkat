@@ -12,17 +12,21 @@
 
 use async_trait::async_trait;
 use keyring::Entry;
+use std::path::{Path, PathBuf};
 
 use super::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
 
 pub struct KeyringTokenStore {
     service_name: String,
+    lock_root: PathBuf,
 }
 
 impl KeyringTokenStore {
     pub fn new(service_name: impl Into<String>) -> Self {
+        let service_name = service_name.into();
         Self {
-            service_name: service_name.into(),
+            lock_root: default_lock_root(&service_name),
+            service_name,
         }
     }
 
@@ -30,15 +34,19 @@ impl KeyringTokenStore {
         &self.service_name
     }
 
+    pub fn lock_root(&self) -> &Path {
+        &self.lock_root
+    }
+
     fn entry_for(&self, key: &TokenKey) -> Result<Entry, TokenStoreError> {
         Entry::new(&self.service_name, &key.keyring_account())
             .map_err(|e| TokenStoreError::KeyringUnavailable(e.to_string()))
     }
-}
 
-#[async_trait]
-impl TokenStore for KeyringTokenStore {
-    async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+    pub(crate) fn load_unlocked(
+        &self,
+        key: &TokenKey,
+    ) -> Result<Option<PersistedTokens>, TokenStoreError> {
         let entry = self.entry_for(key)?;
         let json = match entry.get_password() {
             Ok(s) => s,
@@ -49,7 +57,11 @@ impl TokenStore for KeyringTokenStore {
         Ok(Some(tokens))
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    pub(crate) fn save_unlocked(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         let entry = self.entry_for(key)?;
         let json = serde_json::to_string(tokens)?;
         entry
@@ -58,12 +70,43 @@ impl TokenStore for KeyringTokenStore {
         Ok(())
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    pub(crate) fn clear_unlocked(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
         let entry = self.entry_for(key)?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(TokenStoreError::KeyringUnavailable(e.to_string())),
         }
+    }
+}
+
+#[async_trait]
+impl TokenStore for KeyringTokenStore {
+    async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+        let _guard = super::lock::lock(&self.lock_root, key).await?;
+        self.load_unlocked(key)
+    }
+
+    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+        let _guard = super::lock::lock(&self.lock_root, key).await?;
+        self.save_unlocked(key, tokens)
+    }
+
+    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+        let _guard = super::lock::lock(&self.lock_root, key).await?;
+        self.clear_unlocked(key)
+    }
+
+    async fn clear_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(&self.lock_root, key).await?;
+        if self.load_unlocked(key)?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.clear_unlocked(key)?;
+        Ok(true)
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
@@ -78,4 +121,11 @@ impl TokenStore for KeyringTokenStore {
     fn backend_name(&self) -> &'static str {
         "keyring"
     }
+}
+
+fn default_lock_root(_service_name: &str) -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("meerkat")
+        .join("credentials")
 }

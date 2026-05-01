@@ -36,6 +36,19 @@ impl TokenStore for EphemeralTokenStore {
         Ok(())
     }
 
+    async fn clear_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let mut inner = self.inner.write();
+        if inner.get(key) != Some(expected) {
+            return Ok(false);
+        }
+        inner.remove(key);
+        Ok(true)
+    }
+
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         Ok(self.inner.read().keys().cloned().collect())
     }

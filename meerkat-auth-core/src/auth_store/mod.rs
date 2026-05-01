@@ -14,6 +14,8 @@ pub mod ephemeral;
 pub mod file;
 #[cfg(feature = "keyring")]
 pub mod keyring;
+#[cfg(not(target_arch = "wasm32"))]
+mod lock;
 pub mod refresh;
 
 pub use auto::AutoTokenStore;

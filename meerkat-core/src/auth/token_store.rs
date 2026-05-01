@@ -227,6 +227,11 @@ pub trait TokenStore: Send + Sync {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError>;
     async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError>;
     async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError>;
+    async fn clear_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError>;
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError>;
     fn backend_name(&self) -> &'static str;
 }

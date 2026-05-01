@@ -31,11 +31,10 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
+fs4 = { version = "0.12" }
 
 # Optional: OS keychain TokenStore.
 keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
-# Optional: cross-process refresh lockfile.
-fs4 = { version = "0.12", optional = true }
 # Optional: generic OAuth2 helpers (PKCE / callback / device-code / token-exchange).
 oauth2 = { version = "5", optional = true }
 jsonwebtoken = { version = "9", optional = true, default-features = false, features = ["use_pem"] }
@@ -66,7 +65,7 @@ axum = { workspace = true }
 [features]
 default = ["oauth", "keyring", "file-lock"]
 keyring = ["dep:keyring"]
-file-lock = ["dep:fs4"]
+file-lock = []
 oauth = ["dep:oauth2", "dep:jsonwebtoken", "dep:urlencoding", "dep:axum"]
 aws-sigv4 = [
     "dep:aws-sigv4",

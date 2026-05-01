@@ -41,44 +41,99 @@ impl AutoTokenStore {
     pub fn root(&self) -> &Path {
         self.file.root()
     }
-}
 
-#[async_trait]
-impl TokenStore for AutoTokenStore {
-    async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+    async fn load_unlocked(
+        &self,
+        key: &TokenKey,
+    ) -> Result<Option<PersistedTokens>, TokenStoreError> {
         #[cfg(feature = "keyring")]
         {
-            match self.keyring.load(key).await {
+            match self.keyring.load_unlocked(key) {
                 Ok(Some(t)) => return Ok(Some(t)),
                 Ok(None) | Err(TokenStoreError::KeyringUnavailable(_)) => {}
                 Err(e) => return Err(e),
             }
         }
-        self.file.load(key).await
+        self.file.load_unlocked(key).await
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save_unlocked(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         #[cfg(feature = "keyring")]
         {
-            match self.keyring.save(key, tokens).await {
+            match self.keyring.save_unlocked(key, tokens) {
                 Ok(()) => return Ok(()),
                 Err(TokenStoreError::KeyringUnavailable(_)) => {}
                 Err(e) => return Err(e),
             }
         }
-        self.file.save(key, tokens).await
+        self.file.save_unlocked(key, tokens).await
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        // Clear from BOTH backends so cached copies don't linger.
+    async fn clear_unlocked(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
         #[cfg(feature = "keyring")]
         {
-            match self.keyring.clear(key).await {
+            match self.keyring.clear_unlocked(key) {
                 Ok(()) | Err(TokenStoreError::KeyringUnavailable(_)) => {}
                 Err(e) => return Err(e),
             }
         }
-        self.file.clear(key).await
+        self.file.clear_unlocked(key).await
+    }
+}
+
+#[async_trait]
+impl TokenStore for AutoTokenStore {
+    async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+        let _guard = super::lock::lock(self.file.root(), key).await?;
+        self.load_unlocked(key).await
+    }
+
+    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+        let _guard = super::lock::lock(self.file.root(), key).await?;
+        self.save_unlocked(key, tokens).await
+    }
+
+    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+        let _guard = super::lock::lock(self.file.root(), key).await?;
+        self.clear_unlocked(key).await
+    }
+
+    async fn clear_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(self.file.root(), key).await?;
+
+        #[cfg(feature = "keyring")]
+        {
+            match self.keyring.load_unlocked(key) {
+                Ok(Some(keyring_tokens)) => {
+                    let mut cleared = false;
+                    if &keyring_tokens == expected {
+                        self.keyring.clear_unlocked(key)?;
+                        cleared = true;
+                    }
+                    if self.file.load_unlocked(key).await?.as_ref() == Some(expected) {
+                        self.file.clear_unlocked(key).await?;
+                        cleared = true;
+                    }
+                    return Ok(cleared);
+                }
+                Ok(None) | Err(TokenStoreError::KeyringUnavailable(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        if self.file.load_unlocked(key).await?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.file.clear_unlocked(key).await?;
+        Ok(true)
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {

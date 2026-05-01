@@ -2629,7 +2629,7 @@ mod tests {
             &supervisor_name,
             supervisor_pubkey.to_peer_id().as_str(),
             *supervisor_pubkey.as_bytes(),
-            &format!("inproc://{supervisor_name}"),
+            format!("inproc://{supervisor_name}"),
         )
         .expect("valid supervisor spec");
         member_runtime
@@ -2642,7 +2642,7 @@ mod tests {
             &member_name,
             member_pubkey.to_peer_id().as_str(),
             *member_pubkey.as_bytes(),
-            &format!("inproc://{member_name}"),
+            format!("inproc://{member_name}"),
         )
         .expect("valid member spec");
         supervisor_runtime

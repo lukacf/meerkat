@@ -2275,7 +2275,8 @@ impl AgentFactory {
         connection: &meerkat_llm_core::provider_runtime::ResolvedConnection,
     ) {
         let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(connection_ref);
-        if handle.snapshot(&lease_key).phase.is_some() {
+        let snapshot = handle.snapshot(&lease_key);
+        if snapshot.phase.is_some() {
             return;
         }
         if matches!(
@@ -2285,11 +2286,11 @@ impl AgentFactory {
             return;
         }
         let Some(expires_at) = connection.auth_lease.expires_at() else {
-            let _ = handle.acquire_lease(&lease_key, u64::MAX);
+            let _ = handle.acquire_lease_if_snapshot(&lease_key, &snapshot, u64::MAX);
             return;
         };
         let expires_at = expires_at.timestamp().max(0) as u64;
-        let _ = handle.acquire_lease(&lease_key, expires_at);
+        let _ = handle.acquire_lease_if_snapshot(&lease_key, &snapshot, expires_at);
     }
 
     /// Wrap a session store in the shared adapter.
@@ -4928,6 +4929,197 @@ mod tests {
             snapshot.phase,
             Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
             "factory publication must not reacquire over AuthMachine reauth-required truth"
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[test]
+    fn publish_auth_lease_conditional_acquire_does_not_overwrite_raced_reauth_required_truth() {
+        struct ConditionalAcquireRaceHandle {
+            snapshot: std::sync::Mutex<meerkat_core::handles::AuthLeaseSnapshot>,
+        }
+
+        impl ConditionalAcquireRaceHandle {
+            fn new() -> Self {
+                Self {
+                    snapshot: std::sync::Mutex::new(meerkat_core::handles::AuthLeaseSnapshot {
+                        phase: None,
+                        expires_at: None,
+                        generation: 0,
+                    }),
+                }
+            }
+        }
+
+        impl meerkat_core::handles::AuthLeaseHandle for ConditionalAcquireRaceHandle {
+            fn acquire_lease(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                _expires_at: u64,
+            ) -> Result<
+                meerkat_core::handles::AuthLeaseTransition,
+                meerkat_core::handles::DslTransitionError,
+            > {
+                panic!("factory publication must use conditional acquire")
+            }
+
+            fn acquire_lease_if_snapshot(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                expected: &meerkat_core::handles::AuthLeaseSnapshot,
+                _expires_at: u64,
+            ) -> Result<
+                Option<meerkat_core::handles::AuthLeaseTransition>,
+                meerkat_core::handles::DslTransitionError,
+            > {
+                let mut snapshot = self.snapshot.lock().unwrap();
+                assert_eq!(*snapshot, *expected);
+                *snapshot = meerkat_core::handles::AuthLeaseSnapshot {
+                    phase: Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
+                    expires_at: Some(1_700_000_000),
+                    generation: expected.generation + 1,
+                };
+                Ok(None)
+            }
+
+            fn mark_expiring(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+            ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+                panic!("factory publication must not mark expiring")
+            }
+
+            fn begin_refresh(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+            ) -> Result<
+                meerkat_core::handles::AuthLeaseTransition,
+                meerkat_core::handles::DslTransitionError,
+            > {
+                panic!("factory publication must not begin refresh")
+            }
+
+            fn begin_refresh_if_snapshot(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                _expected: &meerkat_core::handles::AuthLeaseSnapshot,
+            ) -> Result<
+                Option<meerkat_core::handles::AuthLeaseTransition>,
+                meerkat_core::handles::DslTransitionError,
+            > {
+                panic!("factory publication must not conditionally begin refresh")
+            }
+
+            fn complete_refresh(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                _new_expires_at: u64,
+                _now: u64,
+            ) -> Result<
+                meerkat_core::handles::AuthLeaseTransition,
+                meerkat_core::handles::DslTransitionError,
+            > {
+                panic!("factory publication must not complete refresh")
+            }
+
+            fn complete_refresh_if_snapshot(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                _expected: &meerkat_core::handles::AuthLeaseSnapshot,
+                _new_expires_at: u64,
+                _now: u64,
+            ) -> Result<
+                Option<meerkat_core::handles::AuthLeaseTransition>,
+                meerkat_core::handles::DslTransitionError,
+            > {
+                panic!("factory publication must not conditionally complete refresh")
+            }
+
+            fn refresh_failed(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                _permanent: bool,
+            ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+                panic!("factory publication must not fail refresh")
+            }
+
+            fn refresh_failed_if_snapshot(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                _expected: &meerkat_core::handles::AuthLeaseSnapshot,
+                _permanent: bool,
+            ) -> Result<bool, meerkat_core::handles::DslTransitionError> {
+                panic!("factory publication must not fail refresh")
+            }
+
+            fn mark_reauth_required(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+            ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+                panic!("factory publication must not mark reauth required")
+            }
+
+            fn mark_reauth_required_if_snapshot(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+                _expected: &meerkat_core::handles::AuthLeaseSnapshot,
+            ) -> Result<bool, meerkat_core::handles::DslTransitionError> {
+                panic!("factory publication must not mark reauth required")
+            }
+
+            fn release_lease(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+            ) -> Result<(), meerkat_core::handles::DslTransitionError> {
+                panic!("factory publication must not release")
+            }
+
+            fn snapshot(
+                &self,
+                _lease_key: &meerkat_core::handles::LeaseKey,
+            ) -> meerkat_core::handles::AuthLeaseSnapshot {
+                self.snapshot.lock().unwrap().clone()
+            }
+        }
+
+        let raw_handle = Arc::new(ConditionalAcquireRaceHandle::new());
+        let handle: Arc<dyn meerkat_core::handles::AuthLeaseHandle> = raw_handle.clone();
+        let connection_ref = ConnectionRef {
+            realm: RealmId::parse("dev").expect("valid realm"),
+            binding: BindingId::parse("default_openai").expect("valid binding"),
+            profile: None,
+        };
+        let lease_key = meerkat_core::handles::LeaseKey::from_connection_ref(&connection_ref);
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: meerkat_llm_core::provider_runtime::NormalizedBackendKind::OpenAi(
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::OpenAiApi,
+            ),
+            backend_profile: Arc::new(meerkat_core::BackendProfile {
+                id: "openai_backend".into(),
+                provider: Provider::OpenAI,
+                backend_kind: "openai_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            }),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::StaticLease::inline_secret(
+                    "cached-token".to_string(),
+                    meerkat_core::AuthMetadata::default(),
+                    Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                    "test",
+                ),
+            ),
+        };
+
+        AgentFactory::publish_auth_lease(&handle, &connection_ref, &connection);
+
+        let snapshot =
+            meerkat_core::handles::AuthLeaseHandle::snapshot(raw_handle.as_ref(), &lease_key);
+        assert_eq!(
+            snapshot.phase,
+            Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired),
+            "factory publication must not reacquire over a raced AuthMachine reauth-required fact"
         );
     }
 

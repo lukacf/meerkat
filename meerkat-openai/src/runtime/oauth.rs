@@ -208,7 +208,9 @@ impl OpenAiOAuthRuntime {
         self.refresh_access_token().await
     }
 
-    pub async fn refresh_access_token(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+    pub async fn refresh_access_token_without_save(
+        &self,
+    ) -> Result<PersistedTokens, OpenAiOAuthError> {
         let persisted = self
             .load()
             .await?
@@ -241,6 +243,11 @@ impl OpenAiOAuthRuntime {
                 }),
             )
             .await?;
+        Ok(refreshed)
+    }
+
+    pub async fn refresh_access_token(&self) -> Result<PersistedTokens, OpenAiOAuthError> {
+        let refreshed = self.refresh_access_token_without_save().await?;
         self.save(&refreshed).await?;
         Ok(refreshed)
     }

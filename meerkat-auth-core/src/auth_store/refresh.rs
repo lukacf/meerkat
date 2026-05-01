@@ -71,10 +71,10 @@ impl RefreshCoordinator for InMemoryCoordinator {
 // FileLockCoordinator (cross-process dedup)
 // ---------------------------------------------------------------------
 
-#[cfg(feature = "file-lock")]
+#[cfg(all(feature = "file-lock", not(target_arch = "wasm32")))]
 pub use file_lock::FileLockCoordinator;
 
-#[cfg(feature = "file-lock")]
+#[cfg(all(feature = "file-lock", not(target_arch = "wasm32")))]
 mod file_lock {
     use std::fs::{File, OpenOptions};
     use std::path::PathBuf;

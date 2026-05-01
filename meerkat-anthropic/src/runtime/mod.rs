@@ -19,8 +19,8 @@ use meerkat_core::{AuthLease, AuthMetadata, AuthProfile, BackendProfile, Binding
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_auth_core::resolver::{
-    ManagedOauthAccess, complete_managed_oauth_refresh, fail_managed_oauth_refresh,
-    oauth_refresh_error_text_is_permanent, resolve_managed_oauth_access,
+    ManagedOauthAccess, fail_managed_oauth_refresh, oauth_refresh_error_text_is_permanent,
+    resolve_managed_oauth_access, save_and_complete_managed_oauth_refresh,
 };
 use meerkat_auth_core::resolver::{
     finalize_auth_metadata, interactive_login_error, resolve_external_authorizer,
@@ -357,30 +357,14 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                         .await
                         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
                         .ok_or_else(|| interactive_login_error(binding))?;
-                    let mut anthropic_email: Option<String> = None;
-                    let mut anthropic_user_id: Option<String> = None;
-                    let mut anthropic_subscription_tier: Option<String> = None;
-                    // Plan §4b.12: lift id_token claims.
-                    if let Some(id_token) = persisted.id_token.as_deref()
-                        && let Ok(claims) =
-                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
-                    {
-                        let lifted = oauth::AnthropicIdClaims::lift_from_claims(&claims.raw);
-                        anthropic_email = lifted.email;
-                        anthropic_user_id = lifted.user_id;
-                        anthropic_subscription_tier = lifted.subscription_tier;
-                    }
-
-                    let (secret, lease_expires_at) = match auth_method {
-                        AnthropicAuthMethod::OauthToApiKey => persisted
-                            .primary_secret
-                            .clone()
-                            .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))
-                            .map(|secret| (secret, persisted.expires_at))?,
+                    let (resolved_tokens, lease_expires_at) = match auth_method {
+                        AnthropicAuthMethod::OauthToApiKey => {
+                            (persisted.clone(), persisted.expires_at)
+                        }
                         AnthropicAuthMethod::ClaudeAiOauth => {
-                            match resolve_managed_oauth_access(env, binding, &persisted)? {
-                                ManagedOauthAccess::Cached { access, expires_at } => {
-                                    (access, expires_at)
+                            match resolve_managed_oauth_access(env, binding, &persisted).await? {
+                                ManagedOauthAccess::Cached { tokens, expires_at } => {
+                                    (tokens, expires_at)
                                 }
                                 ManagedOauthAccess::Refresh { lifecycle } => {
                                     let coord = env.refresh_coord.clone().unwrap_or_else(|| {
@@ -392,30 +376,49 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                                         store.clone(),
                                         coord,
                                         endpoints,
-                                        key,
+                                        key.clone(),
                                     );
-                                    let refreshed =
-                                        runtime.refresh_access_token().await.map_err(|e| {
+                                    let refreshed = runtime
+                                        .refresh_access_token_without_save()
+                                        .await
+                                        .map_err(|e| {
                                             let permanent =
                                                 anthropic_oauth_refresh_error_is_permanent(&e);
                                             let _ = fail_managed_oauth_refresh(
-                                                env, binding, lifecycle, permanent,
+                                                env,
+                                                binding,
+                                                lifecycle.clone(),
+                                                permanent,
                                             );
                                             anthropic_oauth_refresh_error_to_provider(e, binding)
                                         })?;
-                                    let access = refreshed
-                                        .primary_secret
-                                        .clone()
-                                        .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
-                                    let expires_at = complete_managed_oauth_refresh(
-                                        env, binding, lifecycle, &refreshed,
-                                    )?;
-                                    (access, expires_at)
+                                    let completion = save_and_complete_managed_oauth_refresh(
+                                        env, binding, &key, lifecycle, &refreshed,
+                                    )
+                                    .await?;
+                                    (refreshed, completion.expires_at)
                                 }
                             }
                         }
                         _ => unreachable!("arm guarded by outer match"),
                     };
+                    let secret = resolved_tokens
+                        .primary_secret
+                        .clone()
+                        .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
+                    let mut anthropic_email: Option<String> = None;
+                    let mut anthropic_user_id: Option<String> = None;
+                    let mut anthropic_subscription_tier: Option<String> = None;
+                    // Plan §4b.12: lift id_token claims.
+                    if let Some(id_token) = resolved_tokens.id_token.as_deref()
+                        && let Ok(claims) =
+                            meerkat_auth_core::auth_oauth::jwt::decode_payload(id_token)
+                    {
+                        let lifted = oauth::AnthropicIdClaims::lift_from_claims(&claims.raw);
+                        anthropic_email = lifted.email;
+                        anthropic_user_id = lifted.user_id;
+                        anthropic_subscription_tier = lifted.subscription_tier;
+                    }
                     let mut metadata = AuthMetadata::default();
                     if anthropic_email.is_some()
                         || anthropic_user_id.is_some()

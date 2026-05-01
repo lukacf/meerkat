@@ -62,12 +62,32 @@ impl AuthLeaseHandle for FixedAuthLeaseHandle {
         panic!("managed OAuth must not reacquire over reauth-required lease truth")
     }
 
+    fn acquire_lease_if_snapshot(
+        &self,
+        _lease_key: &LeaseKey,
+        _expected: &AuthLeaseSnapshot,
+        _expires_at: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        panic!("managed OAuth must not conditionally reacquire over reauth-required lease truth")
+    }
+
     fn mark_expiring(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         panic!("managed OAuth must not mark expiring over reauth-required lease truth")
     }
 
-    fn begin_refresh(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+    fn begin_refresh(
+        &self,
+        _lease_key: &LeaseKey,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         panic!("managed OAuth must not refresh over reauth-required lease truth")
+    }
+
+    fn begin_refresh_if_snapshot(
+        &self,
+        _lease_key: &LeaseKey,
+        _expected: &AuthLeaseSnapshot,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        panic!("managed OAuth must not conditionally refresh over reauth-required lease truth")
     }
 
     fn complete_refresh(
@@ -79,6 +99,18 @@ impl AuthLeaseHandle for FixedAuthLeaseHandle {
         panic!("managed OAuth must not complete refresh over reauth-required lease truth")
     }
 
+    fn complete_refresh_if_snapshot(
+        &self,
+        _lease_key: &LeaseKey,
+        _expected: &AuthLeaseSnapshot,
+        _new_expires_at: u64,
+        _now: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        panic!(
+            "managed OAuth must not conditionally complete refresh over reauth-required lease truth"
+        )
+    }
+
     fn refresh_failed(
         &self,
         _lease_key: &LeaseKey,
@@ -87,8 +119,28 @@ impl AuthLeaseHandle for FixedAuthLeaseHandle {
         panic!("managed OAuth must not report refresh failure over reauth-required lease truth")
     }
 
+    fn refresh_failed_if_snapshot(
+        &self,
+        _lease_key: &LeaseKey,
+        _expected: &AuthLeaseSnapshot,
+        _permanent: bool,
+    ) -> Result<bool, DslTransitionError> {
+        panic!("managed OAuth must not report refresh failure over reauth-required lease truth")
+    }
+
     fn mark_reauth_required(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         Ok(())
+    }
+
+    fn mark_reauth_required_if_snapshot(
+        &self,
+        _lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError> {
+        Ok(matches!(
+            expected.phase,
+            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+        ))
     }
 
     fn release_lease(&self, _lease_key: &LeaseKey) -> Result<(), DslTransitionError> {

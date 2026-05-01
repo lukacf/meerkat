@@ -129,19 +129,31 @@ impl RuntimeAuthLeaseHandle {
         Self::new()
     }
 
-    fn apply(
-        &self,
+    fn snapshot_locked(guard: &AuthLeaseRegistry, lease_key: &LeaseKey) -> AuthLeaseSnapshot {
+        let generation = guard.generations.get(lease_key).copied().unwrap_or(0);
+        match guard.authorities.get(lease_key) {
+            Some(machine) => AuthLeaseSnapshot {
+                phase: Some(map_phase(machine.state.lifecycle_phase)),
+                expires_at: machine.state.expires_at,
+                generation,
+            },
+            None => AuthLeaseSnapshot {
+                phase: None,
+                expires_at: None,
+                generation,
+            },
+        }
+    }
+
+    fn apply_locked(
+        guard: &mut AuthLeaseRegistry,
         lease_key: &LeaseKey,
         input: auth_dsl::AuthMachineInput,
         context: &'static str,
         create_if_missing: bool,
-    ) -> Result<u64, DslTransitionError> {
+    ) -> Result<(u64, &'static str, AuthLeasePhase, AuthLeasePhase), DslTransitionError> {
         let action = Self::audit_action_for(&input);
         let remove_after_accept = matches!(&input, auth_dsl::AuthMachineInput::Release);
-        let mut guard = self
-            .machines
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (from_phase, to_phase) = {
             let entry = if create_if_missing {
                 guard
@@ -175,6 +187,22 @@ impl RuntimeAuthLeaseHandle {
         if remove_after_accept {
             guard.authorities.remove(lease_key);
         }
+        Ok((accepted_generation, action, from_phase, to_phase))
+    }
+
+    fn apply(
+        &self,
+        lease_key: &LeaseKey,
+        input: auth_dsl::AuthMachineInput,
+        context: &'static str,
+        create_if_missing: bool,
+    ) -> Result<u64, DslTransitionError> {
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (accepted_generation, action, from_phase, to_phase) =
+            Self::apply_locked(&mut guard, lease_key, input, context, create_if_missing)?;
         emit_audit(lease_key, action, from_phase, to_phase);
         Ok(accepted_generation)
     }
@@ -232,6 +260,35 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         .map(|generation| AuthLeaseTransition { generation })
     }
 
+    fn acquire_lease_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        expires_at: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        let expires_at_ts = if expires_at == u64::MAX {
+            None
+        } else {
+            Some(expires_at)
+        };
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Self::snapshot_locked(&guard, lease_key) != *expected {
+            return Ok(None);
+        }
+        let (generation, action, from_phase, to_phase) = Self::apply_locked(
+            &mut guard,
+            lease_key,
+            auth_dsl::AuthMachineInput::Acquire { expires_at_ts },
+            "AuthLeaseHandle::acquire_lease_if_snapshot",
+            true,
+        )?;
+        emit_audit(lease_key, action, from_phase, to_phase);
+        Ok(Some(AuthLeaseTransition { generation }))
+    }
+
     fn mark_expiring(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         self.apply(
             lease_key,
@@ -242,14 +299,46 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         .map(|_| ())
     }
 
-    fn begin_refresh(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
+    fn begin_refresh(
+        &self,
+        lease_key: &LeaseKey,
+    ) -> Result<AuthLeaseTransition, DslTransitionError> {
         self.apply(
             lease_key,
             auth_dsl::AuthMachineInput::BeginRefresh,
             "AuthLeaseHandle::begin_refresh",
             false,
         )
-        .map(|_| ())
+        .map(|generation| AuthLeaseTransition { generation })
+    }
+
+    fn begin_refresh_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        if !matches!(
+            expected.phase,
+            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+        ) {
+            return Ok(None);
+        }
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Self::snapshot_locked(&guard, lease_key) != *expected {
+            return Ok(None);
+        }
+        let (generation, action, from_phase, to_phase) = Self::apply_locked(
+            &mut guard,
+            lease_key,
+            auth_dsl::AuthMachineInput::BeginRefresh,
+            "AuthLeaseHandle::begin_refresh_if_snapshot",
+            false,
+        )?;
+        emit_audit(lease_key, action, from_phase, to_phase);
+        Ok(Some(AuthLeaseTransition { generation }))
     }
 
     fn complete_refresh(
@@ -275,6 +364,42 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
         .map(|generation| AuthLeaseTransition { generation })
     }
 
+    fn complete_refresh_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        new_expires_at: u64,
+        now: u64,
+    ) -> Result<Option<AuthLeaseTransition>, DslTransitionError> {
+        if expected.phase != Some(AuthLeasePhase::Refreshing) {
+            return Ok(None);
+        }
+        let new_expires_at = if new_expires_at == u64::MAX {
+            None
+        } else {
+            Some(new_expires_at)
+        };
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Self::snapshot_locked(&guard, lease_key) != *expected {
+            return Ok(None);
+        }
+        let (generation, action, from_phase, to_phase) = Self::apply_locked(
+            &mut guard,
+            lease_key,
+            auth_dsl::AuthMachineInput::CompleteRefresh {
+                new_expires_at,
+                now_ts: now,
+            },
+            "AuthLeaseHandle::complete_refresh_if_snapshot",
+            false,
+        )?;
+        emit_audit(lease_key, action, from_phase, to_phase);
+        Ok(Some(AuthLeaseTransition { generation }))
+    }
+
     fn refresh_failed(
         &self,
         lease_key: &LeaseKey,
@@ -289,6 +414,38 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .map(|_| ())
     }
 
+    fn refresh_failed_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+        permanent: bool,
+    ) -> Result<bool, DslTransitionError> {
+        if expected.phase != Some(AuthLeasePhase::Refreshing) {
+            return Ok(false);
+        }
+        let input = if permanent {
+            auth_dsl::AuthMachineInput::RefreshFailedPermanent
+        } else {
+            auth_dsl::AuthMachineInput::RefreshFailedTransient
+        };
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Self::snapshot_locked(&guard, lease_key) != *expected {
+            return Ok(false);
+        }
+        let (_, action, from_phase, to_phase) = Self::apply_locked(
+            &mut guard,
+            lease_key,
+            input,
+            "AuthLeaseHandle::refresh_failed_if_snapshot",
+            false,
+        )?;
+        emit_audit(lease_key, action, from_phase, to_phase);
+        Ok(true)
+    }
+
     fn mark_reauth_required(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
         self.apply(
             lease_key,
@@ -297,6 +454,35 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             false,
         )
         .map(|_| ())
+    }
+
+    fn mark_reauth_required_if_snapshot(
+        &self,
+        lease_key: &LeaseKey,
+        expected: &AuthLeaseSnapshot,
+    ) -> Result<bool, DslTransitionError> {
+        if !matches!(
+            expected.phase,
+            Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring)
+        ) {
+            return Ok(false);
+        }
+        let mut guard = self
+            .machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Self::snapshot_locked(&guard, lease_key) != *expected {
+            return Ok(false);
+        }
+        let (_, action, from_phase, to_phase) = Self::apply_locked(
+            &mut guard,
+            lease_key,
+            auth_dsl::AuthMachineInput::MarkReauthRequired,
+            "AuthLeaseHandle::mark_reauth_required_if_snapshot",
+            false,
+        )?;
+        emit_audit(lease_key, action, from_phase, to_phase);
+        Ok(true)
     }
 
     fn release_lease(&self, lease_key: &LeaseKey) -> Result<(), DslTransitionError> {
@@ -320,19 +506,7 @@ impl AuthLeaseHandle for RuntimeAuthLeaseHandle {
             .machines
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let generation = guard.generations.get(lease_key).copied().unwrap_or(0);
-        match guard.authorities.get(lease_key) {
-            Some(machine) => AuthLeaseSnapshot {
-                phase: Some(map_phase(machine.state.lifecycle_phase)),
-                expires_at: machine.state.expires_at,
-                generation,
-            },
-            None => AuthLeaseSnapshot {
-                phase: None,
-                expires_at: None,
-                generation,
-            },
-        }
+        Self::snapshot_locked(&guard, lease_key)
     }
 }
 
@@ -411,6 +585,87 @@ mod tests {
         let snap = h.snapshot(&lease("dev", "never_registered"));
         assert!(snap.phase.is_none());
         assert!(snap.expires_at.is_none());
+    }
+
+    #[test]
+    fn conditional_acquire_only_accepts_matching_snapshot() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "conditional_acquire");
+        let missing = h.snapshot(&key);
+
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+
+        let accepted = h
+            .acquire_lease_if_snapshot(&key, &missing, 1_900_000_000)
+            .unwrap();
+        assert!(
+            accepted.is_none(),
+            "stale missing snapshot must not reacquire over newer lease truth"
+        );
+        let snap = h.snapshot(&key);
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snap.expires_at, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn conditional_reauth_does_not_mark_refreshing_owner_from_stale_valid_snapshot() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "conditional_reauth");
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+        let valid = h.snapshot(&key);
+        h.begin_refresh(&key).unwrap();
+
+        let marked = h.mark_reauth_required_if_snapshot(&key, &valid).unwrap();
+
+        assert!(
+            !marked,
+            "stale valid snapshot must not mark a concurrent owner refresh reauth-required"
+        );
+        assert_eq!(h.snapshot(&key).phase, Some(AuthLeasePhase::Refreshing));
+    }
+
+    #[test]
+    fn conditional_begin_refresh_does_not_claim_newer_valid_lease_from_stale_snapshot() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "conditional_begin_refresh");
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+        let stale_valid = h.snapshot(&key);
+        h.acquire_lease(&key, 1_900_000_000).unwrap();
+
+        let accepted = h
+            .begin_refresh_if_snapshot(&key, &stale_valid)
+            .expect("conditional begin should not error on stale snapshot");
+
+        assert!(
+            accepted.is_none(),
+            "stale valid snapshot must not claim refresh ownership over newer lease truth"
+        );
+        let snap = h.snapshot(&key);
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Valid));
+        assert_eq!(snap.expires_at, Some(1_900_000_000));
+    }
+
+    #[test]
+    fn conditional_complete_refresh_does_not_complete_newer_owner_from_stale_snapshot() {
+        let h = RuntimeAuthLeaseHandle::new();
+        let key = lease("dev", "conditional_complete_refresh");
+        h.acquire_lease(&key, 1_800_000_000).unwrap();
+        h.begin_refresh(&key).unwrap();
+        let stale_refresh = h.snapshot(&key);
+        h.refresh_failed(&key, false).unwrap();
+        h.begin_refresh(&key).unwrap();
+
+        let accepted = h
+            .complete_refresh_if_snapshot(&key, &stale_refresh, 2_000_000_000, 1_800_000_000)
+            .expect("conditional complete should not error on stale snapshot");
+
+        assert!(
+            accepted.is_none(),
+            "stale refresh owner must not complete a newer refresh owner"
+        );
+        let snap = h.snapshot(&key);
+        assert_eq!(snap.phase, Some(AuthLeasePhase::Refreshing));
+        assert_eq!(snap.expires_at, Some(1_800_000_000));
     }
 
     #[test]

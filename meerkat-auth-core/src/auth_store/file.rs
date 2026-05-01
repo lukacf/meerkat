@@ -38,11 +38,11 @@ impl FileTokenStore {
         self.realm_dir(key.realm.as_str())
             .join(format!("{stem}.json"))
     }
-}
 
-#[async_trait]
-impl TokenStore for FileTokenStore {
-    async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+    pub(crate) async fn load_unlocked(
+        &self,
+        key: &TokenKey,
+    ) -> Result<Option<PersistedTokens>, TokenStoreError> {
         let path = self.path_for(key);
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
@@ -53,7 +53,11 @@ impl TokenStore for FileTokenStore {
         Ok(Some(tokens))
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    pub(crate) async fn save_unlocked(
+        &self,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         let dir = self.realm_dir(key.realm.as_str());
         tokio::fs::create_dir_all(&dir).await?;
         let final_path = self.path_for(key);
@@ -67,13 +71,44 @@ impl TokenStore for FileTokenStore {
         Ok(())
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    pub(crate) async fn clear_unlocked(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
         let path = self.path_for(key);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(TokenStoreError::from(e)),
         }
+    }
+}
+
+#[async_trait]
+impl TokenStore for FileTokenStore {
+    async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
+        let _guard = super::lock::lock(&self.root, key).await?;
+        self.load_unlocked(key).await
+    }
+
+    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+        let _guard = super::lock::lock(&self.root, key).await?;
+        self.save_unlocked(key, tokens).await
+    }
+
+    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+        let _guard = super::lock::lock(&self.root, key).await?;
+        self.clear_unlocked(key).await
+    }
+
+    async fn clear_if_current(
+        &self,
+        key: &TokenKey,
+        expected: &PersistedTokens,
+    ) -> Result<bool, TokenStoreError> {
+        let _guard = super::lock::lock(&self.root, key).await?;
+        if self.load_unlocked(key).await?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.clear_unlocked(key).await?;
+        Ok(true)
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {

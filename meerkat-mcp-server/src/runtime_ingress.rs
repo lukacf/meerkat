@@ -14,7 +14,7 @@ use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutor, CoreExecutorError};
 use meerkat_core::lifecycle::run_control::RunControlCommand;
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunPrimitive,
+    ConversationContextAppend, CoreRenderable, RunPrimitive, RuntimeTurnMetadata,
 };
 use meerkat_core::service::{SessionError, SessionService, StartTurnRequest};
 use meerkat_core::types::SessionId;
@@ -268,6 +268,7 @@ impl McpRuntimeIngressContext {
         &self,
         session_id: &SessionId,
         state: Arc<McpRuntimeSessionState>,
+        turn_metadata: Option<RuntimeTurnMetadata>,
     ) -> Result<SessionId, SessionError> {
         let session = self
             .service
@@ -289,7 +290,10 @@ impl McpRuntimeIngressContext {
         let external_tools = self.external_tools_for_session(session_id, &state).await?;
         let recovered = build_recovered_session(
             session.clone(),
-            &SurfaceSessionRecoveryOverrides::default(),
+            &SurfaceSessionRecoveryOverrides {
+                turn_metadata: turn_metadata.clone(),
+                ..Default::default()
+            },
             SurfaceSessionRecoveryContext {
                 llm_client_override: None,
                 external_tools,
@@ -518,9 +522,13 @@ async fn apply_runtime_turn(
         {
             Ok(output) => Ok(output),
             Err(SessionError::NotFound { .. }) => {
-                Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
-                    .await
-                    .map(|_| ())?;
+                Box::pin(context.rematerialize_persisted_session(
+                    session_id,
+                    state.clone(),
+                    primitive.turn_metadata().cloned(),
+                ))
+                .await
+                .map(|_| ())?;
                 context
                     .service
                     .apply_runtime_context_appends(
@@ -586,9 +594,13 @@ async fn apply_runtime_turn(
     match live_result {
         Ok(output) => Ok(output),
         Err(SessionError::NotFound { .. }) => {
-            Box::pin(context.rematerialize_persisted_session(session_id, state.clone()))
-                .await
-                .map(|_| ())?;
+            Box::pin(context.rematerialize_persisted_session(
+                session_id,
+                state.clone(),
+                primitive.turn_metadata().cloned(),
+            ))
+            .await
+            .map(|_| ())?;
             apply_turn_context_appends(context, session_id, turn_context_appends.as_ref()).await?;
             context
                 .service
@@ -727,6 +739,20 @@ mod tests {
         assert!(
             error.to_string().contains("requires RunStart boundary"),
             "unexpected rejection reason: {error}"
+        );
+    }
+
+    #[test]
+    fn runtime_rematerialization_uses_primitive_turn_metadata_for_recovery() {
+        let source = include_str!("runtime_ingress.rs");
+        let empty_recovery = concat!("&SurfaceSessionRecoveryOverrides", "::default(),");
+        assert!(
+            !source.contains(empty_recovery),
+            "runtime rematerialization must not rebuild with empty recovery overrides"
+        );
+        assert!(
+            source.contains("turn_metadata: turn_metadata.clone()"),
+            "runtime rematerialization must pass primitive turn metadata into recovery"
         );
     }
 }

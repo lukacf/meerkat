@@ -40,6 +40,8 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -83,6 +85,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -140,6 +144,8 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -188,6 +194,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -253,6 +261,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -320,6 +330,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -382,6 +394,8 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -435,6 +449,8 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -474,6 +490,8 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -520,6 +538,8 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -561,6 +581,8 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
+        "src/runtime_ingress.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],

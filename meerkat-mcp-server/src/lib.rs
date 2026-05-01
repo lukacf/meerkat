@@ -10,7 +10,10 @@ mod schedule_host;
 
 #[cfg(test)]
 use meerkat::SessionStore;
-use meerkat::surface::{RequestContext, prepare_surface_session, request_action};
+use meerkat::surface::{
+    RequestContext, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
+    build_recovered_session, prepare_surface_session, request_action,
+};
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
     ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
@@ -1089,12 +1092,30 @@ fn resume_turn_keep_alive_policy(
     }
 }
 
-fn resume_turn_metadata(
+struct ResumeTurnMetadataInput {
     skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
     flow_tool_overlay: Option<TurnToolOverlayInput>,
     additional_instructions: Option<Vec<String>>,
+    model: Option<String>,
+    provider: Option<Provider>,
+    provider_params: Option<serde_json::Value>,
+    provider_for_params: Provider,
     keep_alive: Option<bool>,
+}
+
+fn resume_turn_metadata(
+    input: ResumeTurnMetadataInput,
 ) -> Option<meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata> {
+    let ResumeTurnMetadataInput {
+        skill_references,
+        flow_tool_overlay,
+        additional_instructions,
+        model,
+        provider,
+        provider_params,
+        provider_for_params,
+        keep_alive,
+    } = input;
     let additional_instructions = additional_instructions.and_then(|instructions| {
         let instructions = instructions
             .into_iter()
@@ -1112,6 +1133,16 @@ fn resume_turn_metadata(
         skill_references,
         flow_tool_overlay: flow_tool_overlay.map(Into::into),
         additional_instructions,
+        model: model.map(meerkat_core::lifecycle::run_primitive::ModelId::new),
+        provider,
+        provider_params: provider_params.map(|params| {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::from_legacy_provider_value(
+                    provider_for_params.as_str(),
+                    &params,
+                ),
+            )
+        }),
         keep_alive: resume_turn_keep_alive_policy(keep_alive),
         ..Default::default()
     };
@@ -2937,18 +2968,12 @@ async fn handle_meerkat_resume(
             "keep_alive requires comms_name",
         ));
     }
-    let model = input
-        .model
-        .clone()
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
-        .unwrap_or_else(|| config.agent.model.clone());
-    let max_tokens = input
-        .max_tokens
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens));
-    let provider = input
-        .provider
-        .map(ProviderInput::to_provider)
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.provider));
+    let provider_override = input.provider.map(ProviderInput::to_provider);
+    let stored_provider = stored_metadata
+        .as_ref()
+        .map(|meta| meta.provider)
+        .unwrap_or(meerkat_core::Provider::Other);
+    let provider_for_params = provider_override.unwrap_or(stored_provider);
 
     let resume_bindings = state
         .runtime_adapter
@@ -2996,12 +3021,16 @@ async fn handle_meerkat_resume(
         input.skill_references.clone(),
     )
     .map_err(ToolCallError::invalid_params)?;
-    let turn_metadata = resume_turn_metadata(
-        skill_references.clone(),
-        input.flow_tool_overlay.clone(),
-        input.additional_instructions.clone(),
-        keep_alive_override,
-    );
+    let turn_metadata = resume_turn_metadata(ResumeTurnMetadataInput {
+        skill_references: skill_references.clone(),
+        flow_tool_overlay: input.flow_tool_overlay.clone(),
+        additional_instructions: input.additional_instructions.clone(),
+        model: input.model.clone(),
+        provider: provider_override,
+        provider_params: input.provider_params.clone(),
+        provider_for_params,
+        keep_alive: keep_alive_override,
+    });
 
     // Set up event forwarding
     let (event_tx, event_rx) = maybe_event_channel(input.verbose, input.stream);
@@ -3018,83 +3047,46 @@ async fn handle_meerkat_resume(
             })?),
             None => None,
         };
-    let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
-        stored_metadata
-            .as_ref()
-            .map(|m| m.provider)
-            .unwrap_or(meerkat_core::Provider::Other),
-        stored_metadata
-            .as_ref()
-            .and_then(|m| m.self_hosted_server_id.clone()),
-        input.model.as_deref(),
-        provider,
-    );
-    let mut build = SessionBuildOptions {
-        provider: llm_binding.provider,
-        self_hosted_server_id: llm_binding.self_hosted_server_id,
+    let recovery_overrides = SurfaceSessionRecoveryOverrides {
+        turn_metadata: turn_metadata.clone(),
+        max_tokens: input.max_tokens,
+        system_prompt: input.system_prompt.clone(),
         output_schema,
-        structured_output_retries: input
-            .structured_output_retries
-            .unwrap_or(default_structured_output_retries()),
-        hooks_override: input.hooks_override.clone().unwrap_or_default(),
+        structured_output_retries: input.structured_output_retries,
+        hooks_override: input.hooks_override.clone(),
         comms_name: input.comms_name.clone(),
-        resume_session: Some(session),
+        peer_meta: input.peer_meta.clone(),
         budget_limits: input.budget_limits.clone().map(Into::into),
-        provider_params: input.provider_params.clone(),
-        call_timeout_override: meerkat_core::CallTimeoutOverride::Inherit,
-        external_tools,
+        override_builtins: enable_builtins_override,
+        override_shell: enable_shell_override,
+        override_memory: input.enable_memory,
+        override_mob: input.enable_mob,
+        preload_skills,
         recoverable_tool_defs: (!input.tools.is_empty())
             .then(|| recoverable_callback_tool_defs(&input.tools)),
-        llm_client_override: None,
-        runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings),
-        override_builtins: ToolCategoryOverride::from_override(enable_builtins_override),
-        override_shell: ToolCategoryOverride::from_override(enable_shell_override),
-        override_memory: ToolCategoryOverride::from_override(input.enable_memory),
-        override_schedule: ToolCategoryOverride::Inherit,
-        override_mob: ToolCategoryOverride::Inherit,
-        schedule_tools: None,
-        mob_tool_authority_context: None,
-        preload_skills,
-        peer_meta: input.peer_meta.clone(),
-        realm_id: stored_metadata
-            .as_ref()
-            .and_then(|m| m.realm_id.clone())
-            .or_else(|| Some(state.realm_id.to_string())),
-        instance_id: stored_metadata
-            .as_ref()
-            .and_then(|m| m.instance_id.clone())
-            .or_else(|| state.instance_id.clone()),
-        backend: stored_metadata
-            .as_ref()
-            .and_then(|m| m.backend.clone())
-            .or_else(|| Some(state.backend.clone())),
-        config_generation: current_generation,
-        connection_ref: None,
-        keep_alive,
-        checkpointer: None,
-        silent_comms_intents: Vec::new(),
-        max_inline_peer_notifications: None,
-        app_context: None,
-        additional_instructions: None,
-        shell_env: None,
-        resume_override_mask: ResumeOverrideMask {
-            model: input.model.is_some(),
-            provider: llm_binding.provider_overridden,
-            max_tokens: input.max_tokens.is_some(),
-            structured_output_retries: input.structured_output_retries.is_some(),
-            provider_params: input.provider_params.is_some(),
-            preload_skills: input.preload_skills.is_some(),
-            keep_alive: keep_alive_override.is_some(),
-            comms_name: input.comms_name.is_some(),
-            peer_meta: input.peer_meta.is_some(),
+        ..Default::default()
+    };
+    let recovered = build_recovered_session(
+        session,
+        &recovery_overrides,
+        SurfaceSessionRecoveryContext {
+            external_tools,
+            runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
+                resume_bindings,
+            )),
+            realm_id: Some(state.realm_id.to_string()),
+            instance_id: state.instance_id.clone(),
+            backend: Some(state.backend.clone()),
+            config_generation: current_generation,
             ..Default::default()
         },
-        blob_store_override: None,
-        mob_tools: None,
-    };
-    build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
-        input.enable_mob,
-    ));
+    )
+    .map_err(|e| ToolCallError::internal(format!("{e}")))?;
+    let keep_alive = recovered.keep_alive;
+    let mut create_req = recovered.into_deferred_create_request();
+    create_req.prompt = prompt.clone().into();
+    create_req.event_tx = None;
+    create_req.labels = None;
 
     let make_turn_req = || StartTurnRequest {
         prompt: prompt.clone().into(),
@@ -3104,21 +3096,7 @@ async fn handle_meerkat_resume(
     };
 
     let result = if needs_rebuild {
-        let req = CreateSessionRequest {
-            model,
-            prompt: prompt.clone().into(),
-            render_metadata: None,
-            system_prompt: input.system_prompt.clone(),
-            max_tokens,
-            event_tx: None,
-
-            skill_references: None,
-            initial_turn: InitialTurnPolicy::Defer,
-            deferred_prompt_policy: DeferredPromptPolicy::Discard,
-            build: Some(build),
-            labels: None,
-        };
-        match state.service.create_session(req).await {
+        match state.service.create_session(create_req).await {
             Ok(_) => state.service.start_turn(&session_id, make_turn_req()).await,
             Err(error) => Err(error),
         }
@@ -3131,20 +3109,6 @@ async fn handle_meerkat_resume(
                     "keep_alive requires a session created with comms_name",
                 ));
             }
-            if let Some(explicit_keep_alive) = keep_alive_override {
-                match state
-                    .service
-                    .apply_runtime_session_keep_alive(&session_id, explicit_keep_alive)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(error) => {
-                        return Err(ToolCallError::internal(format!(
-                            "failed to persist keep_alive: {error}"
-                        )));
-                    }
-                }
-            }
             state
                 .runtime_adapter
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
@@ -3155,22 +3119,7 @@ async fn handle_meerkat_resume(
         match state.service.start_turn(&session_id, make_turn_req()).await {
             Ok(run_result) => Ok(run_result),
             Err(SessionError::NotFound { .. }) => {
-                let req = CreateSessionRequest {
-                    model,
-                    prompt: prompt.clone().into(),
-                    render_metadata: None,
-                    system_prompt: input.system_prompt.clone(),
-                    max_tokens,
-                    event_tx: None,
-
-                    skill_references: None,
-                    initial_turn: InitialTurnPolicy::Defer,
-                    deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                    build: Some(build),
-                    labels: None,
-                };
-
-                match state.service.create_session(req).await {
+                match state.service.create_session(create_req).await {
                     Ok(_) => state.service.start_turn(&session_id, make_turn_req()).await,
                     Err(error) => Err(error),
                 }
@@ -3407,18 +3356,22 @@ mod tests {
 
     #[test]
     fn resume_turn_metadata_carries_flow_and_additional_instructions() {
-        let metadata = resume_turn_metadata(
-            None,
-            Some(TurnToolOverlayInput {
+        let metadata = resume_turn_metadata(ResumeTurnMetadataInput {
+            skill_references: None,
+            flow_tool_overlay: Some(TurnToolOverlayInput {
                 allowed_tools: Some(vec!["lookup".to_string()]),
                 blocked_tools: None,
             }),
-            Some(vec![
+            additional_instructions: Some(vec![
                 "apply the resume instruction".to_string(),
                 "   ".to_string(),
             ]),
-            Some(true),
-        )
+            model: None,
+            provider: None,
+            provider_params: None,
+            provider_for_params: meerkat_core::Provider::Other,
+            keep_alive: Some(true),
+        })
         .expect("metadata should be populated");
 
         let flow_tool_overlay = metadata.flow_tool_overlay.expect("flow overlay");
@@ -3444,6 +3397,71 @@ mod tests {
         assert_eq!(
             keep_alive.policy,
             meerkat_core::lifecycle::run_primitive::KeepAliveMode::Pinned
+        );
+    }
+
+    #[test]
+    fn resume_turn_metadata_carries_llm_and_provider_overrides() {
+        let metadata = resume_turn_metadata(ResumeTurnMetadataInput {
+            skill_references: None,
+            flow_tool_overlay: None,
+            additional_instructions: None,
+            model: Some("claude-opus-4-7".to_string()),
+            provider: Some(meerkat_core::Provider::Anthropic),
+            provider_params: Some(serde_json::json!({ "effort": "xhigh" })),
+            provider_for_params: meerkat_core::Provider::Anthropic,
+            keep_alive: Some(true),
+        })
+        .expect("metadata should be populated");
+
+        assert_eq!(
+            metadata.model.as_ref().map(ToString::to_string),
+            Some("claude-opus-4-7".to_string())
+        );
+        assert_eq!(metadata.provider, Some(meerkat_core::Provider::Anthropic));
+
+        let provider_params = metadata.provider_params.expect("provider params");
+        let meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(provider_params) =
+            provider_params
+        else {
+            panic!("provider params must be set through turn metadata");
+        };
+        let legacy = provider_params.to_legacy_provider_value();
+        assert_eq!(legacy["effort"], serde_json::json!("xhigh"));
+
+        let keep_alive = metadata.keep_alive.expect("keep-alive policy");
+        assert!(matches!(
+            keep_alive,
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_)
+        ));
+    }
+
+    #[test]
+    fn mcp_resume_rebuild_uses_recovery_turn_metadata_carrier() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn handle_meerkat_resume")
+            .expect("resume handler exists");
+        let end = source
+            .find("fn wrap_tool_payload")
+            .expect("resume handler end sentinel exists");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("SurfaceSessionRecoveryOverrides"),
+            "MCP resume rebuild should use the shared recovery carrier"
+        );
+        assert!(
+            !body.contains("SessionBuildOptions {"),
+            "MCP resume rebuild must not construct split session build options directly"
+        );
+        assert!(
+            !body.contains("provider: llm_binding.provider"),
+            "MCP resume must not project provider into split build fields"
+        );
+        assert!(
+            !body.contains("keep_alive,\n        checkpointer"),
+            "MCP resume must not project keep_alive into split build fields"
         );
     }
 

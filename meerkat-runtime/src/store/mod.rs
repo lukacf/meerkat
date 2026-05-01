@@ -42,6 +42,10 @@ pub enum RuntimeStoreError {
     Internal(String),
 }
 
+/// Transactional updater for the runtime-owned OAuth login-flow payload snapshot.
+pub type AuthOAuthFlowSnapshotUpdate<'a> =
+    dyn FnMut(Option<&[u8]>) -> Result<Vec<u8>, RuntimeStoreError> + 'a;
+
 /// Describes a serialized session snapshot for boundary and snapshot-only commits.
 #[derive(Debug, Clone)]
 pub struct SessionDelta {
@@ -114,6 +118,16 @@ pub trait RuntimeStore: Send + Sync {
         Err(RuntimeStoreError::Unsupported(
             "load_auth_oauth_flow_snapshot".into(),
         ))
+    }
+
+    /// Atomically update the runtime-owned OAuth login-flow payload snapshot.
+    fn update_auth_oauth_flow_snapshot(
+        &self,
+        update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
+    ) -> Result<(), RuntimeStoreError> {
+        let current = self.load_auth_oauth_flow_snapshot()?;
+        let next = update(current.as_deref())?;
+        self.persist_auth_oauth_flow_snapshot(&next)
     }
 
     /// Atomically persist session delta + authoritative receipt + input state updates.

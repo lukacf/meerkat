@@ -13,7 +13,10 @@ mod inner {
     use crate::identifiers::LogicalRuntimeId;
     use crate::input_state::StoredInputState;
     use crate::runtime_state::RuntimeState;
-    use crate::store::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
+    use crate::store::{
+        AuthOAuthFlowSnapshotUpdate, RuntimeStore, RuntimeStoreError, SessionDelta,
+        authoritative_receipt,
+    };
 
     const CREATE_RUNTIME_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS runtime_input_states (
@@ -232,6 +235,39 @@ CREATE TABLE IF NOT EXISTS runtime_auth_oauth_flow_state (
             )
             .optional()
             .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+        }
+
+        fn update_auth_oauth_flow_snapshot(
+            &self,
+            update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
+        ) -> Result<(), RuntimeStoreError> {
+            let mut conn = open_runtime_connection(&self.path)?;
+            let tx = begin_runtime_transaction(&mut conn)?;
+            let current = tx
+                .query_row(
+                    r"
+                    SELECT state_json
+                    FROM runtime_auth_oauth_flow_state
+                    WHERE id = ?1
+                    ",
+                    params![AUTH_OAUTH_FLOW_STATE_ID],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
+            let next = update(current.as_deref())?;
+            tx.execute(
+                r"
+                INSERT INTO runtime_auth_oauth_flow_state (id, state_json)
+                VALUES (?1, ?2)
+                ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json
+                ",
+                params![AUTH_OAUTH_FLOW_STATE_ID, next],
+            )
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            tx.commit()
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+            Ok(())
         }
 
         async fn commit_session_boundary(

@@ -15,7 +15,10 @@ use tokio::sync::Mutex;
 #[cfg(target_arch = "wasm32")]
 use tokio_with_wasm::alias::sync::Mutex;
 
-use super::{RuntimeStore, RuntimeStoreError, SessionDelta, authoritative_receipt};
+use super::{
+    AuthOAuthFlowSnapshotUpdate, RuntimeStore, RuntimeStoreError, SessionDelta,
+    authoritative_receipt,
+};
 use crate::identifiers::LogicalRuntimeId;
 use crate::input_state::StoredInputState;
 use crate::ops_lifecycle::PersistedOpsSnapshot;
@@ -86,6 +89,19 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .lock()
             .map(|snapshot| snapshot.clone())
             .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))
+    }
+
+    fn update_auth_oauth_flow_snapshot(
+        &self,
+        update: &mut AuthOAuthFlowSnapshotUpdate<'_>,
+    ) -> Result<(), RuntimeStoreError> {
+        let mut snapshot = self
+            .auth_oauth_flow_snapshot
+            .lock()
+            .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
+        let next = update(snapshot.as_deref())?;
+        *snapshot = Some(next);
+        Ok(())
     }
 
     async fn commit_session_boundary(

@@ -481,6 +481,13 @@ pub trait OAuthDevicePollLifecycle: Send + Sync {
     fn device_flow_payloads_changed(&self) -> Result<(), OAuthFlowError> {
         Ok(())
     }
+
+    fn device_flow_payload_removed(
+        &self,
+        _record: &OAuthDeviceFlowRecord,
+    ) -> Result<(), OAuthFlowError> {
+        self.device_flow_payloads_changed()
+    }
 }
 
 pub struct OAuthDevicePollLease {
@@ -648,7 +655,7 @@ impl OAuthDevicePollLease {
             Ok(record) => {
                 self.active = false;
                 if let Some(lifecycle) = &self.lifecycle
-                    && let Err(err) = lifecycle.device_flow_payloads_changed()
+                    && let Err(err) = lifecycle.device_flow_payload_removed(&record)
                 {
                     let _ = lifecycle.restore_device_flow(&verified);
                     let mut flows = self.device_flows.lock();
@@ -890,12 +897,27 @@ impl OAuthFlowRegistry {
         &self,
         mut browser_active: impl FnMut(&ConnectionRef, &str) -> bool,
         mut device_active: impl FnMut(&ConnectionRef, &str) -> bool,
-    ) {
+    ) -> OAuthPrunedFlows {
         let mut flows = self.flows.lock();
-        flows.retain(|flow_id, record| browser_active(&record.target, flow_id));
+        let mut browser = Vec::new();
+        flows.retain(|flow_id, record| {
+            let keep = browser_active(&record.target, flow_id);
+            if !keep {
+                browser.push((flow_id.clone(), record.target.clone()));
+            }
+            keep
+        });
 
         let mut device_flows = self.device_flows.lock();
-        device_flows.retain(|device_code, state| device_active(&state.record.target, device_code));
+        let mut device = Vec::new();
+        device_flows.retain(|device_code, state| {
+            let keep = device_active(&state.record.target, device_code);
+            if !keep {
+                device.push((device_code.clone(), state.record.target.clone()));
+            }
+            keep
+        });
+        OAuthPrunedFlows { browser, device }
     }
 
     pub fn snapshot_for_persistence(&self, now_millis: u64) -> OAuthFlowRegistrySnapshot {

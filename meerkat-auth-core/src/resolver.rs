@@ -635,12 +635,58 @@ pub fn managed_store_oauth_refresh_failure_coordinator(
     binding: ValidatedBinding,
     refresh_started: bool,
 ) -> Arc<dyn RefreshCoordinator> {
+    let pre_claim_guard =
+        ManagedStoreOAuthRefreshPreClaimGuard::new(env.clone(), binding.clone(), refresh_started);
     Arc::new(ManagedStoreOAuthRefreshFailureCoordinator {
         inner,
         env,
         binding,
         refresh_started,
+        pre_claim_guard,
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ManagedStoreOAuthRefreshPreClaimGuard {
+    env: ResolverEnvironment,
+    binding: ValidatedBinding,
+    refresh_started: bool,
+    active: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ManagedStoreOAuthRefreshPreClaimGuard {
+    fn new(
+        env: ResolverEnvironment,
+        binding: ValidatedBinding,
+        refresh_started: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            env,
+            binding,
+            refresh_started,
+            active: std::sync::atomic::AtomicBool::new(refresh_started),
+        })
+    }
+
+    fn disarm(&self) {
+        self.active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ManagedStoreOAuthRefreshPreClaimGuard {
+    fn drop(&mut self) {
+        if self.active.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let _ = mark_managed_store_oauth_refresh_failed(
+                &self.env,
+                &self.binding,
+                self.refresh_started,
+                false,
+            );
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -649,6 +695,7 @@ struct ManagedStoreOAuthRefreshFailureCoordinator {
     env: ResolverEnvironment,
     binding: ValidatedBinding,
     refresh_started: bool,
+    pre_claim_guard: Arc<ManagedStoreOAuthRefreshPreClaimGuard>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -686,6 +733,7 @@ impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
         key: TokenKey,
         refresh_fn: RefreshFn,
     ) -> Result<PersistedTokens, RefreshError> {
+        self.pre_claim_guard.disarm();
         self.inner
             .with_refresh(key, self.wrap_refresh_fn(refresh_fn))
             .await
@@ -696,6 +744,7 @@ impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
         key: TokenKey,
         refresh_fn: RefreshFn,
     ) -> Result<PersistedTokens, RefreshError> {
+        self.pre_claim_guard.disarm();
         self.inner
             .with_forced_refresh(key, self.wrap_refresh_fn(refresh_fn))
             .await
@@ -2834,6 +2883,62 @@ mod tests {
         assert_eq!(
             auth_lease.snapshot(&lease_key).phase,
             Some(AuthLeasePhase::ReauthRequired)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropped_oauth_refresh_before_coordinator_claim_marks_transient_failure() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let tokens = chatgpt_oauth_tokens("pre-coordinator-cancel-access");
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(expires_at),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(2_000),
+        });
+        let mut previous = managed_store_tokens(
+            Arc::clone(&store),
+            key,
+            tokens,
+            Some(auth_lease.snapshot(&lease_key)),
+            ManagedStoreLifecycle::RefreshRequired,
+            None,
+        );
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+        let refresh_started =
+            begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
+                .expect("valid lifecycle can enter refreshing");
+        assert!(refresh_started);
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::Refreshing)
+        );
+
+        let coord = managed_store_oauth_refresh_failure_coordinator(
+            Arc::new(crate::InMemoryCoordinator::new()),
+            env,
+            binding,
+            refresh_started,
+        );
+        drop(coord);
+
+        assert_eq!(
+            auth_lease.refresh_failed_count(),
+            1,
+            "dropping refresh ownership before coordinator claim should release Refreshing"
+        );
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::Expiring)
         );
     }
 

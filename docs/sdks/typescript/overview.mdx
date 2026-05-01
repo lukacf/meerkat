@@ -267,15 +267,17 @@ interface SessionOptions {
 interface RuntimeTurnMetadata {
   model?: string;
   provider?: string;
-  providerParams?: Record<string, unknown>;
-  clearProviderParams?: boolean;
-  connectionRef?: WireConnectionRef;
-  clearConnectionRef?: boolean;
+  providerParams?: TurnMetadataOverride<Record<string, unknown>>;
+  connectionRef?: TurnMetadataOverride<WireConnectionRef>;
   skillReferences?: SkillRef[];
   flowToolOverlay?: TurnToolOverlay;
   additionalInstructions?: string[];
   keepAlive?: boolean;
 }
+
+type TurnMetadataOverride<T> =
+  | { action: "set"; value: T }
+  | { action: "clear" };
 ```
 
 ---

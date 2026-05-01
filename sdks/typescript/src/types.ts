@@ -233,6 +233,10 @@ export interface TurnOptions {
   readonly turnMetadata?: RuntimeTurnMetadata;
 }
 
+export type TurnMetadataOverride<T> =
+  | { readonly action: "set"; readonly value: T }
+  | { readonly action: "clear" };
+
 /** Canonical runtime metadata carrier for session creation and turn starts. */
 export interface RuntimeTurnMetadata {
   readonly skillReferences?: SkillRef[];
@@ -241,10 +245,8 @@ export interface RuntimeTurnMetadata {
   readonly keepAlive?: boolean;
   readonly model?: string;
   readonly provider?: string;
-  readonly providerParams?: Record<string, unknown>;
-  readonly clearProviderParams?: boolean;
-  readonly connectionRef?: WireConnectionRef;
-  readonly clearConnectionRef?: boolean;
+  readonly providerParams?: TurnMetadataOverride<Record<string, unknown>>;
+  readonly connectionRef?: TurnMetadataOverride<WireConnectionRef>;
 }
 
 export interface EventEnvelope<T = unknown> {

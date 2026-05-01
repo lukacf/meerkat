@@ -155,7 +155,11 @@ fn apply_spawn_turn_metadata(
             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
                 Some(params.to_legacy_provider_value())
             }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob spawn turn_metadata.provider_params clear is not supported".to_string(),
+                );
+            }
         };
     }
     if let Some(instructions) = metadata.additional_instructions {
@@ -173,7 +177,11 @@ fn apply_spawn_turn_metadata(
             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
                 Some(connection_ref)
             }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(
+                    "mob spawn turn_metadata.connection_ref clear is not supported".to_string(),
+                );
+            }
         };
     }
 
@@ -2385,6 +2393,27 @@ mod tests {
                 .expect_err("retired mob/spawn split metadata carrier must fail closed");
             assert!(
                 err.to_string().contains(field) || err.to_string().contains("unknown field"),
+                "unexpected error for {field}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mob_spawn_rejects_clear_turn_metadata_overrides_it_cannot_apply() {
+        for (field, value) in [
+            ("provider_params", serde_json::json!({ "action": "clear" })),
+            ("connection_ref", serde_json::json!({ "action": "clear" })),
+        ] {
+            let mut spec = SpawnMemberSpec::new("worker", "w1");
+            let turn_metadata = serde_json::from_value::<WireRuntimeTurnMetadata>(
+                serde_json::json!({ field: value }),
+            )
+            .expect("clear metadata should deserialize at the wire boundary");
+
+            let err = apply_spawn_turn_metadata(&mut spec, Some(turn_metadata))
+                .expect_err("mob spawn must reject clear overrides it cannot apply");
+            assert!(
+                err.contains(field) && err.contains("clear"),
                 "unexpected error for {field}: {err}"
             );
         }

@@ -572,7 +572,10 @@ Cancel an in-flight turn. No-op if the session is idle.
       turnMetadata: {
         model: "gpt-5.2",
         provider: "openai",
-        providerParams: { reasoning_effort: "high" },
+        providerParams: {
+          action: "set",
+          value: { reasoning_effort: "high" },
+        },
       },
     });
     ```

@@ -1053,7 +1053,11 @@ fn apply_spawn_turn_metadata(
             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
                 Some(params.to_legacy_provider_value())
             }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(McpToolError::invalid_params(
+                    "mob spawn turn_metadata.provider_params clear is not supported",
+                ));
+            }
         };
     }
     if let Some(instructions) = metadata.additional_instructions {
@@ -1071,7 +1075,11 @@ fn apply_spawn_turn_metadata(
             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
                 Some(connection_ref)
             }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(McpToolError::invalid_params(
+                    "mob spawn turn_metadata.connection_ref clear is not supported",
+                ));
+            }
         };
     }
     Ok(())
@@ -1293,6 +1301,37 @@ mod tests {
             err.to_string().contains("additional_instructions"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn public_mcp_spawn_rejects_clear_turn_metadata_overrides_it_cannot_apply() {
+        for (field, value) in [
+            ("provider_params", serde_json::json!({ "action": "clear" })),
+            ("connection_ref", serde_json::json!({ "action": "clear" })),
+        ] {
+            let turn_metadata = serde_json::from_value::<WireRuntimeTurnMetadata>(
+                serde_json::json!({ field: value }),
+            )
+            .expect("clear metadata should deserialize at the wire boundary");
+
+            let err = build_spawn_spec(
+                "worker".to_string(),
+                "worker-1".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(turn_metadata),
+            )
+            .expect_err("MCP mob spawn must reject clear overrides it cannot apply");
+            let message = err.message;
+            assert!(
+                message.contains(field) && message.contains("clear"),
+                "unexpected error for {field}: {message}"
+            );
+        }
     }
 
     #[test]

@@ -139,15 +139,31 @@ SkillRef = SkillKey
 """A skill reference, expressed as a structured :class:`SkillKey`."""
 
 
+class ClearTurnMetadataOverride(TypedDict):
+    action: Literal["clear"]
+
+
+class ProviderParamsSetOverride(TypedDict):
+    action: Literal["set"]
+    value: dict[str, Any]
+
+
+class ConnectionRefSetOverride(TypedDict):
+    action: Literal["set"]
+    value: WireConnectionRef | dict[str, str]
+
+
+ProviderParamsOverride = ProviderParamsSetOverride | ClearTurnMetadataOverride
+ConnectionRefOverride = ConnectionRefSetOverride | ClearTurnMetadataOverride
+
+
 class RuntimeTurnMetadata(TypedDict, total=False):
     """Canonical runtime metadata carrier for session creation and turn starts."""
 
     model: str
     provider: str
-    provider_params: Any
-    clear_provider_params: bool
-    connection_ref: WireConnectionRef | dict[str, str]
-    clear_connection_ref: bool
+    provider_params: ProviderParamsOverride
+    connection_ref: ConnectionRefOverride
     keep_alive: bool | dict[str, Any]
     skill_references: list[SkillRef]
     flow_tool_overlay: dict[str, Any]

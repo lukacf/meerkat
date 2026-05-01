@@ -323,12 +323,23 @@ const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-
 const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
 const helperWithConnectionResult: Promise<MobHelperResult> = mob.spawnHelper(
   'Summarize using the OpenAI binding.',
-  { connectionRef: { realm: 'default', binding: 'openai', profile: 'work' } },
+  {
+    turnMetadata: {
+      connectionRef: {
+        action: 'set',
+        value: { realm: 'default', binding: 'openai', profile: 'work' },
+      },
+    },
+  },
 );
 const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'worker-1',
   'Review the draft and suggest one improvement.',
-  { connectionRef: { realm: 'default', binding: 'anthropic' } },
+  {
+    turnMetadata: {
+      connectionRef: { action: 'set', value: { realm: 'default', binding: 'anthropic' } },
+    },
+  },
 );
 const memberSubscription = mob.member('worker-1').subscribe();
 const mobSubscription = mob.subscribeEvents();

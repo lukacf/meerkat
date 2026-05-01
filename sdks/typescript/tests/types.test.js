@@ -964,8 +964,11 @@ describe("Session wrappers", () => {
         keepAlive: true,
         model: "m",
         provider: "openai",
-        providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
-        connectionRef: { realm: "dev", binding: "default_openai" },
+        providerParams: {
+          action: "set",
+          value: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
+        },
+        connectionRef: { action: "set", value: { realm: "dev", binding: "default_openai" } },
       },
     });
     client._startTurnStreaming("s1", "hello", {
@@ -974,8 +977,8 @@ describe("Session wrappers", () => {
         keepAlive: true,
         model: "m",
         provider: "openai-compatible",
-        providerParams: { foo: "bar" },
-        connectionRef: { realm: "dev", binding: "default_openai" },
+        providerParams: { action: "set", value: { foo: "bar" } },
+        connectionRef: { action: "set", value: { realm: "dev", binding: "default_openai" } },
       },
     });
 
@@ -1560,7 +1563,7 @@ describe("Parity wrappers", () => {
       context: { ticket: "LUC-134" },
       turnMetadata: {
         additionalInstructions: ["stay focused"],
-        connectionRef: { realm: "dev", binding: "default_anthropic" },
+        connectionRef: { action: "set", value: { realm: "dev", binding: "default_anthropic" } },
       },
       binding: { kind: "session" },
       shellEnv: { TEST_MODE: "1" },
@@ -1578,7 +1581,7 @@ describe("Parity wrappers", () => {
       profile: "worker",
       agentIdentity: "worker-1",
       turnMetadata: {
-        connectionRef: { realm: "dev", binding: "default_anthropic" },
+        connectionRef: { action: "set", value: { realm: "dev", binding: "default_anthropic" } },
       },
     }]);
     await client.mobTurnStart(
@@ -1593,9 +1596,11 @@ describe("Parity wrappers", () => {
           keepAlive: true,
           model: "gpt-test",
           provider: "openai",
-          providerParams: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
-          connectionRef: { realm: "dev", binding: "default_openai" },
-          clearConnectionRef: true,
+          providerParams: {
+            action: "set",
+            value: { temperature: 0.2, reasoning: { effort: "medium" }, foo: "bar" },
+          },
+          connectionRef: { action: "clear" },
         },
       },
     );

@@ -170,7 +170,7 @@ const publicSpawnSpecWithAdvancedFields: SpawnSpec = {
   context: { ticket: "LUC-134" },
   turnMetadata: {
     additionalInstructions: ["stay focused"],
-    connectionRef: { realm: "dev", binding: "default_anthropic" },
+    connectionRef: { action: "set", value: { realm: "dev", binding: "default_anthropic" } },
   },
   binding: { kind: "session" },
   shellEnv: { TEST_MODE: "1" },
@@ -191,7 +191,7 @@ const publicSpawnManySpec: SpawnManySpec = {
   profile: "worker",
   agentIdentity: "worker-many",
   turnMetadata: {
-    connectionRef: { realm: "dev", binding: "default_anthropic" },
+    connectionRef: { action: "set", value: { realm: "dev", binding: "default_anthropic" } },
   },
 };
 
@@ -214,10 +214,8 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
     keepAlive: true,
     model: "gpt-test",
     provider: "openai",
-    providerParams: { temperature: 0.2 },
-    clearProviderParams: true,
-    connectionRef: { realm: "dev", binding: "default_openai" },
-    clearConnectionRef: true,
+    providerParams: { action: "set", value: { temperature: 0.2 } },
+    connectionRef: { action: "clear" },
   },
 };
 

@@ -1793,7 +1793,12 @@ fn apply_spawn_turn_metadata(
             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
                 Some(params.to_legacy_provider_value())
             }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(err_js(
+                    "invalid_specs",
+                    "mob spawn turn_metadata.provider_params clear is not supported",
+                ));
+            }
         };
     }
     if let Some(instructions) = metadata.additional_instructions {
@@ -1811,9 +1816,100 @@ fn apply_spawn_turn_metadata(
             meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
                 Some(connection_ref)
             }
-            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => None,
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(err_js(
+                    "invalid_specs",
+                    "mob spawn turn_metadata.connection_ref clear is not supported",
+                ));
+            }
         };
     }
+    Ok(())
+}
+
+fn apply_helper_turn_metadata(
+    options: &mut meerkat_mob::HelperOptions,
+    turn_metadata: Option<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>,
+) -> Result<(), JsValue> {
+    let Some(turn_metadata) = turn_metadata else {
+        return Ok(());
+    };
+    let metadata: meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata =
+        turn_metadata.into();
+
+    if metadata.handling_mode.is_some() {
+        return Err(err_js(
+            "invalid_request",
+            "mob helper turn_metadata.handling_mode is not supported",
+        ));
+    }
+    if metadata.skill_references.is_some() {
+        return Err(err_js(
+            "invalid_request",
+            "mob helper turn_metadata.skill_references is not supported",
+        ));
+    }
+    if metadata.flow_tool_overlay.is_some() {
+        return Err(err_js(
+            "invalid_request",
+            "mob helper turn_metadata.flow_tool_overlay is not supported",
+        ));
+    }
+    if metadata.provider.is_some() {
+        return Err(err_js(
+            "invalid_request",
+            "mob helper turn_metadata.provider is not supported",
+        ));
+    }
+    if metadata.keep_alive.is_some() {
+        return Err(err_js(
+            "invalid_request",
+            "mob helper turn_metadata.keep_alive is not supported",
+        ));
+    }
+    if metadata.render_metadata.is_some() {
+        return Err(err_js(
+            "invalid_request",
+            "mob helper turn_metadata.render_metadata is not supported",
+        ));
+    }
+    if metadata.additional_instructions.is_some() {
+        return Err(err_js(
+            "invalid_request",
+            "mob helper turn_metadata.additional_instructions is not supported",
+        ));
+    }
+
+    if let Some(model) = metadata.model {
+        options.model_override = Some(model.to_string());
+    }
+    if let Some(provider_params) = metadata.provider_params {
+        options.provider_params_override = match provider_params {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(params) => {
+                Some(params.to_legacy_provider_value())
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(err_js(
+                    "invalid_request",
+                    "mob helper turn_metadata.provider_params clear is not supported",
+                ));
+            }
+        };
+    }
+    if let Some(connection_ref) = metadata.connection_ref {
+        options.connection_ref = match connection_ref {
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(connection_ref) => {
+                Some(connection_ref)
+            }
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear => {
+                return Err(err_js(
+                    "invalid_request",
+                    "mob helper turn_metadata.connection_ref clear is not supported",
+                ));
+            }
+        };
+    }
+
     Ok(())
 }
 
@@ -2101,14 +2197,15 @@ struct MobMemberSendOptions {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MobSpawnHelperOptions {
     prompt: String,
     #[serde(default)]
     agent_identity: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
     #[serde(default)]
-    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
+    turn_metadata: Option<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>,
     #[serde(default)]
     runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
     #[serde(default)]
@@ -2116,15 +2213,16 @@ struct MobSpawnHelperOptions {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MobForkHelperOptions {
     source_member_id: String,
     prompt: String,
     #[serde(default)]
     agent_identity: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "profile_name")]
     role_name: Option<String>,
     #[serde(default)]
-    connection_ref: Option<meerkat_contracts::WireConnectionRef>,
+    turn_metadata: Option<meerkat_contracts::wire::runtime::WireRuntimeTurnMetadata>,
     #[serde(default)]
     fork_context: Option<meerkat_mob::ForkContext>,
     #[serde(default)]
@@ -2247,9 +2345,7 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
-    if let Some(connection_ref) = request.connection_ref {
-        options.connection_ref = Some(connection_ref.into());
-    }
+    apply_helper_turn_metadata(&mut options, request.turn_metadata)?;
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
     let result = mob_state
@@ -2281,9 +2377,7 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
     }
-    if let Some(connection_ref) = request.connection_ref {
-        options.connection_ref = Some(connection_ref.into());
-    }
+    apply_helper_turn_metadata(&mut options, request.turn_metadata)?;
     options.runtime_mode = request.runtime_mode;
     options.backend = request.backend;
     let result = mob_state
@@ -3003,6 +3097,43 @@ capabilities = [{capability_values}]
             err.to_string().contains("additional_instructions"),
             "unexpected error: {err}"
         );
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn helper_options_reject_top_level_connection_ref() {
+        let err = serde_json::from_value::<super::MobSpawnHelperOptions>(json!({
+            "prompt": "summarize",
+            "agent_identity": "helper-1",
+            "profile_name": "worker",
+            "connection_ref": {
+                "realm": "default",
+                "binding": "openai"
+            }
+        }))
+        .expect_err("helper connection override must live in turn_metadata");
+        assert!(
+            err.to_string().contains("connection_ref"),
+            "unexpected error: {err}"
+        );
+
+        let options = serde_json::from_value::<super::MobSpawnHelperOptions>(json!({
+            "prompt": "summarize",
+            "agent_identity": "helper-1",
+            "profile_name": "worker",
+            "turn_metadata": {
+                "connection_ref": {
+                    "action": "set",
+                    "value": {
+                        "realm": "default",
+                        "binding": "openai"
+                    }
+                }
+            }
+        }))
+        .expect("helper should accept canonical turn_metadata connection override");
+        assert!(options.turn_metadata.is_some());
+        assert_eq!(options.role_name.as_deref(), Some("worker"));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

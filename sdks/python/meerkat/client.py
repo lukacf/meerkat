@@ -318,9 +318,7 @@ def _runtime_turn_metadata(
     if isinstance(provider, str):
         metadata["provider"] = _runtime_provider_wire(provider)
 
-    if source.get("clear_provider_params"):
-        metadata["provider_params"] = {"action": "clear"}
-    elif source.get("provider_params") is not None:
+    if source.get("provider_params") is not None:
         provider_params = source["provider_params"]
         if isinstance(provider_params, dict) and "action" in provider_params:
             metadata["provider_params"] = provider_params
@@ -330,9 +328,7 @@ def _runtime_turn_metadata(
                 "value": _runtime_provider_params_override(provider_params, provider),
             }
 
-    if source.get("clear_connection_ref"):
-        metadata["connection_ref"] = {"action": "clear"}
-    elif source.get("connection_ref") is not None:
+    if source.get("connection_ref") is not None:
         connection_ref = source["connection_ref"]
         if isinstance(connection_ref, dict) and "action" in connection_ref:
             metadata["connection_ref"] = connection_ref

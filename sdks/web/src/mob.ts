@@ -1,6 +1,5 @@
 import { EventSubscription } from './events.js';
 import type {
-  ConnectionRef,
   ContentInput,
   HandlingMode,
   SpawnSpec,
@@ -432,7 +431,7 @@ export class Mob {
     options?: {
       agentIdentity?: string;
       profileName?: string;
-      connectionRef?: ConnectionRef;
+      turnMetadata?: RuntimeTurnMetadata;
       runtimeMode?: string;
       backend?: string;
     },
@@ -443,7 +442,7 @@ export class Mob {
           prompt,
           agent_identity: options?.agentIdentity,
           profile_name: options?.profileName,
-          connection_ref: options?.connectionRef,
+          turn_metadata: turnMetadataToWasm(options?.turnMetadata),
           runtime_mode: options?.runtimeMode,
           backend: options?.backend,
         }),
@@ -474,7 +473,7 @@ export class Mob {
     options?: {
       agentIdentity?: string;
       profileName?: string;
-      connectionRef?: ConnectionRef;
+      turnMetadata?: RuntimeTurnMetadata;
       forkContext?: Record<string, unknown>;
       runtimeMode?: string;
       backend?: string;
@@ -487,7 +486,7 @@ export class Mob {
           prompt,
           agent_identity: options?.agentIdentity,
           profile_name: options?.profileName,
-          connection_ref: options?.connectionRef,
+          turn_metadata: turnMetadataToWasm(options?.turnMetadata),
           fork_context: options?.forkContext,
           runtime_mode: options?.runtimeMode,
           backend: options?.backend,

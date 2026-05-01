@@ -319,18 +319,20 @@ function runtimeTurnMetadataPayload(
   if (keepAlive) metadata.keep_alive = keepAlive;
   setIfDefined(metadata, "model", options.model);
   setIfDefined(metadata, "provider", runtimeProviderPayload(options.provider));
-  if (options.clearProviderParams) {
-    metadata.provider_params = { action: "clear" };
-  } else if (options.providerParams != null) {
-    metadata.provider_params = {
-      action: "set",
-      value: runtimeProviderParamsPayload(options.providerParams, options.provider),
-    };
+  if (options.providerParams != null) {
+    metadata.provider_params =
+      options.providerParams.action === "clear"
+        ? { action: "clear" }
+        : {
+            action: "set",
+            value: runtimeProviderParamsPayload(options.providerParams.value, options.provider),
+          };
   }
-  if (options.clearConnectionRef) {
-    metadata.connection_ref = { action: "clear" };
-  } else if (options.connectionRef != null) {
-    metadata.connection_ref = { action: "set", value: options.connectionRef };
+  if (options.connectionRef != null) {
+    metadata.connection_ref =
+      options.connectionRef.action === "clear"
+        ? { action: "clear" }
+        : { action: "set", value: options.connectionRef.value };
   }
   return Object.keys(metadata).length > 0 ? metadata : undefined;
 }

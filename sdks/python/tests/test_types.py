@@ -407,8 +407,11 @@ async def test_spawn_mob_members_normalizes_nested_turn_metadata():
                 "turn_metadata": {
                     "additional_instructions": ["stay focused"],
                     "connection_ref": {
-                        "realm": "dev",
-                        "binding": "default_anthropic",
+                        "action": "set",
+                        "value": {
+                            "realm": "dev",
+                            "binding": "default_anthropic",
+                        },
                     },
                 },
             }
@@ -938,8 +941,6 @@ def test_session_signatures_expose_single_turn_metadata_carrier() -> None:
         "skill_refs",
         "additional_instructions",
         "flow_tool_overlay",
-        "clear_provider_params",
-        "clear_connection_ref",
     ]
     for method in [
         MeerkatClient.create_session,
@@ -1726,8 +1727,14 @@ async def test_session_turn_and_stream_use_single_turn_metadata_carrier():
             "keep_alive": True,
             "model": "claude-sonnet-4-6",
             "provider": "anthropic",
-            "provider_params": {"reasoning_effort": "low"},
-            "connection_ref": {"realm": "dev", "binding": "default_anthropic"},
+            "provider_params": {
+                "action": "set",
+                "value": {"reasoning_effort": "low"},
+            },
+            "connection_ref": {
+                "action": "set",
+                "value": {"realm": "dev", "binding": "default_anthropic"},
+            },
         },
     )
     assert result.text == "ok"
@@ -1739,8 +1746,7 @@ async def test_session_turn_and_stream_use_single_turn_metadata_carrier():
             "keep_alive": False,
             "model": "gpt-5.4",
             "provider": "openai",
-            "provider_params": {"foo": "bar"},
-            "clear_provider_params": True,
+            "provider_params": {"action": "clear"},
         },
     )
     assert stream_handle == "stream-handle"
@@ -1843,12 +1849,14 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_turn_metadata():
             "model": "gpt-test",
             "provider": "openai",
             "provider_params": {
-                "temperature": 0.2,
-                "reasoning": {"effort": "medium"},
-                "foo": "bar",
+                "action": "set",
+                "value": {
+                    "temperature": 0.2,
+                    "reasoning": {"effort": "medium"},
+                    "foo": "bar",
+                },
             },
-            "connection_ref": {"realm": "dev", "binding": "default_openai"},
-            "clear_connection_ref": True,
+            "connection_ref": {"action": "clear"},
         },
     )
 
@@ -1881,14 +1889,8 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_turn_metadata():
                         "action": "set",
                         "value": {
                             "temperature": 0.2,
-                            "provider_tag": {
-                                "provider": "unknown",
-                                "bag": {
-                                    "namespace": "openai",
-                                    "key": "provider_params",
-                                    "body": "{\"reasoning\":{\"effort\":\"medium\"},\"foo\":\"bar\"}",
-                                },
-                            },
+                            "reasoning": {"effort": "medium"},
+                            "foo": "bar",
                         },
                     },
                     "connection_ref": {"action": "clear"},
@@ -2074,7 +2076,10 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         context={"ticket": "LUC-134"},
         turn_metadata={
             "additional_instructions": ["stay focused"],
-            "connection_ref": {"realm": "dev", "binding": "default_anthropic"},
+            "connection_ref": {
+                "action": "set",
+                "value": {"realm": "dev", "binding": "default_anthropic"},
+            },
         },
         binding={"kind": "session"},
         shell_env={"TEST_MODE": "1"},

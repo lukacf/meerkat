@@ -14579,6 +14579,114 @@ async fn test_turn_driven_respawn_preserves_spawn_turn_metadata() {
 }
 
 #[tokio::test]
+async fn test_turn_driven_respawn_applies_spawn_turn_metadata_to_replacement_materialization() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let model = "gpt-respawn-materialization";
+    let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        model: Some(meerkat_core::lifecycle::run_primitive::ModelId::new(model)),
+        ..Default::default()
+    };
+
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("lead", AgentIdentity::from("l-turn-materialize"))
+                .with_runtime_mode(crate::MobRuntimeMode::TurnDriven)
+                .with_turn_metadata(turn_metadata),
+        )
+        .await
+        .expect("spawn turn-driven lead with materialization metadata");
+
+    handle
+        .respawn(AgentIdentity::from("l-turn-materialize"), None)
+        .await
+        .expect("respawn turn-driven member");
+
+    let snapshot = handle
+        .member_status(&AgentIdentity::from("l-turn-materialize"))
+        .await
+        .expect("member snapshot after respawn");
+    let replacement_session_id = snapshot
+        .current_bridge_session_id
+        .expect("respawned turn-driven member should be session-backed");
+    let replacement = service
+        .live_session_clone(&replacement_session_id)
+        .await
+        .expect("replacement session should exist");
+    let metadata = replacement
+        .session_metadata()
+        .expect("replacement session should have metadata");
+
+    assert_eq!(
+        metadata.model, model,
+        "unconsumed spawn turn metadata must materialize replacement sessions"
+    );
+}
+
+#[tokio::test]
+async fn test_autonomous_respawn_does_not_replay_consumed_spawn_turn_metadata() {
+    let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
+    service.set_keep_alive_turns_complete_immediately(true);
+    let identity = AgentIdentity::from("l-auto-consumed");
+    let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+        additional_instructions: Some(vec![
+            meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::Host,
+                body: "one-shot autonomous metadata".to_string(),
+            },
+        ]),
+        ..Default::default()
+    };
+
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("lead", identity.clone())
+                .with_runtime_mode(crate::MobRuntimeMode::AutonomousHost)
+                .with_turn_metadata(turn_metadata),
+        )
+        .await
+        .expect("spawn autonomous lead with metadata");
+    handle
+        .wait_for_members_kickoff_complete(
+            std::slice::from_ref(&identity),
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("autonomous kickoff should complete");
+    let before_respawn = service.recorded_start_turn_metadata().await.len();
+
+    handle
+        .respawn(identity.clone(), None)
+        .await
+        .expect("respawn autonomous member");
+    handle
+        .wait_for_members_kickoff_complete(
+            std::slice::from_ref(&identity),
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .expect("autonomous replacement kickoff should complete");
+
+    let recorded = service.recorded_start_turn_metadata().await;
+    assert!(
+        recorded.len() > before_respawn,
+        "respawn should start a replacement autonomous kickoff"
+    );
+    let (_, metadata) = recorded
+        .last()
+        .expect("replacement kickoff metadata should be recorded");
+    let replayed = metadata
+        .as_ref()
+        .and_then(|metadata| metadata.additional_instructions.as_ref())
+        .into_iter()
+        .flatten()
+        .any(|instruction| instruction.body == "one-shot autonomous metadata");
+    assert!(
+        !replayed,
+        "autonomous first-turn metadata must be consumed after the original kickoff succeeds"
+    );
+}
+
+#[tokio::test]
 async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() {
     let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
     handle

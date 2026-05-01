@@ -14,6 +14,9 @@ pub enum PeerHandlingModeError {
     /// handling_mode is not allowed on ResponseProgress peer inputs.
     #[error("handling_mode is forbidden on ResponseProgress peer inputs")]
     ForbiddenForResponseProgress,
+    /// Legacy handling_mode and canonical turn_metadata.handling_mode disagree.
+    #[error("peer handling_mode diverges from turn_metadata.handling_mode")]
+    DivergentHandlingMode,
 }
 
 /// Validate that a peer input does not carry handling_mode on response progress.
@@ -21,7 +24,17 @@ pub fn validate_peer_handling_mode(input: &Input) -> Result<(), PeerHandlingMode
     let Input::Peer(peer) = input else {
         return Ok(());
     };
-    if peer.handling_mode.is_none() {
+    let metadata_handling_mode = peer
+        .turn_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.handling_mode);
+    if let (Some(legacy), Some(canonical)) = (peer.handling_mode, metadata_handling_mode)
+        && legacy != canonical
+    {
+        return Err(PeerHandlingModeError::DivergentHandlingMode);
+    }
+    let handling_mode = metadata_handling_mode.or(peer.handling_mode);
+    if handling_mode.is_none() {
         return Ok(());
     }
     match &peer.convention {
@@ -39,6 +52,7 @@ mod tests {
     use crate::input::*;
     use chrono::Utc;
     use meerkat_core::lifecycle::InputId;
+    use meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata;
     use meerkat_core::types::HandlingMode;
 
     fn make_header() -> InputHeader {
@@ -77,6 +91,65 @@ mod tests {
             err,
             PeerHandlingModeError::ForbiddenForResponseProgress
         ));
+    }
+
+    #[test]
+    fn response_progress_with_turn_metadata_handling_mode_rejected() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::ResponseProgress {
+                request_id: "r".into(),
+                phase: ResponseProgressPhase::InProgress,
+            }),
+            body: "working".into(),
+            payload: Some(serde_json::json!({"progress": "working"})),
+            blocks: None,
+            turn_metadata: Some(RuntimeTurnMetadata {
+                handling_mode: Some(HandlingMode::Queue),
+                ..Default::default()
+            }),
+            handling_mode: None,
+        });
+        let err = validate_peer_handling_mode(&input).unwrap_err();
+        assert!(matches!(
+            err,
+            PeerHandlingModeError::ForbiddenForResponseProgress
+        ));
+    }
+
+    #[test]
+    fn divergent_legacy_and_turn_metadata_handling_modes_rejected() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::Message),
+            body: "hi".into(),
+            payload: None,
+            blocks: None,
+            turn_metadata: Some(RuntimeTurnMetadata {
+                handling_mode: Some(HandlingMode::Steer),
+                ..Default::default()
+            }),
+            handling_mode: Some(HandlingMode::Queue),
+        });
+        let err = validate_peer_handling_mode(&input).unwrap_err();
+        assert!(matches!(err, PeerHandlingModeError::DivergentHandlingMode));
+    }
+
+    #[test]
+    fn matching_legacy_and_turn_metadata_handling_modes_accepted() {
+        let input = Input::Peer(PeerInput {
+            header: make_header(),
+            convention: Some(PeerConvention::Message),
+            body: "hi".into(),
+            payload: None,
+            blocks: None,
+            turn_metadata: Some(RuntimeTurnMetadata {
+                handling_mode: Some(HandlingMode::Queue),
+                ..Default::default()
+            }),
+            handling_mode: Some(HandlingMode::Queue),
+        });
+        assert!(validate_peer_handling_mode(&input).is_ok());
     }
 
     #[test]

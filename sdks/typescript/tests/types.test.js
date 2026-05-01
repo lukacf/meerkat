@@ -999,6 +999,33 @@ describe("Session wrappers", () => {
         },
       },
     });
+    await client._startTurn("s1", "hello", {
+      turnMetadata: {
+        provider: "openai",
+        providerParams: {
+          action: "set",
+          value: {
+            provider_tag: {
+              provider: "open_ai",
+              seed: null,
+              supports_temperature_override: null,
+            },
+          },
+        },
+      },
+    });
+    await client._startTurn("s1", "hello", {
+      turnMetadata: {
+        provider: "openai",
+        providerParams: {
+          action: "set",
+          value: {
+            provider_tag: { provider: "open_ai", bogus: 1 },
+            foo: "bar",
+          },
+        },
+      },
+    });
 
     assert.equal(calls[0].method, "turn/start");
     assert.deepEqual(calls[0].params.turn_metadata.skill_references, [
@@ -1050,6 +1077,29 @@ describe("Session wrappers", () => {
             namespace: "openai",
             key: "provider_params",
             body: "{\"provider_tag\":{\"provider\":\"not-real\"},\"foo\":\"bar\"}",
+          },
+        },
+      },
+    });
+    assert.deepEqual(calls[3].params.turn_metadata.provider_params, {
+      action: "set",
+      value: {
+        provider_tag: {
+          provider: "open_ai",
+          seed: null,
+          supports_temperature_override: null,
+        },
+      },
+    });
+    assert.deepEqual(calls[4].params.turn_metadata.provider_params, {
+      action: "set",
+      value: {
+        provider_tag: {
+          provider: "unknown",
+          bag: {
+            namespace: "openai",
+            key: "provider_params",
+            body: "{\"provider_tag\":{\"provider\":\"open_ai\",\"bogus\":1},\"foo\":\"bar\"}",
           },
         },
       },

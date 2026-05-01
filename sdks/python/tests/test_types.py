@@ -161,6 +161,60 @@ def test_runtime_turn_metadata_provider_params_are_schema_valid():
         },
     }
 
+    malformed_known_provider_tag = _runtime_turn_metadata(
+        {
+            "provider": "openai",
+            "provider_params": {
+                "action": "set",
+                "value": {
+                    "provider_tag": {"provider": "open_ai", "bogus": 1},
+                    "foo": "bar",
+                },
+            },
+        }
+    )
+    assert malformed_known_provider_tag is not None
+    assert malformed_known_provider_tag["provider_params"] == {
+        "action": "set",
+        "value": {
+            "provider_tag": {
+                "provider": "unknown",
+                "bag": {
+                    "namespace": "openai",
+                    "key": "provider_params",
+                    "body": "{\"provider_tag\":{\"provider\":\"open_ai\",\"bogus\":1},\"foo\":\"bar\"}",
+                },
+            },
+        },
+    }
+
+    nullable_known_provider_tag = _runtime_turn_metadata(
+        {
+            "provider": "openai",
+            "provider_params": {
+                "action": "set",
+                "value": {
+                    "provider_tag": {
+                        "provider": "open_ai",
+                        "seed": None,
+                        "supports_temperature_override": None,
+                    },
+                },
+            },
+        }
+    )
+    assert nullable_known_provider_tag is not None
+    assert nullable_known_provider_tag["provider_params"] == {
+        "action": "set",
+        "value": {
+            "provider_tag": {
+                "provider": "open_ai",
+                "seed": None,
+                "supports_temperature_override": None,
+            },
+        },
+    }
+
     for field, value in [
         ("keep_alive", True),
         ("provider_params", {"foo": "bar"}),

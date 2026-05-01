@@ -119,7 +119,7 @@ fn runtime_non_prompt_inputs_reject_stale_metadata_fields() {
     });
     assert_unknown_field_rejected(
         serde_json::to_value(peer).expect("serialize peer"),
-        "turn_metadata",
+        "provider_params",
     );
 
     let external = Input::ExternalEvent(ExternalEventInput {

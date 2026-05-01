@@ -48,6 +48,7 @@ import {
   type RealtimeOpenInfo,
   type RealtimeOpenRequest,
   type RealtimeStatusResult,
+  type JsonValue,
   type RuntimeAcceptResult,
   type MobTurnStartParams,
   type RuntimeRealtimeAttachmentStatusResult,
@@ -250,6 +251,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) return true;
+  if (typeof value === "boolean" || typeof value === "string") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (isRecord(value)) return Object.values(value).every(isJsonValue);
+  return false;
+}
+
+function isOptionalJsonValue(value: unknown): boolean {
+  return value === undefined || isJsonValue(value);
+}
+
+function isOptionalJsonNumber(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+function isOptionalJsonU32(value: unknown): boolean {
+  return value === undefined || value === null || isJsonU32(value);
+}
+
+function isOptionalBoolean(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "boolean";
+}
+
 function isStructuredProviderExtension(value: unknown): value is {
   namespace: string;
   key: string;
@@ -257,6 +291,7 @@ function isStructuredProviderExtension(value: unknown): value is {
 } {
   return (
     isRecord(value) &&
+    hasOnlyKeys(value, ["namespace", "key", "body"]) &&
     typeof value.namespace === "string" &&
     typeof value.key === "string" &&
     typeof value.body === "string"
@@ -266,9 +301,88 @@ function isStructuredProviderExtension(value: unknown): value is {
 function isWireProviderTag(value: unknown): value is WireProviderTag {
   if (!isRecord(value) || typeof value.provider !== "string") return false;
   if (value.provider === "unknown") {
-    return isStructuredProviderExtension(value.bag);
+    return hasOnlyKeys(value, ["provider", "bag"]) && isStructuredProviderExtension(value.bag);
   }
-  return ["anthropic", "open_ai", "gemini"].includes(value.provider);
+  if (value.provider === "anthropic") {
+    return (
+      hasOnlyKeys(value, [
+        "provider",
+        "thinking",
+        "thinking_budget_tokens",
+        "web_search",
+        "top_k",
+        "effort",
+        "structured_output",
+        "inference_geo",
+        "compaction",
+        "context",
+        "supports_temperature_override",
+      ]) &&
+      isOptionalJsonValue(value.thinking) &&
+      isOptionalJsonU32(value.thinking_budget_tokens) &&
+      isOptionalJsonValue(value.web_search) &&
+      isOptionalJsonU32(value.top_k) &&
+      isOptionalJsonValue(value.effort) &&
+      isOptionalJsonValue(value.structured_output) &&
+      isOptionalJsonValue(value.inference_geo) &&
+      isOptionalJsonValue(value.compaction) &&
+      isOptionalJsonValue(value.context) &&
+      isOptionalBoolean(value.supports_temperature_override)
+    );
+  }
+  if (value.provider === "open_ai") {
+    return (
+      hasOnlyKeys(value, [
+        "provider",
+        "reasoning_effort",
+        "seed",
+        "frequency_penalty",
+        "presence_penalty",
+        "web_search",
+        "structured_output",
+        "reasoning",
+        "chat_template_kwargs",
+        "thinking",
+        "supports_temperature_override",
+        "supports_reasoning_override",
+      ]) &&
+      isOptionalJsonValue(value.reasoning_effort) &&
+      isOptionalJsonNumber(value.seed) &&
+      isOptionalJsonNumber(value.frequency_penalty) &&
+      isOptionalJsonNumber(value.presence_penalty) &&
+      isOptionalJsonValue(value.web_search) &&
+      isOptionalJsonValue(value.structured_output) &&
+      isOptionalJsonValue(value.reasoning) &&
+      isOptionalJsonValue(value.chat_template_kwargs) &&
+      isOptionalJsonValue(value.thinking) &&
+      isOptionalBoolean(value.supports_temperature_override) &&
+      isOptionalBoolean(value.supports_reasoning_override)
+    );
+  }
+  if (value.provider === "gemini") {
+    return (
+      hasOnlyKeys(value, [
+        "provider",
+        "thinking",
+        "thinking_budget",
+        "thinking_level",
+        "top_k",
+        "top_p",
+        "structured_output",
+        "google_search",
+        "candidate_count",
+      ]) &&
+      isOptionalJsonValue(value.thinking) &&
+      isOptionalJsonU32(value.thinking_budget) &&
+      isOptionalJsonValue(value.thinking_level) &&
+      isOptionalJsonU32(value.top_k) &&
+      isOptionalJsonNumber(value.top_p) &&
+      isOptionalJsonValue(value.structured_output) &&
+      isOptionalJsonValue(value.google_search) &&
+      isOptionalJsonU32(value.candidate_count)
+    );
+  }
+  return false;
 }
 
 function isJsonNumber(value: unknown): value is number {

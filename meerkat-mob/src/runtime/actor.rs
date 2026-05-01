@@ -2508,6 +2508,40 @@ impl MobActor {
         )
     }
 
+    async fn consume_initial_turn_metadata_for_member(
+        &self,
+        agent_identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let should_consume = {
+            let roster = self.roster.read().await;
+            roster
+                .get_by_identity(agent_identity)
+                .filter(|entry| entry.generation == generation)
+                .and_then(|entry| entry.initial_turn_metadata.as_ref())
+                .is_some()
+        };
+        if !should_consume {
+            return Ok(());
+        }
+
+        self.events
+            .append(NewMobEvent {
+                mob_id: self.definition.id.clone(),
+                timestamp: None,
+                kind: MobEventKind::MemberInitialTurnMetadataConsumed {
+                    agent_identity: agent_identity.clone(),
+                    generation,
+                },
+            })
+            .await?;
+        self.roster
+            .write()
+            .await
+            .clear_initial_turn_metadata(agent_identity, generation);
+        Ok(())
+    }
+
     /// Start the autonomous runtime for a member and deliver its initial prompt.
     ///
     /// Sets up the keep-alive infrastructure (comms drain, dispatch capability)
@@ -2539,6 +2573,7 @@ impl MobActor {
                     (
                         mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id),
                         mob_dsl::FenceToken::from_domain(entry.fence_token),
+                        entry.generation,
                     )
                 })
         }
@@ -2547,17 +2582,18 @@ impl MobActor {
                 "autonomous member '{agent_identity}' missing roster entry for startup readiness"
             ))
         })?;
+        let (startup_runtime_id, startup_fence_token, generation) = startup_marker;
 
         if !self
             .dsl_authority
             .state
             .member_startup_ready
-            .contains(&startup_marker.0)
+            .contains(&startup_runtime_id)
         {
             self.apply_dsl_input(
                 mob_dsl::MobMachineInput::StartupMarkReady {
-                    agent_runtime_id: startup_marker.0,
-                    fence_token: startup_marker.1,
+                    agent_runtime_id: startup_runtime_id,
+                    fence_token: startup_fence_token,
                 },
                 "start_autonomous_member/startup_mark_ready",
             )?;
@@ -2608,6 +2644,11 @@ impl MobActor {
                         "autonomous prompt admission failed for '{agent_identity}': {e}"
                     ))
                 })?;
+            self.consume_initial_turn_metadata_for_member(
+                &AgentIdentity::from(agent_identity.as_str()),
+                generation,
+            )
+            .await?;
 
             // Spawn background task for completion wait.
             let log_id = agent_identity.clone();
@@ -7553,13 +7594,16 @@ impl MobActor {
             ContentInput::from(self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity))
         });
         // Prefer roster's effective_profile_override on respawn for lifecycle safety.
-        let profile = if let Some(p) = snapshot.effective_profile_override.clone() {
+        let mut profile = if let Some(p) = snapshot.effective_profile_override.clone() {
             p
         } else {
             self.definition
                 .resolve_profile(&snapshot.profile_name, self.realm_profile_store.as_ref())
                 .await?
         };
+        if let Some(metadata) = snapshot.initial_turn_metadata.as_ref() {
+            apply_member_turn_metadata_to_profile(&mut profile, metadata);
+        }
         let external_tools = self.external_tools_for_profile(&profile)?;
         let mut config = build::build_agent_config(build::BuildAgentConfigParams {
             mob_id: &self.definition.id,
@@ -7576,6 +7620,10 @@ impl MobActor {
             inherited_tool_filter: None,
         })
         .await?;
+        apply_member_turn_metadata_to_build_config(
+            &mut config,
+            snapshot.initial_turn_metadata.clone(),
+        )?;
         config.keep_alive = snapshot.runtime_mode == crate::MobRuntimeMode::AutonomousHost;
         if let Some(ref client) = self.default_llm_client {
             config.llm_client_override = Some(client.clone());
@@ -9231,20 +9279,11 @@ impl MobActor {
                 };
                 self.provisioner.start_turn(&entry.member_ref, req).await?;
                 if initial_turn_metadata.is_some() {
-                    self.events
-                        .append(NewMobEvent {
-                            mob_id: self.definition.id.clone(),
-                            timestamp: None,
-                            kind: MobEventKind::MemberInitialTurnMetadataConsumed {
-                                agent_identity: entry.agent_identity.clone(),
-                                generation: entry.generation,
-                            },
-                        })
-                        .await?;
-                    self.roster
-                        .write()
-                        .await
-                        .clear_initial_turn_metadata(&entry.agent_identity, entry.generation);
+                    self.consume_initial_turn_metadata_for_member(
+                        &entry.agent_identity,
+                        entry.generation,
+                    )
+                    .await?;
                 }
                 Ok(())
             }

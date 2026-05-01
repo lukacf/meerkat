@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, is_dataclass
 import json
+import math
 import os
 import platform
 import shutil
@@ -204,9 +205,42 @@ def _provider_params_namespace(provider: str | None) -> str:
     return provider or "unknown"
 
 
+def _has_only_keys(value: dict[str, Any], allowed: set[str]) -> bool:
+    return set(value).issubset(allowed)
+
+
+def _is_json_value(value: Any) -> bool:
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_value(item) for key, item in value.items())
+    return False
+
+
+def _is_optional_json_value(value: Any) -> bool:
+    return value is None or _is_json_value(value)
+
+
+def _is_optional_json_number(value: Any) -> bool:
+    return value is None or _is_json_number(value)
+
+
+def _is_optional_json_u32(value: Any) -> bool:
+    return value is None or _is_json_u32(value)
+
+
+def _is_optional_bool(value: Any) -> bool:
+    return value is None or isinstance(value, bool)
+
+
 def _is_structured_provider_extension(value: Any) -> bool:
     return (
         isinstance(value, dict)
+        and _has_only_keys(value, {"namespace", "key", "body"})
         and isinstance(value.get("namespace"), str)
         and isinstance(value.get("key"), str)
         and isinstance(value.get("body"), str)
@@ -218,8 +252,95 @@ def _is_wire_provider_tag(value: Any) -> bool:
         return False
     provider = value.get("provider")
     if provider == "unknown":
-        return _is_structured_provider_extension(value.get("bag"))
-    return provider in {"anthropic", "open_ai", "gemini"}
+        return _has_only_keys(value, {"provider", "bag"}) and _is_structured_provider_extension(
+            value.get("bag")
+        )
+    if provider == "anthropic":
+        return (
+            _has_only_keys(
+                value,
+                {
+                    "provider",
+                    "thinking",
+                    "thinking_budget_tokens",
+                    "web_search",
+                    "top_k",
+                    "effort",
+                    "structured_output",
+                    "inference_geo",
+                    "compaction",
+                    "context",
+                    "supports_temperature_override",
+                },
+            )
+            and _is_optional_json_value(value.get("thinking"))
+            and _is_optional_json_u32(value.get("thinking_budget_tokens"))
+            and _is_optional_json_value(value.get("web_search"))
+            and _is_optional_json_u32(value.get("top_k"))
+            and _is_optional_json_value(value.get("effort"))
+            and _is_optional_json_value(value.get("structured_output"))
+            and _is_optional_json_value(value.get("inference_geo"))
+            and _is_optional_json_value(value.get("compaction"))
+            and _is_optional_json_value(value.get("context"))
+            and _is_optional_bool(value.get("supports_temperature_override"))
+        )
+    if provider == "open_ai":
+        return (
+            _has_only_keys(
+                value,
+                {
+                    "provider",
+                    "reasoning_effort",
+                    "seed",
+                    "frequency_penalty",
+                    "presence_penalty",
+                    "web_search",
+                    "structured_output",
+                    "reasoning",
+                    "chat_template_kwargs",
+                    "thinking",
+                    "supports_temperature_override",
+                    "supports_reasoning_override",
+                },
+            )
+            and _is_optional_json_value(value.get("reasoning_effort"))
+            and _is_optional_json_number(value.get("seed"))
+            and _is_optional_json_number(value.get("frequency_penalty"))
+            and _is_optional_json_number(value.get("presence_penalty"))
+            and _is_optional_json_value(value.get("web_search"))
+            and _is_optional_json_value(value.get("structured_output"))
+            and _is_optional_json_value(value.get("reasoning"))
+            and _is_optional_json_value(value.get("chat_template_kwargs"))
+            and _is_optional_json_value(value.get("thinking"))
+            and _is_optional_bool(value.get("supports_temperature_override"))
+            and _is_optional_bool(value.get("supports_reasoning_override"))
+        )
+    if provider == "gemini":
+        return (
+            _has_only_keys(
+                value,
+                {
+                    "provider",
+                    "thinking",
+                    "thinking_budget",
+                    "thinking_level",
+                    "top_k",
+                    "top_p",
+                    "structured_output",
+                    "google_search",
+                    "candidate_count",
+                },
+            )
+            and _is_optional_json_value(value.get("thinking"))
+            and _is_optional_json_u32(value.get("thinking_budget"))
+            and _is_optional_json_value(value.get("thinking_level"))
+            and _is_optional_json_u32(value.get("top_k"))
+            and _is_optional_json_number(value.get("top_p"))
+            and _is_optional_json_value(value.get("structured_output"))
+            and _is_optional_json_value(value.get("google_search"))
+            and _is_optional_json_u32(value.get("candidate_count"))
+        )
+    return False
 
 
 def _is_json_number(value: Any) -> bool:

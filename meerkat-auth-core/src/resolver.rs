@@ -673,19 +673,24 @@ impl ManagedStoreOAuthRefreshPreClaimGuard {
         self.active
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
+
+    fn fail_if_unclaimed(&self) -> Result<(), ProviderAuthError> {
+        if self.active.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            mark_managed_store_oauth_refresh_failed(
+                &self.env,
+                &self.binding,
+                self.refresh_started,
+                false,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for ManagedStoreOAuthRefreshPreClaimGuard {
     fn drop(&mut self) {
-        if self.active.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            let _ = mark_managed_store_oauth_refresh_failed(
-                &self.env,
-                &self.binding,
-                self.refresh_started,
-                false,
-            );
-        }
+        let _ = self.fail_if_unclaimed();
     }
 }
 
@@ -704,7 +709,9 @@ impl ManagedStoreOAuthRefreshFailureCoordinator {
         let env = self.env.clone();
         let binding = self.binding.clone();
         let refresh_started = self.refresh_started;
+        let pre_claim_guard = Arc::clone(&self.pre_claim_guard);
         Box::new(move || {
+            pre_claim_guard.disarm();
             Box::pin(async move {
                 let result = refresh_fn().await;
                 if let Err(err) = result.as_ref() {
@@ -733,10 +740,19 @@ impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
         key: TokenKey,
         refresh_fn: RefreshFn,
     ) -> Result<PersistedTokens, RefreshError> {
-        self.pre_claim_guard.disarm();
-        self.inner
+        let result = self
+            .inner
             .with_refresh(key, self.wrap_refresh_fn(refresh_fn))
-            .await
+            .await;
+        if let Err(err) = result.as_ref()
+            && let Err(lifecycle_err) = self.pre_claim_guard.fail_if_unclaimed()
+        {
+            return Err(RefreshError::Refresh(format!("{err}; {lifecycle_err}")));
+        }
+        if result.is_ok() {
+            self.pre_claim_guard.disarm();
+        }
+        result
     }
 
     async fn with_forced_refresh(
@@ -744,10 +760,19 @@ impl RefreshCoordinator for ManagedStoreOAuthRefreshFailureCoordinator {
         key: TokenKey,
         refresh_fn: RefreshFn,
     ) -> Result<PersistedTokens, RefreshError> {
-        self.pre_claim_guard.disarm();
-        self.inner
+        let result = self
+            .inner
             .with_forced_refresh(key, self.wrap_refresh_fn(refresh_fn))
-            .await
+            .await;
+        if let Err(err) = result.as_ref()
+            && let Err(lifecycle_err) = self.pre_claim_guard.fail_if_unclaimed()
+        {
+            return Err(RefreshError::Refresh(format!("{err}; {lifecycle_err}")));
+        }
+        if result.is_ok() {
+            self.pre_claim_guard.disarm();
+        }
+        result
     }
 }
 
@@ -2935,6 +2960,86 @@ mod tests {
             auth_lease.refresh_failed_count(),
             1,
             "dropping refresh ownership before coordinator claim should release Refreshing"
+        );
+        assert_eq!(
+            auth_lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::Expiring)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct RejectingRefreshCoordinator;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl RefreshCoordinator for RejectingRefreshCoordinator {
+        async fn with_refresh(
+            &self,
+            _key: TokenKey,
+            _refresh_fn: RefreshFn,
+        ) -> Result<PersistedTokens, RefreshError> {
+            Err(RefreshError::Cancelled)
+        }
+
+        async fn with_forced_refresh(
+            &self,
+            _key: TokenKey,
+            _refresh_fn: RefreshFn,
+        ) -> Result<PersistedTokens, RefreshError> {
+            Err(RefreshError::Cancelled)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn oauth_refresh_inner_coordinator_rejection_marks_transient_failure() {
+        let store: Arc<dyn TokenStore> = Arc::new(EphemeralTokenStore::new());
+        let binding =
+            simple_secret_binding(CredentialSourceSpec::ManagedStore, "managed_chatgpt_oauth");
+        let key = TokenKey::from_connection_ref(&binding.connection_ref);
+        let lease_key = LeaseKey::from_connection_ref(&binding.connection_ref);
+        let tokens = chatgpt_oauth_tokens("inner-coordinator-reject-access");
+        let expires_at = meerkat_core::persisted_token_expires_at_epoch_secs(&tokens);
+        let auth_lease = MutableAuthLeaseHandle::from_snapshot(AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(expires_at),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(2_000),
+        });
+        let mut previous = managed_store_tokens(
+            Arc::clone(&store),
+            key.clone(),
+            tokens,
+            Some(auth_lease.snapshot(&lease_key)),
+            ManagedStoreLifecycle::RefreshRequired,
+            None,
+        );
+        let env = ResolverEnvironment::testing()
+            .with_token_store(store)
+            .with_auth_lease_handle(auth_lease.clone());
+        let refresh_started =
+            begin_managed_store_oauth_refresh_lifecycle(&env, &binding, &mut previous)
+                .expect("valid lifecycle can enter refreshing");
+        assert!(refresh_started);
+
+        let coord = managed_store_oauth_refresh_failure_coordinator(
+            Arc::new(RejectingRefreshCoordinator),
+            env,
+            binding,
+            refresh_started,
+        );
+        let refresh_fn: crate::auth_store::RefreshFn =
+            Box::new(|| Box::pin(async { panic!("inner coordinator must not invoke refresh_fn") }));
+
+        assert!(matches!(
+            coord.with_refresh(key, refresh_fn).await,
+            Err(RefreshError::Cancelled)
+        ));
+        assert_eq!(
+            auth_lease.refresh_failed_count(),
+            1,
+            "inner coordinator rejection before provider ownership must release Refreshing"
         );
         assert_eq!(
             auth_lease.snapshot(&lease_key).phase,

@@ -6,14 +6,15 @@
 //! membership and terminal transitions are routed through generated
 //! AuthMachine inputs keyed by the target binding.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use meerkat_auth_core::oauth_flow::{
     OAuthDeviceFlowRecord, OAuthDevicePollLease, OAuthDevicePollLifecycle, OAuthFlowAuthority,
     OAuthFlowError, OAuthFlowRecord, OAuthFlowRegistry, OAuthFlowRegistrySnapshot,
-    OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow, PersistedOAuthDeviceFlow,
+    OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow,
+    PersistedOAuthBrowserFlowRemoval, PersistedOAuthDeviceFlow, PersistedOAuthDeviceFlowRemoval,
 };
 use meerkat_core::ConnectionRef;
 use meerkat_core::handles::DslTransitionError;
@@ -28,7 +29,8 @@ use super::auth_lease::{AuthLeaseReleaseObserver, ReleasedOAuthFlows};
 
 type StoreSlot = Arc<Mutex<Option<Weak<dyn RuntimeStore>>>>;
 type PayloadLock = Arc<Mutex<()>>;
-type RemovedSnapshotKeys = Vec<(ConnectionRef, String)>;
+type RemovedBrowserSnapshotKeys = Vec<PersistedOAuthBrowserFlowRemoval>;
+type RemovedDeviceSnapshotKeys = Vec<PersistedOAuthDeviceFlowRemoval>;
 
 fn current_time_millis() -> u64 {
     SystemTime::now()
@@ -82,18 +84,22 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
             .iter()
             .map(String::as_str)
             .collect::<BTreeSet<_>>();
-        let removed_browser = released
-            .browser_flow_ids
-            .iter()
-            .map(|flow_id| (target.clone(), flow_id.clone()))
-            .collect::<Vec<_>>();
-        let removed_device = released
-            .device_flow_ids
-            .iter()
-            .map(|device_code| (target.clone(), device_code.clone()))
-            .collect::<Vec<_>>();
         let now_millis = current_time_millis();
         let mut snapshot = self.registry.snapshot_for_persistence(now_millis);
+        let removed_browser = snapshot
+            .browser
+            .iter()
+            .filter(|flow| flow.target == target && browser_flow_ids.contains(flow.state.as_str()))
+            .map(browser_removal_from_flow)
+            .collect::<Vec<_>>();
+        let removed_device = snapshot
+            .device
+            .iter()
+            .filter(|flow| {
+                flow.target == target && device_flow_ids.contains(flow.device_code.as_str())
+            })
+            .map(device_removal_from_flow)
+            .collect::<Vec<_>>();
         snapshot.browser.retain(|flow| {
             !(flow.target == target && browser_flow_ids.contains(flow.state.as_str()))
         });
@@ -349,11 +355,17 @@ impl RuntimeOAuthFlowHandle {
         });
     }
 
-    fn retain_registry_payloads_with_lifecycle(&self) -> OAuthPrunedFlows {
-        self.registry.retain_flows_with_lifecycle(
+    fn retain_registry_payloads_with_lifecycle(
+        &self,
+    ) -> (OAuthPrunedFlows, OAuthFlowRegistrySnapshot) {
+        let before = self
+            .registry
+            .snapshot_for_persistence(current_time_millis());
+        let pruned = self.registry.retain_flows_with_lifecycle(
             |target, flow_id| self.lifecycle.has_oauth_browser_flow(target, flow_id),
             |target, flow_id| self.lifecycle.has_oauth_device_flow(target, flow_id),
-        )
+        );
+        (pruned, before)
     }
 
     fn expire_collected_flows(&self, pruned: OAuthPrunedFlows) {
@@ -366,17 +378,30 @@ impl RuntimeOAuthFlowHandle {
     }
 
     fn removed_snapshot_keys_from_pruned(
+        snapshot: &OAuthFlowRegistrySnapshot,
         pruned: &OAuthPrunedFlows,
-    ) -> (RemovedSnapshotKeys, RemovedSnapshotKeys) {
-        let browser = pruned
+    ) -> (RemovedBrowserSnapshotKeys, RemovedDeviceSnapshotKeys) {
+        let pruned_browser = pruned
             .browser
             .iter()
-            .map(|(flow_id, target)| (target.clone(), flow_id.clone()))
-            .collect();
-        let device = pruned
+            .map(|(flow_id, target)| browser_snapshot_key(target, flow_id))
+            .collect::<BTreeSet<_>>();
+        let pruned_device = pruned
             .device
             .iter()
-            .map(|(device_code, target)| (target.clone(), device_code.clone()))
+            .map(|(device_code, target)| device_snapshot_key(target, device_code))
+            .collect::<BTreeSet<_>>();
+        let browser = snapshot
+            .browser
+            .iter()
+            .filter(|flow| pruned_browser.contains(&persisted_browser_snapshot_key(flow)))
+            .map(browser_removal_from_flow)
+            .collect();
+        let device = snapshot
+            .device
+            .iter()
+            .filter(|flow| pruned_device.contains(&persisted_device_snapshot_key(flow)))
+            .map(device_removal_from_flow)
             .collect();
         (browser, device)
     }
@@ -392,8 +417,8 @@ impl RuntimeOAuthFlowHandle {
     fn persist_registry_payloads_removing(
         &self,
         operation: &'static str,
-        removed_browser: &[(ConnectionRef, String)],
-        removed_device: &[(ConnectionRef, String)],
+        removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+        removed_device: &[PersistedOAuthDeviceFlowRemoval],
     ) -> Result<(), OAuthFlowError> {
         persist_registry_payloads(
             &self.registry,
@@ -473,13 +498,13 @@ impl RuntimeOAuthFlowHandle {
             .browser
             .iter()
             .filter(|flow| !current_browser.contains(&persisted_browser_snapshot_key(flow)))
-            .map(|flow| (flow.target.clone(), flow.state.clone()))
+            .map(browser_removal_from_flow)
             .collect::<Vec<_>>();
         let removed_device = snapshot
             .device
             .iter()
             .filter(|flow| !current_device.contains(&persisted_device_snapshot_key(flow)))
-            .map(|flow| (flow.target.clone(), flow.device_code.clone()))
+            .map(device_removal_from_flow)
             .collect::<Vec<_>>();
         let _ = self.persist_registry_payloads_removing(
             "rehydrate_oauth_flows",
@@ -580,8 +605,8 @@ fn persist_registry_payloads(
     registry: &OAuthFlowRegistry,
     store: &StoreSlot,
     operation: &'static str,
-    removed_browser: &[(ConnectionRef, String)],
-    removed_device: &[(ConnectionRef, String)],
+    removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+    removed_device: &[PersistedOAuthDeviceFlowRemoval],
 ) -> Result<(), OAuthFlowError> {
     let now_millis = current_time_millis();
     let snapshot = registry.snapshot_for_persistence(now_millis);
@@ -599,8 +624,8 @@ fn persist_registry_snapshot(
     snapshot: &OAuthFlowRegistrySnapshot,
     store: &StoreSlot,
     operation: &'static str,
-    removed_browser: &[(ConnectionRef, String)],
-    removed_device: &[(ConnectionRef, String)],
+    removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+    removed_device: &[PersistedOAuthDeviceFlowRemoval],
     now_millis: u64,
 ) -> Result<(), OAuthFlowError> {
     let store = store
@@ -664,11 +689,71 @@ fn persisted_device_snapshot_key(flow: &PersistedOAuthDeviceFlow) -> DeviceSnaps
     device_snapshot_key(&flow.target, &flow.device_code)
 }
 
+fn persisted_browser_removal_key(removal: &PersistedOAuthBrowserFlowRemoval) -> BrowserSnapshotKey {
+    browser_snapshot_key(&removal.target, &removal.state)
+}
+
+fn persisted_device_removal_key(removal: &PersistedOAuthDeviceFlowRemoval) -> DeviceSnapshotKey {
+    device_snapshot_key(&removal.target, &removal.device_code)
+}
+
+fn browser_removal_from_flow(flow: &PersistedOAuthBrowserFlow) -> PersistedOAuthBrowserFlowRemoval {
+    PersistedOAuthBrowserFlowRemoval {
+        target: flow.target.clone(),
+        state: flow.state.clone(),
+        expires_at_millis: flow.expires_at_millis,
+    }
+}
+
+fn device_removal_from_flow(flow: &PersistedOAuthDeviceFlow) -> PersistedOAuthDeviceFlowRemoval {
+    PersistedOAuthDeviceFlowRemoval {
+        target: flow.target.clone(),
+        device_code: flow.device_code.clone(),
+        expires_at_millis: flow.expires_at_millis,
+    }
+}
+
+fn merge_browser_removal(
+    removals: &mut BTreeMap<BrowserSnapshotKey, PersistedOAuthBrowserFlowRemoval>,
+    removal: PersistedOAuthBrowserFlowRemoval,
+    now_millis: u64,
+) {
+    if removal.expires_at_millis <= now_millis {
+        return;
+    }
+    let key = persisted_browser_removal_key(&removal);
+    if let Some(existing) = removals.get_mut(&key) {
+        if removal.expires_at_millis > existing.expires_at_millis {
+            *existing = removal;
+        }
+    } else {
+        removals.insert(key, removal);
+    }
+}
+
+fn merge_device_removal(
+    removals: &mut BTreeMap<DeviceSnapshotKey, PersistedOAuthDeviceFlowRemoval>,
+    removal: PersistedOAuthDeviceFlowRemoval,
+    now_millis: u64,
+) {
+    if removal.expires_at_millis <= now_millis {
+        return;
+    }
+    let key = persisted_device_removal_key(&removal);
+    if let Some(existing) = removals.get_mut(&key) {
+        if removal.expires_at_millis > existing.expires_at_millis {
+            *existing = removal;
+        }
+    } else {
+        removals.insert(key, removal);
+    }
+}
+
 fn merge_oauth_registry_snapshot(
     current: Option<&[u8]>,
     local: &OAuthFlowRegistrySnapshot,
-    removed_browser: &[(ConnectionRef, String)],
-    removed_device: &[(ConnectionRef, String)],
+    removed_browser: &[PersistedOAuthBrowserFlowRemoval],
+    removed_device: &[PersistedOAuthDeviceFlowRemoval],
     now_millis: u64,
 ) -> Result<OAuthFlowRegistrySnapshot, crate::store::RuntimeStoreError> {
     let mut merged = match current {
@@ -676,14 +761,22 @@ fn merge_oauth_registry_snapshot(
             .map_err(|err| crate::store::RuntimeStoreError::WriteFailed(err.to_string()))?,
         None => OAuthFlowRegistrySnapshot::default(),
     };
-    let removed_browser = removed_browser
-        .iter()
-        .map(|(target, state)| browser_snapshot_key(target, state))
-        .collect::<BTreeSet<_>>();
-    let removed_device = removed_device
-        .iter()
-        .map(|(target, device_code)| device_snapshot_key(target, device_code))
-        .collect::<BTreeSet<_>>();
+    let mut browser_removed = BTreeMap::new();
+    for removal in merged.browser_removed.iter().cloned() {
+        merge_browser_removal(&mut browser_removed, removal, now_millis);
+    }
+    for removal in removed_browser.iter().cloned() {
+        merge_browser_removal(&mut browser_removed, removal, now_millis);
+    }
+    let mut device_removed = BTreeMap::new();
+    for removal in merged.device_removed.iter().cloned() {
+        merge_device_removal(&mut device_removed, removal, now_millis);
+    }
+    for removal in removed_device.iter().cloned() {
+        merge_device_removal(&mut device_removed, removal, now_millis);
+    }
+    let removed_browser = browser_removed.keys().cloned().collect::<BTreeSet<_>>();
+    let removed_device = device_removed.keys().cloned().collect::<BTreeSet<_>>();
     let local_browser = local
         .browser
         .iter()
@@ -709,18 +802,32 @@ fn merge_oauth_registry_snapshot(
         local
             .browser
             .iter()
-            .filter(|flow| flow.expires_at_millis > now_millis)
+            .filter(|flow| {
+                flow.expires_at_millis > now_millis
+                    && !removed_browser.contains(&persisted_browser_snapshot_key(flow))
+            })
             .cloned(),
     );
     merged.device.extend(
         local
             .device
             .iter()
-            .filter(|flow| flow.expires_at_millis > now_millis)
+            .filter(|flow| {
+                flow.expires_at_millis > now_millis
+                    && !removed_device.contains(&persisted_device_snapshot_key(flow))
+            })
             .cloned(),
     );
+    merged.browser_removed = browser_removed.into_values().collect();
+    merged.device_removed = device_removed.into_values().collect();
     merged.browser.sort_by_key(persisted_browser_snapshot_key);
     merged.device.sort_by_key(persisted_device_snapshot_key);
+    merged
+        .browser_removed
+        .sort_by_key(persisted_browser_removal_key);
+    merged
+        .device_removed
+        .sort_by_key(persisted_device_removal_key);
     Ok(merged)
 }
 
@@ -886,7 +993,15 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
         &self,
         record: &OAuthDeviceFlowRecord,
     ) -> Result<(), OAuthFlowError> {
-        let removed = [(record.target.clone(), record.device_code.clone())];
+        let remaining = record
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .ok_or(OAuthFlowError::Missing)?;
+        let removed = [PersistedOAuthDeviceFlowRemoval {
+            target: record.target.clone(),
+            device_code: record.device_code.clone(),
+            expires_at_millis: expires_at_millis(remaining)?,
+        }];
         persist_registry_payloads(
             &self.registry,
             &self.store,
@@ -921,8 +1036,11 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             pkce_verifier.clone(),
         );
         let mut lifecycle_pruned = OAuthPrunedFlows::default();
+        let mut lifecycle_pruned_snapshot = None;
         if matches!(inserted, Err(OAuthFlowError::CapacityExceeded { .. })) {
-            lifecycle_pruned = self.retain_registry_payloads_with_lifecycle();
+            let (pruned, snapshot) = self.retain_registry_payloads_with_lifecycle();
+            lifecycle_pruned = pruned;
+            lifecycle_pruned_snapshot = Some(snapshot);
             inserted = self.registry.insert_browser_flow_with_pruned(
                 state.clone(),
                 target.clone(),
@@ -938,12 +1056,12 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 return Err(err);
             }
         };
-        let (mut removed_browser, mut removed_device) =
-            Self::removed_snapshot_keys_from_pruned(&lifecycle_pruned);
-        let (mut pruned_browser, mut pruned_device) =
-            Self::removed_snapshot_keys_from_pruned(&pruned);
-        removed_browser.append(&mut pruned_browser);
-        removed_device.append(&mut pruned_device);
+        let (removed_browser, removed_device) =
+            if let Some(snapshot) = lifecycle_pruned_snapshot.as_ref() {
+                Self::removed_snapshot_keys_from_pruned(snapshot, &lifecycle_pruned)
+            } else {
+                (Vec::new(), Vec::new())
+            };
         self.expire_collected_flows(pruned);
         if let Err(err) = self.persist_registry_payloads_removing(
             "admit_oauth_browser_flow",
@@ -1021,7 +1139,11 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             let _ = self.restore_browser_flow(state, &record);
             return Err(err);
         }
-        let removed_browser = [(target.clone(), state.to_string())];
+        let removed_browser = [PersistedOAuthBrowserFlowRemoval {
+            target: target.clone(),
+            state: state.to_string(),
+            expires_at_millis: self.browser_record_expires_at_millis(&record)?,
+        }];
         if let Err(err) = self.persist_registry_payloads_removing(
             "consume_oauth_browser_flow",
             &removed_browser,
@@ -1077,8 +1199,11 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
             expires_in,
         );
         let mut lifecycle_pruned = OAuthPrunedFlows::default();
+        let mut lifecycle_pruned_snapshot = None;
         if matches!(inserted, Err(OAuthFlowError::CapacityExceeded { .. })) {
-            lifecycle_pruned = self.retain_registry_payloads_with_lifecycle();
+            let (pruned, snapshot) = self.retain_registry_payloads_with_lifecycle();
+            lifecycle_pruned = pruned;
+            lifecycle_pruned_snapshot = Some(snapshot);
             inserted = self.registry.admit_device_code_with_pruned(
                 target.clone(),
                 provider,
@@ -1093,12 +1218,12 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
                 return Err(err);
             }
         };
-        let (mut removed_browser, mut removed_device) =
-            Self::removed_snapshot_keys_from_pruned(&lifecycle_pruned);
-        let (mut pruned_browser, mut pruned_device) =
-            Self::removed_snapshot_keys_from_pruned(&pruned);
-        removed_browser.append(&mut pruned_browser);
-        removed_device.append(&mut pruned_device);
+        let (removed_browser, removed_device) =
+            if let Some(snapshot) = lifecycle_pruned_snapshot.as_ref() {
+                Self::removed_snapshot_keys_from_pruned(snapshot, &lifecycle_pruned)
+            } else {
+                (Vec::new(), Vec::new())
+            };
         self.expire_collected_flows(pruned);
         if let Err(err) = self.persist_registry_payloads_removing(
             "admit_oauth_device_flow",
@@ -1121,7 +1246,18 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         provider: OAuthProviderIdentity,
     ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
         self.expire_pruned_flows();
-        self.verify_device(target, device_code, provider)?;
+        if let Err(machine_err) = self.verify_device(target, device_code, provider) {
+            return match self
+                .registry
+                .verify_device_code(device_code, target, provider)
+            {
+                Err(OAuthFlowError::Missing) => {
+                    let _ = self.lifecycle.expire_device_flow(target, device_code);
+                    Err(OAuthFlowError::Missing)
+                }
+                _ => Err(machine_err),
+            };
+        }
         match self
             .registry
             .verify_device_code(device_code, target, provider)
@@ -1699,6 +1835,191 @@ mod tests {
                 "http://127.0.0.1/other-callback",
             )
             .expect("second independent flow rehydrates after first consume");
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn persistent_oauth_browser_tombstone_blocks_stale_authority_resurrection() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store_path = temp_dir.path().join("runtime.sqlite");
+        let creator_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let stale_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let consumer_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &creator_store,
+        );
+        let target = target();
+        let stale_target = alternate_target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let stale_redirect_uri = "http://127.0.0.1/stale-callback";
+        let consumed_state = creator
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "consumed-verifier".to_string(),
+            )
+            .expect("creator admits browser flow");
+
+        let stale_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &stale_store,
+        );
+        let consumer = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &consumer_store,
+        );
+        consumer
+            .consume(&consumed_state, &target, provider, redirect_uri)
+            .expect("independent authority consumes browser flow");
+
+        let stale_new_state = stale_authority
+            .start(
+                stale_target.clone(),
+                provider,
+                stale_redirect_uri.to_string(),
+                "stale-new-verifier".to_string(),
+            )
+            .expect("stale authority admits another flow");
+        let snapshot_json = stale_store
+            .load_auth_oauth_flow_snapshot()
+            .expect("durable OAuth snapshot loads")
+            .expect("durable OAuth snapshot exists");
+        let snapshot = serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&snapshot_json)
+            .expect("durable OAuth snapshot decodes");
+        assert!(
+            !snapshot
+                .browser
+                .iter()
+                .any(|flow| flow.state == consumed_state),
+            "a stale authority must not resurrect a consumed browser flow"
+        );
+        assert!(
+            snapshot
+                .browser
+                .iter()
+                .any(|flow| flow.state == stale_new_state),
+            "the stale authority's new browser flow should still persist"
+        );
+
+        let restarted_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &restarted_store,
+        );
+        assert!(matches!(
+            restarted.consume(&consumed_state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::Missing)
+        ));
+        restarted
+            .consume(
+                &stale_new_state,
+                &stale_target,
+                provider,
+                stale_redirect_uri,
+            )
+            .expect("new stale-authority flow survives restart");
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    #[test]
+    fn persistent_oauth_device_tombstone_blocks_stale_authority_resurrection() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store_path = temp_dir.path().join("runtime.sqlite");
+        let creator_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let stale_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let consumer_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let creator = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &creator_store,
+        );
+        let target = target();
+        let stale_target = alternate_target();
+        let provider = OAuthProviderIdentity::GoogleCodeAssist;
+        let consumed_device_code = "consumed-device-code";
+        let stale_device_code = "stale-new-device-code";
+        creator
+            .admit_device_code(
+                target.clone(),
+                provider,
+                consumed_device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("creator admits device flow");
+
+        let stale_authority = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &stale_store,
+        );
+        let consumer = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &consumer_store,
+        );
+        consumer
+            .begin_device_code_poll(consumed_device_code, &target, provider)
+            .expect("independent authority begins device poll")
+            .consume()
+            .expect("independent authority consumes device flow");
+
+        stale_authority
+            .admit_device_code(
+                stale_target.clone(),
+                provider,
+                stale_device_code.to_string(),
+                Duration::from_secs(60),
+            )
+            .expect("stale authority admits another device flow");
+        let snapshot_json = stale_store
+            .load_auth_oauth_flow_snapshot()
+            .expect("durable OAuth snapshot loads")
+            .expect("durable OAuth snapshot exists");
+        let snapshot = serde_json::from_slice::<OAuthFlowRegistrySnapshot>(&snapshot_json)
+            .expect("durable OAuth snapshot decodes");
+        assert!(
+            !snapshot
+                .device
+                .iter()
+                .any(|flow| flow.device_code == consumed_device_code),
+            "a stale authority must not resurrect a consumed device flow"
+        );
+        assert!(
+            snapshot
+                .device
+                .iter()
+                .any(|flow| flow.device_code == stale_device_code),
+            "the stale authority's new device flow should still persist"
+        );
+
+        let restarted_store: Arc<dyn RuntimeStore> =
+            Arc::new(crate::store::sqlite::SqliteRuntimeStore::new(&store_path).unwrap());
+        let restarted = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+            Duration::from_secs(60),
+            Arc::new(RuntimeAuthLeaseHandle::new()),
+            &restarted_store,
+        );
+        assert!(matches!(
+            restarted.verify_device_code(consumed_device_code, &target, provider),
+            Err(OAuthFlowError::Missing)
+        ));
+        restarted
+            .verify_device_code(stale_device_code, &stale_target, provider)
+            .expect("new stale-authority device flow survives restart");
     }
 
     #[test]

@@ -243,6 +243,8 @@ pub fn canonical_mob_machine_runtime_internal_manifest() -> IndexSet<&'static st
 pub enum MobMachineCommandClassification {
     CatalogInput(MobMachineCatalogInput),
     CatalogInputs(&'static [MobMachineCatalogInput]),
+    GatedCatalogInput(MobMachineCatalogInput),
+    GatedCatalogInputs(&'static [MobMachineCatalogInput]),
     ShellMechanic(MobMachineShellMechanicReason),
 }
 
@@ -250,8 +252,8 @@ impl MobMachineCommandClassification {
     #[must_use]
     pub fn catalog_inputs(self) -> Vec<MobMachineCatalogInput> {
         match self {
-            Self::CatalogInput(input) => vec![input],
-            Self::CatalogInputs(inputs) => inputs.to_vec(),
+            Self::CatalogInput(input) | Self::GatedCatalogInput(input) => vec![input],
+            Self::CatalogInputs(inputs) | Self::GatedCatalogInputs(inputs) => inputs.to_vec(),
             Self::ShellMechanic(_) => Vec::new(),
         }
     }
@@ -262,6 +264,15 @@ impl MobMachineCommandClassification {
             .into_iter()
             .map(MobMachineCatalogInput::input_variant)
             .collect()
+    }
+
+    #[must_use]
+    pub fn gate_inputs(self) -> Vec<MobMachineCatalogInput> {
+        match self {
+            Self::GatedCatalogInput(input) => vec![input],
+            Self::GatedCatalogInputs(inputs) => inputs.to_vec(),
+            Self::CatalogInput(_) | Self::CatalogInputs(_) | Self::ShellMechanic(_) => Vec::new(),
+        }
     }
 }
 
@@ -585,6 +596,12 @@ pub struct MobMachineCommandClassificationRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MobMachineCommandGateRequirement {
+    pub command: MobMachineCommandVariant,
+    pub input: MobMachineCatalogInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MobMachineRuntimeInternalClassificationRecord {
     pub input: MobMachineCatalogInput,
     pub reason: MobMachineRuntimeInternalReason,
@@ -686,6 +703,24 @@ pub fn canonical_mob_machine_command_classifications() -> Vec<MobMachineCommandC
 
 #[doc(hidden)]
 #[must_use]
+pub fn canonical_mob_machine_command_gate_requirements() -> Vec<MobMachineCommandGateRequirement> {
+    canonical_mob_machine_command_classifications()
+        .into_iter()
+        .flat_map(|record| {
+            record
+                .classification
+                .gate_inputs()
+                .into_iter()
+                .map(move |input| MobMachineCommandGateRequirement {
+                    command: record.command,
+                    input,
+                })
+        })
+        .collect()
+}
+
+#[doc(hidden)]
+#[must_use]
 pub const fn canonical_mob_machine_runtime_internal_classifications()
 -> &'static [MobMachineRuntimeInternalClassificationRecord] {
     MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS
@@ -718,10 +753,10 @@ const fn mob_machine_command_classification(
             MobMachineCatalogInput::UnwireExternalPeer,
         ]),
         MobMachineCommandVariant::RunFlow => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::RunFlow)
+            MobMachineCommandClassification::GatedCatalogInput(MobMachineCatalogInput::RunFlow)
         }
         MobMachineCommandVariant::CancelFlow => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::CancelFlow)
+            MobMachineCommandClassification::GatedCatalogInput(MobMachineCatalogInput::CancelFlow)
         }
         MobMachineCommandVariant::FlowStatus => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::FlowStatus)
@@ -769,7 +804,7 @@ const fn mob_machine_command_classification(
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::Destroy)
         }
         MobMachineCommandVariant::TaskCreate => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::TaskCreate)
+            MobMachineCommandClassification::GatedCatalogInput(MobMachineCatalogInput::TaskCreate)
         }
         MobMachineCommandVariant::TaskUpdate => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::TaskUpdate)
@@ -830,13 +865,42 @@ const fn mob_machine_command_classification(
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::GetMember)
         }
         MobMachineCommandVariant::SetSpawnPolicy => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::SetSpawnPolicy)
+            MobMachineCommandClassification::GatedCatalogInput(
+                MobMachineCatalogInput::SetSpawnPolicy,
+            )
         }
         MobMachineCommandVariant::Shutdown => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::Shutdown)
         }
         MobMachineCommandVariant::ForceCancel => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::ForceCancel)
+            MobMachineCommandClassification::GatedCatalogInput(MobMachineCatalogInput::ForceCancel)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_gate_requirements_are_owned_by_canonical_classification() {
+        let requirements = canonical_mob_machine_command_gate_requirements();
+        for record in canonical_mob_machine_command_classifications() {
+            let classified_inputs = record.classification.gate_inputs();
+            let required_inputs = requirements
+                .iter()
+                .filter(|requirement| requirement.command == record.command)
+                .map(|requirement| requirement.input)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                required_inputs, classified_inputs,
+                "gate requirements for {:?} must come from its canonical classification",
+                record.command
+            );
+        }
+        assert!(requirements.iter().any(|requirement| {
+            requirement.command == MobMachineCommandVariant::SetSpawnPolicy
+                && requirement.input == MobMachineCatalogInput::SetSpawnPolicy
+        }));
     }
 }

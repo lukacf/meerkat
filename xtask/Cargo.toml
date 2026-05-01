@@ -19,7 +19,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-machine-authority = ["dep:meerkat-machine-codegen", "dep:which"]
+machine-authority = ["dep:meerkat-machine-codegen", "dep:meerkat-mob", "dep:which"]
 
 [dependencies]
 anyhow.workspace = true
@@ -33,6 +33,7 @@ toml.workspace = true
 which = { workspace = true, optional = true }
 meerkat-machine-codegen = { path = "../meerkat-machine-codegen", optional = true }
 meerkat-machine-schema = { path = "../meerkat-machine-schema" }
+meerkat-mob = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_yaml.workspace = true

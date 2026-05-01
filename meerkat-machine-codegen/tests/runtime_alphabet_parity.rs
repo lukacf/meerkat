@@ -293,7 +293,8 @@ fn assert_mob_command_records_are_identity_checked(
         );
 
         match record.classification {
-            MobMachineCommandClassification::CatalogInput(input) => {
+            MobMachineCommandClassification::CatalogInput(input)
+            | MobMachineCommandClassification::GatedCatalogInput(input) => {
                 if let Some(command_input) = command_input {
                     assert_eq!(
                         input.input_variant(),
@@ -306,7 +307,8 @@ fn assert_mob_command_records_are_identity_checked(
                     "MobMachine command `{command_name}` classifies to an input absent from the generated input alphabet"
                 );
             }
-            MobMachineCommandClassification::CatalogInputs(inputs) => {
+            MobMachineCommandClassification::CatalogInputs(inputs)
+            | MobMachineCommandClassification::GatedCatalogInputs(inputs) => {
                 assert!(
                     !inputs.is_empty(),
                     "MobMachine command `{command_name}` must not use an empty typed catalog classification"

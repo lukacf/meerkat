@@ -51,6 +51,7 @@ rust_library(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
         package_name = "xtask",
@@ -105,6 +106,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
         package_name = "xtask",
@@ -138,6 +140,7 @@ rust_binary(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
@@ -220,6 +223,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
@@ -282,6 +286,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
@@ -346,6 +351,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
@@ -446,6 +452,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
@@ -512,6 +519,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
@@ -569,6 +577,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(
@@ -626,6 +635,7 @@ rust_test(
     deps = [
         "//meerkat-machine-codegen:meerkat_machine_codegen",
         "//meerkat-machine-schema:meerkat_machine_schema",
+        "//meerkat-mob:meerkat_mob",
         "//xtask:xtask",
         "@crates//:which-7.0.3",
     ] + all_crate_deps(

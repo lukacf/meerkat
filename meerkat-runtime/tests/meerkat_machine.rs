@@ -1512,10 +1512,16 @@ async fn failed_executor_continues_processing_backlog() {
     )
     .await;
     assert_eq!(second_state.seed.phase, InputLifecycleState::Consumed);
-    assert_eq!(
-        adapter.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Attached
-    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if adapter.runtime_state(&sid).await.unwrap() == RuntimeState::Attached {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("runtime loop should settle back to Attached after draining the backlog");
     assert!(
         calls.load(Ordering::SeqCst) >= 2,
         "the runtime loop should keep draining queued backlog after a failed run"

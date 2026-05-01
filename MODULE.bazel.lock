@@ -501,7 +501,7 @@
           "REPO_MAPPING:rules_rust+,bazel_tools bazel_tools",
           "REPO_MAPPING:rules_rust+,rules_cc rules_cc+",
           "REPO_MAPPING:rules_rust+,rules_rust rules_rust+",
-          "FILE:@@//Cargo.lock d22f1e801649345cd7554f7fd9661f8a2637d9ca46402b0374165ddd7c0f90aa",
+          "FILE:@@//Cargo.lock 6d04cafccd66c79921303f2507cbd12c3fdad7a1cc114791f46d1e7409381101",
           "FILE:@@//Cargo.toml e5d6d35d507c9bc2a5e2b83e17b12b659f92a78addd0a7ae2a24b1cdcc1d6c5e",
           "FILE:@@//meerkat-machine-derive/Cargo.toml f91da732cdc018477e0db4a1e89ea66cbbf1659bc4eae29782f9b6ba2ac487a6",
           "FILE:@@//meerkat-models/Cargo.toml d2c34db2fbe0ef549bec09bb87d7d048cd4af937ae50fe77a74ddecd92308379",
@@ -542,7 +542,7 @@
           "FILE:@@//meerkat-machine-codegen/Cargo.toml 8ad230c353e921fba809d6b32dad21c91481877674e6e6028d1f1a3d6d01b669",
           "FILE:@@//test-fixtures/surface-build-fixtures/Cargo.toml 0ca9e0746e4c7f80b43591ec7a83c6fa0261f7730d719168a5eb624e31b826bc",
           "FILE:@@//test-fixtures/machine-dsl-tests/Cargo.toml bc9c8bd79e3d4529e12b6495c1ddf79d02020782b06e265539f7dca351438ccd",
-          "FILE:@@//xtask/Cargo.toml e3212c96185cd3e09f10115934760c0f29cfd6a1b61fa28ceb55c10092b2bc65",
+          "FILE:@@//xtask/Cargo.toml 9517b11f56e7334133377e776987a7be1a761ee1e43c3d956c70e2bc391cecf6",
           "FILE:@@//vendor/oai-rt-rs/Cargo.toml 5325298146e1f43afb519170283663b96ddafe2b43c65d64be3ab6b92516bc42"
         ],
         "generatedRepoSpecs": {

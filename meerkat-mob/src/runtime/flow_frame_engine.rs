@@ -20,7 +20,7 @@ use crate::run::{
 use crate::run::{flow_frame, flow_run, loop_iteration};
 use crate::runtime::MobHandle;
 use crate::runtime::conditions::evaluate_condition;
-use crate::store::MobRunStore;
+use crate::store::{FrameAtomicOperation, MobRunStore};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio::time as tokio_time;
 use async_trait::async_trait;
@@ -198,7 +198,201 @@ pub enum FlowFrameLoopStorePlan {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FlowFrameLoopStorePlanVariant {
+    InsertFrame,
+    FrameState,
+    CompleteStepAndRecordOutput,
+    GrantNodeSlot,
+    StartLoop,
+    GrantBodyFrameStart,
+    RunStateOnly,
+    SealFrame,
+    CompleteBodyFrame,
+    LoopRequestBodyFrame,
+    CompleteLoop,
+}
+
+impl FlowFrameLoopStorePlanVariant {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InsertFrame => "InsertFrame",
+            Self::FrameState => "FrameState",
+            Self::CompleteStepAndRecordOutput => "CompleteStepAndRecordOutput",
+            Self::GrantNodeSlot => "GrantNodeSlot",
+            Self::StartLoop => "StartLoop",
+            Self::GrantBodyFrameStart => "GrantBodyFrameStart",
+            Self::RunStateOnly => "RunStateOnly",
+            Self::SealFrame => "SealFrame",
+            Self::CompleteBodyFrame => "CompleteBodyFrame",
+            Self::LoopRequestBodyFrame => "LoopRequestBodyFrame",
+            Self::CompleteLoop => "CompleteLoop",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowFrameLoopStorePlanCommitOperation {
+    FlowState,
+    FrameAtomic(FrameAtomicOperation),
+}
+
+impl FlowFrameLoopStorePlanCommitOperation {
+    pub fn store_method_base(self) -> &'static str {
+        match self {
+            Self::FlowState => "cas_flow_state",
+            Self::FrameAtomic(operation) => match operation {
+                FrameAtomicOperation::CasFrameState => "cas_frame_state",
+                FrameAtomicOperation::CasGrantNodeSlot => "cas_grant_node_slot",
+                FrameAtomicOperation::CasCompleteStepAndRecordOutput => {
+                    "cas_complete_step_and_record_output"
+                }
+                FrameAtomicOperation::CasStartLoop => "cas_start_loop",
+                FrameAtomicOperation::CasLoopRequestBodyFrame => "cas_loop_request_body_frame",
+                FrameAtomicOperation::CasGrantBodyFrameStart => "cas_grant_body_frame_start",
+                FrameAtomicOperation::CasCompleteBodyFrame => "cas_complete_body_frame",
+                FrameAtomicOperation::CasCompleteLoop => "cas_complete_loop",
+            },
+        }
+    }
+
+    pub fn store_methods(self) -> [&'static str; 1] {
+        match self {
+            Self::FlowState => ["cas_flow_state_with_authority"],
+            Self::FrameAtomic(FrameAtomicOperation::CasFrameState) => {
+                ["cas_frame_state_with_authority"]
+            }
+            Self::FrameAtomic(FrameAtomicOperation::CasGrantNodeSlot) => {
+                ["cas_grant_node_slot_with_authority"]
+            }
+            Self::FrameAtomic(FrameAtomicOperation::CasCompleteStepAndRecordOutput) => {
+                ["cas_complete_step_and_record_output_with_authority"]
+            }
+            Self::FrameAtomic(FrameAtomicOperation::CasStartLoop) => {
+                ["cas_start_loop_with_authority"]
+            }
+            Self::FrameAtomic(FrameAtomicOperation::CasLoopRequestBodyFrame) => {
+                ["cas_loop_request_body_frame_with_authority"]
+            }
+            Self::FrameAtomic(FrameAtomicOperation::CasGrantBodyFrameStart) => {
+                ["cas_grant_body_frame_start_with_authority"]
+            }
+            Self::FrameAtomic(FrameAtomicOperation::CasCompleteBodyFrame) => {
+                ["cas_complete_body_frame_with_authority"]
+            }
+            Self::FrameAtomic(FrameAtomicOperation::CasCompleteLoop) => {
+                ["cas_complete_loop_with_authority"]
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowFrameLoopStorePlanCommitRequirement {
+    pub variant: FlowFrameLoopStorePlanVariant,
+    pub operation: FlowFrameLoopStorePlanCommitOperation,
+}
+
+pub const fn canonical_flow_frame_loop_store_plan_commit_requirements()
+-> &'static [FlowFrameLoopStorePlanCommitRequirement] {
+    &[
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::InsertFrame,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasFrameState,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::FrameState,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasFrameState,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::CompleteStepAndRecordOutput,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasCompleteStepAndRecordOutput,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::GrantNodeSlot,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasGrantNodeSlot,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::StartLoop,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasStartLoop,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::GrantBodyFrameStart,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasGrantBodyFrameStart,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::RunStateOnly,
+            operation: FlowFrameLoopStorePlanCommitOperation::FlowState,
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::SealFrame,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasFrameState,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::CompleteBodyFrame,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasCompleteBodyFrame,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::LoopRequestBodyFrame,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasLoopRequestBodyFrame,
+            ),
+        },
+        FlowFrameLoopStorePlanCommitRequirement {
+            variant: FlowFrameLoopStorePlanVariant::CompleteLoop,
+            operation: FlowFrameLoopStorePlanCommitOperation::FrameAtomic(
+                FrameAtomicOperation::CasCompleteLoop,
+            ),
+        },
+    ]
+}
+
 impl FlowFrameLoopStorePlan {
+    pub fn canonical_variant(&self) -> FlowFrameLoopStorePlanVariant {
+        match self {
+            Self::InsertFrame { .. } => FlowFrameLoopStorePlanVariant::InsertFrame,
+            Self::FrameState { .. } => FlowFrameLoopStorePlanVariant::FrameState,
+            Self::CompleteStepAndRecordOutput { .. } => {
+                FlowFrameLoopStorePlanVariant::CompleteStepAndRecordOutput
+            }
+            Self::GrantNodeSlot { .. } => FlowFrameLoopStorePlanVariant::GrantNodeSlot,
+            Self::StartLoop { .. } => FlowFrameLoopStorePlanVariant::StartLoop,
+            Self::GrantBodyFrameStart { .. } => FlowFrameLoopStorePlanVariant::GrantBodyFrameStart,
+            Self::RunStateOnly { .. } => FlowFrameLoopStorePlanVariant::RunStateOnly,
+            Self::SealFrame { .. } => FlowFrameLoopStorePlanVariant::SealFrame,
+            Self::CompleteBodyFrame { .. } => FlowFrameLoopStorePlanVariant::CompleteBodyFrame,
+            Self::LoopRequestBodyFrame { .. } => {
+                FlowFrameLoopStorePlanVariant::LoopRequestBodyFrame
+            }
+            Self::CompleteLoop { .. } => FlowFrameLoopStorePlanVariant::CompleteLoop,
+        }
+    }
+
+    pub fn canonical_commit_operation(&self) -> FlowFrameLoopStorePlanCommitOperation {
+        canonical_flow_frame_loop_store_plan_commit_requirements()
+            .iter()
+            .find_map(|requirement| {
+                (requirement.variant == self.canonical_variant()).then_some(requirement.operation)
+            })
+            .expect("every FlowFrameLoopStorePlan variant has a canonical commit operation")
+    }
+
     pub(super) fn machine_inputs(&self) -> &[mob_dsl::MobMachineInput] {
         match self {
             Self::InsertFrame { machine_inputs, .. }

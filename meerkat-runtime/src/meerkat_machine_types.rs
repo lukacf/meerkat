@@ -627,7 +627,6 @@ pub enum MeerkatMachineCatalogInput {
     UnregisterSession,
     EnsureSessionWithExecutor,
     SetSilentIntents,
-    InterruptCurrentRun,
     CancelAfterBoundary,
     StopRuntimeExecutor,
     ContainsSession,
@@ -678,7 +677,6 @@ impl MeerkatMachineCatalogInput {
         Self::UnregisterSession,
         Self::EnsureSessionWithExecutor,
         Self::SetSilentIntents,
-        Self::InterruptCurrentRun,
         Self::CancelAfterBoundary,
         Self::StopRuntimeExecutor,
         Self::ContainsSession,
@@ -732,7 +730,6 @@ impl MeerkatMachineCatalogInput {
                 MeerkatMachineInputVariant::EnsureSessionWithExecutor
             }
             Self::SetSilentIntents => MeerkatMachineInputVariant::SetSilentIntents,
-            Self::InterruptCurrentRun => MeerkatMachineInputVariant::InterruptCurrentRun,
             Self::CancelAfterBoundary => MeerkatMachineInputVariant::CancelAfterBoundary,
             Self::StopRuntimeExecutor => MeerkatMachineInputVariant::StopRuntimeExecutor,
             Self::ContainsSession => MeerkatMachineInputVariant::ContainsSession,
@@ -799,7 +796,6 @@ impl MeerkatMachineCatalogInput {
             Self::UnregisterSession => "UnregisterSession",
             Self::EnsureSessionWithExecutor => "EnsureSessionWithExecutor",
             Self::SetSilentIntents => "SetSilentIntents",
-            Self::InterruptCurrentRun => "InterruptCurrentRun",
             Self::CancelAfterBoundary => "CancelAfterBoundary",
             Self::StopRuntimeExecutor => "StopRuntimeExecutor",
             Self::ContainsSession => "ContainsSession",
@@ -861,7 +857,6 @@ impl MeerkatMachineCommandVariant {
                 Some(MeerkatMachineCatalogInput::EnsureSessionWithExecutor)
             }
             Self::SetSilentIntents => Some(MeerkatMachineCatalogInput::SetSilentIntents),
-            Self::InterruptCurrentRun => Some(MeerkatMachineCatalogInput::InterruptCurrentRun),
             Self::CancelAfterBoundary => Some(MeerkatMachineCatalogInput::CancelAfterBoundary),
             Self::StopRuntimeExecutor => Some(MeerkatMachineCatalogInput::StopRuntimeExecutor),
             Self::ContainsSession => Some(MeerkatMachineCatalogInput::ContainsSession),

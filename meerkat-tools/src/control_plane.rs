@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::{SessionEffect, ToolDispatchOutcome};
-use meerkat_core::session::{SessionToolVisibilityState, ToolVisibilityWitness};
+use meerkat_core::session::{
+    DeferredToolLoadAuthority, SessionToolVisibilityState, ToolVisibilityWitness,
+};
 use meerkat_core::tool_catalog::stable_owner_key_from_provenance;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use meerkat_core::{
@@ -345,6 +347,10 @@ impl CatalogControlDispatcher {
         }
 
         let accepted_names_vec = accepted_authorities.keys().cloned().collect::<Vec<_>>();
+        let accepted_authorities = accepted_authorities
+            .into_iter()
+            .map(|(name, witness)| DeferredToolLoadAuthority::new(name, witness))
+            .collect::<Vec<_>>();
         let effect =
             (!accepted_authorities.is_empty()).then_some(SessionEffect::RequestDeferredTools {
                 authorities: accepted_authorities,
@@ -605,7 +611,7 @@ mod tests {
 
         fn request_deferred_tools(
             &self,
-            _authorities: BTreeMap<String, ToolVisibilityWitness>,
+            _authorities: Vec<DeferredToolLoadAuthority>,
         ) -> Result<meerkat_core::ToolScopeRevision, meerkat_core::ToolScopeStageError> {
             Err(meerkat_core::ToolScopeStageError::Owner {
                 message: "legacy visibility fixture is read-only".to_string(),
@@ -931,11 +937,58 @@ mod tests {
             panic!("expected RequestDeferredTools session effect");
         };
         assert_eq!(
-            authorities.get("deferred_mcp_tool"),
-            Some(&ToolVisibilityWitness {
-                stable_owner_key: Some("callback:test".to_string()),
-                last_seen_provenance: deferred.provenance.clone(),
-            })
+            authorities.as_slice(),
+            &[DeferredToolLoadAuthority::new(
+                "deferred_mcp_tool",
+                ToolVisibilityWitness {
+                    stable_owner_key: Some("callback:test".to_string()),
+                    last_seen_provenance: deferred.provenance.clone(),
+                }
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn load_effect_carries_deferred_authority_values_not_name_keyed_witnesses() {
+        let deferred = session_tool("deferred_mcp_tool", "Deferred MCP tool");
+        let dispatcher = Arc::new(ExactCatalogDispatcher {
+            tools: vec![Arc::clone(&deferred)].into(),
+            catalog: vec![ToolCatalogEntry::session_deferred(
+                Arc::clone(&deferred),
+                true,
+                "callback:test".to_string(),
+            )]
+            .into(),
+            pending_sources: Arc::from([]),
+            may_require_control_plane: false,
+        });
+        let visibility_provider = Arc::new(CatalogControlVisibilityProvider::new());
+        visibility_provider.set_scope(ToolScope::new_with_projection_names(
+            vec![Arc::clone(&deferred)].into(),
+            std::collections::HashSet::new(),
+            ["deferred_mcp_tool".to_string()].into_iter().collect(),
+        ));
+
+        let control = CatalogControlDispatcher::new(dispatcher, visibility_provider);
+        let outcome = control
+            .dispatch(search_call(
+                LOAD_TOOL_NAME,
+                json!({ "names": ["deferred_mcp_tool"] }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.session_effects.len(), 1);
+        let effect = serde_json::to_value(&outcome.session_effects[0]).unwrap();
+        assert_eq!(effect["effect_type"], "request_deferred_tools");
+        assert!(
+            effect["authorities"].is_array(),
+            "deferred load authority should serialize as typed authority values, not a name-keyed witness map: {effect}"
+        );
+        assert_eq!(effect["authorities"][0]["name"], "deferred_mcp_tool");
+        assert_eq!(
+            effect["authorities"][0]["witness"]["stable_owner_key"],
+            "callback:test"
         );
     }
 
@@ -998,11 +1051,14 @@ mod tests {
             panic!("expected RequestDeferredTools session effect");
         };
         assert_eq!(
-            authorities.get("deferred_mcp_tool"),
-            Some(&ToolVisibilityWitness {
-                stable_owner_key: Some("callback:test".to_string()),
-                last_seen_provenance: deferred.provenance.clone(),
-            })
+            authorities.as_slice(),
+            &[DeferredToolLoadAuthority::new(
+                "deferred_mcp_tool",
+                ToolVisibilityWitness {
+                    stable_owner_key: Some("callback:test".to_string()),
+                    last_seen_provenance: deferred.provenance.clone(),
+                }
+            )]
         );
     }
 

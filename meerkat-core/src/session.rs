@@ -240,6 +240,31 @@ impl ToolVisibilityWitness {
     }
 }
 
+/// Typed authority value for a deferred-tool load request.
+///
+/// The public/effect seam carries the requested route name and provenance
+/// witness as one value. Canonical owners may project this into name-indexed
+/// maps internally, but callers do not get to make a map key the authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct DeferredToolLoadAuthority {
+    pub name: String,
+    pub witness: ToolVisibilityWitness,
+}
+
+impl DeferredToolLoadAuthority {
+    pub fn new(name: impl Into<String>, witness: ToolVisibilityWitness) -> Self {
+        Self {
+            name: name.into(),
+            witness,
+        }
+    }
+
+    pub fn into_parts(self) -> (String, ToolVisibilityWitness) {
+        (self.name, self.witness)
+    }
+}
+
 /// Canonical durable session-local tool visibility intent.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

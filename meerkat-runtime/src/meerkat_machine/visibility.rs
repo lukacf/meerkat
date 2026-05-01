@@ -201,6 +201,28 @@ fn deferred_authority_names_for_visibility_state(
         .collect()
 }
 
+fn deferred_load_authority_map(
+    authorities: &[DeferredToolLoadAuthority],
+) -> Result<std::collections::BTreeMap<String, ToolVisibilityWitness>, ToolScopeStageError> {
+    let mut by_name = std::collections::BTreeMap::new();
+    let mut invalid = Vec::new();
+
+    for authority in authorities {
+        match by_name.insert(authority.name.clone(), authority.witness.clone()) {
+            Some(existing) if existing != authority.witness => invalid.push(authority.name.clone()),
+            _ => {}
+        }
+    }
+
+    if invalid.is_empty() {
+        return Ok(by_name);
+    }
+
+    invalid.sort_unstable();
+    invalid.dedup();
+    Err(ToolScopeStageError::InvalidWitnesses { names: invalid })
+}
+
 fn invalid_deferred_authority_names(
     names: &std::collections::BTreeSet<String>,
     witnesses: &std::collections::BTreeMap<String, ToolVisibilityWitness>,
@@ -422,11 +444,12 @@ impl ToolVisibilityOwner for MachineToolVisibilityOwner {
 
     fn request_deferred_tools(
         &self,
-        authorities: std::collections::BTreeMap<String, ToolVisibilityWitness>,
+        authorities: Vec<DeferredToolLoadAuthority>,
     ) -> Result<ToolScopeRevision, ToolScopeStageError> {
-        // `request_deferred_tools` extends the staged set and carries the
-        // authority map through the DSL input so deferred admission is
-        // authority-visible, not a shell-only name projection.
+        // `request_deferred_tools` receives typed load authorities, then
+        // canonicalizes them against this owner before projecting the accepted
+        // witness map into the DSL input.
+        let authorities = deferred_load_authority_map(&authorities)?;
         let (extended, mut combined_witnesses): (
             std::collections::BTreeSet<String>,
             std::collections::BTreeMap<String, ToolVisibilityWitness>,
